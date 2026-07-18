@@ -1,0 +1,8 @@
+# Safe project-scoped defaults. Codex loads this only after the repo is trusted.
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+web_search = "indexed"
+
+[sandbox_workspace_write]
+# Enable network access only for a specific task that needs an approved service.
+network_access = false

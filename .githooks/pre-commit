@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+repo_root="$(git rev-parse --show-toplevel)"
+
+if command -v pwsh >/dev/null 2>&1; then
+  exec pwsh -NoProfile -File "$repo_root/tools/check-public-repo.ps1" -Mode Staged
+fi
+
+if command -v powershell.exe >/dev/null 2>&1; then
+  exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$repo_root/tools/check-public-repo.ps1" -Mode Staged
+fi
+
+echo "BLOCKED: PowerShell 7+ is required to run the OpenLoops public-repo gate." >&2
+exit 1
