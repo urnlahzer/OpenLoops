@@ -45,6 +45,9 @@ JsonCase 'operation key misses recreate generation' 'P0-REMINDER-OPERATION-PROTO
 JsonCase 'request before ledger' 'P0-REMINDER-OPERATION-PROTOCOL-001' 'contracts/reminder/adapter-boundary.json' {param($c)[array]::Reverse($c.operation_protocol.durability_order)}
 JsonCase 'ambiguous cursor advances' 'P0-REMINDER-OPERATION-PROTOCOL-001' 'contracts/reminder/adapter-boundary.json' {param($c)$c.operation_protocol.cursor_rule='advance cursor'}
 JsonCase 'manual draft persisted' 'P0-REMINDER-OPERATION-PROTOCOL-001' 'contracts/reminder/adapter-boundary.json' {param($c)$c.operation_protocol.manual_draft_rule='persist plaintext and resume'}
+JsonCase 'replay ignores retry eligibility' 'P0-REMINDER-OPERATION-PROTOCOL-001' 'contracts/reminder/adapter-boundary.json' {param($c)$c.operation_protocol.same_key='same key and canonical intent returns the prior state or result with zero new request; different intent is an operation_key_collision'}
+JsonCase 'eligible retry skips durable per-attempt recording' 'P0-REMINDER-OPERATION-PROTOCOL-001' 'contracts/reminder/adapter-boundary.json' {param($c)$c.operation_protocol.known_no_send='only endpoint-independent proof that no request was sent may enter bounded retry with retry_at and attempt_count at most 3'}
+JsonCase 'duplicate invocation reused as retry path' 'P0-REMINDER-OPERATION-PROTOCOL-001' 'contracts/reminder/adapter-boundary.json' {param($c)$c.operation_protocol.known_no_send='a duplicate external invocation is treated the same as an eligible retry and both send at most 3 requests'}
 
 JsonCase 'raw marker persisted' 'P0-REMINDER-AMBIGUOUS-WRITE-001' 'contracts/reminder/adapter-boundary.json' {param($c)$c.remote_marker_protocol.persisted_verifier='raw marker'}
 JsonCase 'random unrecoverable marker' 'P0-REMINDER-AMBIGUOUS-WRITE-001' 'contracts/reminder/adapter-boundary.json' {param($c)$c.remote_marker_protocol.derivation='random value unavailable after crash'}
@@ -92,6 +95,6 @@ TextCase 'spec contradiction appended' 'P0-REMINDER-INVENTORY-001' 'docs/product
 TextCase 'plan contradiction appended' 'P0-REMINDER-INVENTORY-001' 'docs/implementation-plan.md' {param($t)$t+"`nP0-WI-12 enables Graph reminder runtime and Calendar invitations.`n"}
 TextCase 'ADR contradiction appended' 'P0-REMINDER-CROSS-CONTRACT-001' 'docs/adr/ADR-009-reminder-adapters.md' {param($t)$t+"`nContrary decision: persist manual drafts and overwrite user edits.`n"}
 TextCase 'trace contradiction appended' 'P0-REMINDER-INVENTORY-001' 'docs/prd-traceability.md' {param($t)$t+"`nP0-WI-12 passed every gate and ships reminder writes.`n"}
-TextCase 'fresh checker preapproved' 'P0-REMINDER-FRESH-CHECKER-001' 'docs/prd-traceability.md' {param($t)$t-replace'Pending closure','Passed without independent review'}
+TextCase 'fresh checker preapproved' 'P0-REMINDER-FRESH-CHECKER-001' 'docs/prd-traceability.md' {param($t)$t-replace'Passed at P0-WI-12 closure','Passed without independent review'}
 
 if($script:fail.Count-gt 0){[Console]::Error.WriteLine(('FAIL: reminder adapter synthetic mutations: '+($script:fail-join'; ')));exit 1};Write-Output ('PASS: reminder adapter synthetic mutations ({0} rejection cases; OS temp only)' -f $script:count)

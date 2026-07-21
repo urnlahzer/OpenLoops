@@ -390,18 +390,23 @@ Each phase ends with executable evidence. A failed gate narrows the advertised c
   source remains covered by the P0-WI-10 exact source-build pass; the current
   add-in tests, formatting, and lint also passed. No reviewer prompt,
   transcript, or model output was retained.
-- P0-WI-12 is active and is bounded to accepting ADR-009's disabled reminder-
-  adapter decision contract. It defines exact privacy-mapped record shapes,
+- P0-WI-12 closed on 2026-07-21 and accepts ADR-009's disabled reminder-
+  adapter decision contract only. It defines exact privacy-mapped record shapes,
   durable-before-request operation identity, ambiguous-write reconciliation,
   per-field ownership and conflict rules, manual-source atomicity, Calendar and
   review-link safety boundaries, and explicit deferred gate ownership. It does
   not implement an adapter, persist a record, request a permission, make a
   Graph/Office call, enable an automation mode, complete an AC/scenario, pass a
-  gate, or advertise support. The 2026-07-21 checkpoint remains open because the
-  retry contract must distinguish a duplicate external invocation (zero direct
-  requests) from a serialized, durably recorded eligible retry (one request per
-  recorded attempt after revalidation, maximum three). Until that bounded repair
-  and its mutation pass, the fresh-checker exit condition is not satisfied.
+  gate, or advertise support. The bounded 2026-07-21 retry-contract repair
+  distinguishes a duplicate external invocation, which replays the durable
+  ledger result with zero direct requests while no bounded retry is eligible,
+  from a serialized, durably recorded eligible retry, which commits each
+  attempt before its one bounded request after revalidation, with at most
+  three recorded attempts. All 17 deterministic reminder-adapter checks, 73
+  synthetic mutation rejection cases, the complete Phase 0 deterministic
+  checker regression, and three fresh-context closure judgments passed. The
+  unchanged product source remains covered by the P0-WI-10 exact source-build
+  pass. No reviewer prompt, transcript, or model output was retained.
 - Write data-flow/threat models for tokens, Graph content, model transmission, add-in bridge, local state, artifacts, diagnostics, update, and disconnect.
 - Define feature-to-scope manifest and capability flags.
 - Install repository guardrails on the working clone.

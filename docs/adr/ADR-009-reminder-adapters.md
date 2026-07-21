@@ -40,12 +40,17 @@ adapter, collection, loop, source generation, operation kind and exact field
 mask, expected local and remote versions, transient intended-value digests,
 policy and authorization generations, and explicit-recreate generation.
 
-The same key and intent returns the prior state with no new request; the same key
-with different intent is a collision. Stale versions, account or authority
-change, rollback suspicion, or unavailable secure state cause zero requests.
-Pending, started, ambiguous, reconciling, and user-assisted operations block a
-dependent synchronization cursor. Only endpoint-independent proof that nothing
-was sent permits a bounded retry, with at most three attempts.
+A duplicate external invocation of the same key and intent returns the prior
+state with no new request whenever no bounded retry is currently eligible; the
+same key with different intent is a collision. This replay path is distinct
+from an eligible retry: replay never issues a request even while a retry
+remains eligible, and an eligible retry never reuses the replay path to skip
+its own durability step. Stale versions, account or authority change, rollback
+suspicion, or unavailable secure state cause zero requests. Pending, started,
+ambiguous, reconciling, and user-assisted operations block a dependent
+synchronization cursor. Only endpoint-independent proof that nothing was sent
+permits a serialized, durably recorded eligible retry that commits the next
+attempt before its one bounded request, with at most three attempts total.
 
 After restart, a detected-loop payload is reconstructed transiently from current
 evidence and policy and must match the committed operation key. Manual draft text

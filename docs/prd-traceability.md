@@ -287,12 +287,22 @@ transcript, or model output is tracked or packaged.
 | P0-REMINDER-DEFERRED-001 | ADR-003/004/005/006/008/PRIV-001 remain input authorities; ADR-010/011/013 and G-TODO/G-CAL own their separate activation, mode, self-email, endpoint, scope, marker, and conditional-write decisions. | All Phase 0 contracts | Executable ownership boundary | Dependent ADRs and gates |
 | P0-REMINDER-CROSS-CONTRACT-001 | ADR-009 reconciles with permission, synchronization, persistence, evidence, policy, governance, support, and build boundaries without widening fields, scope, runtime, permissions, dependencies, or claims. | All Phase 0 contracts; deterministic checker | Executable | Next Phase 0 work item |
 | P0-REMINDER-CLAIMS-001 | P0-WI-12 accepts no logical record, creates no persistent state, makes no Graph/Office call, requests no permission, and enables/advertises/completes/passes no dependency, capability, support row, AC, scenario, gate, collection behavior, marker, or conditional write. | Reminder/governance/support/build manifests; package/public gates | Executable | Any product or runtime claim |
-| P0-REMINDER-FRESH-CHECKER-001 | Fresh-context privacy, protocol, scope, and adversarial judges must report no unresolved material schema, operation, ambiguity, ownership, direct-edit, conflict, manual-source, Calendar, review-link, privacy, deferred-ownership, claim, or traceability defect. | Work-item review only; no prompt, transcript, or model output stored | Pending closure | Next Phase 0 work item |
+| P0-REMINDER-FRESH-CHECKER-001 | Fresh-context privacy, protocol, scope, and adversarial judges must report no unresolved material schema, operation, ambiguity, ownership, direct-edit, conflict, manual-source, Calendar, review-link, privacy, deferred-ownership, claim, or traceability defect. | Work-item review only; no prompt, transcript, or model output stored | Passed at P0-WI-12 closure | Next Phase 0 work item |
 
 P0-WI-12 accepts only the disabled ADR-009 reminder-adapter decision contract.
 Adapter runtime, logical/persistent records, Graph/Office calls, permissions,
 automation, support claims, acceptance results, and all named gates remain
 inactive, empty, disabled, unavailable, or unrun.
+
+P0-WI-12 closed on 2026-07-21 after the bounded retry-contract repair, all 17
+deterministic reminder-adapter checks, 73 synthetic/adversarial rejection
+cases, the complete Phase 0 deterministic checker regression, the
+metadata-only package allowlist, a prospective staged public-repository scan,
+and three fresh-context closure judgments passed. The unchanged product source
+remains covered by the P0-WI-10 exact source-build pass; the current add-in
+tests, formatting, and lint also passed. The judgments are ephemeral work-item
+evidence; no reviewer prompt, transcript, or model output is tracked or
+packaged.
 
 ## Product and functional requirements
 
