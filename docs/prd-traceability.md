@@ -304,6 +304,38 @@ tests, formatting, and lint also passed. The judgments are ephemeral work-item
 evidence; no reviewer prompt, transcript, or model output is tracked or
 packaged.
 
+### P0-WI-13 add-in bridge checks
+
+| Check ID | Exact assertion | Evidence | Status | Blocks |
+|---|---|---|---|---|
+| P0-BRIDGE-INVENTORY-001 | P0-WI-13/ADR-010 has exact OWN-01, owned/consumed requirement (OL-UX-006/007 owned, OL-REM-016 consumed from ADR-009), AC, gate, source, input-authority, separate-decision, runtime, and claim inventories; only ADR-010 advances from planned to accepted. | Bridge manifest; specification/plan; governance and ADR registries | Executable decision contract | Bridge runtime |
+| P0-BRIDGE-TRANSPORT-001 | Named pipes are preferred for companion-internal/native-UI traffic; a same-user loopback web bridge is the sole Office add-in candidate, proven only by the G-ADDIN spike; exact transport, host/port, certificate mechanics, discovery, and per-client behavior stay `unresolved_pending_G-ADDIN`, and no unproven reachability/authority assumption is pinned. | Bridge manifest; implementation-plan §5; product-spec G-ADDIN gate text | Executable disabled contract | G-ADDIN |
+| P0-BRIDGE-BOOTSTRAP-001 | First pairing binds packaged companion, add-in origin/client, OS user, opaque account reference, single-use nonce, expiry, and an explicit user-verifiable action; race, replay, and brute-force defenses are closed; no bootstrap value may sit in a URL, Office roaming settings, localStorage, or repository configuration. | Bridge manifest; synthetic bootstrap mutations | Executable protocol contract | G-ADDIN |
+| P0-BRIDGE-SESSION-001 | Sessions are least-authority, command-scoped, memory-only, rotated on reconnect, and revoked on account change; a stale or prior-account session is rejected; the same-user-malware limitation is explicit. | Bridge manifest; synthetic session mutations | Executable session contract | G-ADDIN |
+| P0-BRIDGE-CERTIFICATE-001 | No mechanism may install machine-wide trust or a general-purpose trusted root with a retained signing key; any selected certificate is current-user-only, name-limited, non-exportable-key, lifecycle-managed, and completely removed on disconnect/uninstall. | Bridge manifest; product-spec G-ADDIN gate text | Executable certificate contract | G-ADDIN |
+| P0-BRIDGE-REVIEW-LINK-001 | Review-link activation resolves one random non-secret opaque loop handle through an authenticated per-user account-bound session; the ADR-009 prohibited list is unchanged and unsupported clients omit the link or show a fixed safe fallback. | Bridge/reminder manifests | Executable disabled contract | ADR-009, G-ADDIN |
+| P0-BRIDGE-CONTENT-001 | No mailbox content, identifier, token, or authority-bearing URL may reach browser localStorage, IndexedDB, service-worker cache, a URL, console output, analytics, or a crash report on any add-in surface. | Bridge manifest; canary mutations | Executable content contract | G-PRIV |
+| P0-BRIDGE-FALLBACK-001 | Native companion status/review/recovery is the fallback whenever the bridge or add-in is unavailable; a failed G-ADDIN blocks the Outlook-add-in MVP and routes to OWN-01 rather than silently substituting native UI. | Bridge manifest; support-matrix fallback rule | Executable fallback contract | G-ADDIN |
+| P0-BRIDGE-PRIVACY-001 | No new persisted database record is introduced; any future pairing root stays in ADR-005's reserved pairing-root.dpapi blob and session secrets remain memory-only; a future persisted bridge record requires a separate ADR-PRIV-001 revision. | Bridge/persistence/privacy manifests | Executable privacy contract | G-PRIV, G-STATE |
+| P0-BRIDGE-CROSS-CONTRACT-001 | ADR-010 reconciles with ADR-005's pairing-root ownership, ADR-006's Office/link boundary, ADR-009's review-link deferral, the governance registry (ADR-010 accepted; ADR-011/012/013 still planned), the support-matrix client floor, and build-skeleton inactivity without widening fields, scope, permissions, runtime, or claims. | All Phase 0 contracts; deterministic checker | Executable | Next Phase 0 work item |
+| P0-BRIDGE-CLAIMS-001 | P0-WI-13 accepts no logical record, creates no persistent state, makes no network/Graph/Office call, requests no permission, and enables/advertises/completes/passes no dependency, capability, support row, AC, scenario, gate, transport, or certificate mechanic. | Bridge/governance/support/build manifests; package/public gates | Executable | Any product or runtime claim |
+| P0-BRIDGE-FRESH-CHECKER-001 | Fresh-context security, privacy, governance, and adversarial judges must report no unresolved material transport, bootstrap, session, certificate, review-link, content, fallback, privacy, or traceability defect before closure. | Work-item review only; no prompt, transcript, or model output stored | Passed at P0-WI-13 closure | Next Phase 0 work item |
+
+P0-WI-13 accepts only the disabled ADR-010 add-in-bridge decision contract.
+Bridge runtime, a deployed manifest, an active listener or pipe, an issued
+certificate, a created pairing, requested permissions, support claims,
+acceptance results, and all named gates remain inactive, empty, disabled,
+unavailable, or unrun.
+
+P0-WI-13 closed on 2026-07-21 after all 12 deterministic bridge checks, 72
+synthetic/adversarial rejection cases, the complete Phase 0 deterministic
+checker regression, the metadata-only package allowlist, a prospective staged
+public-repository scan, and four fresh-context closure judgments passed. The
+unchanged product source remains covered by the P0-WI-10 exact source-build
+pass; the current add-in tests, formatting, and lint also passed. The
+judgments are ephemeral work-item evidence; no reviewer prompt, transcript, or
+model output is tracked or packaged.
+
 ## Product and functional requirements
 
 | PRD ID | Source requirement | Disposition | Specification | Planned verification | Approval |

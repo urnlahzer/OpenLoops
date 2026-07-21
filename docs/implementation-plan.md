@@ -407,6 +407,22 @@ Each phase ends with executable evidence. A failed gate narrows the advertised c
   checker regression, and three fresh-context closure judgments passed. The
   unchanged product source remains covered by the P0-WI-10 exact source-build
   pass. No reviewer prompt, transcript, or model output was retained.
+- P0-WI-13 closed on 2026-07-21 and accepts ADR-010's disabled add-in bridge
+  decision contract only. It pins the preferred named-pipe companion-internal
+  transport, the sole loopback-web-bridge add-in candidate gated on the
+  G-ADDIN spike, the first-pair bootstrap binding and its
+  race/replay/brute-force defenses, the least-authority in-memory session and
+  rotation/revocation rules, the certificate/trust prohibitions and lifecycle,
+  the review-link activation and content boundaries, and the
+  native-fallback/gate-failure routing to OWN-01. It implements no listener,
+  pipe, certificate, pairing, manifest, permission, or client support; exact
+  transport, loopback host/port, certificate mechanics, discovery, and
+  per-client behavior remain unresolved pending G-ADDIN, which remains unrun.
+  All 12 deterministic bridge checks, 72 synthetic mutation rejection cases,
+  the complete Phase 0 deterministic checker regression, and four
+  fresh-context closure judgments passed. The unchanged product source remains
+  covered by the P0-WI-10 exact source-build pass. No reviewer prompt,
+  transcript, or model output was retained.
 - Write data-flow/threat models for tokens, Graph content, model transmission, add-in bridge, local state, artifacts, diagnostics, update, and disconnect.
 - Define feature-to-scope manifest and capability flags.
 - Install repository guardrails on the working clone.

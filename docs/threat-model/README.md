@@ -3,8 +3,8 @@
 **Status:** Routing baseline for P0-WI-01; detailed threat models remain planned
 except for the linked P0-WI-02 privacy model, P0-WI-05 OAuth model,
  P0-WI-08 protected-local-state model, P0-WI-09 evidence-identity model, and
- P0-WI-10 model-provider model, P0-WI-11 policy/state model, and P0-WI-12
- reminder-adapter model.
+ P0-WI-10 model-provider model, P0-WI-11 policy/state model, P0-WI-12
+ reminder-adapter model, and P0-WI-13 add-in bridge model.
 
 This index prevents an implementation path from being treated as safe merely
 because its detailed ADR has not been written. Every routed capability remains
@@ -44,6 +44,10 @@ Detailed models completed so far:
 - [Reminder adapter boundary](reminder-adapter-boundary.md) — ADR-009 operation,
   ambiguous-write, ownership, manual-source, Calendar, review-link, and privacy
   decision contract only; adapter runtime and gates remain inactive.
+- [Add-in bridge](addin-bridge.md) — ADR-010 transport, first-pair bootstrap,
+  least-authority session, network/certificate, review-link activation,
+  content, and native-fallback decision contract only; bridge runtime and all
+  named gates remain inactive.
 
 `P0-THREAT-001` checks that all nine rows and their ADR, gate, owner, prohibited-
 behavior, and fallback routes remain represented in the machine-readable

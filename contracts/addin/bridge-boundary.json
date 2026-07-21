@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "work_item": "P0-WI-13",
+  "adr": "ADR-010",
+  "decision_status": "accepted_contract_runtime_unimplemented",
+  "snapshot_date": "2026-07-21",
+  "owner_decisions": ["OWN-01"],
+  "owned_requirements": ["OL-GOV-001", "OL-UX-006", "OL-UX-007"],
+  "consumed_requirements": ["OL-REM-016"],
+  "primary_acceptance_criteria": ["AC-11", "AC-12"],
+  "dependent_acceptance_criteria": [],
+  "primary_scenarios": [],
+  "scenario_dependencies": [],
+  "blocking_gates": ["G-ADDIN", "G-PRIV"],
+  "input_authorities": [
+    {"owner":"ADR-001","input":"Windows-first single-user companion runtime; companion-add-in communication disabled until G-ADDIN and ADR-010"},
+    {"owner":"ADR-003","input":"Office add-in manifest permissions and requirement sets remain feature-scoped and disabled"},
+    {"owner":"ADR-005","input":"pairing-root.dpapi reservation, DPAPI blob rules, and memory-only session-secret boundary"},
+    {"owner":"ADR-006","input":"EWS-to-REST conversion, displayMessageFormAsync gating, webLink validation, and the random non-secret review-link handle rule"},
+    {"owner":"ADR-009","input":"review_link_boundary payload, prohibited list, and deferred activation to ADR-010 and G-ADDIN"},
+    {"owner":"ADR-PRIV-001","input":"exact record fields, retention, and prohibited content; PRIV-XREC-010 pairing/session secret exclusion"}
+  ],
+  "separate_decisions": {
+    "exact_transport_selection_and_loopback_mechanics": "G-ADDIN",
+    "asset_hosting_manifest_and_client_matrix": "G-ADDIN",
+    "certificate_issuance_rotation_and_expiry_mechanics": "G-ADDIN",
+    "automation_modes_eligibility_evaluation_and_flags": "ADR-011",
+    "self_email_send_recipient_and_operation_protocol": "ADR-013",
+    "persistent_field_allowlist_and_retention": "ADR-PRIV-001",
+    "storage_encryption_atomicity_and_rollback": "ADR-005"
+  },
+  "catalogs": {
+    "transport_candidate_code": ["named_pipe_companion_internal", "loopback_web_bridge_addin_candidate"],
+    "bootstrap_binding_field": ["expected_packaged_companion", "office_addin_origin_and_client", "os_user", "opaque_account_reference", "single_use_nonce", "expiry", "explicit_user_verifiable_action"],
+    "session_property": ["least_authority", "command_scoped", "in_memory_only", "rotated_on_reconnect", "revoked_on_account_change"],
+    "certificate_prohibition": ["machine_wide_trust", "general_purpose_trusted_root_with_retained_signing_key", "exportable_private_key", "broad_or_inherited_acl"],
+    "review_link_activation_property": ["random_non_secret_opaque_handle", "authenticated_per_user_session", "account_bound_resolution", "no_standalone_authority"],
+    "content_prohibition": ["browser_local_storage", "indexeddb", "service_worker_cache", "url_query_or_fragment", "console_output", "analytics", "crash_report", "office_roaming_settings"],
+    "native_fallback_trigger": ["bridge_unavailable", "addin_unavailable", "unsupported_client", "disconnect", "uninstall", "gate_failed"]
+  },
+  "transport_boundary": {
+    "preferred_internal_transport": "named pipes for companion-internal and native-UI traffic",
+    "addin_candidate_transport": "a same-user loopback web bridge is the sole candidate transport for the Office add-in, used only if the runnable packaged G-ADDIN spike proves asset hosting, certificate/network, discovery, and bootstrap boundaries on every advertised client",
+    "prohibited_assumptions": ["a named pipe is reachable from Office.js", "Graph delegated scopes authorize add-in operations", "a remotely reachable service", "LAN or non-loopback binding"],
+    "unresolved_pending_G-ADDIN": ["exact transport selection", "loopback host and port", "certificate mechanics", "discovery mechanism", "per-client behavior"]
+  },
+  "bootstrap_boundary": {
+    "bound_fields": ["expected_packaged_companion", "office_addin_origin_and_client", "os_user", "opaque_account_reference", "single_use_nonce", "expiry", "explicit_user_verifiable_action"],
+    "prohibited_locations": ["URL parameters", "Office roaming settings", "localStorage", "repository configuration"],
+    "race_defense": "two concurrent first-pair attempts on the same port resolve to at most one bound pairing; the loser observes a fail-closed rejection rather than a second silent binding",
+    "replay_defense": "a replayed nonce is rejected once its single use is consumed or its expiry passes",
+    "brute_force_defense": "pairing verification is rate- and attempt-bounded so brute-forcing the verification value fails closed rather than degrading into an open window",
+    "unpaired_command_rule": "no unpaired command exists; every command requires a bound, live session, so a malicious local page issuing loopback requests before pairing completes is rejected"
+  },
+  "session_boundary": {
+    "authority": "least-authority command-scoped in-memory sessions authorizing only the specific companion commands the add-in surface requires: review, evidence navigation, settings, and status",
+    "prohibited_authority": ["generic authority", "synchronization authority"],
+    "persistence": "every session secret is held in memory only and is never written to the database, a DPAPI blob, disk, or a log",
+    "rotation": "a session rotates on reconnect and is revoked on account change",
+    "stale_rule": "a session bound to a prior account or a stale companion generation is rejected, not silently reused",
+    "residual_limitation": "this is a same-user boundary only; it defends against a malicious local web page or a different local account, not against code already running as the same authenticated OS user"
+  },
+  "network_boundary": {
+    "host_origin_validation": "exact Host and Origin values are validated against a closed allowlist",
+    "csrf_defense": "an explicit CSRF defense independent of cookies is required",
+    "binding": "loopback addresses only; no LAN, wildcard, or 0.0.0.0 bind",
+    "rate_and_size_limits": "request rate and size limits are enforced",
+    "session_expiry": "sessions expire",
+    "dns_rebinding": "hostnames that resolve to a loopback address after the fact from an external-looking origin are rejected"
+  },
+  "certificate_boundary": {
+    "prohibited": ["machine-wide certificate trust", "a general-purpose trusted root with a retained signing key", "an exportable private key", "a broad or inherited ACL"],
+    "scope_if_selected": "current-user only, limited to the exact tested loopback names, using a non-exportable private key ACL'd to the user and application",
+    "lifecycle": "explicit issue, rotation, expiry, and replacement behavior",
+    "cleanup": "completely removed on disconnect and uninstall; failure of any trust cleanup step or client path blocks the add-in"
+  },
+  "review_link_boundary": {
+    "payload": "one random, non-secret, opaque loop handle and no authority, exactly the ADR-009 payload",
+    "activation": "an authenticated, per-user, account-bound resolution of that handle against the current loop state",
+    "prohibited": ["bearer token", "session token", "pairing token", "Graph or Office ID", "account identifier", "mailbox content", "raw evidence link"],
+    "unsupported_client_behavior": "omit the link or show a fixed safe-fallback instruction; never fall back to embedding authority in the link"
+  },
+  "content_boundary": {
+    "prohibited_locations": ["browser localStorage", "IndexedDB", "service-worker cache", "a URL", "console output", "analytics", "a crash report", "Office roaming settings"],
+    "scope": "applies to every add-in surface, not only the review link"
+  },
+  "native_fallback_boundary": {
+    "trigger": ["bridge unavailable", "add-in unavailable", "disconnected", "uninstalled", "an unsupported client", "before G-ADDIN passes"],
+    "behavior": "the companion's native status/review/recovery surface is the fallback",
+    "gate_failure_routing": "if G-ADDIN fails outright, the PRD-required Outlook add-in capability is blocked and routed to OWN-01 for a product-owner decision",
+    "prohibited": "native UI is never a silent substitute for the blocked add-in capability, and no claim advertises add-in support in its place"
+  },
+  "privacy_boundary": {
+    "approved_record_types": [],
+    "new_persisted_records": "none; this ADR introduces no new persisted database record",
+    "pairing_state_location": "any future pairing root remains the already-reserved pairing-root.dpapi blob under ADR-005's DPAPI boundary, owned by ADR-010 with ADR-005 storage constraints",
+    "session_state_location": "session secrets remain memory-only and are never a database record",
+    "revision_requirement": "introducing any future persisted bridge record requires a separate ADR-PRIV-001 revision; this ADR approves none",
+    "prohibited_values": ["mailbox content", "Microsoft or Office identifier", "account identifier", "token", "bearer secret", "pairing secret", "session secret", "raw URL carrying authority", "free text", "prompt or model material"]
+  },
+  "runtime_boundary": {
+    "bridge_runtime": false,
+    "manifest_deployed": false,
+    "listener_active": false,
+    "pipe_active": false,
+    "certificate_issued": false,
+    "pairing_created": false,
+    "permissions_requested": [],
+    "persistent_records_created": [],
+    "network_calls": [],
+    "acceptance_criteria_completed": [],
+    "scenarios_completed": [],
+    "gates_passed": []
+  },
+  "claims": {
+    "capabilities_enabled": [],
+    "capabilities_advertised": [],
+    "support_rows_advertised": [],
+    "client_matrix_supported": [],
+    "certificate_mechanics_proven": [],
+    "transport_selected": []
+  },
+  "sources": [
+    {"id":"SRC-SPEC-ADDIN","location":"docs/product-spec.md#10-quality-and-safety-gates"},
+    {"id":"SRC-SPEC-UX","location":"docs/product-spec.md#69-outlook-experience"},
+    {"id":"SRC-PLAN-ADDIN","location":"docs/implementation-plan.md#5-outlook-add-in-and-local-bridge-spike"},
+    {"id":"SRC-PLAN-ADR","location":"docs/implementation-plan.md#10-required-architecture-decision-records"},
+    {"id":"SRC-SUPPORT-MATRIX","location":"docs/support-matrix.md"},
+    {"id":"SRC-THREAT-INDEX","location":"docs/threat-model/README.md"},
+    {"id":"SRC-RESEARCH-CONNECTION","location":"research/microsoft-graph/connection-options.md"},
+    {"id":"SRC-RESEARCH-SECURITY","location":"research/microsoft-graph/security-and-local-state.md"}
+  ]
+}

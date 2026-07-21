@@ -25,7 +25,7 @@ an unrun capability gate into an implementation assumption.
 | [ADR-007](ADR-007-model-boundary.md) | Model boundary | Accepted | OWN-08 | G-MODEL, G-PRIV, G-SEC-AUDIT, G-RELEASE |
 | [ADR-008](ADR-008-policy-and-state-model.md) | Policy and state model | Accepted | OWN-03 | G-AUTO, G-AUTO-FULL |
 | [ADR-009](ADR-009-reminder-adapters.md) | Reminder adapters | Accepted | OWN-03, OWN-04, OWN-05, OWN-07 | G-TODO, G-CAL, G-AUTO, G-AUTO-FULL |
-| ADR-010 | Add-in bridge | Planned | OWN-01 | G-ADDIN |
+| [ADR-010](ADR-010-add-in-bridge.md) | Add-in bridge | Accepted | OWN-01 | G-ADDIN |
 | ADR-011 | Automation and evaluation | Planned | OWN-03 | G-AUTO, G-AUTO-FULL |
 | ADR-012 | Distribution and registration | Planned | OWN-00, OWN-01, OWN-02 | G-ID, G-RELEASE |
 | ADR-013 | Self-email | Planned | OWN-10 | G-SELFMAIL |
