@@ -1,0 +1,739 @@
+{
+  "schema_version": 1,
+  "work_item": "P0-WI-02",
+  "adr": { "id": "ADR-PRIV-001", "status": "accepted" },
+  "owner_decisions": ["OWN-06", "OWN-07"],
+  "requirements": [
+    "OL-GOV-001", "OL-CLOSE-006", "OL-CLOSE-007", "OL-REM-004",
+    "OL-REM-006", "OL-REM-007", "OL-REM-011", "OL-REM-013",
+    "OL-REM-016", "OL-UX-006", "OL-UX-009", "OL-UX-010",
+    "OL-TEST-003", "OL-METRIC-001", "OL-METRIC-002", "OL-METRIC-003",
+    "OL-METRIC-004", "OL-MODEL-001", "OL-MODEL-003", "OL-MODEL-004",
+    "OL-MODEL-006", "OL-MODEL-009", "OL-MODEL-011", "OL-MODEL-013",
+    "OL-NFR-005", "OL-NFR-006", "OL-NFR-010", "OL-NFR-012"
+  ],
+  "acceptance_criteria": [],
+  "blocking_gates": ["G-STATE", "G-PRIV", "G-SEC-AUDIT"],
+  "claim_state": {
+    "capability_enabled": false,
+    "logical_runtime_schema_approved": false,
+    "gates_passed": [],
+    "acceptance_criteria_completed": []
+  },
+  "semantic_types": [
+    { "id": "opaque_local_id", "rule": "random application-local identifier; never derived from a Microsoft or user identity" },
+    { "id": "encrypted_locator", "rule": "strict typed locator validated before application-level authenticated encryption" },
+    { "id": "keyed_digest", "rule": "purpose-separated keyed digest with fixed algorithm and length; never reversible encoding" },
+    { "id": "closed_enum", "rule": "versioned closed code set with unknown values rejected" },
+    { "id": "boolean", "rule": "boolean only" },
+    { "id": "bounded_integer", "rule": "integer with field-specific closed bounds" },
+    { "id": "canonical_timestamp", "rule": "canonical UTC instant used only for the named operational purpose" },
+    { "id": "canonical_duration", "rule": "bounded duration used only for the named operational purpose" },
+    { "id": "unicode_range", "rule": "validated block ordinal and Unicode scalar boundary range; no captured text" },
+    { "id": "version_label", "rule": "bounded non-content implementation or policy version label" },
+    { "id": "encrypted_structured_temporal", "rule": "typed temporal instant/date/range/event reference encrypted after validation; never the source phrase" },
+    { "id": "encrypted_user_setting", "rule": "value explicitly authored by the user for an enumerated setting key and encrypted after per-key validation" },
+    { "id": "secure_store_reference", "rule": "opaque reference to an operating-system-protected secret; never secret material" },
+    { "id": "opaque_reference_set", "rule": "bounded set or ordered list of application-local references" },
+    { "id": "counter_value", "rule": "bounded aggregate count without person, client, message, task, or exact-event dimensions" }
+    ,{ "id": "fixed_crypto_bytes", "rule": "algorithm-specific fixed-length nonce or authentication tag; permitted only in the persistence envelope" }
+    ,{ "id": "authenticated_ciphertext", "rule": "bounded authenticated-encryption output for one already validated logical record; permitted only in the persistence envelope" }
+    ,{ "id": "local_schedule", "rule": "user-authored local clock time or recurring schedule; exact serialized form and bounds require ADR-005 before use" }
+    ,{ "id": "timezone_identifier", "rule": "user-selected IANA or Windows timezone catalog identifier; exact accepted catalog requires ADR-005 before use" }
+    ,{ "id": "coarse_time_bucket", "rule": "non-event rolling-window bucket with no exact activity timestamp; exact serialized form requires ADR-005 before use" }
+  ],
+  "retention_policies": [
+    { "id": "account_until_disconnect", "rule": "retain until account disconnect or explicit local account deletion" },
+    { "id": "checkpoint_until_scope_removed", "rule": "retain until the collection leaves configured scope or account disconnects" },
+    { "id": "observation_window_plus_15", "rule": "configured history window of 1 through 365 days plus exactly 15 days; an active reference pins only required records" },
+    { "id": "unresolved_quarantine", "rule": "retain only the required encrypted message-observation and content-free health fields while retry dismiss or recovery remains unresolved; success dismissal or recovery returns the observation to observation-window retention and deletes it immediately when that window has elapsed; disconnect immediately deletes the local observation and related health record regardless of age with zero Graph mutations" },
+    { "id": "active_loop_lineage", "rule": "candidate or open loop lineage until terminal resolution, explicit user deletion, or disconnect" },
+    { "id": "terminal_loop_lineage", "rule": "default 30 days after terminal state; configurable integer from 0 through 365 days" },
+    { "id": "completed_operation_90", "rule": "completed operation entries for exactly 90 days" },
+    { "id": "unresolved_operation", "rule": "pending or ambiguous operation until reconciled or explicitly abandoned" },
+    { "id": "job_health_until_resolved", "rule": "unresolved health state only until retry success, dismissal, recovery completion, or disconnect; resolution atomically deletes the job_health record before the related observation returns to ordinary retention" },
+    { "id": "settings_until_replaced", "rule": "until changed, explicitly deleted, reset where supported, or disconnect" },
+    { "id": "counter_rolling_30", "rule": "rolling 30-day aggregate and independently resettable" }
+    ,{ "id": "enclosed_record_policy", "rule": "inherits the exact retention and deletion policy of the enclosed validated logical record" }
+  ],
+  "operation_policies": [
+    { "id": "delete_local_only", "rule": "logical deletion of application-controlled records with reference-aware cleanup; zero Graph mutations and no Microsoft artifact deletion" },
+    { "id": "compact_and_retire_best_effort", "rule": "best-effort database compaction and safe key retirement with no physical-erasure guarantee" },
+    { "id": "reset_counter_only", "rule": "reset touches only aggregate product counters" },
+    { "id": "reset_setting_only", "rule": "reset or replacement touches only the named user setting" },
+    { "id": "disconnect_user_choice", "rule": "local cleanup follows explicit leave, detach, or individual-review choices and never bulk-deletes Microsoft artifacts" },
+    { "id": "export_disabled", "rule": "product-state and metric export are unavailable in the MVP and require a new privacy decision" },
+    { "id": "diagnostic_export_gated", "rule": "diagnostic export remains unavailable until a separate exact content-free schema, ADR-012, G-PRIV, G-RELEASE, and G-SEC-AUDIT pass" }
+  ],
+  "lifecycle_transitions": [
+    {
+      "id": "loop_lineage_retention",
+      "record_types": ["email_evidence_ref", "calendar_invitation_ref", "user_authored_artifact_ref", "loop", "deadline_evidence", "transition", "reminder_link", "client_association"],
+      "states": [
+        { "when": "candidate_or_open", "retention": "active_loop_lineage" },
+        { "when": "terminal", "retention": "terminal_loop_lineage" }
+      ]
+    },
+    {
+      "id": "operation_retention",
+      "record_types": ["operation_ledger"],
+      "states": [
+        { "when": "pending_or_ambiguous", "retention": "unresolved_operation" },
+        { "when": "completed", "retention": "completed_operation_90" }
+      ]
+    },
+    {
+      "id": "quarantine_retention",
+      "record_types": ["message_observation"],
+      "states": [
+        { "when": "recoverable_quarantine_unresolved", "retention": "unresolved_quarantine" },
+        { "when": "retry_succeeded_dismissed_or_recovery_complete", "retention": "observation_window_plus_15" }
+      ]
+    }
+  ],
+  "record_types": [
+    {
+      "id": "persistence_envelope",
+      "field_groups": [
+        {
+          "classification": "technical_private", "semantic_type": "opaque_local_id", "purpose": "record_identity_and_aad_binding", "necessity": "required",
+          "threat": "ciphertext_swap_or_cross_account_replay", "disclosure": "local_only", "protection": "minimum_clear_envelope", "retention": "enclosed_record_policy",
+          "deletion": "compact_and_retire_best_effort", "reset": "record_lifecycle", "export": "export_disabled", "reconstruction": "not_displayed", "source": "PLAN-3.1",
+          "fields": ["record_id", "account_binding_aad"]
+        },
+        {
+          "classification": "technical_private", "semantic_type": "closed_enum", "purpose": "record_type_dispatch", "necessity": "required",
+          "threat": "type_confusion", "disclosure": "local_only", "protection": "minimum_clear_envelope", "retention": "enclosed_record_policy",
+          "deletion": "compact_and_retire_best_effort", "reset": "record_lifecycle", "export": "export_disabled", "reconstruction": "not_displayed", "source": "PLAN-3.1",
+          "fields": ["record_type"]
+        },
+        {
+          "classification": "technical_private", "semantic_type": "version_label", "purpose": "decryption_and_migration", "necessity": "required",
+          "threat": "downgrade_or_schema_confusion", "disclosure": "local_only", "protection": "minimum_clear_envelope", "retention": "enclosed_record_policy",
+          "deletion": "compact_and_retire_best_effort", "reset": "record_lifecycle", "export": "export_disabled", "reconstruction": "not_displayed", "source": "PLAN-3.1",
+          "fields": ["schema_version", "ciphertext_version", "key_id"]
+        },
+        {
+          "classification": "technical_private", "semantic_type": "fixed_crypto_bytes", "purpose": "authenticated_encryption_parameters", "necessity": "required",
+          "threat": "nonce_reuse_or_ciphertext_tamper", "disclosure": "local_only", "protection": "minimum_clear_envelope", "retention": "enclosed_record_policy",
+          "deletion": "compact_and_retire_best_effort", "reset": "record_lifecycle", "export": "export_disabled", "reconstruction": "not_displayed", "source": "PLAN-3.1",
+          "fields": ["nonce", "authentication_tag"]
+        },
+        {
+          "classification": "sensitive_encrypted", "semantic_type": "authenticated_ciphertext", "purpose": "encrypted_logical_record", "necessity": "required",
+          "threat": "plaintext_state_disclosure_or_ciphertext_tamper", "disclosure": "local_only", "protection": "aead_ciphertext", "retention": "enclosed_record_policy",
+          "deletion": "compact_and_retire_best_effort", "reset": "record_lifecycle", "export": "export_disabled", "reconstruction": "decrypt_then_validate", "source": "PLAN-3.1",
+          "fields": ["ciphertext"]
+        }
+      ]
+    },
+    {
+      "id": "account_binding",
+      "field_groups": [
+        {
+          "classification": "operational_private", "semantic_type": "opaque_local_id", "purpose": "account_isolation", "necessity": "required",
+          "threat": "cross-account correlation", "disclosure": "local_only", "protection": "aead_envelope", "retention": "account_until_disconnect",
+          "deletion": "delete_local_only", "reset": "disconnect_only", "export": "export_disabled", "reconstruction": "not_displayed", "source": "PLAN-3.1",
+          "fields": ["record_id", "account_ref"]
+        },
+        {
+          "classification": "operational_private", "semantic_type": "closed_enum", "purpose": "capability_binding", "necessity": "required",
+          "threat": "scope_confusion", "disclosure": "local_only", "protection": "aead_envelope", "retention": "account_until_disconnect",
+          "deletion": "delete_local_only", "reset": "disconnect_only", "export": "export_disabled", "reconstruction": "safe_code_projection", "source": "PLAN-3.1",
+          "fields": ["cloud_code", "enabled_feature_codes", "requested_scope_codes", "granted_scope_codes"]
+        },
+        {
+          "classification": "credential_reference", "semantic_type": "secure_store_reference", "purpose": "token_state_lookup", "necessity": "conditional",
+          "threat": "credential_disclosure", "disclosure": "local_only", "protection": "aead_envelope", "retention": "account_until_disconnect",
+          "deletion": "delete_local_only", "reset": "disconnect_only", "export": "export_disabled", "reconstruction": "not_displayed", "source": "PLAN-3.1",
+          "fields": ["oauth_token_state_ref"]
+        }
+      ]
+    },
+    {
+      "id": "sync_checkpoint",
+      "field_groups": [
+        {
+          "classification": "operational_private", "semantic_type": "opaque_local_id", "purpose": "sync_identity", "necessity": "required",
+          "threat": "cross-account_cursor_use", "disclosure": "local_only", "protection": "aead_envelope", "retention": "checkpoint_until_scope_removed",
+          "deletion": "delete_local_only", "reset": "scope_removal_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "PLAN-3.1",
+          "fields": ["record_id", "account_ref"]
+        },
+        {
+          "classification": "sensitive_microsoft_metadata", "semantic_type": "encrypted_locator", "purpose": "incremental_sync", "necessity": "required",
+          "threat": "resource_and_cursor_disclosure", "disclosure": "local_only", "protection": "aead_envelope", "retention": "checkpoint_until_scope_removed",
+          "deletion": "delete_local_only", "reset": "scope_removal_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "PLAN-3.1",
+          "fields": ["collection_locator", "delta_or_next_locator"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "keyed_digest", "purpose": "query_contract_integrity", "necessity": "required",
+          "threat": "query_scope_correlation", "disclosure": "local_only", "protection": "keyed_hmac_inside_aead", "retention": "checkpoint_until_scope_removed",
+          "deletion": "delete_local_only", "reset": "scope_removal_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "PLAN-3.1",
+          "fields": ["query_fingerprint_hmac"]
+        },
+        {
+          "classification": "operational_private", "semantic_type": "closed_enum", "purpose": "sync_status", "necessity": "required",
+          "threat": "coverage_misstatement", "disclosure": "local_only", "protection": "aead_envelope", "retention": "checkpoint_until_scope_removed",
+          "deletion": "delete_local_only", "reset": "scope_removal_or_disconnect", "export": "export_disabled", "reconstruction": "safe_code_projection", "source": "PLAN-3.1",
+          "fields": ["collection_kind", "status_code"]
+        },
+        {
+          "classification": "operational_private", "semantic_type": "canonical_timestamp", "purpose": "freshness_status", "necessity": "required",
+          "threat": "behavioral_timing_disclosure", "disclosure": "local_only", "protection": "aead_envelope", "retention": "checkpoint_until_scope_removed",
+          "deletion": "delete_local_only", "reset": "scope_removal_or_disconnect", "export": "export_disabled", "reconstruction": "safe_time_projection", "source": "PLAN-3.1",
+          "fields": ["last_complete_at"]
+        }
+      ]
+    },
+    {
+      "id": "message_observation",
+      "field_groups": [
+        {
+          "classification": "operational_private", "semantic_type": "opaque_local_id", "purpose": "observation_identity", "necessity": "required",
+          "threat": "cross_account_correlation", "disclosure": "local_only", "protection": "aead_envelope", "retention": "observation_window_plus_15",
+          "deletion": "delete_local_only", "reset": "retention_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "PLAN-3.1",
+          "fields": ["record_id", "account_ref"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "keyed_digest", "purpose": "source_version_idempotency", "necessity": "required",
+          "threat": "message_correlation", "disclosure": "local_only", "protection": "keyed_hmac_inside_aead", "retention": "observation_window_plus_15",
+          "deletion": "delete_local_only", "reset": "retention_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "PLAN-3.1",
+          "fields": ["source_version_hmac", "observed_version_hmac"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "closed_enum", "purpose": "eligibility_and_job_state", "necessity": "required",
+          "threat": "behavior_inference", "disclosure": "local_only", "protection": "aead_envelope", "retention": "observation_window_plus_15",
+          "deletion": "delete_local_only", "reset": "retention_or_disconnect", "export": "export_disabled", "reconstruction": "safe_code_projection", "source": "PLAN-3.1",
+          "fields": ["direction_code", "read_observation_code", "first_observation_code", "job_outcome_code", "failure_class", "retry_state"]
+        },
+        {
+          "classification": "operational_private", "semantic_type": "version_label", "purpose": "replay_policy", "necessity": "required",
+          "threat": "policy_confusion", "disclosure": "local_only", "protection": "aead_envelope", "retention": "observation_window_plus_15",
+          "deletion": "delete_local_only", "reset": "retention_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "PLAN-3.1",
+          "fields": ["policy_version"]
+        },
+        {
+          "classification": "sensitive_microsoft_metadata", "semantic_type": "encrypted_locator", "purpose": "quarantine_refetch", "necessity": "conditional",
+          "threat": "message_identifier_disclosure", "disclosure": "local_only", "protection": "aead_envelope", "retention": "observation_window_plus_15",
+          "deletion": "delete_local_only", "reset": "retention_or_disconnect", "export": "export_disabled", "reconstruction": "microsoft_refetch", "source": "OL-SYNC-013",
+          "fields": ["quarantined_locator"]
+        },
+        {
+          "classification": "operational_private", "semantic_type": "bounded_integer", "purpose": "quarantine_retry", "necessity": "conditional",
+          "threat": "unbounded_retry", "disclosure": "local_only", "protection": "aead_envelope", "retention": "observation_window_plus_15",
+          "deletion": "delete_local_only", "reset": "retention_or_disconnect", "export": "export_disabled", "reconstruction": "safe_code_projection", "source": "OL-SYNC-013",
+          "fields": ["retry_generation"]
+        },
+        {
+          "classification": "operational_private", "semantic_type": "canonical_timestamp", "purpose": "observation_order", "necessity": "required",
+          "threat": "behavioral_timing_disclosure", "disclosure": "local_only", "protection": "aead_envelope", "retention": "observation_window_plus_15",
+          "deletion": "delete_local_only", "reset": "retention_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "PLAN-3.1",
+          "fields": ["observed_at"]
+        }
+      ]
+    },
+    {
+      "id": "email_evidence_ref",
+      "field_groups": [
+        {
+          "classification": "operational_private", "semantic_type": "opaque_local_id", "purpose": "evidence_identity", "necessity": "required",
+          "threat": "cross_account_evidence_use", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "SPEC-5.2",
+          "fields": ["source_ref_id", "account_ref"]
+        },
+        {
+          "classification": "sensitive_microsoft_metadata", "semantic_type": "encrypted_locator", "purpose": "evidence_refetch", "necessity": "required",
+          "threat": "message_folder_conversation_disclosure", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "microsoft_refetch", "source": "SPEC-5.2",
+          "fields": ["message_locator", "fallback_locator", "conversation_ref", "selected_folder_context"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "closed_enum", "purpose": "evidence_semantics", "necessity": "required",
+          "threat": "obligation_inference", "disclosure": "local_and_transient_projection", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "safe_code_projection", "source": "SPEC-5.2",
+          "fields": ["component_code", "relation_code"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "unicode_range", "purpose": "evidence_reanchoring", "necessity": "required",
+          "threat": "content_position_correlation", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "microsoft_refetch", "source": "SPEC-5.2",
+          "fields": ["block_ordinal", "range_start", "range_end"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "keyed_digest", "purpose": "evidence_integrity", "necessity": "required",
+          "threat": "content_fingerprinting", "disclosure": "local_only", "protection": "keyed_hmac_inside_aead", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "microsoft_refetch", "source": "SPEC-5.2",
+          "fields": ["content_digest_hmac", "prefix_digest_hmac", "suffix_digest_hmac"]
+        },
+        {
+          "classification": "operational_private", "semantic_type": "version_label", "purpose": "anchor_versioning", "necessity": "required",
+          "threat": "stale_evidence_use", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "SPEC-5.2",
+          "fields": ["anchor_version", "locator_version"]
+        },
+        {
+          "classification": "operational_private", "semantic_type": "canonical_timestamp", "purpose": "evidence_chronology", "necessity": "required",
+          "threat": "behavioral_timing_disclosure", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "SPEC-5.2",
+          "fields": ["observed_at"]
+        }
+      ]
+    },
+    {
+      "id": "calendar_invitation_ref",
+      "field_groups": [
+        {
+          "classification": "operational_private", "semantic_type": "opaque_local_id", "purpose": "invitation_evidence_identity", "necessity": "required",
+          "threat": "cross_account_evidence_use", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "SPEC-5.2",
+          "fields": ["source_ref_id", "account_ref", "invitation_email_ref_id"]
+        },
+        {
+          "classification": "sensitive_microsoft_metadata", "semantic_type": "encrypted_locator", "purpose": "calendar_refetch", "necessity": "conditional",
+          "threat": "calendar_identifier_disclosure", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "microsoft_refetch", "source": "SPEC-5.2",
+          "fields": ["event_locator", "response_locator"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "keyed_digest", "purpose": "calendar_version_integrity", "necessity": "conditional",
+          "threat": "calendar_correlation", "disclosure": "local_only", "protection": "keyed_hmac_inside_aead", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "microsoft_refetch", "source": "SPEC-5.2",
+          "fields": ["event_version_hmac"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "closed_enum", "purpose": "invitation_state", "necessity": "conditional",
+          "threat": "calendar_response_disclosure", "disclosure": "local_and_transient_projection", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "safe_code_projection", "source": "SPEC-5.2",
+          "fields": ["response_state_code", "relation_code"]
+        },
+        {
+          "classification": "operational_private", "semantic_type": "canonical_timestamp", "purpose": "invitation_chronology", "necessity": "required",
+          "threat": "behavioral_timing_disclosure", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "SPEC-5.2",
+          "fields": ["observed_at"]
+        }
+      ]
+    },
+    {
+      "id": "user_authored_artifact_ref",
+      "field_groups": [
+        {
+          "classification": "operational_private", "semantic_type": "opaque_local_id", "purpose": "manual_source_identity", "necessity": "required",
+          "threat": "cross_account_artifact_use", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "SPEC-5.8",
+          "fields": ["source_ref_id", "account_ref"]
+        },
+        {
+          "classification": "sensitive_microsoft_metadata", "semantic_type": "encrypted_locator", "purpose": "manual_artifact_refetch", "necessity": "required",
+          "threat": "artifact_identifier_disclosure", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "microsoft_refetch", "source": "SPEC-5.8",
+          "fields": ["adapter_locator", "list_locator", "artifact_locator"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "keyed_digest", "purpose": "manual_field_change_detection", "necessity": "required",
+          "threat": "artifact_content_fingerprinting", "disclosure": "local_only", "protection": "keyed_hmac_inside_aead", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "microsoft_refetch", "source": "SPEC-5.8",
+          "fields": ["title_digest_hmac", "body_digest_hmac", "due_digest_hmac", "title_version_hmac", "body_version_hmac", "due_version_hmac"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "closed_enum", "purpose": "manual_source_authority", "necessity": "required",
+          "threat": "model_overwrite_or_origin_confusion", "disclosure": "local_and_transient_projection", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "safe_code_projection", "source": "SPEC-5.8",
+          "fields": ["artifact_type_code", "title_ownership_code", "body_ownership_code", "due_ownership_code", "title_version_state", "body_version_state", "due_version_state", "origin_state_code", "source_availability_code"]
+        },
+        {
+          "classification": "operational_private", "semantic_type": "canonical_timestamp", "purpose": "manual_source_chronology", "necessity": "required",
+          "threat": "behavioral_timing_disclosure", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "SPEC-5.8",
+          "fields": ["observed_at"]
+        }
+      ]
+    },
+    {
+      "id": "loop",
+      "field_groups": [
+        {
+          "classification": "operational_private", "semantic_type": "opaque_local_id", "purpose": "loop_identity_and_relations", "necessity": "required",
+          "threat": "cross_account_or_cross_loop_confusion", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "SPEC-5.1",
+          "fields": ["loop_id", "account_ref", "operative_deadline_ref_id", "last_evaluated_source_ref_id"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "closed_enum", "purpose": "loop_lifecycle", "necessity": "required",
+          "threat": "obligation_and_behavior_inference", "disclosure": "local_and_transient_projection", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "safe_code_projection", "source": "SPEC-5.1",
+          "fields": ["origin_code", "provenance_codes", "obligation_state_code", "review_flag_codes", "deadline_state_code", "closure_review_state_code", "reminder_state_code", "analysis_state_code", "source_state_code", "resolution_code", "confidence_bucket"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "opaque_reference_set", "purpose": "loop_evidence_and_history", "necessity": "required",
+          "threat": "relationship_correlation", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "microsoft_refetch", "source": "SPEC-5.1",
+          "fields": ["source_ref_ids_by_role", "reminder_ref_ids", "transition_ref_ids"]
+        },
+        {
+          "classification": "operational_private", "semantic_type": "version_label", "purpose": "policy_schema_model_replay", "necessity": "required",
+          "threat": "policy_or_model_drift", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "safe_code_projection", "source": "SPEC-5.1",
+          "fields": ["loop_version", "policy_version", "schema_version", "model_label_code"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "encrypted_structured_temporal", "purpose": "operative_deadline_projection", "necessity": "conditional",
+          "threat": "behavioral_timing_disclosure", "disclosure": "local_and_transient_projection", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "safe_temporal_projection", "source": "SPEC-5.1",
+          "fields": ["operative_deadline_value_or_range"]
+        }
+      ]
+    },
+    {
+      "id": "deadline_evidence",
+      "field_groups": [
+        {
+          "classification": "operational_private", "semantic_type": "opaque_local_id", "purpose": "deadline_identity", "necessity": "required",
+          "threat": "cross_loop_deadline_use", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "SPEC-5.3",
+          "fields": ["deadline_evidence_id", "loop_id", "source_ref_id"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "closed_enum", "purpose": "deadline_semantics", "necessity": "required",
+          "threat": "deadline_and_behavior_inference", "disclosure": "local_and_transient_projection", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "safe_code_projection", "source": "SPEC-5.3",
+          "fields": ["source_type_code", "precision_code", "interpretation_code", "operative_selection_code"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "encrypted_structured_temporal", "purpose": "deadline_scheduling", "necessity": "required",
+          "threat": "behavioral_timing_disclosure", "disclosure": "local_and_transient_projection", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "safe_temporal_projection", "source": "SPEC-5.3",
+          "fields": ["value_or_range"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "timezone_identifier", "purpose": "deadline_timezone", "necessity": "required",
+          "threat": "location_or_schedule_inference", "disclosure": "local_and_transient_projection", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "safe_temporal_projection", "source": "SPEC-5.3",
+          "fields": ["timezone_id"]
+        }
+      ]
+    },
+    {
+      "id": "transition",
+      "field_groups": [
+        {
+          "classification": "operational_private", "semantic_type": "opaque_local_id", "purpose": "transition_identity", "necessity": "required",
+          "threat": "cross_loop_history_use", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "SPEC-5.4",
+          "fields": ["transition_id", "loop_id", "user_action_id"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "closed_enum", "purpose": "state_history", "necessity": "required",
+          "threat": "behavior_and_obligation_inference", "disclosure": "local_and_transient_projection", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "safe_code_projection", "source": "SPEC-5.4",
+          "fields": ["prior_facet_codes", "new_facet_codes", "reason_code", "actor_code"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "opaque_reference_set", "purpose": "transition_evidence", "necessity": "conditional",
+          "threat": "relationship_correlation", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "microsoft_refetch", "source": "SPEC-5.4",
+          "fields": ["source_ref_ids"]
+        },
+        {
+          "classification": "operational_private", "semantic_type": "canonical_timestamp", "purpose": "transition_order", "necessity": "required",
+          "threat": "behavioral_timing_disclosure", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "safe_time_projection", "source": "SPEC-5.4",
+          "fields": ["occurred_at"]
+        },
+        {
+          "classification": "operational_private", "semantic_type": "version_label", "purpose": "transition_replay", "necessity": "required",
+          "threat": "policy_confusion", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "SPEC-5.4",
+          "fields": ["loop_version", "policy_version"]
+        }
+      ]
+    },
+    {
+      "id": "reminder_link",
+      "field_groups": [
+        {
+          "classification": "operational_private", "semantic_type": "opaque_local_id", "purpose": "reminder_link_identity", "necessity": "required",
+          "threat": "cross_loop_artifact_use", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "PLAN-3.1",
+          "fields": ["reminder_link_id", "loop_id"]
+        },
+        {
+          "classification": "sensitive_microsoft_metadata", "semantic_type": "encrypted_locator", "purpose": "reminder_reconciliation", "necessity": "required",
+          "threat": "artifact_identifier_disclosure", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "microsoft_refetch", "source": "PLAN-3.1",
+          "fields": ["list_locator", "artifact_locator"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "closed_enum", "purpose": "reminder_state_and_ownership", "necessity": "required",
+          "threat": "user_edit_overwrite", "disclosure": "local_and_transient_projection", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "safe_code_projection", "source": "OL-REM-011",
+          "fields": ["adapter_code", "operation_state_code", "reconciliation_state_code", "title_ownership_code", "body_ownership_code", "due_ownership_code"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "keyed_digest", "purpose": "reminder_change_detection", "necessity": "conditional",
+          "threat": "artifact_content_fingerprinting", "disclosure": "local_only", "protection": "keyed_hmac_inside_aead", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "microsoft_refetch", "source": "OL-REM-013",
+          "fields": ["title_digest_hmac", "body_digest_hmac", "due_digest_hmac", "artifact_version_hmac", "observed_remote_version_hmac", "remote_correlation_hmac"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "encrypted_structured_temporal", "purpose": "user_controlled_reminder_due_override", "necessity": "conditional",
+          "threat": "behavioral_timing_disclosure", "disclosure": "local_and_transient_projection", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "safe_temporal_projection", "source": "OL-REM-007",
+          "fields": ["reminder_due_override"]
+        },
+        {
+          "classification": "operational_private", "semantic_type": "canonical_timestamp", "purpose": "reminder_reconciliation_freshness", "necessity": "conditional",
+          "threat": "behavioral_timing_disclosure", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "safe_time_projection", "source": "OL-REM-013",
+          "fields": ["last_reconciled_at"]
+        }
+      ]
+    },
+    {
+      "id": "operation_ledger",
+      "field_groups": [
+        {
+          "classification": "sensitive_derived", "semantic_type": "keyed_digest", "purpose": "mutation_idempotency", "necessity": "required",
+          "threat": "operation_correlation", "disclosure": "local_only", "protection": "keyed_hmac_inside_aead", "retention": "unresolved_operation",
+          "deletion": "delete_local_only", "reset": "reconcile_abandon_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "PLAN-3.1",
+          "fields": ["operation_key_hmac"]
+        },
+        {
+          "classification": "operational_private", "semantic_type": "opaque_local_id", "purpose": "operation_account_binding", "necessity": "required",
+          "threat": "cross_account_mutation", "disclosure": "local_only", "protection": "aead_envelope", "retention": "unresolved_operation",
+          "deletion": "delete_local_only", "reset": "reconcile_abandon_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "PLAN-3.1",
+          "fields": ["record_id", "account_ref", "operation_id", "loop_id", "source_ref_id"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "closed_enum", "purpose": "mutation_reconciliation", "necessity": "required",
+          "threat": "blind_retry_or_wrong_target", "disclosure": "local_only", "protection": "aead_envelope", "retention": "unresolved_operation",
+          "deletion": "delete_local_only", "reset": "reconcile_abandon_or_disconnect", "export": "export_disabled", "reconstruction": "safe_code_projection", "source": "PLAN-3.1",
+          "fields": ["operation_kind_code", "adapter_code", "state_code", "reconciliation_code", "field_mask_codes", "ownership_codes", "ambiguity_or_failure_code"]
+        },
+        {
+          "classification": "sensitive_microsoft_metadata", "semantic_type": "encrypted_locator", "purpose": "mutation_destination_reconciliation", "necessity": "conditional",
+          "threat": "artifact_identifier_disclosure", "disclosure": "local_only", "protection": "aead_envelope", "retention": "unresolved_operation",
+          "deletion": "delete_local_only", "reset": "reconcile_abandon_or_disconnect", "export": "export_disabled", "reconstruction": "microsoft_refetch", "source": "PLAN-3.1",
+          "fields": ["destination_locator"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "keyed_digest", "purpose": "remote_precondition_and_correlation", "necessity": "conditional",
+          "threat": "blind_retry_or_remote_correlation", "disclosure": "local_only", "protection": "keyed_hmac_inside_aead", "retention": "unresolved_operation",
+          "deletion": "delete_local_only", "reset": "reconcile_abandon_or_disconnect", "export": "export_disabled", "reconstruction": "microsoft_refetch", "source": "PLAN-3.1",
+          "fields": ["expected_remote_version_hmac", "remote_correlation_hmac"]
+        },
+        {
+          "classification": "operational_private", "semantic_type": "bounded_integer", "purpose": "bounded_retry_control", "necessity": "required",
+          "threat": "unbounded_retry", "disclosure": "local_only", "protection": "aead_envelope", "retention": "unresolved_operation",
+          "deletion": "delete_local_only", "reset": "reconcile_abandon_or_disconnect", "export": "export_disabled", "reconstruction": "safe_count_projection", "source": "PLAN-3.1",
+          "fields": ["attempt_count"]
+        },
+        {
+          "classification": "operational_private", "semantic_type": "canonical_timestamp", "purpose": "mutation_retry_and_retention", "necessity": "conditional",
+          "threat": "behavioral_timing_disclosure", "disclosure": "local_only", "protection": "aead_envelope", "retention": "unresolved_operation",
+          "deletion": "delete_local_only", "reset": "reconcile_abandon_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "PLAN-3.1",
+          "fields": ["retry_at", "completed_at"]
+        }
+      ]
+    },
+    {
+      "id": "job_health",
+      "field_groups": [
+        {
+          "classification": "operational_private", "semantic_type": "opaque_local_id", "purpose": "health_identity", "necessity": "required",
+          "threat": "cross_account_health_confusion", "disclosure": "local_only", "protection": "aead_envelope", "retention": "job_health_until_resolved",
+          "deletion": "delete_local_only", "reset": "resolve_dismiss_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "PLAN-3.1",
+          "fields": ["record_id", "account_ref", "quarantine_ref"]
+        },
+        {
+          "classification": "operational_private", "semantic_type": "closed_enum", "purpose": "content_free_health", "necessity": "required",
+          "threat": "error_content_leakage", "disclosure": "local_only", "protection": "aead_envelope", "retention": "job_health_until_resolved",
+          "deletion": "delete_local_only", "reset": "resolve_dismiss_or_disconnect", "export": "export_disabled", "reconstruction": "safe_code_projection", "source": "PLAN-3.1",
+          "fields": ["error_class_code"]
+        },
+        {
+          "classification": "operational_private", "semantic_type": "bounded_integer", "purpose": "bounded_retry", "necessity": "required",
+          "threat": "unbounded_retry", "disclosure": "local_only", "protection": "aead_envelope", "retention": "job_health_until_resolved",
+          "deletion": "delete_local_only", "reset": "resolve_dismiss_or_disconnect", "export": "export_disabled", "reconstruction": "safe_code_projection", "source": "PLAN-3.1",
+          "fields": ["attempt_count", "quarantine_generation"]
+        },
+        {
+          "classification": "operational_private", "semantic_type": "canonical_timestamp", "purpose": "retry_and_staleness", "necessity": "conditional",
+          "threat": "behavioral_timing_disclosure", "disclosure": "local_only", "protection": "aead_envelope", "retention": "job_health_until_resolved",
+          "deletion": "delete_local_only", "reset": "resolve_dismiss_or_disconnect", "export": "export_disabled", "reconstruction": "safe_time_projection", "source": "PLAN-3.1",
+          "fields": ["retry_at", "stale_since"]
+        }
+      ]
+    },
+    {
+      "id": "user_setting",
+      "field_groups": [
+        {
+          "classification": "operational_private", "semantic_type": "opaque_local_id", "purpose": "settings_identity", "necessity": "required",
+          "threat": "cross_account_setting_use", "disclosure": "local_only", "protection": "aead_envelope", "retention": "settings_until_replaced",
+          "deletion": "delete_local_only", "reset": "setting_reset_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "SPEC-7",
+          "fields": ["settings_id", "account_ref"]
+        },
+        {
+          "classification": "user_provided_private", "semantic_type": "encrypted_user_setting", "purpose": "explicit_user_configuration", "necessity": "optional_user_setting",
+          "threat": "identity_provider_or_client_information_disclosure", "disclosure": "local_and_user_settings_ui", "protection": "aead_envelope", "retention": "settings_until_replaced",
+          "deletion": "delete_local_only", "reset": "setting_reset_or_disconnect", "export": "export_disabled", "reconstruction": "user_provided_value", "source": "SPEC-7",
+          "fields": ["identity_address_values", "identity_name_values", "identity_alias_values", "identity_nickname_values", "identity_initial_values", "identity_username_values", "identity_role_values", "identity_team_values", "identity_context_rules", "client_mapping_refs", "excluded_sender_values", "excluded_domain_values", "typed_correction_rules", "provider_profile", "exact_consented_origin", "provider_model_label", "consented_transmitted_field_codes"]
+        },
+        {
+          "classification": "sensitive_microsoft_metadata", "semantic_type": "encrypted_locator", "purpose": "configured_folder_policy", "necessity": "optional_user_setting",
+          "threat": "folder_identifier_disclosure", "disclosure": "local_and_user_settings_ui", "protection": "aead_envelope", "retention": "settings_until_replaced",
+          "deletion": "delete_local_only", "reset": "setting_reset_or_disconnect", "export": "export_disabled", "reconstruction": "user_provided_value", "source": "SPEC-7",
+          "fields": ["selected_folder_locators"]
+        },
+        {
+          "classification": "user_provided_private", "semantic_type": "closed_enum", "purpose": "typed_user_configuration", "necessity": "optional_user_setting",
+          "threat": "behavior_and_policy_inference", "disclosure": "local_and_user_settings_ui", "protection": "aead_envelope", "retention": "settings_until_replaced",
+          "deletion": "delete_local_only", "reset": "setting_reset_or_disconnect", "export": "export_disabled", "reconstruction": "safe_code_projection", "source": "SPEC-7",
+          "fields": ["reminder_creation_mode", "candidate_visibility_codes", "reminder_eligibility_codes", "request_sensitivity_code", "deadline_inference_sensitivity_code", "closure_sensitivity_code", "review_threshold_codes", "week_end_policy_code", "date_only_policy_code", "reminder_type_code", "no_deadline_behavior_code", "ignored_category_codes", "daily_summary_destination_code", "reward_mode_code", "reward_wording_code", "reward_frequency_code", "model_provider_code", "model_label", "telemetry_code"]
+        },
+        {
+          "classification": "user_provided_private", "semantic_type": "bounded_integer", "purpose": "bounded_user_configuration", "necessity": "optional_user_setting",
+          "threat": "behavior_and_load_inference", "disclosure": "local_and_user_settings_ui", "protection": "aead_envelope", "retention": "settings_until_replaced",
+          "deletion": "delete_local_only", "reset": "setting_reset_or_disconnect", "export": "export_disabled", "reconstruction": "safe_code_projection", "source": "SPEC-7",
+          "fields": ["history_window_days", "poll_cadence_seconds"]
+        },
+        {
+          "classification": "user_provided_private", "semantic_type": "local_schedule", "purpose": "local_schedule_configuration", "necessity": "optional_user_setting",
+          "threat": "work_schedule_inference", "disclosure": "local_and_user_settings_ui", "protection": "aead_envelope", "retention": "settings_until_replaced",
+          "deletion": "delete_local_only", "reset": "setting_reset_or_disconnect", "export": "export_disabled", "reconstruction": "user_provided_value", "source": "SPEC-7",
+          "fields": ["eod_local_time", "daily_summary_schedule"]
+        },
+        {
+          "classification": "user_provided_private", "semantic_type": "canonical_duration", "purpose": "reminder_lead_configuration", "necessity": "optional_user_setting",
+          "threat": "work_schedule_inference", "disclosure": "local_and_user_settings_ui", "protection": "aead_envelope", "retention": "settings_until_replaced",
+          "deletion": "delete_local_only", "reset": "setting_reset_or_disconnect", "export": "export_disabled", "reconstruction": "user_provided_value", "source": "SPEC-7",
+          "fields": ["reminder_lead_rule"]
+        },
+        {
+          "classification": "user_provided_private", "semantic_type": "boolean", "purpose": "boolean_user_configuration", "necessity": "optional_user_setting",
+          "threat": "preference_inference", "disclosure": "local_and_user_settings_ui", "protection": "aead_envelope", "retention": "settings_until_replaced",
+          "deletion": "delete_local_only", "reset": "setting_reset_or_disconnect", "export": "export_disabled", "reconstruction": "safe_code_projection", "source": "SPEC-7",
+          "fields": ["reward_emoji_enabled", "aggregate_indicators_enabled"]
+        },
+        {
+          "classification": "user_provided_private", "semantic_type": "timezone_identifier", "purpose": "timezone_configuration", "necessity": "required",
+          "threat": "location_or_schedule_inference", "disclosure": "local_and_user_settings_ui", "protection": "aead_envelope", "retention": "settings_until_replaced",
+          "deletion": "delete_local_only", "reset": "setting_reset_or_disconnect", "export": "export_disabled", "reconstruction": "user_provided_value", "source": "SPEC-7",
+          "fields": ["timezone_id"]
+        }
+      ]
+    },
+    {
+      "id": "client_association",
+      "field_groups": [
+        {
+          "classification": "operational_private", "semantic_type": "opaque_local_id", "purpose": "client_association_identity", "necessity": "required",
+          "threat": "cross_loop_association", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "not_displayed", "source": "SPEC-5.7",
+          "fields": ["client_association_id", "loop_id"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "opaque_reference_set", "purpose": "grounded_client_association", "necessity": "conditional",
+          "threat": "client_relationship_inference", "disclosure": "local_only", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "microsoft_refetch", "source": "SPEC-5.7",
+          "fields": ["evidence_ref_ids"]
+        },
+        {
+          "classification": "user_provided_private", "semantic_type": "encrypted_user_setting", "purpose": "configured_client_mapping", "necessity": "conditional",
+          "threat": "client_name_disclosure", "disclosure": "local_and_transient_projection", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "user_provided_value", "source": "SPEC-5.7",
+          "fields": ["configured_mapping_ref"]
+        },
+        {
+          "classification": "sensitive_derived", "semantic_type": "closed_enum", "purpose": "association_uncertainty", "necessity": "required",
+          "threat": "client_relationship_inference", "disclosure": "local_and_transient_projection", "protection": "aead_envelope", "retention": "active_loop_lineage",
+          "deletion": "delete_local_only", "reset": "loop_lineage_or_disconnect", "export": "export_disabled", "reconstruction": "safe_code_projection", "source": "SPEC-5.7",
+          "fields": ["confidence_bucket", "ambiguity_flag"]
+        }
+      ]
+    },
+    {
+      "id": "product_counter",
+      "field_groups": [
+        {
+          "classification": "aggregate_private", "semantic_type": "closed_enum", "purpose": "local_product_indicator", "necessity": "conditional",
+          "threat": "productivity_profile_creation", "disclosure": "local_and_transient_projection", "protection": "aead_envelope", "retention": "counter_rolling_30",
+          "deletion": "delete_local_only", "reset": "reset_counter_only", "export": "export_disabled", "reconstruction": "safe_code_projection", "source": "OL-METRIC-001",
+          "fields": ["counter_code"]
+        },
+        {
+          "classification": "aggregate_private", "semantic_type": "counter_value", "purpose": "local_product_indicator", "necessity": "conditional",
+          "threat": "productivity_profile_creation", "disclosure": "local_and_transient_projection", "protection": "aead_envelope", "retention": "counter_rolling_30",
+          "deletion": "delete_local_only", "reset": "reset_counter_only", "export": "export_disabled", "reconstruction": "safe_count_projection", "source": "OL-METRIC-002",
+          "fields": ["count"]
+        },
+        {
+          "classification": "aggregate_private", "semantic_type": "coarse_time_bucket", "purpose": "rolling_counter_window", "necessity": "required",
+          "threat": "exact_behavioral_timeline", "disclosure": "local_only", "protection": "aead_envelope", "retention": "counter_rolling_30",
+          "deletion": "delete_local_only", "reset": "reset_counter_only", "export": "export_disabled", "reconstruction": "not_displayed", "source": "OL-METRIC-002",
+          "fields": ["coarse_window_bucket"]
+        },
+        {
+          "classification": "aggregate_private", "semantic_type": "version_label", "purpose": "rolling_counter_window_schema", "necessity": "required",
+          "threat": "schema_confusion", "disclosure": "local_only", "protection": "aead_envelope", "retention": "counter_rolling_30",
+          "deletion": "delete_local_only", "reset": "reset_counter_only", "export": "export_disabled", "reconstruction": "not_displayed", "source": "OL-METRIC-002",
+          "fields": ["window_version"]
+        }
+      ]
+    }
+  ],
+  "source_variants": [
+    {
+      "id": "email_evidence",
+      "record_type": "email_evidence_ref",
+      "component_codes": ["subject", "body_block", "quote_block", "sender", "to", "cc", "attachment_name", "link_label", "calendar_response"],
+      "relation_codes": ["task", "ownership", "waiting_party", "deadline", "modification", "closure", "delegation", "supersession", "context"],
+      "availability": "shape_approved_use_blocked_by_G-MAIL_G-PRIV"
+    },
+    {
+      "id": "calendar_invitation",
+      "record_type": "calendar_invitation_ref",
+      "component_codes": [],
+      "relation_codes": ["task", "ownership", "waiting_party", "deadline", "modification", "closure", "delegation", "supersession", "context"],
+      "availability": "shape_approved_use_blocked_by_G-CAL_G-MAIL_G-PRIV"
+    },
+    {
+      "id": "user_authored_microsoft_artifact",
+      "record_type": "user_authored_artifact_ref",
+      "artifact_type_codes": ["todo", "calendar"],
+      "authoritative_fields": ["title", "body", "due"],
+      "ownership_code": "user_authoritative",
+      "authoritative_readable_source_location": "microsoft_artifact_only",
+      "availability": "shape_approved_use_blocked_by_G-TODO_or_G-CAL_and_G-PRIV"
+    }
+  ],
+  "diagnostic_events": [],
+  "forbidden_classes": [
+    "mail_subject", "mail_body", "body_preview", "quote_text", "generated_summary",
+    "generated_explanation", "task_title", "task_body", "deadline_phrase",
+    "participant_value", "email_address", "display_name", "attachment_name",
+    "attachment_bytes", "link_label", "url", "raw_graph_id", "tenant_id",
+    "account_id", "object_id", "workspace_id", "raw_delta_url", "raw_request",
+    "raw_response", "authorization_header", "token", "key_material", "secret",
+    "prompt", "model_request", "model_response", "model_output", "model_rationale",
+    "embedding", "vector", "test_sample", "test_label", "test_prediction",
+    "free_text_correction", "exception_text", "error_body", "log", "transcript",
+    "browser_cache", "diagnostic_bundle", "source_map", "screenshot", "har_capture"
+  ],
+  "cross_record_invariants": [
+    { "id": "PRIV-XREC-001", "rule": "typed logical records are validated immediately before encryption and immediately after decryption or migration" },
+    { "id": "PRIV-XREC-002", "rule": "unknown manifest record, field, source variant, metadata bag, extension bag, generic string, generic bytes, or generic map is rejected; runtime enum, value, and version schemas approve no values until ADR-005 and the dependent domain ADR define exact catalogs and bounds" },
+    { "id": "PRIV-XREC-003", "rule": "email_evidence origin requires valid email evidence and never an authoritative user-authored artifact source" },
+    { "id": "PRIV-XREC-004", "rule": "calendar_invitation origin requires a calendar invitation source and remains unavailable until G-CAL, G-MAIL, and G-PRIV" },
+    { "id": "PRIV-XREC-005", "rule": "user_authored_microsoft_artifact origin requires exactly one authoritative artifact source and user_authoritative title, body, and due ownership" },
+    { "id": "PRIV-XREC-006", "rule": "model or system output cannot overwrite authoritative user-authored artifact title, body, or due field state" },
+    { "id": "PRIV-XREC-007", "rule": "artifact deletion or inaccessibility produces source unavailable without text fallback, fabricated closure, or automatic terminal transition" },
+    { "id": "PRIV-XREC-008", "rule": "reminder completion or deletion never closes an email or invitation loop" },
+    { "id": "PRIV-XREC-009", "rule": "state deletion, reset, retention, disconnect, and export operations produce zero Graph mutations and never bulk-delete Microsoft artifacts" },
+    { "id": "PRIV-XREC-010", "rule": "tokens, provider keys, encryption keys, HMAC keys, and pairing secrets are excluded and remain governed by ADR-005 or ADR-010" },
+    { "id": "PRIV-XREC-011", "rule": "no product-state or metric export exists in the MVP; diagnostic export requires a separately approved exact content-free schema and named gates" },
+    { "id": "PRIV-XREC-012", "rule": "logical deletion and best-effort compaction or key retirement never claim physical erasure from SSD history, OS paging, backups, snapshots, endpoint security, administrator access, or platform crashes" },
+    { "id": "PRIV-XREC-013", "rule": "retry success dismissal or recovery atomically deletes the related job_health record before returning the message_observation to ordinary retention; disconnect atomically deletes both local records; a quarantine_ref never dangles and cleanup performs zero Graph mutations" }
+  ]
+}

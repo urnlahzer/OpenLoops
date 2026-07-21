@@ -1,0 +1,203 @@
+{
+  "schema_version": 1,
+  "work_item": "P0-WI-11",
+  "adr": "ADR-008",
+  "decision_status": "accepted_contract_runtime_unimplemented",
+  "snapshot_date": "2026-07-20",
+  "owner_decisions": ["OWN-03"],
+  "owned_requirements": ["OL-GOV-001", "OL-DUE-001", "OL-DUE-002", "OL-DUE-003", "OL-DUE-004", "OL-DUE-005", "OL-DUE-006", "OL-DUE-007", "OL-DUE-008", "OL-DUE-009", "OL-CLOSE-003", "OL-CLOSE-004", "OL-CLOSE-005", "OL-CLOSE-006", "OL-CLOSE-007", "OL-CLOSE-008", "OL-DELEG-001", "OL-DELEG-002"],
+  "consumed_requirements": ["OL-DET-001", "OL-DET-002", "OL-DET-003", "OL-DET-004", "OL-DET-005", "OL-DET-006", "OL-DET-007", "OL-CLOSE-001", "OL-CLOSE-002", "OL-REM-010", "OL-REM-017"],
+  "acceptance_criteria": ["AC-08", "AC-09", "AC-13", "AC-15", "AC-16", "AC-17"],
+  "primary_scenarios": ["AS-03", "AS-04", "AS-06", "AS-08", "AS-09", "AS-20"],
+  "scenario_dependencies": [
+    {"id":"AS-07","owners":["ADR-008","ADR-009"],"status":"unpassed_reminder_adapter_contract_required"},
+    {"id":"AS-10","owners":["ADR-006","ADR-008"],"status":"unpassed_evidence_runtime_required"},
+    {"id":"AS-13","owners":["ADR-004","ADR-008","ADR-011"],"status":"unpassed_sync_policy_and_runtime_required"},
+    {"id":"AS-15","owners":["ADR-008","ADR-009"],"status":"unpassed_reminder_conflict_contract_required"},
+    {"id":"AS-16","owners":["ADR-004","ADR-005","ADR-007","ADR-008"],"status":"unpassed_recovery_runtime_required"},
+    {"id":"AS-17","owners":["ADR-005","ADR-008","ADR-009"],"status":"unpassed_rollback_reconciliation_runtime_required"},
+    {"id":"AS-19","owners":["ADR-006","ADR-008","ADR-009","ADR-PRIV-001"],"status":"unpassed_manual_source_and_adapter_runtime_required"},
+    {"id":"AS-21","owners":["ADR-008","ADR-009","ADR-011"],"status":"unpassed_G_AUTO_required"},
+    {"id":"AS-23","owners":["ADR-008","ADR-009","ADR-011"],"status":"unpassed_G_AUTO_and_G_AUTO_FULL_required"}
+  ],
+  "blocking_gates": ["G-AUTO", "G-AUTO-FULL"],
+  "input_authorities": [
+    {"owner":"ADR-004","input":"live versus historical and causally ordered observation facts"},
+    {"owner":"ADR-006","input":"validated source identity availability role anchors and versions"},
+    {"owner":"ADR-007","input":"validated bounded untrusted hypotheses only; never transition authority"},
+    {"owner":"ADR-PRIV-001","input":"exact persistent field allowlist and retention"},
+    {"owner":"ADR-005","input":"atomic encrypted record transaction and rollback boundary"}
+  ],
+  "separate_decisions": {
+    "reminder_adapters_operations_ownership_conflicts": "ADR-009",
+    "automation_modes_eligibility_evaluation_and_feature_flags": "ADR-011",
+    "evidence_identity_and_reanchoring": "ADR-006",
+    "persistence_encryption_and_atomic_commit": "ADR-005",
+    "provider_transport_and_hypothesis_validation": "ADR-007"
+  },
+  "record_contracts": [
+    {
+      "id":"loop",
+      "unknown_fields":"reject",
+      "exact_fields_in_order":["loop_id","account_ref","origin_code","provenance_codes","obligation_state_code","review_flag_codes","deadline_state_code","closure_review_state_code","reminder_state_code","analysis_state_code","source_state_code","resolution_code","confidence_bucket","source_ref_ids_by_role","operative_deadline_ref_id","operative_deadline_value_or_range","reminder_ref_ids","transition_ref_ids","policy_version","schema_version","model_label_code","loop_version","last_evaluated_source_ref_id"],
+      "required_fields":["loop_id","account_ref","origin_code","provenance_codes","obligation_state_code","review_flag_codes","deadline_state_code","closure_review_state_code","reminder_state_code","analysis_state_code","source_state_code","resolution_code","confidence_bucket","source_ref_ids_by_role","reminder_ref_ids","transition_ref_ids","policy_version","schema_version","model_label_code","loop_version"],
+      "nullable_fields":["operative_deadline_ref_id","operative_deadline_value_or_range","last_evaluated_source_ref_id"],
+      "collection_bounds":{"provenance_codes":6,"review_flag_codes":7,"source_ref_ids_by_role":256,"reminder_ref_ids":16,"transition_ref_ids":4096},
+      "ordering":"closed enum order for sets; semantic role then opaque reference bytes for references; transition order by loop_version",
+      "version_rules":"schema policy and loop versions are nonzero integers; loop_version increments exactly once per committed transition"
+    },
+    {
+      "id":"deadline_evidence",
+      "unknown_fields":"reject",
+      "exact_fields_in_order":["deadline_evidence_id","loop_id","source_ref_id","source_type_code","precision_code","interpretation_code","operative_selection_code","value_or_range","timezone_id"],
+      "required_fields":["deadline_evidence_id","loop_id","source_type_code","precision_code","interpretation_code","operative_selection_code","value_or_range","timezone_id"],
+      "nullable_fields":["source_ref_id"],
+      "source_ref_rule":"required except for explicit user_supplied evidence; never accepts copied source text",
+      "timezone_rule":"validated supported Windows or IANA identifier; normalized UTF-8; 1 through 128 bytes",
+      "value_rule":"strict tagged temporal value matching precision; no generic string map JSON or extension member"
+    },
+    {
+      "id":"transition",
+      "unknown_fields":"reject",
+      "exact_fields_in_order":["transition_id","loop_id","user_action_id","prior_facet_codes","new_facet_codes","reason_code","actor_code","source_ref_ids","occurred_at","loop_version","policy_version"],
+      "required_fields":["transition_id","loop_id","prior_facet_codes","new_facet_codes","reason_code","actor_code","source_ref_ids","occurred_at","loop_version","policy_version"],
+      "nullable_fields":["user_action_id"],
+      "user_action_rule":"required for actor user and prohibited for actor system",
+      "source_ref_bound":32,
+      "source_ref_order":"semantic relation code then opaque reference bytes; unique",
+      "facet_rule":"complete prior and new facet tuples; no partial patch or generic map",
+      "text_rule":"no copied rationale free text source phrase task person or generated explanation"
+    }
+  ],
+  "facet_catalogs": {
+    "origin_code": ["email_evidence", "calendar_invitation", "user_authored_microsoft_artifact"],
+    "provenance_codes": ["requested", "acknowledged", "promised", "attributed", "inferred", "ambiguous"],
+    "obligation_state_code": ["candidate", "open", "terminal"],
+    "review_flag_codes": ["needs_review", "historical_backfill", "identity_ambiguous", "association_ambiguous", "quote_ambiguous", "deadline_ambiguous", "delegation_ambiguous"],
+    "deadline_state_code": ["unresolved", "undated_confirmed", "scheduled", "approaching", "overdue"],
+    "closure_review_state_code": ["none", "possible", "kept_open", "evidence_requested"],
+    "reminder_state_code": ["none", "proposed", "pending_write", "linked", "changed", "completed_needs_evidence", "missing", "conflict", "ambiguous_write"],
+    "analysis_state_code": ["current", "queued", "unavailable", "quarantined", "stale"],
+    "source_state_code": ["available", "partially_available", "unavailable", "changed"],
+    "resolution_code": ["none", "closed", "declined", "delegated", "moot", "dismissed", "completed_outside_email"],
+    "confidence_bucket": ["high", "medium", "low"],
+    "deadline_source_type_code": ["requested", "promised", "inferred", "user_supplied"],
+    "deadline_precision_code": ["instant", "date", "business_day", "week", "event_relative", "soft", "unspecified"],
+    "deadline_interpretation_code": ["resolved", "ambiguous", "needs_user_input"],
+    "operative_selection_code": ["not_selected", "selected", "superseded"],
+    "actor_code": ["system", "user"],
+    "delegation_code": ["transferred", "shared", "assisted", "retained", "unclear"],
+    "primary_label_precedence": ["terminal_resolution", "possible_closure", "needs_review", "overdue", "approaching_deadline", "needs_deadline", "candidate", "active"]
+  },
+  "legality_rules": [
+    "resolution none if and only if obligation state is candidate or open; every terminal loop has exactly one non-none resolution",
+    "a system or model hypothesis can never produce terminal obligation state or a non-none resolution",
+    "possible kept_open and evidence_requested closure review states require an open obligation; candidate and terminal require closure review none",
+    "approaching and overdue require an open obligation plus a resolved operational boundary",
+    "candidate never ages and never authorizes a reminder write; terminal stops aging but retains deadline evidence and value",
+    "undated_confirmed requires an explicit user transition and has no operational boundary; it suppresses repeat prompts until causally later deadline evidence or user edit",
+    "quarantined requires an encrypted re-fetchable locator and retry or dismiss path before cursor advancement",
+    "changed unavailable or partially available source freezes evidence-dependent automation and never proves closure failure or dismissal",
+    "reminder completion deletion missing conflict or ambiguity never changes obligation state or resolution; candidate stays candidate open stays open and terminal stays terminal",
+    "later evidence on a terminal loop may add needs_review and a validated relation but never changes resolution reopens or sets closure review non-none",
+    "model confidence alone never promotes candidate to open",
+    "user correction dominates repeated automated input unless validated evidence is causally later"
+  ],
+  "establishment_policy": [
+    {"case":"validated explicit outgoing promise; medium or high; no core ambiguity","state":"open","provenance":["promised"],"history":"review_only_no_artifact_authority"},
+    {"case":"validated direct incoming request or question; deterministic identity; medium or high; no core ambiguity","state":"open","provenance":["requested"],"history":"review_only_no_artifact_authority"},
+    {"case":"validated acknowledgement of associated request","state":"open","provenance_add":["acknowledged"],"promise_rule":"add promised only with supported future-act evidence"},
+    {"case":"validated explicit deterministic attribution; high; no transfer ambiguity","state":"open","provenance":["attributed"],"history":"review_only_no_artifact_authority"},
+    {"case":"calendar invitation","state":"open_only_after_G_CAL_and_G_MAIL_input","provenance":["requested"],"external_mutation":"prohibited"},
+    {"case":"soft implied social contextual role low-confidence or core-ambiguous","state":"candidate","review":"needs_review plus exact ambiguity flags","external_mutation":"prohibited"},
+    {"case":"user confirms candidate mine and actionable","state":"open","actor":"user","history":"append transition preserve provenance"},
+    {"case":"invalid or ungrounded hypothesis","state":"unchanged","external_mutation":"prohibited"}
+  ],
+  "deadline_policy": {
+    "separation":"requested promised inferred user-supplied operative and reminder deadlines remain distinct; reminder override never changes operative deadline",
+    "default_eod":"17:00 user-local; changing timezone EOD week or date-only policy previews affected loops and requires confirmation before rewriting a confirmed boundary",
+    "operative_rules":[
+      "same-message requested and user-promised deadlines are both retained and the promised deadline is operative unless actor or scope is ambiguous",
+      "a causally later confidently associated user extension becomes operative without requester acceptance and records renegotiated",
+      "a causally later confidently associated requester directive or counter becomes operative and preserves the prior extension",
+      "a date mention without directive or modification meaning never changes the operative deadline",
+      "independent actions split; ambiguous attachment preserves alternatives sets deadline_ambiguous and requires review",
+      "no deadline is an explicit user choice that sets undated_confirmed",
+      "unresolved event-relative evidence stays unresolved with deadline_ambiguous until one event is selected",
+      "soft urgency is scheduled without an aging boundary and never becomes approaching or overdue"
+    ],
+    "aging_rules":[
+      "instant ages against its evidence-derived instant",
+      "date and business_day age against a configured policy boundary without upgrading evidence precision",
+      "week ages against retained range end and displays the range",
+      "event_relative ages only after unique event correlation",
+      "soft unspecified and undated_confirmed never age",
+      "terminal and candidate do not newly age; open alone projects approaching or overdue"
+    ],
+    "prompt_commands":["set_deadline","no_deadline","defer_reminder","dismiss","not_mine"],
+    "defer_reminder_rule":"records a user transition that suppresses the current prompt version only; it does not set undated_confirmed change evidence or authorize an artifact"
+  },
+  "hypothesis_projection": {
+    "identity":"target loop plus hypothesis kind plus ordered validated source references including source versions plus policy version",
+    "persistence":"represented only by approved source relations and transition reason/source/version fields; no new hypothesis text key or model rationale",
+    "projection_order":["possible if any unsuppressed current hypothesis exists","evidence_requested if no possible hypothesis and any evidence request is pending","kept_open if no possible or requested hypothesis and at least one current hypothesis was suppressed","none otherwise"],
+    "suppression":"keep_open suppresses only the exact identity; causally later source version or a different loop kind source tuple or policy version remains reviewable"
+  },
+  "command_policy": [
+    {"id":"confirm_mine_actionable","allowed_from":["candidate"],"required":"explicit user action and current loop version","result":"open with preserved provenance and appended transition","external_effect":"none"},
+    {"id":"confirm_fulfilled","allowed_from":["open"],"required":"one or more validated closure evidence refs and explicit user action","result":"terminal closed","external_effect":"separate optional ADR-009 operation only"},
+    {"id":"confirm_declined","allowed_from":["candidate","open"],"required":"explicit decline evidence or manual decline confirmation","result":"terminal declined distinct from closed dismissed and moot","external_effect":"never send; optional detach or complete is separate"},
+    {"id":"confirm_moot","allowed_from":["candidate","open"],"required":"withdrawal supersession no-longer-relevant evidence or explicit manual choice","result":"terminal moot with typed reason","external_effect":"never delete automatically"},
+    {"id":"confirm_transfer","allowed_from":["candidate","open"],"required":"delegation evidence or manual confirmation of full transfer","result":"terminal delegated only for transferred; shared assisted retained or unclear stays open","external_effect":"none"},
+    {"id":"keep_open","allowed_from":["open"],"required":"exact current hypothesis identity and explicit user action","result":"open with exact suppression transition","external_effect":"none"},
+    {"id":"request_evidence","allowed_from":["open"],"required":"explicit user action and hypothesis kind","result":"open evidence_requested projection","external_effect":"none"},
+    {"id":"remap_evidence","allowed_from":["candidate","open","terminal"],"required":"selected evidence old and target loop versions","result":"atomic relation detach and attach then deterministic re-evaluation of both loops","external_effect":"none"},
+    {"id":"select_different_evidence","allowed_from":["candidate","open","terminal"],"required":"validated user-selected source component","result":"replace or add proposed relation and re-render without terminal change","external_effect":"none"},
+    {"id":"completed_outside_email","allowed_from":["candidate","open"],"required":"explicit user confirmation","result":"terminal completed_outside_email without fabricated evidence","external_effect":"separate optional ADR-009 operation only"},
+    {"id":"dismiss_classify","allowed_from":["candidate","open"],"required":"typed correction reason and explicit user action","result":"terminal dismissed except typed transferred or moot outcomes","external_effect":"never delete automatically"},
+    {"id":"reopen","allowed_from":["terminal"],"required":"explicit user action and current loop version","result":"open resolution none closure review none needs_review added prior history retained and evidence re-evaluated","external_effect":"none"}
+  ],
+  "correction_policy": {
+    "reason_codes":["not_mine","false_detection","duplicate","delegated","shared","assisted","retained","moot","no_longer_relevant","wrong_deadline","wrong_client","other"],
+    "free_text":"prohibited from persistence",
+    "current_and_future":"current-loop correction and durable future rule are separate commands and separate confirmations",
+    "future_rule":"explicit settings or rule only; prospective by default; never model training personalization or hidden profile",
+    "replay":"optional bounded review-only replay; never historical reminder mutation",
+    "duplicate":"version-check survivor and loser; transfer only validated non-conflicting evidence and deadline history; append both transitions; loser becomes dismissed duplicate; conflicts remain reviewable"
+  },
+  "transition_policy": {
+    "automated_key":"validated source identity and source version plus policy version and target loop; replay is a no-op",
+    "user_key_algorithm":["lookup opaque command key before version comparison","same key and same canonical payload returns original result with zero mutation","same key and different payload is command_key_collision","unseen key with stale expected loop version is visible_refresh_conflict","validate current state evidence and command preconditions","append exactly one transition and increment loop version atomically"],
+    "reopen_generation":"old command keys remain historical no-ops and cannot re-terminal a reopened generation",
+    "rollback":"suspected rollback freezes all outward mutation; ADR-005 recovery and reconciliation remains authoritative"
+  },
+  "reminder_boundary": {
+    "local_policy_only":true,
+    "completion_or_deletion":"changes reminder facet only; obligation and resolution are monotonic absent an explicit user lifecycle command",
+    "obligation_projection":"candidate stays candidate open stays open and terminal stays terminal",
+    "terminal_transition":"commits independently before any optional reminder operation; remote failure never rolls back the local lifecycle transition",
+    "proposal_revocation":"candidate or terminal transition revokes local proposal authorization but never deletes or reconciles an extant artifact automatically",
+    "graph_office_permissions_calls_operations":[],
+    "automatic_mutation":"prohibited pending ADR-009 ADR-011 and applicable gates"
+  },
+  "privacy_boundary": {
+    "approved_record_types":["loop","deadline_evidence","transition"],
+    "prohibited_values":["human-readable task person client subject body attachment link or deadline phrase","free-text reason rationale correction explanation or note","raw Microsoft Graph Office account tenant message event task or URL identifier","prompt model request response output rationale embedding transcript or vector","generic JSON map extension bag open enum unbounded string bytes array or blob"],
+    "diagnostics":"fixed non-content codes and bounded counters only; no facet history source identifier temporal value or command payload",
+    "persistence_runtime":"disabled; ADR-005 G-STATE and G-PRIV remain required before accepting a logical record"
+  },
+  "runtime_boundary": {"policy_runtime":false,"logical_records_accepted":false,"persistent_records_created":[],"network_calls":[],"graph_office_mutations":[],"model_calls":[],"acceptance_criteria_completed":[],"scenarios_completed":[],"gates_passed":[]},
+  "claims": {"capabilities_enabled":[],"capabilities_advertised":[],"support_rows_advertised":[],"permissions_requested":[],"dependencies_activated":[]},
+  "sources": [
+    {"id":"SRC-SPEC-DOMAIN","location":"docs/product-spec.md#5-domain-model"},
+    {"id":"SRC-SPEC-DEADLINE","location":"docs/product-spec.md#66-deadline-semantics"},
+    {"id":"SRC-SPEC-CLOSURE","location":"docs/product-spec.md#67-closure-manual-completion-and-delegation"},
+    {"id":"SRC-SPEC-REMINDER","location":"docs/product-spec.md#68-reminder-artifacts"},
+    {"id":"SRC-SPEC-FLOWS","location":"docs/product-spec.md#8-required-user-flows"},
+    {"id":"SRC-PLAN-INVARIANTS","location":"docs/implementation-plan.md#32-hard-invariants"},
+    {"id":"SRC-PLAN-AUTOMATION","location":"docs/implementation-plan.md#phase-6--calendar-summaries-reward-and-test-mode"},
+    {"id":"SRC-OWN-03","location":"research/microsoft-graph/product-decisions.md#stable-owner-decision-crosswalk"},
+    {"id":"SRC-RESEARCH-SECURITY","location":"research/microsoft-graph/security-and-local-state.md#threats-and-required-controls"},
+    {"id":"SRC-RESEARCH-VALIDATION","location":"research/microsoft-graph/validation-plan.md#reliability-and-privacy-experiments"}
+  ]
+}

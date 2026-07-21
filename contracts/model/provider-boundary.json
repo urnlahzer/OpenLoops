@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "work_item": "P0-WI-10",
+  "adr": "ADR-007",
+  "decision_status": "accepted_contract_runtime_unimplemented",
+  "snapshot_date": "2026-07-20",
+  "owner_decisions": ["OWN-08"],
+  "requirements": ["OL-SYNC-012", "OL-SYNC-013", "OL-TEST-003", "OL-MODEL-001", "OL-MODEL-002", "OL-MODEL-003", "OL-MODEL-004", "OL-MODEL-005", "OL-MODEL-006", "OL-MODEL-007", "OL-MODEL-008", "OL-MODEL-009", "OL-MODEL-010", "OL-MODEL-011", "OL-MODEL-012", "OL-MODEL-013", "OL-MODEL-014", "OL-MODEL-015", "OL-NFR-005", "OL-NFR-007", "OL-NFR-011"],
+  "acceptance_scenarios": ["AS-12", "AS-16", "AS-22"],
+  "scenario_dependencies": [
+    {"id":"AS-12","requirements":["OL-MODEL-006","OL-MODEL-011","OL-NFR-005"],"owners":["ADR-007","ADR-PRIV-001"],"gates":["G-MODEL","G-PRIV"],"status":"unpassed_runtime_and_adversarial_evidence_required"},
+    {"id":"AS-16","requirements":["OL-SYNC-012","OL-SYNC-013","OL-NFR-007"],"owners":["ADR-004","ADR-005","ADR-007"],"gates":["G-MAIL","G-STATE","G-MODEL","G-PRIV"],"status":"unpassed_runtime_persistence_and_provider_recovery_evidence_required"},
+    {"id":"AS-22","requirements":["OL-MODEL-003","OL-MODEL-004","OL-MODEL-010","OL-MODEL-011","OL-MODEL-013","OL-MODEL-014","OL-MODEL-015"],"owners":["ADR-005","ADR-007"],"gates":["G-MODEL","G-PRIV","G-SEC-AUDIT","G-RELEASE"],"status":"unpassed_local_and_hosted_provider_contract_evidence_required"}
+  ],
+  "blocking_gates": ["G-MODEL", "G-PRIV", "G-SEC-AUDIT", "G-RELEASE"],
+  "default_provider": "disabled",
+  "profiles": [
+    {"id":"disabled","state":"safe_default","advertised":false,"network_requests":0,"credential":"none","fallback":"analysis_unavailable; preserve existing loops; zero mutation"},
+    {"id":"ollama_local","state":"disabled_pending_gates","advertised":false,"authority":"http://127.0.0.1:11434","chat_path":"/api/chat","tags_path":"/api/tags","credential":"prohibited","transport":"direct IPv4 loopback only; no DNS proxy redirect LAN tunnel or alternate port","locality":"loopback is not proof of local processing; G-MODEL must prove cloud disabled and reject cloud models","structured_output":"request schema when supported and always validate again in application"},
+    {"id":"ollama_cloud","state":"disabled_pending_gates","advertised":false,"authority":"https://ollama.com","chat_path":"/api/chat","tags_path":"/api/tags","credential":"one write-only API key from ADR-005 provider-credential.dpapi; Authorization Bearer only to exact authority","transport":"direct valid-TLS public HTTPS; no proxy redirect or cross-origin authorization","structured_output":"Ollama Cloud does not currently enforce structured outputs; application validation is authoritative"},
+    {"id":"approved_https","state":"optional_disabled_pending_adapter_gates","advertised":false,"authority":"one canonical user-consented public HTTPS origin","chat_path":"adapter-fixed and separately reviewed","credential":"one write-only OS-protected adapter credential with fixed auth mapping; no arbitrary headers","transport":"direct valid-TLS public HTTPS; no proxy redirect userinfo query fragment IP literal private link-local reserved metadata or cross-origin authorization","structured_output":"application validation is authoritative","substitution":"cannot replace the required tested ollama_cloud path"}
+  ],
+  "provider_preflight": {
+    "mailbox_content": "prohibited",
+    "ollama_model_listing": "GET the fixed /api/tags path only after authority validation; bound and strictly parse name model digest and details; ignore unknown members; never persist the raw response",
+    "selected_model_identity": "exact provider profile plus exact model label plus provider-reported digest when available plus adapter schema and policy versions",
+    "local_only_release_proof": "G-MODEL disposable-process harness starts Ollama with OLLAMA_NO_CLOUD=1, confirms the content-free cloud-disabled status, confirms a locally resident selected digest, rejects every cloud model and any cloud-capable fallback, and proves zero non-loopback connection; ordinary loopback reachability alone never passes",
+    "cloud_key_validation": "content-free bounded GET /api/tags with the write-only key; authorization is constructed only after exact https://ollama.com authority validation",
+    "api_versioning": "Ollama API is not strictly versioned; every supported capability is contract-tested and any response shape capability model digest or documented behavior drift disables the profile pending review",
+    "failure": "provider remains disabled; no mailbox projection is sent and no alternate origin model provider or proxy is attempted"
+  },
+  "request_contract": {
+    "method": "POST",
+    "content_type": "application/json",
+    "stream": false,
+    "ollama_top_level_fields_in_order": ["model", "messages", "stream"],
+    "ollama_message_fields_in_order": ["role", "content"],
+    "ollama_roles_in_order": ["system", "user"],
+    "provider_schema_request": "no provider-side format or tools field is sent in the MVP contract; strict application validation of analysis-output-v1 is authoritative",
+    "tool_calls": "prohibited; tools functions images attachments linked-document contents and remote retrieval fields are absent",
+    "input": "one changed message projection plus at most four relevance-selected context projections supplied by deterministic code",
+    "allowed_components": ["subject", "body_block", "quote_block", "sender", "to", "cc", "attachment_name", "link_label"],
+    "maximum_context_messages": 4,
+    "maximum_blocks_per_message": 64,
+    "maximum_scalars_per_block": 8192,
+    "maximum_participants_per_message": 500,
+    "maximum_attachment_names_per_message": 256,
+    "maximum_link_labels_per_message": 256,
+    "maximum_request_bytes": 524288,
+    "untrusted_delimiting": "mailbox projections are length-framed untrusted data and cannot alter policy prompt schema scopes tools endpoint or model",
+    "prohibited": ["whole mailbox", "whole thread by default", "attachment bytes", "linked content", "URLs or href values", "credentials", "unrelated recipients", "Graph locators", "provider key"]
+  },
+  "response_contract": {
+    "maximum_response_bytes": 262144,
+    "maximum_wall_time_seconds": 60,
+    "maximum_connect_time_seconds": 5,
+    "schema_id": "openloops-analysis-v1",
+    "schema_path": "contracts/model/analysis-output.schema.json",
+    "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+    "unknown_fields": "reject",
+    "duplicate_json_members": "reject before schema validation",
+    "maximum_claims": 64,
+    "required_validation_order": ["strict UTF-8 and one JSON value", "duplicate-member and unknown-field rejection", "schema and numeric/catalog bounds", "supplied opaque-handle membership", "canonical block and Unicode-scalar range bounds", "transient evidence text correspondence", "participant-position membership", "deterministic date reparse and timezone resolution", "internal claim and relation consistency", "semantic adversarial and deterministic positive-policy checks"],
+    "invalid_result": "analysis_unavailable or needs_review; zero Graph Office reminder lifecycle or provider mutation",
+    "rationale": "never persisted or evidence; UI explanation is reconstructed from validated templates and evidence",
+    "provider_schema_enforcement": "defense in depth only; never substitutes for application validation"
+  },
+  "network_policy": {
+    "redirects": "disabled at client and any redirect response rejects",
+    "proxy_inheritance": "disabled; HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY system proxy PAC WPAD and provider SDK defaults are ignored",
+    "dns": "external host resolves through application-controlled policy; all answers are validated before connect and the connected peer address is revalidated; any private loopback link-local multicast reserved documentation benchmark carrier-grade NAT unspecified or metadata address rejects",
+    "auth_header_policy": "construct only after final authority validation; never forward on redirect retry authority edit or DNS-policy failure",
+    "tls": "system trust and hostname verification required externally; no custom CA insecure switch or certificate bypass",
+    "retries": "zero automatic retry after any request with content; user-visible bounded replay revalidates consent origin model and evidence",
+    "response": "bounded streaming reader cancels immediately over byte or time limit"
+  },
+  "consent_contract": {
+    "required_before_content": ["provider profile", "exact authority", "model label", "transmitted field categories", "maximum context count", "provider privacy and retention responsibility", "local process boundary or external transmission"],
+    "invalidated_by": ["provider profile change", "authority change", "path or adapter change", "model label or digest change", "transmitted-field change", "schema or policy version change", "provider capability drift"],
+    "credential_display": "write-only; never returned to add-in UI diagnostics logs errors command line repository or package",
+    "key_validation": "content-free request only where supported; replacement requires content-free revalidation, deletion or secure-store loss disables active use, and neither replacement nor deletion triggers replay; failure sends no mailbox content"
+  },
+  "settings_disclosure": {
+    "policy_version": "model-sensitivity-v1",
+    "ui_visibility": "show provider profile exact endpoint model label external-data disclosure and every confidence or detection sensitivity before provider use and whenever settings are reviewed",
+    "sensitivities": [
+      {"id":"request_sensitivity","allowed_values":["low","standard","high"],"default":"standard","default_semantics":"high-recall standard","prerequisite":"provider configured for inferred cases","change_behavior":"offers bounded replay with review-only results"},
+      {"id":"deadline_inference_sensitivity","allowed_values":["explicit-only","standard","high"],"default":"standard","prerequisite":"provider optional","change_behavior":"offers bounded replay and never overwrites user resolution automatically"},
+      {"id":"closure_sensitivity","allowed_values":["conservative","standard","high"],"default":"conservative","prerequisite":"provider configured for semantic association","change_behavior":"offers bounded replay and every result remains possible closure"}
+    ],
+    "review_thresholds": {
+      "claim_types": ["request", "promise", "attribution", "question", "deadline_change", "possible_closure", "delegation", "modification"],
+      "threshold_kind": "per claim type calibrated confidence bucket",
+      "safe_default": "review_required",
+      "pinned_by": "model-sensitivity-v1",
+      "gate": "G-MODEL",
+      "change_behavior": "offers bounded policy-version replay with review-only results and no automatic terminal Graph Office or reminder mutation"
+    },
+    "global_change_behavior": "a sensitivity or threshold change never starts replay automatically; existing loops remain intact"
+  },
+  "semantic_policy": {
+    "model_role": "untrusted transient hypothesis producer only",
+    "never_authority_for": ["Graph or Office mutation", "lifecycle transition", "automatic closure", "scope or prompt change", "endpoint selection", "tool execution"],
+    "schema_valid_is_not_safe": true,
+    "automatic_eligibility": "unavailable until separate ADR-011 plus G-AUTO or G-AUTO-FULL; requires independently held semantic adversarial suite and deterministic positive constraints",
+    "drift": "provider model digest label schema prompt or policy drift invalidates automation calibration and permits review-only replay only"
+  },
+  "privacy_boundary": {
+    "persistent_prompt_request_response_output_rationale_transcript_embedding": "prohibited",
+    "diagnostics": ["provider_disabled", "analysis_unavailable", "timeout", "transport_policy_rejected", "response_too_large", "invalid_utf8", "invalid_json", "invalid_schema", "invalid_evidence", "semantic_rejected"],
+    "diagnostic_values": "fixed codes and bounded non-content counters only; no endpoint path host key header body prompt response model text or source identifier",
+    "provider_sdk_logging": "disabled and source-sanitized before application exceptions",
+    "canary_requirement": "zero in every application-controlled durable temporary diagnostic crash browser package CI and repository artifact; exact enabled provider request is the only test-time exception"
+  },
+  "runtime_boundary": {"provider_transport":false,"configured_profiles":[],"network_origins":[],"credentials_accepted":false,"records_created":[],"acceptance_scenarios_completed":[],"gates_passed":[]},
+  "claims": {"provider_calls":[],"permissions_requested":[],"capabilities_enabled":[],"support_rows_advertised":[],"acceptance_criteria_completed":[]},
+  "sources": [
+    {"id":"SRC-SPEC-OWN-08","location":"docs/product-spec.md#31-approved-owner-decisions"},
+    {"id":"SRC-SPEC-MODEL","location":"docs/product-spec.md#611-model-and-policy-contract"},
+    {"id":"SRC-OLLAMA-API","location":"https://docs.ollama.com/api/introduction","verified":"2026-07-20"},
+    {"id":"SRC-OLLAMA-AUTH","location":"https://docs.ollama.com/api/authentication","verified":"2026-07-20"},
+    {"id":"SRC-OLLAMA-CLOUD","location":"https://docs.ollama.com/cloud","verified":"2026-07-20"},
+    {"id":"SRC-OLLAMA-FAQ","location":"https://docs.ollama.com/faq","verified":"2026-07-20"},
+    {"id":"SRC-OLLAMA-STRUCTURED","location":"https://docs.ollama.com/capabilities/structured-outputs","verified":"2026-07-20"},
+    {"id":"SRC-OLLAMA-TAGS","location":"https://docs.ollama.com/api/tags","verified":"2026-07-20"}
+  ],
+  "source_claims": [
+    {"source":"SRC-OLLAMA-API","claim":"documented local base is http://localhost:11434/api, cloud base is https://ollama.com/api, and the API is not strictly versioned"},
+    {"source":"SRC-OLLAMA-AUTH","claim":"local localhost API requires no authentication; direct ollama.com API uses an API-key Bearer authorization header"},
+    {"source":"SRC-OLLAMA-CLOUD","claim":"cloud models may be reached through a signed-in local Ollama process or directly at ollama.com; P0-WI-10 permits only the separately gated direct cloud profile and never treats loopback as local-only proof"},
+    {"source":"SRC-OLLAMA-FAQ","claim":"OLLAMA_NO_CLOUD=1 disables Ollama cloud features and default serving binds loopback; G-MODEL must prove this in a disposable process rather than trusting reachability"},
+    {"source":"SRC-OLLAMA-STRUCTURED","claim":"Ollama Cloud currently does not support structured outputs; application validation is authoritative"},
+    {"source":"SRC-OLLAMA-TAGS","claim":"GET /api/tags returns a model list including name model and digest fields; raw responses remain transient"}
+  ]
+}

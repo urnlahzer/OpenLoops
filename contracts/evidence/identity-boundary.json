@@ -1,0 +1,485 @@
+{
+  "schema_version": 1,
+  "work_item": "P0-WI-09",
+  "repair_item": "P0-WI-09R",
+  "repair_authorization": "product owner approved the three final-gate repairs on 2026-07-20; no capability gate permission or runtime activation is approved",
+  "adr": "ADR-006",
+  "decision_status": "accepted_contract_runtime_unimplemented",
+  "snapshot_date": "2026-07-20",
+  "owner_decisions": ["OWN-05", "OWN-07"],
+  "requirements": [
+    "OL-GOV-001", "OL-SYNC-004", "OL-SYNC-005", "OL-SYNC-010", "OL-SYNC-011", "OL-SYNC-012",
+    "OL-INV-002", "OL-INV-006", "OL-DEDUP-007", "OL-CLOSE-004", "OL-CLOSE-006",
+    "OL-REM-005", "OL-REM-016", "OL-UX-001", "OL-UX-002", "OL-MODEL-003", "OL-MODEL-004",
+    "OL-NFR-005", "OL-NFR-009", "OL-NFR-012"
+  ],
+  "acceptance_scenarios": ["AS-10", "AS-14", "AS-16", "AS-19"],
+  "blocking_gates": ["G-MAIL", "G-CAL", "G-ADDIN", "G-STATE", "G-PRIV"],
+  "claims": {
+    "graph_calls": [],
+    "office_calls": [],
+    "network_contacts": [],
+    "persistent_records_created": [],
+    "gates_passed": [],
+    "acceptance_criteria_completed": [],
+    "acceptance_scenarios_completed": [],
+    "capabilities_enabled": [],
+    "capabilities_advertised": [],
+    "supported_rows": []
+  },
+  "runtime_boundary": {
+    "status": "unimplemented",
+    "graph_transport": false,
+    "office_bridge": false,
+    "durable_state": false,
+    "selected_dependencies": [],
+    "network_origins": [],
+    "accepted_secrets": [],
+    "configured_accounts": [],
+    "configured_folders": []
+  },
+  "inactive_runtime_inventory": {
+    "policy":"while every P0-WI-09 capability remains disabled, every file in the current product plus package-script-reachable build/test execution surface, Rust/TypeScript import, root npm field, npm script, Cargo/npm locked dependency input, and generated-contract input is exact-allowlisted and covered by one aggregate fingerprint; any reachable addition or change fails P0-EVID-CLAIMS-001 before semantic signature scans",
+    "allowed_files_in_order":[
+      ".node-version",
+      "Cargo.lock",
+      "Cargo.toml",
+      "contracts/ipc/skeleton-status.schema.json",
+      "crates/openloops-application/Cargo.toml",
+      "crates/openloops-application/src/lib.rs",
+      "crates/openloops-contracts/Cargo.toml",
+      "crates/openloops-contracts/src/lib.rs",
+      "crates/openloops-desktop/Cargo.toml",
+      "crates/openloops-desktop/src/main.rs",
+      "crates/openloops-domain/Cargo.toml",
+      "crates/openloops-domain/src/lib.rs",
+      "crates/openloops-graph/Cargo.toml",
+      "crates/openloops-graph/src/lib.rs",
+      "crates/openloops-inference/Cargo.toml",
+      "crates/openloops-inference/src/lib.rs",
+      "crates/openloops-persistence/Cargo.toml",
+      "crates/openloops-persistence/src/lib.rs",
+      "eslint.config.mjs",
+      "outlook-addin/src/skeleton.ts",
+      "outlook-addin/test/skeleton.test.ts",
+      "outlook-addin/tsconfig.json",
+      "package-lock.json",
+      "package.json",
+      "rust-toolchain.toml",
+      "tools/generate-contracts.mjs"
+    ],
+    "allowed_typescript_import_lines_in_order":[
+      "import eslint from \"@eslint/js\";",
+      "import tseslint from \"typescript-eslint\";",
+      "import type { SkeletonStatus } from \"../.generated/skeleton-status.js\";",
+      "import assert from \"node:assert/strict\";",
+      "import test from \"node:test\";",
+      "import { syntheticStatus } from \"../src/skeleton.js\";",
+      "import { readFile, mkdir, writeFile } from \"node:fs/promises\";",
+      "import { resolve } from \"node:path\";"
+    ],
+    "allowed_rust_use_lines_in_order":[
+      "use openloops_contracts::{SkeletonStatus, synthetic_status as generated_synthetic_status};",
+      "use openloops_domain::CapabilityState;",
+      "use super::CapabilityState;"
+    ],
+    "forbidden_dynamic_load_constructs":["dynamic import","require","eval","Function constructor","WebAssembly","child_process","process binding","Deno","Bun"],
+    "allowed_package_fields_in_order":["name","version","type","private","license","files","packageManager","engines","scripts","devDependencies"],
+    "allowed_npm_scripts": {
+      "generate:contracts":"node tools/generate-contracts.mjs",
+      "format:check":"prettier --no-config --no-editorconfig --check package.json outlook-addin/tsconfig.json outlook-addin/src outlook-addin/test tools/generate-contracts.mjs eslint.config.mjs",
+      "lint":"eslint outlook-addin/src outlook-addin/test tools/generate-contracts.mjs",
+      "build:addin":"npm run generate:contracts && tsc -p outlook-addin/tsconfig.json",
+      "check:addin":"npm run generate:contracts && tsc -p outlook-addin/tsconfig.json --noEmit",
+      "test:addin":"npm run build:addin && node --test target/outlook-addin/test/*.test.js"
+    },
+    "allowed_dev_dependencies": {
+      "@eslint/js":"10.0.1",
+      "@types/node":"24.13.3",
+      "@types/office-js":"1.0.600",
+      "eslint":"10.7.0",
+      "prettier":"3.9.5",
+      "typescript":"6.0.2",
+      "typescript-eslint":"8.64.0"
+    },
+    "forbidden_package_sections":["dependencies","optionalDependencies","peerDependencies","bundleDependencies","bundledDependencies","overrides"],
+    "execution_surface_fingerprint_sha256":"e9edc4cacb854d5488bc75b247938ff89b0f24dd366a8cf2d99bc4651d536cbb",
+    "semantic_scan":"secondary defense only; exact inventories are authoritative and signatures never substitute for them"
+  },
+  "closed_source_variants": [
+    {
+      "id": "email_evidence",
+      "record_type": "email_evidence_ref",
+      "state": "disabled",
+      "advertised": false,
+      "gates": ["G-MAIL", "G-STATE", "G-PRIV"]
+    },
+    {
+      "id": "calendar_invitation",
+      "record_type": "calendar_invitation_ref",
+      "state": "disabled",
+      "advertised": false,
+      "gates": ["G-CAL", "G-MAIL", "G-STATE", "G-PRIV"],
+      "domain_values": "unavailable_pending_G-CAL_and_ADR-009"
+    },
+    {
+      "id": "user_authored_microsoft_artifact",
+      "record_type": "user_authored_artifact_ref",
+      "state": "disabled",
+      "advertised": false,
+      "gates": ["G-TODO_or_G-CAL", "G-STATE", "G-PRIV"],
+      "domain_values": "unavailable_pending_ADR-009_and_adapter_gate"
+    }
+  ],
+  "email_record_schema": {
+    "record_type": "email_evidence_ref",
+    "schema_version": 1,
+    "unknown_or_duplicate_fields": "reject",
+    "fields_in_canonical_order": [
+      "source_ref_id", "account_ref", "message_locator", "fallback_locator", "conversation_ref",
+      "selected_folder_context", "component_code", "relation_code", "block_ordinal", "range_start",
+      "range_end", "content_digest_hmac", "prefix_digest_hmac", "suffix_digest_hmac",
+      "anchor_version", "locator_version", "observed_at"
+    ],
+    "field_contracts": [
+      {"field":"source_ref_id","required":true,"nullable":false,"logical_type":"opaque_random_bytes","exact_bytes":16},
+      {"field":"account_ref","required":true,"nullable":false,"logical_type":"opaque_random_bytes","exact_bytes":16},
+      {"field":"message_locator","required":true,"nullable":false,"logical_type":"graph_message_locator_v1"},
+      {"field":"fallback_locator","required":true,"nullable":true,"logical_type":"graph_rest_fallback_locator_v1"},
+      {"field":"conversation_ref","required":true,"nullable":true,"logical_type":"bounded_opaque_microsoft_id","minimum_utf8_bytes":1,"maximum_utf8_bytes":1024,"comparison":"case_sensitive"},
+      {"field":"selected_folder_context","required":true,"nullable":false,"logical_type":"selected_folder_context_v1"},
+      {"field":"component_code","required":true,"nullable":false,"logical_type":"closed_enum","catalog":["subject","body_block","quote_block","sender","to","cc","attachment_name","link_label","calendar_response"]},
+      {"field":"relation_code","required":true,"nullable":false,"logical_type":"closed_enum","catalog":["task","ownership","waiting_party","deadline","modification","closure","delegation","supersession","context"]},
+      {"field":"block_ordinal","required":true,"nullable":false,"logical_type":"u32","minimum":0,"maximum":4095},
+      {"field":"range_start","required":true,"nullable":false,"logical_type":"u32_unicode_scalar_index","minimum":0,"maximum":1048575},
+      {"field":"range_end","required":true,"nullable":false,"logical_type":"u32_unicode_scalar_index_exclusive","minimum":1,"maximum":1048576},
+      {"field":"content_digest_hmac","required":true,"nullable":false,"logical_type":"hmac_sha256","exact_bytes":32},
+      {"field":"prefix_digest_hmac","required":true,"nullable":false,"logical_type":"hmac_sha256","exact_bytes":32},
+      {"field":"suffix_digest_hmac","required":true,"nullable":false,"logical_type":"hmac_sha256","exact_bytes":32},
+      {"field":"anchor_version","required":true,"nullable":false,"logical_type":"closed_u16","catalog":[1]},
+      {"field":"locator_version","required":true,"nullable":false,"logical_type":"closed_u16","catalog":[1]},
+      {"field":"observed_at","required":true,"nullable":false,"logical_type":"canonical_utc_timestamp","format":"RFC3339_seconds_Z","minimum":"2000-01-01T00:00:00Z","maximum":"9999-12-31T23:59:59Z"}
+    ],
+    "cross_field_rules": [
+      "range_start is strictly less than range_end",
+      "range_end is at most the Unicode scalar count of the addressed canonical block",
+      "block_ordinal addresses exactly one block in the component-specific ordered block list",
+      "message_locator account_ref and selected_folder_context account_ref equal the record account_ref",
+      "source_ref_id is unique within the bound account",
+      "no field contains readable source text participant value subject URL filename prompt model output explanation or raw diagnostic"
+    ]
+  },
+  "locator_contract": {
+    "primary": {
+      "logical_type": "graph_message_locator_v1",
+      "fields_in_canonical_order": ["kind", "account_ref", "mailbox_binding_hmac", "immutable_id"],
+      "kind": "graph_rest_immutable_entry_id",
+      "account_ref_bytes": 16,
+      "mailbox_binding_hmac_bytes": 32,
+      "immutable_id": {"minimum_utf8_bytes":1,"maximum_utf8_bytes":1024,"comparison":"case_sensitive","storage":"inside_AEAD_only"},
+      "identity_scope": "one item while it remains in the same bound primary mailbox",
+      "not_identity": ["folder", "conversation", "subject", "internet_message_id", "content_digest", "web_link"]
+    },
+    "fallback": {
+      "logical_type": "graph_rest_fallback_locator_v1",
+      "fields_in_canonical_order": ["kind", "account_ref", "mailbox_binding_hmac", "rest_id", "source_code"],
+      "kind": "graph_rest_id",
+      "account_ref_bytes": 16,
+      "mailbox_binding_hmac_bytes": 32,
+      "rest_id": {"minimum_utf8_bytes":1,"maximum_utf8_bytes":1024,"comparison":"case_sensitive","storage":"inside_AEAD_only"},
+      "source_codes": ["graph_response", "office_ews_to_rest_v2_0"],
+      "authority": "candidate lookup only; never proves identity after move copy send archive export import or account change",
+      "nullable_only_when": "no tested default REST ID was transiently available at source creation"
+    },
+    "folder_context": {
+      "logical_type": "selected_folder_context_v1",
+      "fields_in_canonical_order": ["account_ref", "collection_ref", "folder_locator"],
+      "account_ref_bytes": 16,
+      "collection_ref_bytes": 16,
+      "folder_locator": {"minimum_utf8_bytes":1,"maximum_utf8_bytes":1024,"comparison":"case_sensitive","storage":"inside_AEAD_only"},
+      "purpose": "coverage and bounded candidate search context only",
+      "identity_authority": "none; display names and folder location never identify the message"
+    },
+    "account_binding": {
+      "mailbox_binding_hmac": {
+        "algorithm":"HMAC-SHA-256",
+        "key":"the distinct random per-account ADR-005 content-digest HMAC key",
+        "purpose_tag":"openloops-hmac-v1/email_evidence_ref.message_locator/mailbox_binding",
+        "owning_schema_version":1,
+        "component_count":3,
+        "input_layout":"use exactly one ADR-005 digest_suite input envelope; exactly three ordered owning-ADR components: one-byte cloud code 1 for commercial_global_work_school, 16-byte RFC4122 network-order tid claim UUID, and 16-byte RFC4122 network-order oid claim UUID; never repeat the purpose account binding schema version or component count",
+        "claim_source":"validated ID-token claims under ADR-002/G-ID; missing malformed personal guest shared sovereign or mismatched claims reject",
+        "output_bytes":32,
+        "comparison":"constant-time full 32-byte comparison",
+        "storage":"inside the message_locator or fallback_locator AEAD field only; raw tid and oid claims are never persisted"
+      },
+      "cross_account_rule": "any account_ref or mailbox_binding_hmac mismatch rejects before Graph Office display or reanchoring",
+      "tenant_address_display_name_storage": "prohibited"
+    }
+  },
+  "graph_request_contract": {
+    "api_version": "v1.0",
+    "mailbox_path": "/me",
+    "delta_path_shape": "/me/mailFolders/{selected-folder}/messages/delta",
+    "refetch_path_shape": "/me/messages/{immutable-id}",
+    "attachment_path_shape": "/me/messages/{immutable-id}/attachments",
+    "attachment_method": "GET",
+    "immutable_preference_header": "Prefer: IdType=\"ImmutableId\"",
+    "preference_rule": "include on every initial delta continuation reconciliation refetch and item-response request that can return a message id; nextLink and deltaLink remain opaque and are followed without reconstruction",
+    "content_preference_header": "Prefer: outlook.body-content-type=\"html\"",
+    "delta_select_fields_in_order": ["id","changeKey","conversationId","parentFolderId","receivedDateTime","sentDateTime","isRead","subject","body","from","sender","toRecipients","ccRecipients","hasAttachments"],
+    "attachment_select_fields_in_order": ["id","name","contentType","isInline","size"],
+    "attachment_query_shape": "$select=id,name,contentType,isInline,size",
+    "attachment_enumeration_rule": "for every accepted message enumerate GET /me/messages/{immutable-id}/attachments with the exact attachment query and immutable-id preference through opaque nextLink pages to a terminal response; hasAttachments is a non-authoritative optimization hint and never suppresses enumeration because inline-only attachments can leave it false",
+    "navigation_select_fields_in_order": ["id","webLink"],
+    "prohibited_selected_fields": ["bodyPreview","internetMessageHeaders","internetMessageId","extensions","singleValueExtendedProperties","multiValueExtendedProperties"],
+    "attachment_content_fetch": "prohibited",
+    "request_confirmation": "do not infer immutable format from shape; accept an id for persistence only from a request issued under the exact preference and validated by G-MAIL",
+    "translation_endpoint": {
+      "path": "/me/translateExchangeIds",
+      "state": "prohibited_for_MVP_contract",
+      "reason": "current v1.0 documentation requires an unapproved user-directory delegated permission; do not request User.Read User.ReadBasic.All or another scope for evidence identity",
+      "owner_route": "product_owner_before_any_scope_change"
+    }
+  },
+  "observation_digest_contract": {
+    "framing_rule": "use exactly one ADR-005 digest_suite input envelope; this object defines only the ordered owning-ADR component byte strings inside that envelope and never repeats the domain purpose tag account binding owning schema version or component count",
+    "component_counts": {"query_fingerprint_v1":7,"source_version_v1":4,"observed_version_v1":7},
+    "query_fingerprint_v1": "exactly seven ordered components: 16-byte collection_ref; exact ASCII v1.0; exact ASCII delta path shape; selected-field catalog encoded as u16be count then each contract-ordered ASCII field as u16be byte length plus exact bytes; preference catalog encoded as u16be count then each contract-ordered preference ASCII string as u16be byte length plus exact bytes; u16be initial-window days; u32be policy version",
+    "source_version_v1": "ordered components: 32-byte mailbox_binding_hmac; immutable-id exact UTF-8 bytes; changeKey exact UTF-8 bytes; u16be locator version",
+    "observed_version_v1": "ordered components: 32-byte source_version_hmac; parentFolderId exact UTF-8 bytes; u8 direction code; u8 read-observation code; u8 first-observation code; RFC3339-seconds-Z observed-at ASCII bytes; u32be policy version",
+    "direction_code_map": [{"code":1,"id":"incoming"},{"code":2,"id":"outgoing"}],
+    "read_observation_code_map": [{"code":1,"id":"unread"},{"code":2,"id":"read"},{"code":3,"id":"unknown"}],
+    "first_observation_code_map": [{"code":1,"id":"initial_backfill"},{"code":2,"id":"post_baseline_first"},{"code":3,"id":"subsequent"}],
+    "transient_inputs": "immutable id changeKey parentFolderId and query strings are never separately persisted logged diagnosed exported or packaged",
+    "outputs": "full 32-byte purpose-separated HMAC-SHA-256 inside the ADR-005 AEAD envelope"
+  },
+  "canonical_anchor_contract": {
+    "anchor_version": 1,
+    "normalization_steps_in_order": [
+      "decode the selected Graph field using its declared JSON Unicode scalar value and reject unpaired surrogates",
+      "sanitize HTML to inert text with no scripts styles remote resources active schemes or hidden executable content",
+      "normalize CRLF and CR to LF",
+      "normalize Unicode to NFC",
+      "preserve all remaining Unicode scalars including hostile-looking instructions as inert data",
+      "split into the component-specific ordered block list and build a transient source offset map"
+    ],
+    "range_unit": "zero-based Unicode scalar index in one NFC canonical block",
+    "range_end": "exclusive",
+    "empty_ranges": "prohibited",
+    "maximum_blocks_per_component": 4096,
+    "maximum_scalars_per_block": 1048576,
+    "prefix_context_scalars": 64,
+    "suffix_context_scalars": 64,
+    "context_edges": "use the available zero-to-64 scalars immediately before or after the range in the same block; never cross a block boundary",
+    "digest_algorithm": "HMAC-SHA-256",
+    "digest_key": "distinct random per-account content-digest key owned by ADR-005",
+    "digest_output_bytes": 32,
+    "component_count": 7,
+    "component_code_map": [{"code":1,"id":"subject"},{"code":2,"id":"body_block"},{"code":3,"id":"quote_block"},{"code":4,"id":"sender"},{"code":5,"id":"to"},{"code":6,"id":"cc"},{"code":7,"id":"attachment_name"},{"code":8,"id":"link_label"},{"code":9,"id":"calendar_response"}],
+    "framing": "use exactly one ADR-005 digest_suite input envelope; the first six ordered owning-ADR components are 16-byte source_ref_id, four-byte u32be component code from component_code_map, four-byte u32be block_ordinal, four-byte u32be range_start, four-byte u32be range_end, and four-byte u32be anchor_version; the seventh component is purpose-specific exact NFC UTF-8 text as defined by purpose_layouts; every component is carried once by the ADR-005 u32be-length component framing and the purpose tag account binding schema version and component count are never repeated",
+    "purpose_layouts": [
+      {"field":"content_digest_hmac","purpose_tag":"openloops-hmac-v1/email_evidence_ref/content_digest","seventh_component":"exact canonical text from range_start inclusive to range_end exclusive"},
+      {"field":"prefix_digest_hmac","purpose_tag":"openloops-hmac-v1/email_evidence_ref/prefix_digest","seventh_component":"exact available zero-to-64-scalar canonical prefix immediately before range_start in the same block"},
+      {"field":"suffix_digest_hmac","purpose_tag":"openloops-hmac-v1/email_evidence_ref/suffix_digest","seventh_component":"exact available zero-to-64-scalar canonical suffix immediately after range_end in the same block"}
+    ],
+    "content_input": "exact canonical text in range_start through range_end",
+    "prefix_input": "available prefix context only",
+    "suffix_input": "available suffix context only",
+    "comparison": "constant-time full 32-byte comparison",
+    "digest_non_authority": "a digest match proves content equality under the key and framing; it never alone proves item identity ownership account folder or copy lineage"
+  },
+  "canonical_projection_contract": {
+    "version":"evidence-canonical-v1",
+    "graph_shape_rules": {
+      "subject":"required JSON string with at most 1048576 Unicode scalars after validation",
+      "body":"required itemBody object projected to exactly contentType and content; contentType must equal lowercase html because the exact request preference asks for html and content must be a JSON string; any other missing duplicate null type or value rejects the item",
+      "sender_and_from":"each present value must project to exactly one recipient object; sender is used and from is fallback only when sender is absent",
+      "to_and_cc":"required JSON arrays in service order with at most 500 recipient objects each",
+      "recipient":"project exactly emailAddress.name and emailAddress.address as JSON strings; name may be empty, address must contain 1-to-1024 UTF-8 bytes, and unknown projected fields or invalid values reject",
+      "attachments":"for every accepted message, regardless of hasAttachments, page the exact graph_request_contract attachment endpoint and query to completion under the item/account binding; require at most 256 unique case-sensitive attachment ids, reject duplicate ids or incomplete/capped paging, sort the complete set by unsigned UTF-8 attachment-id bytes, use only name strings as blocks, and discard every attachment id after ordering; hasAttachments is never authoritative because inline-only attachments can leave it false",
+      "odata_annotations":"the transport may remove only schema-known OData annotation members before this projection; no ordinary unknown field is silently accepted",
+      "invalid_shape_result":"recoverable quarantine or analysis unavailable before anchor creation; zero cursor advance unless ADR-004 recoverability is durable"
+    },
+    "scalar_policy": {
+      "json_decode":"reject any unpaired UTF-16 surrogate before scalar conversion",
+      "line_endings":"CRLF and CR become LF",
+      "normalization":"Unicode NFC after line-ending and HTML-text projection",
+      "rejected_scalars":"U+0000 through U+0008, U+000B, U+000C, U+000E through U+001F, U+007F through U+009F, U+FDD0 through U+FDEF, and every scalar ending FFFE or FFFF",
+      "allowed_ascii_controls":"HT and LF only before text whitespace normalization; CR is consumed by line-ending normalization",
+      "comparison":"case-sensitive Unicode scalar equality after NFC unless a field rule states otherwise"
+    },
+    "participant_text_rule":"normalize line endings, reject forbidden scalars, replace every HT with one ASCII space, trim only leading/trailing ASCII spaces, NFC-normalize name and address independently, preserve address case, then emit address alone when name is empty or name plus one ASCII space plus less-than plus address plus greater-than",
+    "html_text_profile": {
+      "profile_id":"openloops-inert-html-text-v1",
+      "parser":"WHATWG HTML fragment parsing algorithm with a body context; no scripting flag and no network/resource loader; character references are decoded by the parser",
+      "ignored_nodes":["comment","doctype","processing_instruction"],
+      "drop_elements_with_descendants":["head","script","style","template","noscript","iframe","object","embed","svg","math","canvas","audio","video","source","track","form","input","button","select","option","textarea"],
+      "line_break_elements":["br","hr"],
+      "block_boundary_elements":["address","article","aside","blockquote","dd","div","dl","dt","fieldset","figcaption","figure","footer","h1","h2","h3","h4","h5","h6","header","li","main","nav","ol","p","pre","section","table","tbody","thead","tfoot","tr","ul"],
+      "table_cell_elements":["td","th"],
+      "dom_event_algorithm":"walk the accepted fragment DOM in depth-first tree order. An ignored node emits nothing. A drop element emits nothing and its descendants are not visited. For every block_boundary_element except an outermost blockquote segmentation boundary, emit exactly one LF immediately before visiting its first child and exactly one LF immediately after visiting its last child, including when it has no children. For every td or th, emit exactly one LF immediately before its first child and one LF immediately after its last child. For br or hr emit exactly one LF and visit no children. Every other accepted element emits no entry or exit character and visits children in tree order. Each accepted text node emits its complete parser-decoded scalar sequence after the text-node whitespace rule. No other DOM event emits text.",
+      "outermost_blockquote_algorithm":"when entering an outermost blockquote, flush the current nonempty body buffer after final whitespace normalization, suppress that outermost blockquote's own entry and exit LF events, route all accepted descendant events to one quote buffer, and emit that final nonempty quote buffer as one quote_block on exit; nested blockquotes use the ordinary block-boundary entry and exit LF events inside the same quote buffer; resume a new body buffer after the outermost exit",
+      "line_feed_finalization":"after DOM event emission and before block emission, replace HT and FF in text-node output with ASCII space, strip ASCII spaces immediately adjacent to LF, collapse each ASCII-space run to one, collapse each LF run to at most two, and trim leading or trailing ASCII space or LF; this operation is applied independently to each body quote and link-label buffer",
+      "text_whitespace":"in text nodes replace HT and FF with ASCII space; preserve parser-decoded scalars; emitted block boundaries and br/hr are LF; strip ASCII spaces adjacent to LF, collapse ASCII-space runs to one, collapse LF runs to at most two, and trim leading/trailing ASCII space or LF from each emitted block",
+      "quote_segmentation":"an outermost blockquote element at any depth flushes the current body buffer and emits one quote_block from its complete descendant inert text including nested blockquotes; leaving it starts a new body buffer; maximal nonempty text outside outermost blockquote boundaries emits body_block; empty blocks are discarded",
+      "link_labels":"for every a element in document order emit one link_label block from its descendant inert text using the same whitespace rule; discard an empty label and never read fetch canonicalize persist or digest href",
+      "remote_behavior":"no URL resolution fetch CSS image font media iframe object redirect or event execution occurs"
+    },
+    "plain_component_rules": {
+      "subject":"one block from the complete validated subject string after scalar policy",
+      "attachment_name":"one block per complete sorted attachment using the complete validated name string after scalar policy",
+      "calendar_response":"unavailable pending G-CAL; no block or anchor may be created",
+      "range_mapping":"build source/rendered offsets transiently only after final block text exists; a range never addresses parser markup or a discarded node"
+    },
+    "conformance_vectors": [
+      {"id":"CANON-HTML-ENTITY-BLOCKQUOTE-001","input_kind":"html","input":"<p>A&amp;B<br>C</p><blockquote>Q</blockquote>","body_blocks":["A&B\nC"],"quote_blocks":["Q"],"link_labels":[],"result":"accept"},
+      {"id":"CANON-HIDDEN-LINK-001","input_kind":"html","input":"<script>DROP</script><p>Safe <a href=\"https://synthetic.invalid/path\">Label</a></p>","body_blocks":["Safe Label"],"quote_blocks":[],"link_labels":["Label"],"result":"accept"},
+      {"id":"CANON-HTML-SIBLING-BLOCKS-001","input_kind":"html","input":"<div>A</div><div>B</div>","body_blocks":["A\n\nB"],"quote_blocks":[],"link_labels":[],"result":"accept"},
+      {"id":"CANON-HTML-NESTED-BLOCKS-001","input_kind":"html","input":"<div>A<div>B</div>C</div>","body_blocks":["A\nB\nC"],"quote_blocks":[],"link_labels":[],"result":"accept"},
+      {"id":"CANON-HTML-TABLE-CELLS-001","input_kind":"html","input":"<table><tr><td>A</td><td>B</td></tr></table>","body_blocks":["A\n\nB"],"quote_blocks":[],"link_labels":[],"result":"accept"},
+      {"id":"CANON-NFC-ASTRAL-001","input_kind":"subject","input":"Cafe\u0301 😀","blocks":["Café 😀"],"scalar_count":6,"result":"accept"},
+      {"id":"CANON-PARTICIPANT-001","input_kind":"participant","name":"Synthetic User","address":"synthetic@example.invalid","blocks":["Synthetic User <synthetic@example.invalid>"],"result":"accept"},
+      {"id":"CANON-UNPAIRED-SURROGATE-001","input_kind":"json_utf16_code_units","input_hex":[55296],"result":"reject"},
+      {"id":"CANON-NONCHARACTER-001","input_kind":"unicode_scalars","input_hex":[65535],"result":"reject"},
+      {"id":"CANON-INCOMPLETE-ATTACHMENTS-001","input_kind":"attachment_pages","page_state":"cap_exhausted_before_terminal_page","result":"reject_anchor_creation"},
+      {"id":"CANON-INLINE-ONLY-ATTACHMENT-001","input_kind":"graph_message_and_attachment_pages","hasAttachments":false,"attachment_pages":[{"terminal":true,"attachments":[{"id":"synthetic-inline-1","name":"synthetic-inline.png","contentType":"image/png","isInline":true,"size":64}]}],"attachment_name_blocks":["synthetic-inline.png"],"result":"accept"}
+    ]
+  },
+  "component_block_order": {
+    "subject": "exactly one block",
+    "body_block": "sanitizer-produced current-body blocks in document order",
+    "quote_block": "sanitizer-produced quoted or forwarded blocks in document order",
+    "sender": "exactly one participant_text_rule block from sender or from only when sender is absent",
+    "to": "participant_text_rule blocks in toRecipients service array order",
+    "cc": "participant_text_rule blocks in ccRecipients service array order",
+    "attachment_name": "complete attachment set sorted by unsigned UTF-8 bytes of unique case-sensitive opaque attachment id; id is discarded after ordering",
+    "link_label": "sanitized visible link labels in document order; URL is never an anchor input or stored",
+    "calendar_response": "invitation-mail response text block only; event state remains unavailable pending G-CAL"
+  },
+  "resolution_state_machine": {
+    "states": ["unresolved","primary_verified","changed","candidate_ambiguous","unavailable"],
+    "steps_in_order": [
+      "reject any account mailbox cloud locator version schema or source-ref binding mismatch without a network call",
+      "under G-MAIL refetch the primary immutable id through the bound account and exact selected-field contract",
+      "canonicalize transient content and require the full content digest plus prefix and suffix digest at the stored range",
+      "if all anchors match project primary_verified in memory and discard fetched content after the bounded operation",
+      "if the item resolves but anchors differ project changed freeze evidence-dependent automation and require review before reanchoring",
+      "if the primary does not resolve enumerate the complete bounded candidate universe exactly as defined by fallback_search_contract and verify every candidate with all three anchors",
+      "only a completed enumeration may classify zero one or many verified candidates; zero projects unavailable and more than one projects candidate_ambiguous",
+      "only one verified candidate from a completed enumeration may be offered as replacement evidence and requires explicit user confirmation before locator replacement",
+      "persist an approved locator replacement and new anchors only in one ADR-005 transaction after G-STATE and G-PRIV"
+    ],
+    "network_failures": "throttling outage consent revocation and transient client failure project stale_or_unavailable status without destructive locator change",
+    "missing_is_not_negative_evidence": true,
+    "stored_content_fallback": "prohibited",
+    "automatic_reanchoring": "prohibited",
+    "evidence_dependent_automation_on_changed_ambiguous_unavailable": "frozen"
+  },
+  "fallback_search_contract": {
+    "candidate_universe":"the union of messages already observed under the bound account in every currently authorized selected folder and configured history window; no unselected folder mailbox directory global search or newly requested permission is included",
+    "enumeration_order":"selected collections by unsigned collection_ref bytes, then each collection's opaque Graph paging order; nextLink remains opaque and every page must be consumed",
+    "completion_marker":"complete only after every selected collection reaches a terminal page within the fixed G-MAIL-validated page item byte and wall-clock caps and every candidate refetch and attachment-metadata sequence reaches its terminal response",
+    "complete_classification":"after complete enumeration and exact account source schema canonicalization and triple-anchor verification, zero verified candidates projects unavailable, one may be offered for explicit confirmation, and every one of two or more verified candidates is surfaced as candidate_ambiguous",
+    "incomplete_classification":"any throttle outage consent loss retry exhaustion page cap item cap byte cap time cap malformed response attachment cap or missing terminal page projects candidate_ambiguous with search_incomplete or safe unavailable/stale; it never projects zero or singleton and never offers or replaces a candidate",
+    "candidate_storage":"candidate identifiers selected fields canonical blocks and match details are transient only and are discarded after the bounded operation",
+    "authority":"fallback lookup and triple-anchor matches are candidate evidence only; they never establish copy lineage account identity delivery closure or automatic replacement"
+  },
+  "lifecycle_identity_rules": {
+    "same_mailbox_move": "primary immutable id may remain authoritative only after the G-MAIL move matrix passes; folder context updates as coverage metadata and never changes source identity",
+    "ordinary_archive_folder_move":"moving an item to the ordinary Archive folder inside the same bound primary mailbox is only a same_mailbox_move case and remains blocked on the exact G-MAIL move matrix",
+    "copy": "a copy is a distinct item with a distinct source identity even when every anchor matches; never merge or replace automatically",
+    "in_place_archive_mailbox": "the Exchange in-place or online archive mailbox is outside the approved primary-mailbox boundary and projects unavailable; no archive-mailbox capability exists unless the product owner later approves its permissions support matrix and gates",
+    "export_import": "new item identity; prior source remains unavailable and no automatic lineage is inferred",
+    "draft_or_compose": "never creates or updates a persistent evidence source",
+    "saved_sent_copy": "create evidence only from the first G-MAIL-validated saved Sent Items observation under the immutable preference; never claim delivery",
+    "send_without_saved_copy_or_immediate_move_delete": "known loss unless later observed in selected scope; never fabricate a locator",
+    "delete_retention_or_permission_loss": "preserve loop and abstract history project evidence unavailable and freeze evidence-dependent automation",
+    "conversation_match": "candidate hint only; never source identity or automatic deduplication",
+    "internet_message_id": "not selected persisted or used as identity",
+    "user_replacement": "explicit user action creates a typed source transition; old source history remains until normal retention"
+  },
+  "office_and_link_contract": {
+    "authority_separation": "Office add-in item identity and Graph authorization are separate; no Office permission grants Graph access and no Graph scope grants Office manifest authority",
+    "office_item_id": "transient case-sensitive EWS-format value in read mode only; never persist log place in a review link or treat as Graph identity",
+    "office_to_graph": "under G-ADDIN call convertToRestId with RestVersion.v2_0 in memory then use the result only for an exact bound Graph GET under Mail.Read and the immutable preference; persist only the returned validated immutable locator",
+    "graph_to_office": "unavailable until G-ADDIN and G-MAIL prove a client-matrix conversion/display contract; translateExchangeIds is not a fallback",
+    "display_message_form": "under G-ADDIN call displayMessageFormAsync with a transient EWS id and Mailbox 1.9 and inspect the completion callback; any callback error including item-not-found or no confirmed display projects safe navigation unavailable; displayMessageForm without Async is prohibited",
+    "graph_web_link": "retrieve transiently with the exact navigation select only after primary identity and account validation; never persist log iframe proxy rewrite append a token or treat as identity",
+    "web_link_origin_allowlist": ["https://outlook.office.com", "https://outlook.office365.com", "https://outlook.live.com"],
+    "web_link_validation": {
+      "maximum_utf8_bytes":8192,
+      "preparse":"reject empty input leading or trailing whitespace every ASCII control and every C1 control before exactly one WHATWG URL parse",
+      "scheme":"exact lowercase https after parsing",
+      "credentials":"parsed username and password must both be empty",
+      "port":"parsed effective port must be 443 and an explicitly supplied nondefault port is rejected",
+      "host":"parsed ASCII hostname after IDNA processing must exactly equal one allowlisted hostname; reject an IP literal trailing dot punycode result or any other suffix prefix or lookalike",
+      "origin":"serialized normalized origin must exactly equal one web_link_origin_allowlist entry",
+      "path_query_fragment":"opaque to OpenLoops and never rewritten inspected logged persisted or used as identity",
+      "redirects":"OpenLoops validates and hands off only the initial URL; it never prefetches follows or validates redirects"
+    },
+    "web_link_behavior": "open only the exactly validated initial URL as a top-level external browser navigation with no application prefetch; sign-in region client redirect and retention behavior remain G-MAIL/G-ADDIN tests",
+    "review_link": "contains only a random non-secret local loop handle and no Graph Office account mailbox content session pairing or bearer value",
+    "fallback_ui": "show evidence or navigation unavailable plus safe instructions; never copy the URL or identifier into diagnostics"
+  },
+  "unavailable_projection": {
+    "safe_codes": ["evidence_unavailable","evidence_changed","evidence_ambiguous","navigation_unavailable","reconnect_required","stale"],
+    "safe_noncontent_fields": ["loop_status_code","deadline_state_code","approved_deadline_value","reminder_state_code","record_age_bucket"],
+    "prohibited_projection": ["reconstructed_task_text","person_text","subject","excerpt","filename","link_label","URL","identifier","generated_explanation"],
+    "user_actions": ["select_replacement_evidence","completed_outside_email","dismiss","reopen","delete_loop"],
+    "closure_rule": "unavailable changed or missing evidence never closes resolves dismisses or proves failure"
+  },
+  "privacy_boundary": {
+    "approved_persistent_record": "email_evidence_ref only after G-MAIL G-STATE and G-PRIV",
+    "human_readable_mailbox_or_generated_text": "prohibited",
+    "raw_identifier_storage": "only exact encrypted locator fields inside the ADR-005 AEAD envelope; never plaintext SQL index log diagnostic fixture package or repository",
+    "content_digest_storage": "only full 32-byte purpose-separated keyed HMAC values inside the AEAD envelope",
+    "transient_values": "Graph and Office IDs webLink selected message fields canonical blocks offset maps and anchor inputs remain bounded in memory only",
+    "diagnostic_event_allowlist": [],
+    "canary_positions": ["subject","body","participant","attachment_name","link_label","graph_id","office_id","web_link","change_key","error_body"],
+    "prohibited_canary_count": 0,
+    "residual_limits": "OS paging Office WebView browser caches same-user malware administrators endpoint tooling backups snapshots and platform crash behavior are not claimed erased"
+  },
+  "separate_decisions": {
+    "permissions_and_folder_policy": "ADR-003",
+    "synchronization_and_checkpoint_transactions": "ADR-004",
+    "encryption_keys_and_durable_transactions": "ADR-005",
+    "calendar_event_response_values": "ADR-009 and G-CAL",
+    "user_authored_artifact_locator_and_field_values": "ADR-009 and G-TODO_or_G-CAL",
+    "add_in_bridge_pairing_and_client_support": "ADR-010 and G-ADDIN",
+    "reminder_links_and_mutations": "ADR-009 and adapter gates"
+  },
+  "documented_conflicts_and_unresolved_tests": [
+    {
+      "id": "EVID-UNRESOLVED-DRAFT-ID-001",
+      "conflict": "the current mail API overview names sending a draft as an immutable-ID exception while the immutable-ID article describes retrieving the Sent Items copy by the draft immutable ID",
+      "disposition": "OpenLoops creates no source from draft or compose and tests saved-sent observations independently in G-MAIL"
+    },
+    {
+      "id": "EVID-UNRESOLVED-TRANSLATE-SCOPE-001",
+      "conflict": "the current translateExchangeIds v1.0 permission table requires user-directory permissions outside ADR-003",
+      "disposition": "endpoint prohibited; no permission expansion; route any proposed change to product owner"
+    },
+    {
+      "id": "EVID-UNRESOLVED-OFFICE-DISPLAY-001",
+      "conflict": "Office conversion display and cached-mode IDs can be stale and client behavior differs",
+      "disposition": "navigation remains disabled until G-ADDIN and G-MAIL pass the exact supported-client matrix"
+    }
+  ],
+  "sources": [
+    {"id":"SRC-SPEC-EVIDENCE","location":"docs/product-spec.md#52-source-and-evidence-references"},
+    {"id":"SRC-SPEC-UNAVAILABLE","location":"docs/product-spec.md#85-evidence-unavailable"},
+    {"id":"SRC-PLAN-EVIDENCE","location":"docs/implementation-plan.md#phase-3--mail-ingestion-and-evidence-substrate"},
+    {"id":"SRC-RESEARCH-VALIDATION","location":"research/microsoft-graph/validation-plan.md#mail-experiments"},
+    {"id":"SRC-PRIVACY","location":"contracts/privacy/persistence-boundary.json"},
+    {"id":"SRC-SYNC","location":"contracts/synchronization/mail-sync-boundary.json"},
+    {"id":"SRC-MS-IMMUTABLE","location":"https://learn.microsoft.com/graph/outlook-immutable-id"},
+    {"id":"SRC-MS-MAIL-OVERVIEW","location":"https://learn.microsoft.com/graph/api/resources/mail-api-overview?view=graph-rest-1.0"},
+    {"id":"SRC-MS-MESSAGE","location":"https://learn.microsoft.com/graph/api/resources/message?view=graph-rest-1.0"},
+    {"id":"SRC-MS-MESSAGE-ATTACHMENTS","location":"https://learn.microsoft.com/graph/api/message-list-attachments?view=graph-rest-1.0"},
+    {"id":"SRC-MS-TRANSLATE","location":"https://learn.microsoft.com/graph/api/user-translateexchangeids?view=graph-rest-1.0"},
+    {"id":"SRC-OFFICE-MAILBOX","location":"https://learn.microsoft.com/javascript/api/outlook/office.mailbox"},
+    {"id":"SRC-OFFICE-MESSAGE-READ","location":"https://learn.microsoft.com/javascript/api/outlook/office.messageread"},
+    {"id":"SRC-OFFICE-CACHED-ID","location":"https://learn.microsoft.com/outlook/troubleshoot/performance/erroritemnotfound-when-office-add-ins-make-rest-calls"}
+  ]
+}

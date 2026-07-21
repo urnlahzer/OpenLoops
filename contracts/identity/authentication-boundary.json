@@ -1,0 +1,191 @@
+{
+  "schema_version": 1,
+  "work_item": "P0-WI-05",
+  "adr": "ADR-002",
+  "decision_status": "accepted_contract_runtime_unimplemented",
+  "snapshot_date": "2026-07-19",
+  "owner_decisions": ["OWN-00", "OWN-02"],
+  "requirements": ["OL-GOV-001", "OL-AUTH-001", "OL-AUTH-002", "OL-AUTH-004", "OL-AUTH-005", "OL-AUTH-006", "OL-NFR-005", "OL-NFR-006", "OL-NFR-011", "OL-NFR-012"],
+  "claims": {
+    "acceptance_criteria_completed": [],
+    "gates_passed": [],
+    "capabilities_enabled": [],
+    "capabilities_advertised": [],
+    "permissions_requested": [],
+    "network_contacts": []
+  },
+  "flow": {
+    "client_type": "delegated_public_client",
+    "authorization_surface": "system_browser",
+    "grant": "authorization_code",
+    "pkce_method": "S256",
+    "confidential_client_material": "prohibited",
+    "runtime_status": "unimplemented",
+    "blocking_gates": ["G-ID", "G-PRIV"],
+    "broad_release_gate": "G-SEC-AUDIT",
+    "failure_owner": "product_owner",
+    "fallback": "identity-dependent capabilities remain disabled"
+  },
+  "prohibited_flows": [
+    "application_permissions",
+    "client_credentials",
+    "device_code_fallback",
+    "embedded_credential_collection",
+    "embedded_webview",
+    "implicit",
+    "ropc",
+    "tenant_wide_access",
+    "wam_mvp_dependency"
+  ],
+  "redirect_contract": {
+    "binding": "same_machine_loopback_only",
+    "host_selection": "unresolved_pending_G-ID",
+    "host_candidates": ["127.0.0.1", "localhost"],
+    "ipv4_ipv6_behavior": "unresolved_pending_G-ID",
+    "port": "ephemeral_os_assigned",
+    "path": "exact_registered_path_pending_G-ID",
+    "response_mode": "query_only_pending_G-ID_validation",
+    "http_method": "GET_only_pending_G-ID_validation",
+    "form_post": "prohibited_unless_future_owner_review_and_G-ID_revision",
+    "fragment_response": "prohibited",
+    "host_authority_validation": "exact_pending_listener_authority_required",
+    "duplicate_parameters": "reject",
+    "malformed_parameters": "reject",
+    "unexpected_parameters": "ignore_bounded_without_logging_persistence_or_exposure",
+    "success_shape": "exactly_one_code_and_state_no_error",
+    "error_shape": "exactly_one_error_and_state_no_code",
+    "error_detail_policy": "bounded_allowlist_pending_G-ID_sanitized_not_logged",
+    "mixed_success_error": "reject",
+    "listener_lifecycle": "one_pending_transaction_then_immediate_shutdown",
+    "lan_binding": "prohibited",
+    "wildcard_redirect": "prohibited",
+    "remote_callback": "prohibited"
+  },
+  "transaction_contract": {
+    "state": "fresh_high_entropy_csprng_exact_match_one_use",
+    "pkce_verifier": "fresh_high_entropy_memory_only_one_use",
+    "pending_transactions": 1,
+    "duplicate_callback": "reject",
+    "replayed_callback": "reject",
+    "expired_callback": "reject",
+    "callback_without_pending_transaction": "reject",
+    "port_collision": "cancel_and_retry_with_fresh_transaction",
+    "second_process": "fail_closed",
+    "second_same_process_attempt": "reject_without_mutating_incumbent",
+    "unsolicited_or_malformed_callback": "reject_without_mutating_or_replacing_incumbent",
+    "account_switch": "cancel_transaction_clear_ephemeral_state_require_restart",
+    "cancellation": "shutdown_listener_and_clear_ephemeral_state"
+  },
+  "account_contract": {
+    "core_target": "commercial_global_work_school_primary_mailbox",
+    "accounts_per_os_user": 1,
+    "personal_accounts": "disabled_pending_complete_matrix",
+    "guest_accounts": "unsupported",
+    "shared_mailboxes": "unsupported",
+    "sovereign_clouds": "unsupported",
+    "multiple_accounts": "unsupported",
+    "cross_account_state_inheritance": "prohibited",
+    "authority_selection": "unresolved_pending_G-ID",
+    "audience_selection": "unresolved_pending_G-ID"
+  },
+  "token_boundary": {
+    "persistence_status": "ADR-005_contract_accepted_runtime_unimplemented_pending_G-ID_G-PRIV",
+    "allowed_locations": ["process_memory", "transient_system_browser_protocol_url", "transient_loopback_callback_url", "future_os_protected_store_after_gates"],
+    "protocol_url_policy": "only opaque random state in the authorization request and opaque code plus exact state in the callback; never content, account data, return URLs, logging, copying, or application-controlled persistence",
+    "prohibited_locations": ["application_controlled_browser_storage", "cli_arguments", "diagnostics", "fixtures", "logs", "plaintext_files", "repository", "telemetry"],
+    "prohibited_values": ["access_token", "authorization_code", "authorization_header", "browser_cookie", "client_secret", "pkce_verifier", "refresh_token", "tenant_or_account_identifier", "transaction_state"],
+    "token_claim_validation": "unresolved_pending_G-ID",
+    "refresh_rotation": "unresolved_pending_G-ID",
+    "secure_store_failure": "session_only_or_fail_closed_no_plaintext_fallback",
+    "diagnostic_allowlist": []
+  },
+  "disconnect_contract": {
+    "stop_new_identity_work": true,
+    "clear_ephemeral_transaction_state": true,
+    "remove_application_owned_cache_where_supported": true,
+    "cache_delete_failure": "identity_and_reconnect_remain_disabled_owner_approved_recovery_required",
+    "cache_delete_failure_disclosure": "application-controlled protected cache cleanup is incomplete and residual Microsoft browser session or consent may also remain",
+    "delete_account_bound_application_state_after_ADR-005": true,
+    "global_logout_claim": false,
+    "global_token_revocation_claim": false,
+    "browser_session_revocation_claim": false,
+    "tenant_consent_revocation_claim": false,
+    "required_disclosure": "local cleanup is not global logout, token revocation, session revocation, or tenant-consent revocation"
+  },
+  "dependency_decisions": [
+    {
+      "crate": "oauth2",
+      "version": "5.0.0",
+      "default_features": false,
+      "features": ["reqwest", "timing-resistant-secret-traits"],
+      "license": "MIT OR Apache-2.0",
+      "purpose": "typed OAuth authorization-code, PKCE, state, and token protocol primitives"
+    },
+    {
+      "crate": "reqwest",
+      "version": "0.12.28",
+      "default_features": false,
+      "features": ["rustls-tls-native-roots"],
+      "license": "MIT OR Apache-2.0",
+      "purpose": "future token HTTP client with redirects disabled and bounded requests"
+    },
+    {
+      "crate": "tokio",
+      "version": "1.53.0",
+      "default_features": false,
+      "features": ["io-util", "net", "rt", "sync", "time"],
+      "license": "MIT",
+      "purpose": "future bounded loopback listener and cancellation primitives"
+    },
+    {
+      "crate": "url",
+      "version": "2.5.8",
+      "default_features": false,
+      "features": ["std"],
+      "license": "MIT OR Apache-2.0",
+      "purpose": "typed authorization, token, and redirect URL parsing"
+    },
+    {
+      "crate": "webbrowser",
+      "version": "1.2.1",
+      "default_features": false,
+      "features": ["hardened"],
+      "license": "MIT OR Apache-2.0",
+      "purpose": "future system-browser launch without an embedded browser"
+    },
+    {
+      "crate": "httparse",
+      "version": "1.10.1",
+      "default_features": false,
+      "features": ["std"],
+      "license": "MIT OR Apache-2.0",
+      "purpose": "future bounded parsing of one loopback callback request"
+    }
+  ],
+  "dependency_policy": {
+    "activation": "selected_not_activated",
+    "cargo_lock_status": "required_before_activation",
+    "git_dependencies": "prohibited",
+    "wildcard_versions": "prohibited",
+    "ad_hoc_oauth_or_crypto": "prohibited",
+    "security_review": "required_before_activation_and_at_G-SEC-AUDIT",
+    "rust_compatibility_target": "1.97.1"
+  },
+  "separate_decisions": {
+    "feature_scopes_and_office_permissions": "ADR-003",
+    "protected_token_and_key_persistence": "ADR-005",
+    "distribution_and_shared_registration": "ADR-012"
+  },
+  "sources": [
+    { "id": "SRC-RFC-7636", "location": "https://www.rfc-editor.org/rfc/rfc7636" },
+    { "id": "SRC-RFC-8252", "location": "https://www.rfc-editor.org/rfc/rfc8252" },
+    { "id": "SRC-MS-AUTH-FLOWS", "location": "https://learn.microsoft.com/entra/identity-platform/authentication-flows-app-scenarios" },
+    { "id": "SRC-MS-REDIRECT", "location": "https://learn.microsoft.com/entra/identity-platform/reply-url" },
+    { "id": "SRC-OAUTH2-CRATE", "location": "https://crates.io/crates/oauth2/5.0.0" },
+    { "id": "SRC-REQWEST-CRATE", "location": "https://crates.io/crates/reqwest/0.12.28" },
+    { "id": "SRC-TOKIO-CRATE", "location": "https://crates.io/crates/tokio/1.53.0" },
+    { "id": "SRC-URL-CRATE", "location": "https://crates.io/crates/url/2.5.8" },
+    { "id": "SRC-WEBBROWSER-CRATE", "location": "https://crates.io/crates/webbrowser/1.2.1" }
+    ,{ "id": "SRC-HTTPPARSE-CRATE", "location": "https://crates.io/crates/httparse/1.10.1" }
+  ]
+}

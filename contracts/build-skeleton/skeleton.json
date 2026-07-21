@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "work_item": "P0-WI-04",
+  "snapshot_date": "2026-07-19",
+  "requirements": ["OL-NFR-010", "OL-NFR-011", "OL-NFR-012"],
+  "acceptance_criteria": [],
+  "gates_passed": [],
+  "capabilities_enabled": [],
+  "capabilities_advertised": [],
+  "toolchains": {
+    "rust": {
+      "channel": "1.97.1",
+      "host": "x86_64-pc-windows-msvc",
+      "profile": "minimal",
+      "components": ["clippy", "rustfmt"]
+    },
+    "node": {
+      "version": "24.18.0",
+      "lifecycle": "LTS",
+      "npm": "11.16.0"
+    },
+    "typescript": {
+      "version": "6.0.2",
+      "office_types": "1.0.600",
+      "node_types": "24.13.3"
+    },
+    "rust_contract_tooling": {
+      "typify": { "version": "0.7.0", "license": "Apache-2.0" },
+      "serde": { "version": "1.0.229", "license": "MIT OR Apache-2.0" },
+      "serde_json": { "version": "1.0.150", "license": "MIT OR Apache-2.0" }
+    }
+  },
+  "workspace": {
+    "domain": { "package": "openloops-domain", "dependencies": [] },
+    "contracts": { "package": "openloops-contracts", "dependencies": [] },
+    "application": { "package": "openloops-application", "dependencies": ["openloops-contracts", "openloops-domain"] },
+    "graph": { "package": "openloops-graph", "dependencies": ["openloops-application", "openloops-domain"] },
+    "inference": { "package": "openloops-inference", "dependencies": ["openloops-application", "openloops-domain"] },
+    "persistence": { "package": "openloops-persistence", "dependencies": ["openloops-application", "openloops-domain"] },
+    "desktop": { "package": "openloops-desktop", "dependencies": ["openloops-application", "openloops-contracts", "openloops-domain", "openloops-graph", "openloops-inference", "openloops-persistence"] }
+  },
+  "contract_generation": {
+    "schema": "contracts/ipc/skeleton-status.schema.json",
+    "rust_output": "untracked typify macro expansion in Cargo target output",
+    "typescript_output": "outlook-addin/.generated/skeleton-status.ts",
+    "generated_outputs_tracked": false
+  },
+  "runtime_boundary": {
+    "graph_transport": false,
+    "oauth": false,
+    "model_provider": false,
+    "durable_state": false,
+    "addin_manifest": false,
+    "network_origins": [],
+    "accepted_secrets": [],
+    "synthetic_stdout": "OPENLOOPS_SYNTHETIC_SMOKE_OK"
+  },
+  "build_policy": {
+    "locked_dependencies": true,
+    "source_maps": false,
+    "debug_symbols_in_release": false,
+    "npm_private": true,
+    "npm_files": [],
+    "npm_dry_run_metadata_files": ["LICENSE", "package.json"],
+    "generated_output_tracked": false,
+    "bootstrap_installs_software": false,
+    "bootstrap_accepts_secret_arguments": false
+  },
+  "sources": [
+    { "id": "SRC-RUST-RELEASE", "location": "https://blog.rust-lang.org/2026/07/16/Rust-1.97.1/" },
+    { "id": "SRC-NODE-RELEASES", "location": "https://nodejs.org/en/about/previous-releases" },
+    { "id": "SRC-OFFICE-JS", "location": "https://learn.microsoft.com/office/dev/add-ins/develop/develop-overview" },
+    { "id": "SRC-SPEC-BUILD", "location": "docs/product-spec.md#13-nonfunctional-requirements" },
+    { "id": "SRC-PLAN-PHASE-0", "location": "docs/implementation-plan.md#phase-0--adrs-threat-model-and-rust-skeleton" }
+  ]
+}

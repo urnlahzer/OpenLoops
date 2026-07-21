@@ -1,0 +1,18 @@
+[package]
+name = "openloops-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+openloops-application = { path = "../openloops-application" }
+openloops-contracts = { path = "../openloops-contracts" }
+openloops-domain = { path = "../openloops-domain" }
+openloops-graph = { path = "../openloops-graph" }
+openloops-inference = { path = "../openloops-inference" }
+openloops-persistence = { path = "../openloops-persistence" }
+
+[lints]
+workspace = true
