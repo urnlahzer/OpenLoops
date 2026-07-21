@@ -28,7 +28,7 @@
     { "id": "ADR-009", "status": "accepted" },
     { "id": "ADR-010", "status": "accepted" },
     { "id": "ADR-011", "status": "accepted" },
-    { "id": "ADR-012", "status": "planned" },
+    { "id": "ADR-012", "status": "accepted" },
     { "id": "ADR-013", "status": "planned" }
   ],
   "gates": [

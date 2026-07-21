@@ -94,8 +94,8 @@ $reminder=Json $ReminderPath 'P0-AUTOMATION-CROSS-CONTRACT-001'
 if($null-ne$reminder){if($reminder.separate_decisions.mode_semantics_eligibility_evaluation_flags_and_rollback-ne'ADR-011'){Fail 'P0-AUTOMATION-CROSS-CONTRACT-001'};$rmatrix=$reminder.review_link_boundary|ConvertTo-Json -Depth 10 -Compress}
 $gov=Json $GovernancePath 'P0-AUTOMATION-CROSS-CONTRACT-001'
 if($null-ne$gov){
- $a11=@($gov.adrs|Where-Object{$_.id-eq'ADR-011'});$planned=@($gov.adrs|Where-Object{$_.id-in@('ADR-012','ADR-013')})
- if($a11.Count-ne 1-or$a11[0].status-ne'accepted'-or@($planned|Where-Object{$_.status-ne'planned'}).Count-ne 0){Fail 'P0-AUTOMATION-CROSS-CONTRACT-001'}
+ $a11=@($gov.adrs|Where-Object{$_.id-eq'ADR-011'});$a12=@($gov.adrs|Where-Object{$_.id-eq'ADR-012'});$planned=@($gov.adrs|Where-Object{$_.id-in@('ADR-013')})
+ if($a11.Count-ne 1-or$a11[0].status-ne'accepted'-or$a12.Count-ne 1-or$a12[0].status-ne'accepted'-or@($planned|Where-Object{$_.status-ne'planned'}).Count-ne 0){Fail 'P0-AUTOMATION-CROSS-CONTRACT-001'}
  $own03=@($gov.owner_decisions|Where-Object{$_.id-eq'OWN-03'});if($own03.Count-ne 1-or($own03[0].adrs-notcontains'ADR-011')-or$own03[0].status-ne'accepted'){Fail 'P0-AUTOMATION-CROSS-CONTRACT-001'}
  if(@($gov.gates|Where-Object{$_.id-in$m.blocking_gates-and$_.status-ne'unrun'}).Count-ne 0){Fail 'P0-AUTOMATION-CROSS-CONTRACT-001'}
  $hybridCap=@($gov.capabilities|Where-Object{$_.id-eq'hybrid_reminder_mode'});$autoCap=@($gov.capabilities|Where-Object{$_.id-eq'fully_automatic_reminder_mode'})
@@ -115,8 +115,8 @@ $adr=Text $AdrPath 'P0-AUTOMATION-CROSS-CONTRACT-001';$threat=Text $ThreatPath '
 if((NHash $adr)-ne'77dd1396da6f88097bb638ce0677b0f6eba904e0350b8f9fa4e638c3c586baf2'){Fail 'P0-AUTOMATION-CROSS-CONTRACT-001'}
 if((NHash $threat)-ne'b81bc7f32a8a727e0c840aba2c36a2c45d86f6597b3a5794a419d94bf4bf3100'){Fail 'P0-AUTOMATION-CROSS-CONTRACT-001'}
 if((NHash $spec)-ne'c0a7718d78bde3804142e5b79a937a8d66a372bfe35406e2c8b2ce96d4c7ed54'){Fail 'P0-AUTOMATION-INVENTORY-001'}
-if((NHash $plan)-ne'a082f7800c303e40018b633af36802d77eacf56971d9c4438a00f55fd44a5971'){Fail 'P0-AUTOMATION-INVENTORY-001'}
-if((NHash $trace)-ne'a839a92f3f51ab4d47f188e0d3033ce0c4fbab7398a8cbccd61cdb983bf8b0ae'){Fail 'P0-AUTOMATION-INVENTORY-001'}
+if((NHash $plan)-ne'24d7f6a978f62b7d7a2eca0314361df84628ca515ee957593fa77f83f3b2e93f'){Fail 'P0-AUTOMATION-INVENTORY-001'}
+if((NHash $trace)-ne'90bd38ff7a1872e7550f40a1e01e966f2bc95d3f1e45eb0119478977505f776a'){Fail 'P0-AUTOMATION-INVENTORY-001'}
 Has $adr @('Status:** Accepted','P0-WI-14','OWN-03','G-AUTO, G-AUTO-FULL','alone owns OL-REM-017 execution, eligibility strata, evaluation, feature','flags, G-AUTO/G-AUTO-FULL evidence, and rollback to confirmation-first','A mode change is prospective only','No mode silently creates or rewrites a','invalidates the corresponding calibration','instantly, unilaterally, and','without running an evaluation, creating a corpus, flipping a flag, or') 'P0-AUTOMATION-CROSS-CONTRACT-001'
 Has $threat @('Automation and evaluation','Eligibility creep','Calibration rot after provider/model/schema/prompt/policy/threshold/category drift','Sealed judge-corpus contamination or leakage into maker/implementation-LLM context','Flag flip without independent gate evidence','Retroactive batch mutation on mode change or replay','Rollback to confirmation-first failing or being conditional','Judge-corpus content, labels, or predictions leaking into the repository or diagnostics','Semantic manipulation that passes schema validation but is unsafe','Sample sizes too small for the claimed 95% lower-bound precision','Inferred closure or external communication becoming automatic in any mode') 'P0-AUTOMATION-CROSS-CONTRACT-001'
 $ids=[regex]::Matches($trace,'(?m)^\| (P0-AUTOMATION-[A-Z-]+-001) \|')|ForEach-Object{$_.Groups[1].Value};Exact @($ids) $checks 'P0-AUTOMATION-INVENTORY-001';foreach($id in $checks){if(([regex]::Matches($trace,'\b'+[regex]::Escape($id)+'\b')).Count-ne 1){Fail 'P0-AUTOMATION-INVENTORY-001'}}

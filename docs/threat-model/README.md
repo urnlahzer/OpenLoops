@@ -4,8 +4,8 @@
 except for the linked P0-WI-02 privacy model, P0-WI-05 OAuth model,
  P0-WI-08 protected-local-state model, P0-WI-09 evidence-identity model, and
  P0-WI-10 model-provider model, P0-WI-11 policy/state model, P0-WI-12
- reminder-adapter model, P0-WI-13 add-in bridge model, and P0-WI-14
- automation-and-evaluation model.
+ reminder-adapter model, P0-WI-13 add-in bridge model, P0-WI-14
+ automation-and-evaluation model, and P0-WI-15 distribution-and-update model.
 
 This index prevents an implementation path from being treated as safe merely
 because its detailed ADR has not been written. Every routed capability remains
@@ -54,6 +54,10 @@ Detailed models completed so far:
   invalidation, rollback, and evaluation-evidence-privacy decision contract
   only; no evaluation, corpus, flag, or mode is active, and all named gates
   remain inactive.
+- [Distribution and update](distribution-and-update.md) — ADR-012
+  two-registration, update-trust-chain, release-artifact, installer/uninstall,
+  and diagnostics-rule decision contract only; nothing is signed, packaged,
+  registered, published, or installed, and G-ID/G-RELEASE remain inactive.
 
 `P0-THREAT-001` checks that all nine rows and their ADR, gate, owner, prohibited-
 behavior, and fallback routes remain represented in the machine-readable

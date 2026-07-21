@@ -366,6 +366,37 @@ pass; the current add-in tests, formatting, and lint also passed. The
 judgments are ephemeral work-item evidence; no reviewer prompt, transcript, or
 model output is tracked or packaged.
 
+### P0-WI-15 distribution and registration checks
+
+| Check ID | Exact assertion | Evidence | Status | Blocks |
+|---|---|---|---|---|
+| P0-DIST-INVENTORY-001 | P0-WI-15/ADR-012 has exact OWN-00/01/02, owned requirement (OL-NFR-010/011/012, exclusive of any other manifest's ownership claim), source, input-authority, separate-decision, runtime, and claim inventories; only ADR-012 advances from planned to accepted. | Distribution manifest; specification/plan; governance and ADR registries | Executable decision contract | Distribution runtime |
+| P0-DIST-REGISTRATION-001 | BYO public-client registration is the only enabled Phase 0/source-build path with placeholder-only tracked configuration and no secret on a command line; the PKCE-does-not-authenticate-the-binary limitation is preserved regardless of registration mode. | Distribution manifest; ADR-001; research connection-options.md | Executable registration contract | G-ID |
+| P0-DIST-SHARED-GOVERNANCE-001 | Shared project registration stays disabled and cannot be enabled by sign-in success, development convenience, or a passing test; its required governance-control catalog matches the research source's complete before-shared-production-registration list exactly. | Distribution manifest; research connection-options.md | Executable governance contract | G-ID, G-RELEASE |
+| P0-DIST-UPDATE-TRUST-001 | Update metadata is signed independently of package signing; a trusted-key inventory supports rotation/revocation; version policy is monotonic anti-downgrade; channel binding, expiry, exact package hash/size, atomic protected staging/replacement with recovery, source-revision-verifiable provenance, and no default elevation are all exact. | Distribution manifest; ADR-005 migration/rollback rules; R-21/R-22 | Executable update-trust contract | G-RELEASE, G-SEC-AUDIT |
+| P0-DIST-ARTIFACTS-001 | Every released artifact class has an explicit allowlist; SBOM and provenance are required; source maps and generated diagnostics are prohibited; npm/Cargo publishability remain disabled in Phase 0; canary/public-repository gates run at required release points and never print a suspected value. | Distribution manifest; AGENTS.md; build-skeleton manifest | Executable artifact-boundary contract | G-RELEASE |
+| P0-DIST-INSTALLER-001 | The installer is per-user and unelevated; uninstall is complete, removing every ADR-010 bridge-trust/certificate/protocol registration; residual-risk disclosure follows ADR-005/ADR-PRIV-001 without a physical-erasure claim; zero Graph mutation and no bulk artifact deletion. | Distribution manifest; ADR-001/005/010/PRIV-001 | Executable installer contract | G-RELEASE |
+| P0-DIST-DIAGNOSTICS-001 | The diagnostic-event allowlist stays empty; any future export requires an exact content-free schema plus ADR-012, G-PRIV, G-RELEASE, and G-SEC-AUDIT, and none of the four may be represented as satisfied by a partial subset. | Distribution/privacy manifests; ADR-PRIV-001 | Executable diagnostics contract | G-PRIV, G-RELEASE, G-SEC-AUDIT |
+| P0-DIST-PRIVACY-001 | No tracked client ID, tenant ID, secret, or non-placeholder registration value exists in any fixture or example; no signing key, package identity, or update-transport mechanic is guessed ahead of G-RELEASE. | Distribution manifest; canary mutations | Executable privacy contract | G-PRIV |
+| P0-DIST-CROSS-CONTRACT-001 | ADR-012 reconciles with ADR-001's registration-boundary wording, ADR-005's migration/rollback rules, ADR-010's certificate-cleanup rule, ADR-PRIV-001's diagnostics allowlist, the governance registry (ADR-012 accepted; ADR-013 still planned), the support matrix, and build-skeleton package rules without widening scope, runtime, or claims. | All Phase 0 contracts; deterministic checker | Executable | Next Phase 0 work item |
+| P0-DIST-CLAIMS-001 | P0-WI-15 signs no package, publishes no update, registers no shared Entra application, builds no installer, and enables/advertises/completes/passes no capability, support row, AC, scenario, or gate. | Distribution/governance/support/build manifests; package/public gates | Executable | Any product or runtime claim |
+| P0-DIST-FRESH-CHECKER-001 | Fresh-context security, registration-governance, governance, and adversarial judges must report no unresolved material registration, update-trust, artifact, installer, diagnostics, privacy, or traceability defect before closure. | Work-item review only; no prompt, transcript, or model output stored | Passed at P0-WI-15 closure | Next Phase 0 work item |
+
+P0-WI-15 accepts only the disabled ADR-012 distribution-and-registration
+decision contract. Nothing is signed, packaged, published, registered, or
+installed; no update mechanism exists; G-ID and G-RELEASE remain unrun, and
+every acceptance criterion or scenario that depends on either gate remains
+unpassed.
+
+P0-WI-15 closed on 2026-07-21 after all 11 deterministic distribution checks,
+56 synthetic/adversarial rejection cases, the complete Phase 0 deterministic
+checker regression, the metadata-only package allowlist, a prospective staged
+public-repository scan, and four fresh-context closure judgments passed. The
+unchanged product source remains covered by the P0-WI-10 exact source-build
+pass; the current add-in tests, formatting, and lint also passed. The
+judgments are ephemeral work-item evidence; no reviewer prompt, transcript, or
+model output is tracked or packaged.
+
 ## Product and functional requirements
 
 | PRD ID | Source requirement | Disposition | Specification | Planned verification | Approval |

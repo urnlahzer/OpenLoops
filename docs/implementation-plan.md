@@ -437,6 +437,28 @@ Each phase ends with executable evidence. A failed gate narrows the advertised c
   checker regression, and four fresh-context closure judgments passed. The
   unchanged product source remains covered by the P0-WI-10 exact source-build
   pass. No reviewer prompt, transcript, or model output was retained.
+- P0-WI-15 closed on 2026-07-21 and accepts ADR-012 and its closed, disabled distribution-and-
+  registration decision contract only. It records the two-registration model
+  (BYO public-client registration as the only Phase 0/source-build path with
+  placeholder-only tracked configuration; a shared OpenLoops registration
+  remaining a separately gated future option requiring the complete
+  publisher-governance control list), the signed update trust chain
+  (metadata signed independently of package signing, trusted-key
+  rotation/revocation, monotonic anti-downgrade, channel binding, expiry,
+  exact package hash/size, atomic protected staging/replacement with
+  recovery, source-revision-verifiable provenance, no default elevation), the
+  release-artifact boundary (explicit per-class allowlists, required
+  SBOM/provenance, prohibited source maps/generated diagnostics, disabled
+  `npm`/Cargo publishability), the per-user unelevated installer and complete
+  bridge-trust uninstall boundary, and the empty diagnostics rule without
+  signing, packaging, publishing, registering, or installing anything. Exact
+  signing technology, certificate provider, update transport, and channel
+  names remain unresolved pending G-RELEASE, which remains unrun alongside
+  G-ID. All 11 deterministic distribution checks, 56 synthetic mutation
+  rejection cases, the complete Phase 0 deterministic checker regression, and
+  four fresh-context closure judgments passed. The unchanged product source
+  remains covered by the P0-WI-10 exact source-build pass. No reviewer prompt,
+  transcript, or model output was retained.
 - Write data-flow/threat models for tokens, Graph content, model transmission, add-in bridge, local state, artifacts, diagnostics, update, and disconnect.
 - Define feature-to-scope manifest and capability flags.
 - Install repository guardrails on the working clone.
