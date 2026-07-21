@@ -423,6 +423,20 @@ Each phase ends with executable evidence. A failed gate narrows the advertised c
   fresh-context closure judgments passed. The unchanged product source remains
   covered by the P0-WI-10 exact source-build pass. No reviewer prompt,
   transcript, or model output was retained.
+- P0-WI-14 closed on 2026-07-21 and accepts ADR-011 and its closed, disabled
+  automation-and-evaluation decision contract only. It records the three
+  closed OL-REM-017 mode definitions and their exact eligibility strata, the
+  `hybrid_enabled`/`automatic_enabled` feature-flag topology, the sealed
+  evaluation-corpus governance, the calibration-invalidation rule set, and
+  instant rollback to confirmation-first without running an evaluation,
+  creating a corpus, flipping a flag, enabling a mode, or completing an
+  acceptance criterion or scenario. ADR-008 and ADR-009's deferred
+  automation-mode wording is closed without reopening either ADR; G-AUTO and
+  G-AUTO-FULL remain unrun. All 11 deterministic automation checks, 48
+  synthetic mutation rejection cases, the complete Phase 0 deterministic
+  checker regression, and four fresh-context closure judgments passed. The
+  unchanged product source remains covered by the P0-WI-10 exact source-build
+  pass. No reviewer prompt, transcript, or model output was retained.
 - Write data-flow/threat models for tokens, Graph content, model transmission, add-in bridge, local state, artifacts, diagnostics, update, and disconnect.
 - Define feature-to-scope manifest and capability flags.
 - Install repository guardrails on the working clone.

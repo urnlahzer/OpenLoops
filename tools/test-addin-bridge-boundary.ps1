@@ -81,7 +81,7 @@ JsonCase 'transport selected claimed' 'P0-BRIDGE-CLAIMS-001' 'contracts/addin/br
 JsonCase 'certificate mechanics proven claimed' 'P0-BRIDGE-CLAIMS-001' 'contracts/addin/bridge-boundary.json' {param($c)$c.claims.certificate_mechanics_proven=@('loopback_cert_v1')}
 
 JsonCase 'ADR-010 planned again' 'P0-BRIDGE-CROSS-CONTRACT-001' 'contracts/governance/capabilities.json' {param($c)($c.adrs|Where-Object{$_.id -eq 'ADR-010'}).status='planned'}
-JsonCase 'ADR-011 prematurely accepted' 'P0-BRIDGE-CROSS-CONTRACT-001' 'contracts/governance/capabilities.json' {param($c)($c.adrs|Where-Object{$_.id -eq 'ADR-011'}).status='accepted'}
+JsonCase 'ADR-011 regressed to planned' 'P0-BRIDGE-CROSS-CONTRACT-001' 'contracts/governance/capabilities.json' {param($c)($c.adrs|Where-Object{$_.id -eq 'ADR-011'}).status='planned'}
 JsonCase 'pairing-root ownership drift' 'P0-BRIDGE-CROSS-CONTRACT-001' 'contracts/persistence/protected-state-boundary.json' {param($c)($c.secret_inventory|Where-Object{$_.id -eq 'pairing_root_secret'}).owner='ADR-005'}
 JsonCase 'session secret becomes a database value' 'P0-BRIDGE-CROSS-CONTRACT-001' 'contracts/persistence/protected-state-boundary.json' {param($c)($c.secret_inventory|Where-Object{$_.id -eq 'session_secret'}).database_value='opaque_reference'}
 JsonCase 'office link boundary weakened' 'P0-BRIDGE-CROSS-CONTRACT-001' 'contracts/evidence/identity-boundary.json' {param($c)$c.office_and_link_contract.review_link='may contain a session or pairing value for unsupported clients'}

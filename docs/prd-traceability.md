@@ -317,7 +317,7 @@ packaged.
 | P0-BRIDGE-CONTENT-001 | No mailbox content, identifier, token, or authority-bearing URL may reach browser localStorage, IndexedDB, service-worker cache, a URL, console output, analytics, or a crash report on any add-in surface. | Bridge manifest; canary mutations | Executable content contract | G-PRIV |
 | P0-BRIDGE-FALLBACK-001 | Native companion status/review/recovery is the fallback whenever the bridge or add-in is unavailable; a failed G-ADDIN blocks the Outlook-add-in MVP and routes to OWN-01 rather than silently substituting native UI. | Bridge manifest; support-matrix fallback rule | Executable fallback contract | G-ADDIN |
 | P0-BRIDGE-PRIVACY-001 | No new persisted database record is introduced; any future pairing root stays in ADR-005's reserved pairing-root.dpapi blob and session secrets remain memory-only; a future persisted bridge record requires a separate ADR-PRIV-001 revision. | Bridge/persistence/privacy manifests | Executable privacy contract | G-PRIV, G-STATE |
-| P0-BRIDGE-CROSS-CONTRACT-001 | ADR-010 reconciles with ADR-005's pairing-root ownership, ADR-006's Office/link boundary, ADR-009's review-link deferral, the governance registry (ADR-010 accepted; ADR-011/012/013 still planned), the support-matrix client floor, and build-skeleton inactivity without widening fields, scope, permissions, runtime, or claims. | All Phase 0 contracts; deterministic checker | Executable | Next Phase 0 work item |
+| P0-BRIDGE-CROSS-CONTRACT-001 | ADR-010 reconciles with ADR-005's pairing-root ownership, ADR-006's Office/link boundary, ADR-009's review-link deferral, the governance registry (ADR-010 and ADR-011 accepted; ADR-012/013 still planned), the support-matrix client floor, and build-skeleton inactivity without widening fields, scope, permissions, runtime, or claims. | All Phase 0 contracts; deterministic checker | Executable | Next Phase 0 work item |
 | P0-BRIDGE-CLAIMS-001 | P0-WI-13 accepts no logical record, creates no persistent state, makes no network/Graph/Office call, requests no permission, and enables/advertises/completes/passes no dependency, capability, support row, AC, scenario, gate, transport, or certificate mechanic. | Bridge/governance/support/build manifests; package/public gates | Executable | Any product or runtime claim |
 | P0-BRIDGE-FRESH-CHECKER-001 | Fresh-context security, privacy, governance, and adversarial judges must report no unresolved material transport, bootstrap, session, certificate, review-link, content, fallback, privacy, or traceability defect before closure. | Work-item review only; no prompt, transcript, or model output stored | Passed at P0-WI-13 closure | Next Phase 0 work item |
 
@@ -328,6 +328,36 @@ acceptance results, and all named gates remain inactive, empty, disabled,
 unavailable, or unrun.
 
 P0-WI-13 closed on 2026-07-21 after all 12 deterministic bridge checks, 72
+synthetic/adversarial rejection cases, the complete Phase 0 deterministic
+checker regression, the metadata-only package allowlist, a prospective staged
+public-repository scan, and four fresh-context closure judgments passed. The
+unchanged product source remains covered by the P0-WI-10 exact source-build
+pass; the current add-in tests, formatting, and lint also passed. The
+judgments are ephemeral work-item evidence; no reviewer prompt, transcript, or
+model output is tracked or packaged.
+
+### P0-WI-14 automation and evaluation checks
+
+| Check ID | Exact assertion | Evidence | Status | Blocks |
+|---|---|---|---|---|
+| P0-AUTOMATION-INVENTORY-001 | P0-WI-14/ADR-011 has exact OWN-03, owned requirement (OL-REM-010/017, exclusive of any other manifest's ownership claim), AC/scenario, gate, source, input-authority, separate-decision, runtime, and claim inventories; only ADR-011 advances from planned to accepted. | Automation manifest; specification/plan; governance and ADR registries | Executable decision contract | Automation runtime |
+| P0-AUTOMATION-MODES-001 | The three OL-REM-017 modes are a closed catalog: confirmation-first requires an explicit user action for every creation/service update; hybrid auto-creates only the three narrow explicit categories with a resolved deadline, high confidence, deterministic identity, and no quote/delegation/coreference ambiguity, and auto-updates only OpenLoops-owned fields; automatic requires opt-in plus G-AUTO-FULL and still keeps candidate/ambiguous/identity/delegation/quote/undated/historical/stale-write cases review-only. | Automation manifest; product-spec §6.8 | Executable mode contract | G-AUTO, G-AUTO-FULL |
+| P0-AUTOMATION-STRATA-001 | No mode reading ever admits a candidate, ambiguous, undated, historical, medium/low-confidence, identity-ambiguous, delegation-ambiguous, or quote-ambiguous case to automatic mutation; inferred closure and external communication are never automatic in any mode. | Automation manifest; synthetic stratum-widening mutations | Executable eligibility contract | G-AUTO, G-AUTO-FULL |
+| P0-AUTOMATION-FLAGS-001 | `hybrid_enabled` and `automatic_enabled` default false and flip only after their named gate passes plus an accountable owner release decision; no code default, configuration drift, mode-change UI, or settings preference alone flips a flag. | Automation manifest; synthetic flag mutations | Executable flag-topology contract | G-AUTO, G-AUTO-FULL |
+| P0-AUTOMATION-CORPUS-001 | The release-judge corpus is wholly synthetic, sealed outside the repository/implementation-LLM context/maker workflow, split by conversation family, at least 30% difficult/ambiguous and at least 20% quoted-history, with declared per-stratum sample sizes, a lower-bound confidence procedure, immutable hashes/version, a pinned maximum tuning-attempt budget, and contamination checks; "zero in 10,000" is framed as an observation, never a guarantee. | Automation manifest; implementation-plan §8.2 | Executable corpus-governance contract | G-AUTO, G-AUTO-FULL |
+| P0-AUTOMATION-CALIBRATION-001 | Provider, model digest/label, schema, prompt, policy, review-threshold, or category drift invalidates calibration and reverts any already-flipped flag to confirmation-first pending re-evaluation; only an explicit review-only replay follows drift. | Automation manifest; ADR-007 drift rules | Executable calibration contract | G-AUTO, G-AUTO-FULL |
+| P0-AUTOMATION-ROLLBACK-001 | Rollback to confirmation-first is instant, unilateral, lossless, and unconditional regardless of flag/gate state, and never mutates, recreates, or deletes a historical batch, artifact, or loop transition. | Automation manifest; synthetic rollback mutations | Executable rollback contract | G-AUTO, G-AUTO-FULL |
+| P0-AUTOMATION-PRIVACY-001 | No corpus content, label, prediction, prompt, transcript, or model output may enter the repository, a package, or a diagnostic artifact; only sanitized aggregate counts and stable non-content identifiers are approved; reported metrics match implementation-plan §8.2 and imply no persistent user profiling. | Automation manifest; canary mutations | Executable privacy contract | G-PRIV |
+| P0-AUTOMATION-CROSS-CONTRACT-001 | ADR-011 reconciles with ADR-007's drift rules, ADR-008's deferral wording, ADR-009's hybrid strata, the governance registry (ADR-011 accepted; ADR-012/013 still planned), the support matrix, and build-skeleton inactivity without widening fields, scope, runtime, or claims. | All Phase 0 contracts; deterministic checker | Executable | Next Phase 0 work item |
+| P0-AUTOMATION-CLAIMS-001 | P0-WI-14 enables no mode, flips no flag, runs no evaluation, creates no corpus, and enables/advertises/completes/passes no capability, support row, AC, scenario, gate, or calibration result. | Automation/governance/support/build manifests; package/public gates | Executable | Any product or runtime claim |
+| P0-AUTOMATION-FRESH-CHECKER-001 | Fresh-context safety, evaluation-integrity, governance, and adversarial judges must report no unresolved material mode, eligibility-stratum, flag, corpus-governance, calibration, rollback, privacy, or traceability defect before closure. | Work-item review only; no prompt, transcript, or model output stored | Passed at P0-WI-14 closure | Next Phase 0 work item |
+
+P0-WI-14 accepts only the disabled ADR-011 automation-and-evaluation decision
+contract. No mode is enabled, no evaluation is run, no corpus is created, no
+flag is flipped, and no acceptance criterion, scenario, or named gate
+advances.
+
+P0-WI-14 closed on 2026-07-21 after all 11 deterministic automation checks, 48
 synthetic/adversarial rejection cases, the complete Phase 0 deterministic
 checker regression, the metadata-only package allowlist, a prospective staged
 public-repository scan, and four fresh-context closure judgments passed. The
