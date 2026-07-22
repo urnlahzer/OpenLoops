@@ -13,6 +13,29 @@
 //! each owning ADR. Sixteen of the twenty-three purposes remain
 //! `unavailable_pending_owner_ADR` and this module refuses to compute a
 //! digest for them.
+//!
+//! `openloops-application`'s IMPL-07 story explicitly did **not** close
+//! [`PurposeTag::OperationLedgerOperationKey`], even though ADR-009's
+//! `contracts/reminder/adapter-boundary.json` `operation_protocol.intent_hmac_input_order`
+//! fully specifies that purpose's 18 ordered components. This crate's own
+//! binding contract, `contracts/persistence/protected-state-boundary.json`
+//! `digest_suite.purpose_catalog`, records `operation_ledger.operation_key_hmac`'s
+//! `owner` as **"ADR-009 and ADR-011"** — two named owners, not one — and its
+//! `purpose_catalog_status` closes a row only "until every named owner
+//! closes them." ADR-011 (`docs/adr/ADR-011-automation-and-evaluation.md`)
+//! does not address the operation-key layout at all, so the second owner has
+//! not closed its half; the row must stay `unavailable_pending_owner_ADR`
+//! here, and [`compute`]/[`frame`] must keep refusing it, regardless of how
+//! completely ADR-009 alone specifies the framing. `openloops_application::ledger`
+//! documents this as an explicit, tested honest gap: it implements the full
+//! ADR-009 operation-ledger state machine over an opaque, externally supplied
+//! key, and its own `operation_key_hmac` helper (the ADR-009 intent-to-key
+//! framing) is tested only to confirm it fails closed with
+//! [`DigestError::LayoutNotYetOwned`] while this purpose remains unavailable.
+//! The two sibling `operation_ledger` purposes (`expected_remote_version_hmac`,
+//! `remote_correlation_hmac`) are unrelated to the operation key and stay
+//! `unavailable_pending_owner_ADR` for their own reason: no adapter gate has
+//! proven a remote marker/version contract yet.
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
@@ -144,9 +167,13 @@ impl PurposeTag {
     }
 
     /// Whether `digest_suite.purpose_catalog[].input_layout` is closed
-    /// (an ADR-006 reference) rather than `unavailable_pending_owner_ADR`.
+    /// (an owning-ADR reference) rather than `unavailable_pending_owner_ADR`.
     ///
-    /// Exactly the first seven catalog rows are closed today.
+    /// Exactly the first seven catalog rows (ADR-006) are closed today.
+    /// [`Self::OperationLedgerOperationKey`] is *not* included even though
+    /// ADR-009 alone fully specifies its layout: the contract's `owner` for
+    /// that row is "ADR-009 and ADR-011" and ADR-011 has not closed its half
+    /// (see this module's doc comment).
     #[must_use]
     pub const fn is_layout_closed(self) -> bool {
         matches!(
@@ -342,6 +369,24 @@ mod tests {
         ];
         assert_eq!(unavailable.len(), 16);
         assert!(unavailable.iter().all(|p| !p.is_layout_closed()));
+    }
+
+    #[test]
+    fn operation_ledger_operation_key_refuses_to_frame_pending_the_second_owner() {
+        // `contracts/persistence/protected-state-boundary.json`
+        // `digest_suite.purpose_catalog`'s `operation_ledger.operation_key_hmac`
+        // row names owner "ADR-009 and ADR-011"; ADR-011 has not closed its
+        // half, so this purpose must stay refused even though ADR-009 alone
+        // fully specifies `intent_hmac_input_order`.
+        assert_eq!(
+            frame(
+                PurposeTag::OperationLedgerOperationKey,
+                account(),
+                schema(),
+                &[]
+            ),
+            Err(DigestError::LayoutNotYetOwned)
+        );
     }
 
     #[test]

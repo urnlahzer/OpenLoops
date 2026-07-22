@@ -76,10 +76,10 @@ if ($manifest.toolchains.rust_contract_tooling.typify.version -ne '0.7.0' -or
 $expectedLayers = @{
     domain = @{ package='openloops-domain'; dependencies=@() }
     contracts = @{ package='openloops-contracts'; dependencies=@() }
-    application = @{ package='openloops-application'; dependencies=@('openloops-contracts','openloops-domain') }
+    application = @{ package='openloops-application'; dependencies=@('openloops-contracts','openloops-domain','openloops-persistence') }
     graph = @{ package='openloops-graph'; dependencies=@('openloops-application','openloops-domain','openloops-persistence') }
     inference = @{ package='openloops-inference'; dependencies=@('openloops-application','openloops-contracts','openloops-domain') }
-    persistence = @{ package='openloops-persistence'; dependencies=@('openloops-application','openloops-domain') }
+    persistence = @{ package='openloops-persistence'; dependencies=@('openloops-domain') }
     desktop = @{ package='openloops-desktop'; dependencies=@('openloops-application','openloops-contracts','openloops-domain','openloops-graph','openloops-inference','openloops-persistence') }
 }
 Exact @($manifest.workspace.PSObject.Properties.Name) @($expectedLayers.Keys) 'P0-SKELETON-DIRECTION-001'

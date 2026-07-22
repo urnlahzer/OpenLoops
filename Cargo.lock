@@ -290,6 +290,7 @@ version = "0.0.0"
 dependencies = [
  "openloops-contracts",
  "openloops-domain",
+ "openloops-persistence",
 ]
 
 [[package]]
@@ -342,7 +343,6 @@ dependencies = [
  "aes-gcm",
  "getrandom",
  "hmac",
- "openloops-application",
  "openloops-domain",
  "rusqlite",
  "sha2",

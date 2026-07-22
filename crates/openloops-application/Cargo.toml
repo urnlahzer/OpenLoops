@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 openloops-contracts = { path = "../openloops-contracts" }
 openloops-domain = { path = "../openloops-domain" }
+openloops-persistence = { path = "../openloops-persistence" }
 
 [lints]
 workspace = true
