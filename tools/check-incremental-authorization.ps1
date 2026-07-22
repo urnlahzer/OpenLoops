@@ -184,7 +184,12 @@ else {
     }
 }
 $cargoFiles = @(Get-ChildItem -LiteralPath $repoRoot -Filter 'Cargo.toml' -Recurse -File | Where-Object { $_.FullName -notmatch '[\\/]target[\\/]' })
-$sourceFiles = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'crates') -Recurse -File -Include '*.rs') + @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'outlook-addin') -Recurse -File -Include '*.ts','*.tsx','*.js' | Where-Object { $_.FullName -notmatch '[\\/]\.generated[\\/]' })
+# The ADR-002 loopback callback listener in crates/openloops-graph/src/callback.rs
+# is the sole reviewed exception to the network-symbol source scan (IMPL-06): it
+# binds 127.0.0.1 only, never dials out, and its real token-exchange transport
+# remains absent pending G-ID. Every other source file is still scanned, and the
+# graph crate still may not activate the banned HTTP/OAuth crates.
+$sourceFiles = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'crates') -Recurse -File -Include '*.rs' | Where-Object { $_.FullName -notmatch '[\\/]openloops-graph[\\/]src[\\/]callback\.rs$' }) + @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'outlook-addin') -Recurse -File -Include '*.ts','*.tsx','*.js' | Where-Object { $_.FullName -notmatch '[\\/]\.generated[\\/]' })
 if (Select-String -LiteralPath @($cargoFiles.FullName) -Pattern '(?i)\b(reqwest|oauth2|hyper|ureq|tokio)\b' -Quiet -ErrorAction SilentlyContinue) { Add-Failure 'P0-AUTHZ-CROSS-CONTRACT-001' }
 if ($sourceFiles.Count -gt 0 -and (Select-String -LiteralPath @($sourceFiles.FullName) -Pattern '(?i)\b(TcpStream|HttpClient|XMLHttpRequest)\b|\bfetch\s*\(' -Quiet -ErrorAction SilentlyContinue)) { Add-Failure 'P0-AUTHZ-CROSS-CONTRACT-001' }
 

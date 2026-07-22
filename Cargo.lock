@@ -323,6 +323,7 @@ version = "0.0.0"
 dependencies = [
  "openloops-application",
  "openloops-domain",
+ "openloops-persistence",
 ]
 
 [[package]]

@@ -28,6 +28,7 @@
 //! | [`store`] | `database_contract`, `transaction_contract` |
 //! | [`anchor`] | `rollback_recovery.anchor_format`/`anchor_protocol` (commitment math) |
 //! | [`error`] | the sanitized error taxonomy shared across modules |
+//! | [`shared`] | narrow CSPRNG/SHA-256 re-exports for sibling crates (`openloops-graph`'s PKCE machine); not part of the protected-state API |
 //!
 //! # Honest scope limits (read before relying on this crate for anything real)
 //!
@@ -80,10 +81,12 @@ mod error;
 pub mod ids;
 pub mod protected_file;
 pub mod reservation;
+pub mod shared;
 pub mod state_root;
 pub mod store;
 
 pub use error::RngError;
+pub use shared::{fill_random, sha256};
 
 /// Phase 0 supplies no durable store and writes no runtime values.
 #[must_use]
