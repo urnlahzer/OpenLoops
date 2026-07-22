@@ -352,7 +352,7 @@ $persistenceRoot = Join-Path $repoRoot 'crates\openloops-persistence'
 $persistenceFiles = @(Get-ChildItem -LiteralPath $persistenceRoot -Recurse -File | ForEach-Object {
     [IO.Path]::GetRelativePath($persistenceRoot, $_.FullName).Replace('\','/')
 })
-Exact @($persistenceFiles) @('Cargo.toml','src/lib.rs') 'P0-STATE-CLAIMS-001'
+Exact @($persistenceFiles) @('Cargo.toml','src/aad.rs','src/anchor.rs','src/digest.rs','src/dpapi.rs','src/dpapi_ffi.rs','src/envelope.rs','src/error.rs','src/ids.rs','src/lib.rs','src/protected_file.rs','src/reservation.rs','src/state_root.rs','src/store.rs') 'P0-STATE-CLAIMS-001'
 $persistenceSource = Get-Content -Raw -LiteralPath (Join-Path $persistenceRoot 'src\lib.rs')
 if ($persistenceSource -notmatch 'const fn is_available\(\) -> bool\s*\{\s*false\s*\}') { Fail 'P0-STATE-CLAIMS-001' }
 
@@ -377,7 +377,7 @@ function Get-WorkspaceBuildInputs([string]$Root) {
 $workspaceRoot = Resolve-Input $WorkspaceScanRoot
 $workspaceInputs = @(Get-WorkspaceBuildInputs $workspaceRoot | Sort-Object)
 $workspaceRelative = @($workspaceInputs | ForEach-Object { [IO.Path]::GetRelativePath($workspaceRoot, $_).Replace('\','/') })
-$expectedWorkspaceInputs = @('Cargo.lock','Cargo.toml','crates/openloops-application/Cargo.toml','crates/openloops-application/src/lib.rs','crates/openloops-contracts/Cargo.toml','crates/openloops-contracts/src/lib.rs','crates/openloops-desktop/Cargo.toml','crates/openloops-desktop/src/main.rs','crates/openloops-domain/Cargo.toml','crates/openloops-domain/src/command.rs','crates/openloops-domain/src/deadline.rs','crates/openloops-domain/src/display.rs','crates/openloops-domain/src/establishment.rs','crates/openloops-domain/src/facets.rs','crates/openloops-domain/src/hypothesis.rs','crates/openloops-domain/src/ids.rs','crates/openloops-domain/src/legality.rs','crates/openloops-domain/src/lib.rs','crates/openloops-domain/src/record.rs','crates/openloops-domain/src/transition.rs','crates/openloops-graph/Cargo.toml','crates/openloops-graph/src/lib.rs','crates/openloops-inference/Cargo.toml','crates/openloops-inference/src/lib.rs','crates/openloops-persistence/Cargo.toml','crates/openloops-persistence/src/lib.rs','rust-toolchain.toml')
+$expectedWorkspaceInputs = @('Cargo.lock','Cargo.toml','crates/openloops-application/Cargo.toml','crates/openloops-application/src/lib.rs','crates/openloops-contracts/Cargo.toml','crates/openloops-contracts/src/lib.rs','crates/openloops-desktop/Cargo.toml','crates/openloops-desktop/src/main.rs','crates/openloops-domain/Cargo.toml','crates/openloops-domain/src/command.rs','crates/openloops-domain/src/deadline.rs','crates/openloops-domain/src/display.rs','crates/openloops-domain/src/establishment.rs','crates/openloops-domain/src/facets.rs','crates/openloops-domain/src/hypothesis.rs','crates/openloops-domain/src/ids.rs','crates/openloops-domain/src/legality.rs','crates/openloops-domain/src/lib.rs','crates/openloops-domain/src/record.rs','crates/openloops-domain/src/transition.rs','crates/openloops-graph/Cargo.toml','crates/openloops-graph/src/lib.rs','crates/openloops-inference/Cargo.toml','crates/openloops-inference/src/lib.rs','crates/openloops-persistence/Cargo.toml','crates/openloops-persistence/src/aad.rs','crates/openloops-persistence/src/anchor.rs','crates/openloops-persistence/src/digest.rs','crates/openloops-persistence/src/dpapi_ffi.rs','crates/openloops-persistence/src/dpapi.rs','crates/openloops-persistence/src/envelope.rs','crates/openloops-persistence/src/error.rs','crates/openloops-persistence/src/ids.rs','crates/openloops-persistence/src/lib.rs','crates/openloops-persistence/src/protected_file.rs','crates/openloops-persistence/src/reservation.rs','crates/openloops-persistence/src/state_root.rs','crates/openloops-persistence/src/store.rs','rust-toolchain.toml')
 ExactOrdered $workspaceRelative $expectedWorkspaceInputs 'P0-STATE-CLAIMS-001'
 $workspaceFingerprintRows = @()
 $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
@@ -388,21 +388,33 @@ foreach ($sourcePath in $workspaceInputs) {
         Fail 'P0-STATE-CLAIMS-001'
         continue
     }
+    $relative = [IO.Path]::GetRelativePath($workspaceRoot, $sourcePath).Replace('\','/')
+    # ADR-005 implementation is sanctioned only inside crates/openloops-persistence.
+    # The selected-dependency and API scan below now asserts confinement: any use
+    # outside that crate, or a locked version other than the exact activated pin,
+    # still fails closed. (Re-scoped at IMPL-03 from the Phase 0 zero-runtime scan
+    # without removing any pattern.)
+    $isSanctionedPersistenceFile = $relative -like 'crates/openloops-persistence/*'
     if ([IO.Path]::GetFileName($sourcePath) -eq 'Cargo.toml') {
-        if ($sourceText -match '(?i)\b(aes-gcm|hmac|sha2|getrandom|rusqlite|windows-sys|zeroize)\b') { Fail 'P0-STATE-CLAIMS-001' }
+        if (-not $isSanctionedPersistenceFile -and $sourceText -match '(?i)\b(aes-gcm|hmac|sha2|getrandom|rusqlite|windows-sys|zeroize)\b') { Fail 'P0-STATE-CLAIMS-001' }
     } elseif ([IO.Path]::GetFileName($sourcePath) -eq 'Cargo.lock') {
-        if ($sourceText -match '(?ms)\[\[package\]\]\s+name\s*=\s*"(aes-gcm|hmac|sha2|getrandom|rusqlite|windows-sys|zeroize)"') { Fail 'P0-STATE-CLAIMS-001' }
-    } elseif ($sourceText -match '(?i)CryptProtectData|CryptUnprotectData|\brusqlite\b|\baes_gcm\b|Aes256Gcm|\bhmac::|\bsha2::|\bgetrandom::|\bwindows_sys\b|\bzeroize\b|\bstd::fs\b|\btokio::fs\b|File::create|OpenOptions|Connection::open') {
+        $activatedPins = @{ 'aes-gcm'='0.11.0'; 'hmac'='0.13.0'; 'sha2'='0.11.0'; 'getrandom'='0.4.3'; 'rusqlite'='0.40.1'; 'windows-sys'='0.61.2'; 'zeroize'='1.9.0' }
+        foreach ($lockMatch in [regex]::Matches($sourceText, '(?ms)\[\[package\]\]\s+name\s*=\s*"(aes-gcm|hmac|sha2|getrandom|rusqlite|windows-sys|zeroize)"\s+version\s*=\s*"([^"]+)"')) {
+            if ($lockMatch.Groups[2].Value -ne $activatedPins[$lockMatch.Groups[1].Value]) { Fail 'P0-STATE-CLAIMS-001' }
+        }
+        foreach ($pinName in $activatedPins.Keys) {
+            if ($sourceText -notmatch ('(?ms)\[\[package\]\]\s+name\s*=\s*"' + [regex]::Escape($pinName) + '"\s+version\s*=\s*"' + [regex]::Escape($activatedPins[$pinName]) + '"')) { Fail 'P0-STATE-CLAIMS-001' }
+        }
+    } elseif (-not $isSanctionedPersistenceFile -and $sourceText -match '(?i)CryptProtectData|CryptUnprotectData|\brusqlite\b|\baes_gcm\b|Aes256Gcm|\bhmac::|\bsha2::|\bgetrandom::|\bwindows_sys\b|\bzeroize\b|\bstd::fs\b|\btokio::fs\b|File::create|OpenOptions|Connection::open') {
         Fail 'P0-STATE-CLAIMS-001'
     }
-    $relative = [IO.Path]::GetRelativePath($workspaceRoot, $sourcePath).Replace('\','/')
     $normalizedSourceText = $sourceText.Replace("`r`n", "`n").Replace("`r", "`n")
     $fileHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($strictUtf8.GetBytes($normalizedSourceText))).ToLowerInvariant()
     $workspaceFingerprintRows += "$relative`0$fileHash"
 }
 $workspaceFingerprintMaterial = $workspaceFingerprintRows -join "`n"
 $workspaceFingerprint = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($workspaceFingerprintMaterial))).ToLowerInvariant()
-if ($workspaceFingerprint -ne 'a36b0f0e4d3e788e1594e1a3d716b10dacd98389da7925d1b72ff8d25770a6a4') { Fail 'P0-STATE-CLAIMS-001' }
+if ($workspaceFingerprint -ne 'b9ed3e6592767546dd105d13223223577e318a4ff82b1c4912f60e3a442b00a6') { Fail 'P0-STATE-CLAIMS-001' }
 
 $trace = Get-Content -Raw -LiteralPath (Resolve-Input $TraceabilityPath)
 $expectedChecks = @('P0-STATE-INVENTORY-001','P0-STATE-SCHEMA-001','P0-STATE-ENVELOPE-001','P0-STATE-KEYS-001','P0-STATE-BINDING-001','P0-STATE-TRANSACTION-001','P0-STATE-MIGRATION-001','P0-STATE-ROLLBACK-001','P0-STATE-LIFECYCLE-001','P0-STATE-PRIVACY-001','P0-STATE-CROSS-CONTRACT-001','P0-STATE-CLAIMS-001','P0-STATE-FRESH-CHECKER-001')
