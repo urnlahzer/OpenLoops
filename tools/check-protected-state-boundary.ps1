@@ -402,7 +402,7 @@ foreach ($sourcePath in $workspaceInputs) {
 }
 $workspaceFingerprintMaterial = $workspaceFingerprintRows -join "`n"
 $workspaceFingerprint = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($workspaceFingerprintMaterial))).ToLowerInvariant()
-if ($workspaceFingerprint -ne '90bd5ad06ccede433a466fc19405ebbe9930324282cf62482b8ae317a8e3b49f') { Fail 'P0-STATE-CLAIMS-001' }
+if ($workspaceFingerprint -ne 'a36b0f0e4d3e788e1594e1a3d716b10dacd98389da7925d1b72ff8d25770a6a4') { Fail 'P0-STATE-CLAIMS-001' }
 
 $trace = Get-Content -Raw -LiteralPath (Resolve-Input $TraceabilityPath)
 $expectedChecks = @('P0-STATE-INVENTORY-001','P0-STATE-SCHEMA-001','P0-STATE-ENVELOPE-001','P0-STATE-KEYS-001','P0-STATE-BINDING-001','P0-STATE-TRANSACTION-001','P0-STATE-MIGRATION-001','P0-STATE-ROLLBACK-001','P0-STATE-LIFECYCLE-001','P0-STATE-PRIVACY-001','P0-STATE-CROSS-CONTRACT-001','P0-STATE-CLAIMS-001','P0-STATE-FRESH-CHECKER-001')
