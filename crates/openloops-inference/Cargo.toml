@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 openloops-application = { path = "../openloops-application" }
+openloops-contracts = { path = "../openloops-contracts" }
 openloops-domain = { path = "../openloops-domain" }
 
 [lints]

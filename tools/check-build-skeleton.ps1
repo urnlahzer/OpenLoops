@@ -78,7 +78,7 @@ $expectedLayers = @{
     contracts = @{ package='openloops-contracts'; dependencies=@() }
     application = @{ package='openloops-application'; dependencies=@('openloops-contracts','openloops-domain') }
     graph = @{ package='openloops-graph'; dependencies=@('openloops-application','openloops-domain') }
-    inference = @{ package='openloops-inference'; dependencies=@('openloops-application','openloops-domain') }
+    inference = @{ package='openloops-inference'; dependencies=@('openloops-application','openloops-contracts','openloops-domain') }
     persistence = @{ package='openloops-persistence'; dependencies=@('openloops-application','openloops-domain') }
     desktop = @{ package='openloops-desktop'; dependencies=@('openloops-application','openloops-contracts','openloops-domain','openloops-graph','openloops-inference','openloops-persistence') }
 }

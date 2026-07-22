@@ -24,6 +24,7 @@ pub mod blocks;
 pub mod canonical;
 pub mod error;
 pub mod message;
+pub mod validation;
 pub mod walker;
 
 /// Phase 0 supplies no model provider or content-analysis path.

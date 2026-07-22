@@ -330,6 +330,7 @@ name = "openloops-inference"
 version = "0.0.0"
 dependencies = [
  "openloops-application",
+ "openloops-contracts",
  "openloops-domain",
 ]
 

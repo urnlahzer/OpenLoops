@@ -12,7 +12,8 @@
 //! | [`ids`] | opaque identifiers and bounded reference collections underlying every `record_contracts` field |
 //! | [`legality`] | `legality_rules` (the Cartesian facet-combination subset) |
 //! | [`establishment`] | `establishment_policy` |
-//! | [`deadline`] | `deadline_policy` |
+//! | [`deadline`] | `deadline_policy` (precedence and aging) |
+//! | [`deadline_parse`] | `deadline_policy` (OL-DUE-002 deterministic text parsing) |
 //! | [`hypothesis`] | `hypothesis_projection` |
 //! | [`command`] | `command_policy`, `transition_policy`, `correction_policy.duplicate` |
 //! | [`transition`] | `record_contracts[transition]` |
@@ -21,6 +22,7 @@
 
 pub mod command;
 pub mod deadline;
+pub mod deadline_parse;
 pub mod display;
 pub mod establishment;
 pub mod facets;
