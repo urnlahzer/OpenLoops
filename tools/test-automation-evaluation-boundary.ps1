@@ -55,7 +55,7 @@ JsonCase 'evaluation run claim' 'P0-AUTOMATION-CLAIMS-001' 'contracts/automation
 JsonCase 'corpus created claim' 'P0-AUTOMATION-CLAIMS-001' 'contracts/automation/evaluation-boundary.json' {param($c)$c.runtime_boundary.corpus_created=$true}
 
 JsonCase 'ADR-011 prematurely revert while capability claimed enabled' 'P0-AUTOMATION-CROSS-CONTRACT-001' 'contracts/governance/capabilities.json' {param($c)($c.adrs|Where-Object{$_.id -eq 'ADR-011'}).status='planned'}
-JsonCase 'ADR-013 prematurely accepted' 'P0-AUTOMATION-CROSS-CONTRACT-001' 'contracts/governance/capabilities.json' {param($c)($c.adrs|Where-Object{$_.id -eq 'ADR-013'}).status='accepted'}
+JsonCase 'ADR-013 regressed to planned' 'P0-AUTOMATION-CROSS-CONTRACT-001' 'contracts/governance/capabilities.json' {param($c)($c.adrs|Where-Object{$_.id -eq 'ADR-013'}).status='planned'}
 JsonCase 'hybrid capability enabled in governance' 'P0-AUTOMATION-CROSS-CONTRACT-001' 'contracts/governance/capabilities.json' {param($c)($c.capabilities|Where-Object{$_.id -eq 'hybrid_reminder_mode'}).state='enabled'}
 JsonCase 'gate marked passed in governance' 'P0-AUTOMATION-CROSS-CONTRACT-001' 'contracts/governance/capabilities.json' {param($c)($c.gates|Where-Object{$_.id -eq 'G-AUTO'}).status='passed'}
 JsonCase 'policy separate-decision drift' 'P0-AUTOMATION-CROSS-CONTRACT-001' 'contracts/domain/policy-state-boundary.json' {param($c)$c.separate_decisions.automation_modes_eligibility_evaluation_and_feature_flags='ADR-009'}

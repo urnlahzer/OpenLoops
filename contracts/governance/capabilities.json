@@ -29,7 +29,7 @@
     { "id": "ADR-010", "status": "accepted" },
     { "id": "ADR-011", "status": "accepted" },
     { "id": "ADR-012", "status": "accepted" },
-    { "id": "ADR-013", "status": "planned" }
+    { "id": "ADR-013", "status": "accepted" }
   ],
   "gates": [
     { "id": "G-ID", "status": "unrun", "owner_on_failure": "product_owner", "fallback": "identity-dependent capabilities remain disabled" },

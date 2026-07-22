@@ -244,7 +244,7 @@ foreach ($owner in @($registry.owner_decisions)) {
 }
 
 $acceptedAdrs = @($registry.adrs | Where-Object { $_.status -eq 'accepted' } | ForEach-Object { [string]$_.id })
-Test-ExactSet -Actual $acceptedAdrs -Expected @('ADR-001', 'ADR-002', 'ADR-003', 'ADR-004', 'ADR-005', 'ADR-006', 'ADR-007', 'ADR-008', 'ADR-009', 'ADR-010', 'ADR-011', 'ADR-012', 'ADR-PRIV-001') -FailureId 'P0-TRACE-001'
+Test-ExactSet -Actual $acceptedAdrs -Expected @('ADR-001', 'ADR-002', 'ADR-003', 'ADR-004', 'ADR-005', 'ADR-006', 'ADR-007', 'ADR-008', 'ADR-009', 'ADR-010', 'ADR-011', 'ADR-012', 'ADR-013', 'ADR-PRIV-001') -FailureId 'P0-TRACE-001'
 if (@($registry.adrs | Where-Object { $_.status -notin @('accepted', 'planned') }).Count -gt 0) {
     Add-Failure -Id 'P0-TRACE-001'
 }

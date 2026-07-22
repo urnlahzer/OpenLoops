@@ -92,7 +92,7 @@ if($null-ne$reminder){Has ($reminder.review_link_boundary|ConvertTo-Json -Depth 
 $gov=Json $GovernancePath 'P0-BRIDGE-CROSS-CONTRACT-001'
 if($null-ne$gov){
  $a10=@($gov.adrs|Where-Object{$_.id-eq'ADR-010'});$a11=@($gov.adrs|Where-Object{$_.id-eq'ADR-011'});$a12=@($gov.adrs|Where-Object{$_.id-eq'ADR-012'});$planned=@($gov.adrs|Where-Object{$_.id-in@('ADR-013')})
- if($a10.Count-ne 1-or$a10[0].status-ne'accepted'-or$a11.Count-ne 1-or$a11[0].status-ne'accepted'-or$a12.Count-ne 1-or$a12[0].status-ne'accepted'-or@($planned|Where-Object{$_.status-ne'planned'}).Count-ne 0){Fail 'P0-BRIDGE-CROSS-CONTRACT-001'}
+ if($a10.Count-ne 1-or$a10[0].status-ne'accepted'-or$a11.Count-ne 1-or$a11[0].status-ne'accepted'-or$a12.Count-ne 1-or$a12[0].status-ne'accepted'-or@($planned|Where-Object{$_.status-ne'accepted'}).Count-ne 0){Fail 'P0-BRIDGE-CROSS-CONTRACT-001'}
  if(@($gov.gates|Where-Object{$_.id-in$m.blocking_gates-and$_.status-ne'unrun'}).Count-ne 0){Fail 'P0-BRIDGE-CROSS-CONTRACT-001'}
 }
 $support=Json $SupportPath 'P0-BRIDGE-CROSS-CONTRACT-001'
@@ -110,8 +110,8 @@ $adr=Text $AdrPath 'P0-BRIDGE-CROSS-CONTRACT-001';$threat=Text $ThreatPath 'P0-B
 if((NHash $adr)-ne'4522e71c18247b157fa15997b00ff60e4ee10b5ad1ea307ca832c14ba3ee8ba1'){Fail 'P0-BRIDGE-CROSS-CONTRACT-001'}
 if((NHash $threat)-ne'5f476f5096703aab139505a4f01ef20a2e1fd3c0fd358661152d3da1e8515987'){Fail 'P0-BRIDGE-CROSS-CONTRACT-001'}
 if((NHash $spec)-ne'c0a7718d78bde3804142e5b79a937a8d66a372bfe35406e2c8b2ce96d4c7ed54'){Fail 'P0-BRIDGE-INVENTORY-001'}
-if((NHash $plan)-ne'24d7f6a978f62b7d7a2eca0314361df84628ca515ee957593fa77f83f3b2e93f'){Fail 'P0-BRIDGE-INVENTORY-001'}
-if((NHash $trace)-ne'90bd38ff7a1872e7550f40a1e01e966f2bc95d3f1e45eb0119478977505f776a'){Fail 'P0-BRIDGE-INVENTORY-001'}
+if((NHash $plan)-ne'03c11ed8980703bbc2649a460162577d4a4a898528c63867c789afbd8b6c735a'){Fail 'P0-BRIDGE-INVENTORY-001'}
+if((NHash $trace)-ne'50c627612d5a6c6d4429bab069901ec04c3b8c067c00e7d0e06bef7b2a810d23'){Fail 'P0-BRIDGE-INVENTORY-001'}
 Has $adr @('Status:** Accepted','P0-WI-13','OWN-01','Named pipes are preferred','same-user loopback web bridge','no unpaired command exists','least-authority and command-scoped','It MUST NOT install machine-wide certificate trust','one random, non-secret,','opaque loop handle and no authority','No mailbox content, identifier, token, or URL carrying','never a silent substitute','introduces no new persisted database record') 'P0-BRIDGE-CROSS-CONTRACT-001'
 Has $threat @('Add-in bridge','Pairing bootstrap race between two first-pair attempts','Replayed pairing nonce','DNS-rebinding a hostname to 127.0.0.1','CSRF from the add-in WebView or another page','Certificate/trust abuse','Uninstall/disconnect cleanup failure','Same-user malware') 'P0-BRIDGE-CROSS-CONTRACT-001'
 $ids=[regex]::Matches($trace,'(?m)^\| (P0-BRIDGE-[A-Z-]+-001) \|')|ForEach-Object{$_.Groups[1].Value};Exact @($ids) $checks 'P0-BRIDGE-INVENTORY-001';foreach($id in $checks){if(([regex]::Matches($trace,'\b'+[regex]::Escape($id)+'\b')).Count-ne 1){Fail 'P0-BRIDGE-INVENTORY-001'}}

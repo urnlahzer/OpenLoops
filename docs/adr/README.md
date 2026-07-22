@@ -28,7 +28,7 @@ an unrun capability gate into an implementation assumption.
 | [ADR-010](ADR-010-add-in-bridge.md) | Add-in bridge | Accepted | OWN-01 | G-ADDIN |
 | [ADR-011](ADR-011-automation-and-evaluation.md) | Automation and evaluation | Accepted | OWN-03 | G-AUTO, G-AUTO-FULL |
 | [ADR-012](ADR-012-distribution-and-registration.md) | Distribution and registration | Accepted | OWN-00, OWN-01, OWN-02 | G-ID, G-RELEASE |
-| ADR-013 | Self-email | Planned | OWN-10 | G-SELFMAIL |
+| [ADR-013](ADR-013-self-email.md) | Self-email | Accepted | OWN-10 | G-SELFMAIL |
 
 The machine-readable registry is
 `contracts/governance/capabilities.json`. `P0-TRACE-001` checks that its ADR,

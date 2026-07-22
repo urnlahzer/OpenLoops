@@ -121,7 +121,7 @@ Has $adrPriv @('Diagnostics have an empty allowlist; any future diagnostic expor
 $gov=Json $GovernancePath 'P0-DIST-CROSS-CONTRACT-001'
 if($null-ne$gov){
  $a12=@($gov.adrs|Where-Object{$_.id-eq'ADR-012'});$a13=@($gov.adrs|Where-Object{$_.id-eq'ADR-013'})
- if($a12.Count-ne 1-or$a12[0].status-ne'accepted'-or$a13.Count-ne 1-or$a13[0].status-ne'planned'){Fail 'P0-DIST-CROSS-CONTRACT-001'}
+ if($a12.Count-ne 1-or$a12[0].status-ne'accepted'-or$a13.Count-ne 1-or$a13[0].status-ne'accepted'){Fail 'P0-DIST-CROSS-CONTRACT-001'}
  if(@($gov.gates|Where-Object{$_.id-in$m.blocking_gates-and$_.status-ne'unrun'}).Count-ne 0){Fail 'P0-DIST-CROSS-CONTRACT-001'}
  $shared=@($gov.capabilities|Where-Object{$_.id-eq'shared_project_registration'})
  if($shared.Count-ne 1-or$shared[0].state-ne'disabled'-or$shared[0].advertised-ne$false){Fail 'P0-DIST-CROSS-CONTRACT-001'}
@@ -148,8 +148,8 @@ $adr=Text $AdrPath 'P0-DIST-CROSS-CONTRACT-001';$threat=Text $ThreatPath 'P0-DIS
 if((NHash $adr)-ne'09ac519ec14fd894706a2010f9d7860658655487a4afee07c0ae044c19e924cc'){Fail 'P0-DIST-CROSS-CONTRACT-001'}
 if((NHash $threat)-ne'10143d6884cb28a4449ff6172becd8915ae877eec11fb40535f02b7f23bedcb4'){Fail 'P0-DIST-CROSS-CONTRACT-001'}
 if((NHash $spec)-ne'c0a7718d78bde3804142e5b79a937a8d66a372bfe35406e2c8b2ce96d4c7ed54'){Fail 'P0-DIST-INVENTORY-001'}
-if((NHash $plan)-ne'24d7f6a978f62b7d7a2eca0314361df84628ca515ee957593fa77f83f3b2e93f'){Fail 'P0-DIST-INVENTORY-001'}
-if((NHash $trace)-ne'90bd38ff7a1872e7550f40a1e01e966f2bc95d3f1e45eb0119478977505f776a'){Fail 'P0-DIST-INVENTORY-001'}
+if((NHash $plan)-ne'03c11ed8980703bbc2649a460162577d4a4a898528c63867c789afbd8b6c735a'){Fail 'P0-DIST-INVENTORY-001'}
+if((NHash $trace)-ne'50c627612d5a6c6d4429bab069901ec04c3b8c067c00e7d0e06bef7b2a810d23'){Fail 'P0-DIST-INVENTORY-001'}
 Has $adr @('Status:** Accepted','P0-WI-15','OWN-00, OWN-01, OWN-02','G-ID, G-RELEASE','BYO public-client registration is the only enabled Phase 0/source-build path','is a separate, disabled, gated future option','PKCE does not authenticate the binary','signed independently of package signing','older binary refuses to write a newer schema or ciphertext version','publishability remain disabled in','stays empty','unresolved_pending_G-RELEASE') 'P0-DIST-CROSS-CONTRACT-001'
 Has $threat @('Distribution and update','Malicious fork reuses the shared client ID or impersonates the publisher','Update downgrade to a vulnerable signed version','Update metadata swapped between channels','Staged package replaced after verification','Signing-key compromise with no rotation/revocation path','Expired metadata replayed as current','Provenance that cannot be tied to a source revision','Elevation path smuggled into install or update','Supply-chain or lockfile tamper reaching a release','Secret or real identifier entering a package, SBOM, or repository','Uninstall leaving bridge trust or a certificate behind','Publisher-governance failure blocking the shared registration path') 'P0-DIST-CROSS-CONTRACT-001'
 $ids=[regex]::Matches($trace,'(?m)^\| (P0-DIST-[A-Z-]+-001) \|')|ForEach-Object{$_.Groups[1].Value};Exact @($ids) $checks 'P0-DIST-INVENTORY-001';foreach($id in $checks){if(([regex]::Matches($trace,'\b'+[regex]::Escape($id)+'\b')).Count-ne 1){Fail 'P0-DIST-INVENTORY-001'}}

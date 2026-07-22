@@ -58,6 +58,11 @@ Detailed models completed so far:
   two-registration, update-trust-chain, release-artifact, installer/uninstall,
   and diagnostics-rule decision contract only; nothing is signed, packaged,
   registered, published, or installed, and G-ID/G-RELEASE remain inactive.
+- [Self-email](self-email.md) — ADR-013 recipient, consent, generation,
+  marker, recursion-suppression, operation-protocol, schedule, and
+  failure-boundary decision contract only; no `Mail.Send` scope is requested,
+  nothing is sent, no marker mechanism is selected, and G-SELFMAIL/G-PRIV
+  remain inactive.
 
 `P0-THREAT-001` checks that all nine rows and their ADR, gate, owner, prohibited-
 behavior, and fallback routes remain represented in the machine-readable

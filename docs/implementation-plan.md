@@ -459,6 +459,32 @@ Each phase ends with executable evidence. A failed gate narrows the advertised c
   four fresh-context closure judgments passed. The unchanged product source
   remains covered by the P0-WI-10 exact source-build pass. No reviewer prompt,
   transcript, or model output was retained.
+- P0-WI-16 closed on 2026-07-21 and accepts ADR-013 and its closed, disabled
+  self-email decision contract only. It pins the recipient policy (canonical contract-tested
+  authenticated-account address only; source unresolved pending G-SELFMAIL;
+  no arbitrary, user-input-sourced, Cc/Bcc, reply-to, or distribution-list
+  recipient), the consent policy (separate explicit enablement plus separate
+  incremental `Mail.Send` consent after G-SELFMAIL; disablement or consent
+  loss stops sends before any request), the generation policy (transient
+  reconstruction under OL-SUM-003 with no stored copy), the marker policy (a
+  verified OpenLoops-generated marker with candidate mechanisms unresolved
+  pending G-SELFMAIL that must survive the round trip, verify on the saved
+  sent copy, and never exclude user-authored mail), recursion suppression
+  (a detected marker blocks loop creation, summary-of-summary inclusion, and
+  re-summarization; suppression failure fails closed to no-send), the send
+  operation protocol (the ADR-005/ADR-009 durable-before-request ledger
+  reused exactly, with ambiguous outcomes reconciled against the ledger and
+  the Sent Items observation before any retry and no blind retry), the
+  schedule policy (missed schedules coalesce with no catch-up burst), and the
+  failure boundary (secure-store loss, rollback suspicion, account mismatch,
+  or marker-verification failure each cause zero send requests) without
+  requesting `Mail.Send`, sending anything, selecting a marker mechanism, or
+  completing an acceptance criterion or scenario. G-SELFMAIL and G-PRIV
+  remain unrun. All 11 deterministic self-email checks, 73 synthetic mutation
+  rejection cases, the complete Phase 0 deterministic checker regression, and
+  four fresh-context closure judgments passed. The unchanged product source
+  remains covered by the P0-WI-10 exact source-build pass. No reviewer prompt,
+  transcript, or model output was retained.
 - Write data-flow/threat models for tokens, Graph content, model transmission, add-in bridge, local state, artifacts, diagnostics, update, and disconnect.
 - Define feature-to-scope manifest and capability flags.
 - Install repository guardrails on the working clone.

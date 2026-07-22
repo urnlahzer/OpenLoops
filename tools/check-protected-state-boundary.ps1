@@ -324,7 +324,7 @@ Exact @($purposePairs) @($privacyPurposePairs) 'P0-STATE-CROSS-CONTRACT-001'
 $gov = Get-Content -Raw -LiteralPath (Resolve-Input $GovernancePath) | ConvertFrom-Json
 $a5 = @($gov.adrs | Where-Object id -eq 'ADR-005')
 if ($a5.Count -ne 1 -or $a5[0].status -ne 'accepted' -or
-    @($gov.adrs | Where-Object { $_.id -notin @('ADR-001','ADR-002','ADR-003','ADR-004','ADR-005','ADR-006','ADR-007','ADR-008','ADR-009','ADR-010','ADR-011','ADR-012','ADR-PRIV-001') -and $_.status -ne 'planned' }).Count -ne 0 -or
+    @($gov.adrs | Where-Object { $_.id -notin @('ADR-001','ADR-002','ADR-003','ADR-004','ADR-005','ADR-006','ADR-007','ADR-008','ADR-009','ADR-010','ADR-011','ADR-012','ADR-013','ADR-PRIV-001') -and $_.status -ne 'planned' }).Count -ne 0 -or
     @($gov.gates | Where-Object status -ne 'unrun').Count -ne 0 -or
     @($gov.capabilities | Where-Object { $_.state -ne 'disabled' -or $_.advertised -ne $false }).Count -ne 0 -or
     @($gov.product_acceptance_criteria_completed).Count -ne 0) { Fail 'P0-STATE-CROSS-CONTRACT-001'; Fail 'P0-STATE-CLAIMS-001' }

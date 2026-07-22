@@ -61,7 +61,7 @@ JsonCase 'capability-enabled claim' 'P0-DIST-CLAIMS-001' 'contracts/distribution
 JsonCase 'registration mode advertised claim' 'P0-DIST-CLAIMS-001' 'contracts/distribution/registration-boundary.json' {param($c)$c.claims.registration_modes_advertised=@('shared_project_registration')}
 
 JsonCase 'ADR-012 prematurely reverted to planned' 'P0-DIST-CROSS-CONTRACT-001' 'contracts/governance/capabilities.json' {param($c)($c.adrs|Where-Object{$_.id -eq 'ADR-012'}).status='planned'}
-JsonCase 'ADR-013 prematurely accepted' 'P0-DIST-CROSS-CONTRACT-001' 'contracts/governance/capabilities.json' {param($c)($c.adrs|Where-Object{$_.id -eq 'ADR-013'}).status='accepted'}
+JsonCase 'ADR-013 regressed to planned' 'P0-DIST-CROSS-CONTRACT-001' 'contracts/governance/capabilities.json' {param($c)($c.adrs|Where-Object{$_.id -eq 'ADR-013'}).status='planned'}
 JsonCase 'shared registration capability enabled in governance' 'P0-DIST-CROSS-CONTRACT-001' 'contracts/governance/capabilities.json' {param($c)($c.capabilities|Where-Object{$_.id -eq 'shared_project_registration'}).state='enabled'}
 JsonCase 'gate marked passed in governance' 'P0-DIST-CROSS-CONTRACT-001' 'contracts/governance/capabilities.json' {param($c)($c.gates|Where-Object{$_.id -eq 'G-RELEASE'}).status='passed'}
 JsonCase 'support matrix claims a supported row' 'P0-DIST-CROSS-CONTRACT-001' 'contracts/support/support-matrix.json' {param($c)$c.claim_state.supported_rows=@('shared_project_registration')}

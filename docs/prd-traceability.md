@@ -397,6 +397,36 @@ pass; the current add-in tests, formatting, and lint also passed. The
 judgments are ephemeral work-item evidence; no reviewer prompt, transcript, or
 model output is tracked or packaged.
 
+### P0-WI-16 self-email checks
+
+| Check ID | Exact assertion | Evidence | Status | Blocks |
+|---|---|---|---|---|
+| P0-SELFMAIL-INVENTORY-001 | P0-WI-16/ADR-013 has exact OWN-10, owned requirement (OL-SUM-002/003/004, exclusive of any other manifest's ownership claim), source, input-authority, separate-decision, runtime, and claim inventories; only ADR-013 advances from planned to accepted. | Self-email manifest; specification/plan; governance and ADR registries | Executable decision contract | Self-email runtime |
+| P0-SELFMAIL-RECIPIENT-001 | The only legal recipient is the canonical contract-tested address of the authenticated account; its source remains unresolved pending G-SELFMAIL; arbitrary or additional recipients, a user-input-sourced recipient, Cc/Bcc, reply-to redirection, and distribution lists are prohibited. | Self-email manifest; ADR-013 | Executable recipient contract | G-SELFMAIL |
+| P0-SELFMAIL-CONSENT-001 | Self-email requires separate explicit feature enablement and separate incremental `Mail.Send` consent granted only after G-SELFMAIL, matching ADR-003 exactly; disablement or consent loss stops sends before any request. | Self-email manifest; ADR-003 | Executable consent contract | G-SELFMAIL |
+| P0-SELFMAIL-MARKER-001 | A verified OpenLoops-generated marker, with candidate mechanisms unresolved pending G-SELFMAIL, must survive the full round trip to the saved sent copy, verify without relying on subject text, exclude only OpenLoops-generated summaries, never exclude user-authored mail, and never carry content, an identifier, or a secret. | Self-email manifest; ADR-013 | Executable marker contract | G-SELFMAIL |
+| P0-SELFMAIL-RECURSION-001 | A detected marker prevents loop creation, summary-of-summary inclusion, and re-summarization; a suppression failure fails closed to no-send rather than a best-effort filter. | Self-email manifest; ADR-013 | Executable recursion contract | G-SELFMAIL |
+| P0-SELFMAIL-OPERATION-001 | The send reuses the ADR-005/ADR-009 durable-before-request operation-ledger protocol exactly; an ambiguous outcome reconciles against the ledger and the Sent Items observation before any retry; a lost response is never blindly retried; secure-store loss, rollback suspicion, account mismatch, or marker-verification failure each cause zero send requests. | Self-email manifest; ADR-004/005/009 | Executable operation contract | G-SELFMAIL |
+| P0-SELFMAIL-SCHEDULE-001 | A scheduled send runs only while enabled, consented, and authenticated; missed schedules coalesce into the next eligible run with no catch-up burst. | Self-email manifest; ADR-013 | Executable schedule contract | G-SELFMAIL |
+| P0-SELFMAIL-PRIVACY-001 | No summary copy, draft, or template output is stored under OL-SUM-003; content rules inherit the ADR-PRIV-001 privacy boundary, which prohibits persisting generated summaries or explanations; no marker mechanism or canonical recipient source is guessed ahead of G-SELFMAIL. | Self-email/privacy manifests; ADR-PRIV-001 | Executable privacy contract | G-PRIV |
+| P0-SELFMAIL-CROSS-CONTRACT-001 | ADR-013 reconciles with ADR-003's `Mail.Send` consent wording, ADR-004's sent-copy observation rule, ADR-005/ADR-009's operation-ledger protocol, ADR-PRIV-001's generated-summary prohibition, the governance registry (ADR-013 accepted), the support matrix, and build-skeleton inactivity without widening scope, runtime, or claims. | All Phase 0 contracts; deterministic checker | Executable | Next Phase 0 work item |
+| P0-SELFMAIL-CLAIMS-001 | P0-WI-16 requests no `Mail.Send` scope, sends no message, selects no marker mechanism, and enables/advertises/completes/passes no capability, support row, AC, scenario, or gate. | Self-email/governance/support/build manifests | Executable | Any product or runtime claim |
+| P0-SELFMAIL-FRESH-CHECKER-001 | Fresh-context send-safety, privacy, governance, and adversarial judges must report no unresolved material recipient, consent, marker, recursion, operation, schedule, privacy, or traceability defect before closure. | Work-item review only; no prompt, transcript, or model output stored | Passed at P0-WI-16 closure | Next Phase 0 work item |
+
+P0-WI-16 accepts only the disabled ADR-013 self-email decision contract. No
+`Mail.Send` scope is requested, no message is sent, no marker mechanism is
+selected, and G-SELFMAIL and G-PRIV remain unrun; every acceptance criterion
+or scenario that depends on either gate remains unpassed.
+
+P0-WI-16 closed on 2026-07-21 after all 11 deterministic self-email checks, 73
+synthetic/adversarial rejection cases, the complete Phase 0 deterministic
+checker regression, the metadata-only package allowlist, a prospective staged
+public-repository scan, and four fresh-context closure judgments passed. The
+unchanged product source remains covered by the P0-WI-10 exact source-build
+pass; the current add-in tests, formatting, and lint also passed. The
+judgments are ephemeral work-item evidence; no reviewer prompt, transcript, or
+model output is tracked or packaged.
+
 ## Product and functional requirements
 
 | PRD ID | Source requirement | Disposition | Specification | Planned verification | Approval |
