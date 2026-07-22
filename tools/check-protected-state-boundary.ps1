@@ -377,7 +377,7 @@ function Get-WorkspaceBuildInputs([string]$Root) {
 $workspaceRoot = Resolve-Input $WorkspaceScanRoot
 $workspaceInputs = @(Get-WorkspaceBuildInputs $workspaceRoot | Sort-Object)
 $workspaceRelative = @($workspaceInputs | ForEach-Object { [IO.Path]::GetRelativePath($workspaceRoot, $_).Replace('\','/') })
-$expectedWorkspaceInputs = @('Cargo.lock','Cargo.toml','crates/openloops-application/Cargo.toml','crates/openloops-application/src/lib.rs','crates/openloops-contracts/Cargo.toml','crates/openloops-contracts/src/lib.rs','crates/openloops-desktop/Cargo.toml','crates/openloops-desktop/src/main.rs','crates/openloops-domain/Cargo.toml','crates/openloops-domain/src/lib.rs','crates/openloops-graph/Cargo.toml','crates/openloops-graph/src/lib.rs','crates/openloops-inference/Cargo.toml','crates/openloops-inference/src/lib.rs','crates/openloops-persistence/Cargo.toml','crates/openloops-persistence/src/lib.rs','rust-toolchain.toml')
+$expectedWorkspaceInputs = @('Cargo.lock','Cargo.toml','crates/openloops-application/Cargo.toml','crates/openloops-application/src/lib.rs','crates/openloops-contracts/Cargo.toml','crates/openloops-contracts/src/lib.rs','crates/openloops-desktop/Cargo.toml','crates/openloops-desktop/src/main.rs','crates/openloops-domain/Cargo.toml','crates/openloops-domain/src/command.rs','crates/openloops-domain/src/deadline.rs','crates/openloops-domain/src/display.rs','crates/openloops-domain/src/establishment.rs','crates/openloops-domain/src/facets.rs','crates/openloops-domain/src/hypothesis.rs','crates/openloops-domain/src/ids.rs','crates/openloops-domain/src/legality.rs','crates/openloops-domain/src/lib.rs','crates/openloops-domain/src/record.rs','crates/openloops-domain/src/transition.rs','crates/openloops-graph/Cargo.toml','crates/openloops-graph/src/lib.rs','crates/openloops-inference/Cargo.toml','crates/openloops-inference/src/lib.rs','crates/openloops-persistence/Cargo.toml','crates/openloops-persistence/src/lib.rs','rust-toolchain.toml')
 ExactOrdered $workspaceRelative $expectedWorkspaceInputs 'P0-STATE-CLAIMS-001'
 $workspaceFingerprintRows = @()
 $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
@@ -402,7 +402,7 @@ foreach ($sourcePath in $workspaceInputs) {
 }
 $workspaceFingerprintMaterial = $workspaceFingerprintRows -join "`n"
 $workspaceFingerprint = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($workspaceFingerprintMaterial))).ToLowerInvariant()
-if ($workspaceFingerprint -ne '860f64b95f94648163670c860ec611efb21c101b714c36b04c9485019d30a235') { Fail 'P0-STATE-CLAIMS-001' }
+if ($workspaceFingerprint -ne '90bd5ad06ccede433a466fc19405ebbe9930324282cf62482b8ae317a8e3b49f') { Fail 'P0-STATE-CLAIMS-001' }
 
 $trace = Get-Content -Raw -LiteralPath (Resolve-Input $TraceabilityPath)
 $expectedChecks = @('P0-STATE-INVENTORY-001','P0-STATE-SCHEMA-001','P0-STATE-ENVELOPE-001','P0-STATE-KEYS-001','P0-STATE-BINDING-001','P0-STATE-TRANSACTION-001','P0-STATE-MIGRATION-001','P0-STATE-ROLLBACK-001','P0-STATE-LIFECYCLE-001','P0-STATE-PRIVACY-001','P0-STATE-CROSS-CONTRACT-001','P0-STATE-CLAIMS-001','P0-STATE-FRESH-CHECKER-001')

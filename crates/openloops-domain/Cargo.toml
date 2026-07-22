@@ -1,5 +1,6 @@
 [package]
 name = "openloops-domain"
+description = "ADR-008 deterministic loop policy/state engine: pure Rust, no I/O, no persistence, no network."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
