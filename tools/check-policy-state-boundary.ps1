@@ -53,7 +53,7 @@ ExactOrdered @($m.input_authorities.owner) @('ADR-004','ADR-006','ADR-007','ADR-
 ExactOrdered @($m.sources.id) @('SRC-SPEC-DOMAIN','SRC-SPEC-DEADLINE','SRC-SPEC-CLOSURE','SRC-SPEC-REMINDER','SRC-SPEC-FLOWS','SRC-PLAN-INVARIANTS','SRC-PLAN-AUTOMATION','SRC-OWN-03','SRC-RESEARCH-SECURITY','SRC-RESEARCH-VALIDATION') 'P0-POLICY-INVENTORY-001'
 $specText=Read-Text $ProductSpecPath 'P0-POLICY-INVENTORY-001';$planText=Read-Text $ImplementationPlanPath 'P0-POLICY-INVENTORY-001'
 if((Normalized-Hash $specText)-ne'c0a7718d78bde3804142e5b79a937a8d66a372bfe35406e2c8b2ce96d4c7ed54'){Fail 'P0-POLICY-INVENTORY-001'}
-if((Normalized-Hash $planText)-ne'03c11ed8980703bbc2649a460162577d4a4a898528c63867c789afbd8b6c735a'){Fail 'P0-POLICY-INVENTORY-001'}
+if((Normalized-Hash $planText)-ne'bc857151555cf9be61a0e075c40907e5b9750ac62293b9a5bddf13efe6cbe575'){Fail 'P0-POLICY-INVENTORY-001'}
 Has $specText @('OL-REM-010 MUST','development, test mode, and limited preview confirmation-first until G-AUTO passes','Fully automatic mode MUST remain unavailable until G-AUTO-FULL passes','Inferred closure and external communication are never automatic in any mode.','OL-REM-017 MUST','`confirmation_first`','`hybrid`','`automatic`','A mode change is prospective.','No mode silently creates or rewrites a historical batch, closes a loop, deletes an artifact, or communicates with another person.') 'P0-POLICY-INVENTORY-001'
 Has $planText @('Exact OL-REM-010/OL-REM-017 mode policy and separate feature flags','keep hybrid disabled until G-AUTO and automatic disabled until G-AUTO-FULL','make hybrid the full-MVP new-install default under OWN-03') 'P0-POLICY-INVENTORY-001'
 
@@ -169,7 +169,7 @@ foreach($name in @('capabilities_enabled','capabilities_advertised','support_row
 
 $adrText=Read-Text $AdrPath 'P0-POLICY-CROSS-CONTRACT-001';$threatText=Read-Text $ThreatPath 'P0-POLICY-CROSS-CONTRACT-001';$traceText=Read-Text $TraceabilityPath 'P0-POLICY-INVENTORY-001'
 if((Normalized-Hash $adrText)-ne'f1007955f1704d536bd827fc8d8ef41b7bcde892bf5db4e22592b681294b5b73'){Fail 'P0-POLICY-CROSS-CONTRACT-001'}
-if((Normalized-Hash $traceText)-ne'50c627612d5a6c6d4429bab069901ec04c3b8c067c00e7d0e06bef7b2a810d23'){Fail 'P0-POLICY-INVENTORY-001'}
+if((Normalized-Hash $traceText)-ne'a5dc80035f1e0b447ec1f1c2f2ed3896eb9d433bd87a515a5c473878c3062fea'){Fail 'P0-POLICY-INVENTORY-001'}
 Has $adrText @('ADR-008','Status:** Accepted','P0-WI-11','OWN-03','Consumed requirements:** OL-REM-010, OL-REM-017','G-AUTO','G-AUTO-FULL','Several current closure','same key and canonical payload','Candidate loops may be explicitly declined','terminal loops do not newly age','ADR-009 exclusively owns','ADR-011 exclusively owns','implements no policy runtime','neither implements nor completes either requirement') 'P0-POLICY-CROSS-CONTRACT-001'
 Has $threatText @('Policy and state boundary threat model','Model output terminalizes a loop','Multiple closure hypotheses','Reminder completion/deletion closes an obligation','Accepted OWN-03 is mistaken','Local terminal change causes an implicit Graph operation') 'P0-POLICY-CROSS-CONTRACT-001'
 $traceIds=[regex]::Matches($traceText,'(?m)^\| (P0-POLICY-[A-Z-]+-001) \|')|ForEach-Object{$_.Groups[1].Value}

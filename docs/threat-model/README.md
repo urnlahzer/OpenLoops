@@ -1,11 +1,11 @@
 # Threat-model routing index
 
-**Status:** Routing baseline for P0-WI-01; detailed threat models remain planned
-except for the linked P0-WI-02 privacy model, P0-WI-05 OAuth model,
- P0-WI-08 protected-local-state model, P0-WI-09 evidence-identity model, and
- P0-WI-10 model-provider model, P0-WI-11 policy/state model, P0-WI-12
- reminder-adapter model, P0-WI-13 add-in bridge model, P0-WI-14
- automation-and-evaluation model, and P0-WI-15 distribution-and-update model.
+**Status:** Routing baseline for P0-WI-01. The P0-WI-17 Phase 0 exit review
+adds the last two missing detailed models — Graph mail content and
+disconnect/uninstall — so all nine routing rows below now have at least one
+linked detailed threat model; see "Detailed models completed so far." Every
+detailed model remains decision-contract-only: no runtime, Graph/Office/model
+transport, persistence, or named gate is active.
 
 This index prevents an implementation path from being treated as safe merely
 because its detailed ADR has not been written. Every routed capability remains
@@ -28,6 +28,11 @@ Detailed models completed so far:
 
 - [OAuth transaction and token state](oauth-token-state.md) — ADR-002 decision
   contract only; runtime and G-ID evidence remain unimplemented.
+- [Graph mail content and synchronization](graph-mail-content.md) —
+  ADR-003/ADR-004/ADR-006/ADR-007 over-fetch, persistence, coalesced-claim,
+  cursor-expiry, quarantine, hostile-content, throttling, cross-account, raw-
+  locator, folder-identity, retention, coverage-claim, and bounded-projection
+  decision contract only; Graph, model, and all named gates remain inactive.
 - [Privacy and local state](privacy-and-local-state.md) — ADR-PRIV-001 field
   boundary only; runtime schemas and state gates remain unimplemented.
 - [Protected local state](protected-local-state.md) — ADR-005 encryption, key,
@@ -63,6 +68,11 @@ Detailed models completed so far:
   failure-boundary decision contract only; no `Mail.Send` scope is requested,
   nothing is sent, no marker mechanism is selected, and G-SELFMAIL/G-PRIV
   remain inactive.
+- [Disconnect and uninstall](disconnect-and-uninstall.md) —
+  ADR-002/ADR-005/ADR-010/ADR-012/ADR-PRIV-001 orphaned-DPAPI, orphaned-
+  bridge-trust, partial-cleanup, reconnect-after-failure, cross-user-deletion,
+  no-bulk-artifact-deletion, residual-risk-disclosure, and migration-in-flight
+  decision contract only; cleanup runtime and all named gates remain inactive.
 
 `P0-THREAT-001` checks that all nine rows and their ADR, gate, owner, prohibited-
 behavior, and fallback routes remain represented in the machine-readable

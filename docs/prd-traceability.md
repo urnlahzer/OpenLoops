@@ -171,6 +171,13 @@ scan, and fresh security/privacy/adversarial review passed. No review transcript
 model output, generated diagnostic, or real identifier/content is retained as
 closure evidence.
 
+P0-WI-17 exit-audit note (2026-07-21): re-running `tools/test-protected-state-boundary.ps1`
+against the current repository measured 163 adversarial mutations, not the 161
+recorded above. This discrepancy is flagged for product-owner review as a
+traceability inconsistency found during the Phase 0 exit audit; it is recorded
+here rather than silently corrected, and it does not change P0-WI-08's closed
+status or any gate/capability claim.
+
 ### P0-WI-09 / P0-WI-09R evidence identity and anchoring checks
 
 | Check ID | Exact assertion | Evidence | Status | Blocks |

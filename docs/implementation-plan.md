@@ -495,6 +495,33 @@ Each phase ends with executable evidence. A failed gate narrows the advertised c
 - Build/test skeleton passes without secrets or generated artifacts tracked.
 - Every unresolved capability has a named gate, owner role, and fallback.
 
+The Phase 0 exit review (P0-WI-17) ran on 2026-07-21. It added the two
+remaining detailed threat models (Graph mail content and disconnect/uninstall)
+so all nine `docs/threat-model/README.md` routing rows now have a linked
+detailed model, all of which remain decision-contract-only. All fourteen ADRs
+are accepted with executable decision contracts and deterministic checkers.
+All 18 `tools/check-*.ps1` deterministic checkers passed. All 16
+`tools/test-*.ps1` synthetic mutation suites (every suite except
+`test-source-build-preflight.ps1`) passed, totaling 1,168 measured
+adversarial/rejection cases. `tools/check-public-repo.ps1 -Mode Tracked`
+(128 blobs) and `-Mode History` (202 blobs) both passed. `npm run test:addin`,
+`npm run format:check`, and `npm run lint` all passed. The exact source build
+(`pwsh ./tools/source-build.ps1`) passed on the review machine once the
+pinned rustc/cargo 1.97.1 toolchain — already installed but outside the
+default shell `PATH` — was placed on `PATH` for the invocation; the
+pinned-prerequisite check, locked `npm ci`, add-in test/format/lint, `cargo
+fmt`/`clippy`/`test`, and the synthetic desktop smoke
+(`OPENLOOPS_SYNTHETIC_SMOKE_OK`) all passed with zero credentials and zero
+Graph/network product calls. The audit also found that `docs/prd-traceability.md`'s P0-WI-08
+closure paragraph records 161 synthetic adversarial mutations while the
+current `tools/test-protected-state-boundary.ps1` suite measures 163; that
+discrepancy is flagged there rather than silently corrected. Every capability
+in `contracts/governance/capabilities.json` remains disabled and unadvertised
+behind its named unrun gate with product-owner failure routing and its
+recorded fallback. This paragraph completes no G-gate, acceptance criterion,
+scenario, or capability; Phase 1 remains blocked on disposable-tenant
+credentials and the live gates.
+
 ### Phase 1 — Disposable-tenant Graph and add-in contract harness
 
 **Deliverables**
