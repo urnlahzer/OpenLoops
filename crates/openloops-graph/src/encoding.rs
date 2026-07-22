@@ -14,6 +14,14 @@
 const BASE64URL_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
+/// RFC 4648 §6 standard base32 alphabet. Unlike the base64 alphabet, this
+/// one is already URL/filename-safe as-is (uppercase letters and `2`-`7`
+/// only; no `+`, `/`, or other character that would need escaping in a
+/// query value or opaque token), so `remote-marker-v1`'s "base32url" is
+/// exactly this alphabet with the RFC's `=` padding stripped — the same
+/// "unpadded" convention [`base64url_encode`] already uses above.
+const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
 /// Encodes `input` as unpadded base64url (RFC 4648 §5).
 #[must_use]
 pub fn base64url_encode(input: &[u8]) -> String {
@@ -49,6 +57,32 @@ fn push_group(out: &mut String, n: u32, chars: usize) {
     for &index in indices.iter().take(chars) {
         out.push(char::from(BASE64URL_ALPHABET[index as usize]));
     }
+}
+
+/// Encodes `input` as unpadded base32 (RFC 4648 §6) over the standard
+/// alphabet — this crate's "base32url" (see [`BASE32_ALPHABET`]'s doc
+/// comment for why no distinct URL-safe alphabet is needed). Encode-only:
+/// nothing in this crate ever needs to recover bytes from a derived marker,
+/// so no decoder is implemented.
+#[must_use]
+pub fn base32url_encode(input: &[u8]) -> String {
+    let mut out = String::with_capacity(input.len().div_ceil(5) * 8);
+    let mut accumulator: u32 = 0;
+    let mut bits_buffered: u32 = 0;
+    for &byte in input {
+        accumulator = (accumulator << 8) | u32::from(byte);
+        bits_buffered += 8;
+        while bits_buffered >= 5 {
+            bits_buffered -= 5;
+            let index = (accumulator >> bits_buffered) & 0x1F;
+            out.push(char::from(BASE32_ALPHABET[index as usize]));
+        }
+    }
+    if bits_buffered > 0 {
+        let index = (accumulator << (5 - bits_buffered)) & 0x1F;
+        out.push(char::from(BASE32_ALPHABET[index as usize]));
+    }
+    out
 }
 
 /// Percent-encodes `input` for use as one query value (RFC 3986 unreserved
@@ -116,7 +150,7 @@ fn hex_value(byte: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64url_encode, percent_decode, percent_encode_query_value};
+    use super::{base32url_encode, base64url_encode, percent_decode, percent_encode_query_value};
 
     #[test]
     fn base64url_of_sha256_is_a_stable_deterministic_regression_anchor() {
@@ -167,6 +201,31 @@ mod tests {
         assert_eq!(base64url_encode(b"foob"), "Zm9vYg");
         assert_eq!(base64url_encode(b"fooba"), "Zm9vYmE");
         assert_eq!(base64url_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn base32url_matches_the_rfc_4648_section_10_test_vectors_unpadded() {
+        // RFC 4648 §10's published BASE32 vectors, with the `=` padding this
+        // crate's unpadded convention omits (mirrors
+        // `base64url_round_trips_every_remainder_length` above).
+        assert_eq!(base32url_encode(b""), "");
+        assert_eq!(base32url_encode(b"f"), "MY");
+        assert_eq!(base32url_encode(b"fo"), "MZXQ");
+        assert_eq!(base32url_encode(b"foo"), "MZXW6");
+        assert_eq!(base32url_encode(b"foob"), "MZXW6YQ");
+        assert_eq!(base32url_encode(b"fooba"), "MZXW6YTB");
+        assert_eq!(base32url_encode(b"foobar"), "MZXW6YTBOI");
+    }
+
+    #[test]
+    fn base32url_has_no_padding_or_unsafe_characters() {
+        let encoded = base32url_encode(&[0xFFu8; 32]);
+        assert!(!encoded.contains('='));
+        assert!(
+            encoded
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b))
+        );
     }
 
     #[test]

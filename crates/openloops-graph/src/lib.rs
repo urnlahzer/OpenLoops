@@ -15,6 +15,7 @@
 //! | [`callback`] | `redirect_contract` (the loopback callback listener/parser) |
 //! | [`exchange`] | the token-exchange port; real endpoint is `unresolved_pending_G-ID` |
 //! | [`transport`] | implementation-plan §2.2 `GraphTransport` |
+//! | [`todo`] | ADR-009 `remote_marker_protocol`/`ownership_matrix`/`direct_edit_and_conflict`; real endpoint is `unresolved_pending_G-TODO` |
 //!
 //! # Dependency activation deviation (read before assuming `oauth2`/`reqwest`/`tokio` are active)
 //!
@@ -58,6 +59,7 @@ pub mod callback;
 pub mod encoding;
 pub mod exchange;
 pub mod pkce;
+pub mod todo;
 pub mod transaction;
 pub mod transport;
 
