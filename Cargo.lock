@@ -319,11 +319,31 @@ name = "openloops-domain"
 version = "0.0.0"
 
 [[package]]
+name = "openloops-eval"
+version = "0.0.0"
+dependencies = [
+ "openloops-contracts",
+ "openloops-domain",
+ "openloops-inference",
+ "openloops-persistence",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "openloops-graph"
 version = "0.0.0"
 dependencies = [
  "openloops-application",
  "openloops-domain",
+ "openloops-persistence",
+]
+
+[[package]]
+name = "openloops-harness"
+version = "0.0.0"
+dependencies = [
+ "openloops-graph",
  "openloops-persistence",
 ]
 

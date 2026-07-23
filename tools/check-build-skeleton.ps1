@@ -81,6 +81,8 @@ $expectedLayers = @{
     inference = @{ package='openloops-inference'; dependencies=@('openloops-application','openloops-contracts','openloops-domain') }
     persistence = @{ package='openloops-persistence'; dependencies=@('openloops-domain') }
     desktop = @{ package='openloops-desktop'; dependencies=@('openloops-application','openloops-contracts','openloops-domain','openloops-graph','openloops-inference','openloops-persistence') }
+    eval = @{ package='openloops-eval'; dependencies=@('openloops-contracts','openloops-domain','openloops-inference','openloops-persistence') }
+    harness = @{ package='openloops-harness'; dependencies=@('openloops-graph','openloops-persistence') }
 }
 Exact @($manifest.workspace.PSObject.Properties.Name) @($expectedLayers.Keys) 'P0-SKELETON-DIRECTION-001'
 foreach ($layer in $expectedLayers.Keys) {
@@ -102,7 +104,7 @@ $cargoRoot = Text 'Cargo.toml'
 if ($cargoRoot -notmatch 'resolver = "3"' -or $cargoRoot -notmatch 'publish = false' -or
     $cargoRoot -notmatch 'unsafe_code = "forbid"' -or $cargoRoot -notmatch 'debug = 0') { Fail 'P0-SKELETON-PACKAGE-001' }
 $cargoLock = Text 'Cargo.lock'
-if (([regex]::Matches($cargoLock, '(?m)^name = "openloops-')).Count -ne 7 -or
+if (([regex]::Matches($cargoLock, '(?m)^name = "openloops-')).Count -ne 9 -or
     $cargoLock -match '(?m)^source = "(?!registry\+https://github\.com/rust-lang/crates\.io-index")' -or
     $cargoLock -notmatch '(?s)name = "typify"\s+version = "0\.7\.0"' -or
     $cargoLock -notmatch '(?s)name = "serde"\s+version = "1\.0\.229"' -or

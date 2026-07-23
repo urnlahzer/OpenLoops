@@ -8,6 +8,8 @@ members = [
   "crates/openloops-inference",
   "crates/openloops-persistence",
   "crates/openloops-desktop",
+  "crates/openloops-eval",
+  "crates/openloops-harness",
 ]
 
 [workspace.package]
