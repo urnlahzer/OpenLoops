@@ -611,10 +611,13 @@ fn split_reply_history(
 /// size bounds) in one reply-history quote chunk.
 const REPLY_HISTORY_CHUNK_MAX_CHARS: usize = 4096;
 /// Maximum number of reply-history quote chunks a single message may add.
-/// Reply history is historical context, never anchorable evidence, so once
-/// this many chunks are full the remainder is simply dropped rather than
-/// risking the whole message's block count tripping
-/// `MAX_BLOCKS_PER_MESSAGE`.
+/// The retained chunks remain fully available downstream as quoted context
+/// (`validation.rs` can still resolve anchors into them; `ollama.rs` still
+/// sends them to the model); only text beyond this cap is dropped, and
+/// dropped text never reaches the prompt or the anchor set, so nothing can
+/// cite it. The cap exists so that once this many chunks are full, the
+/// remainder is simply dropped rather than risking the whole message's
+/// block count tripping `MAX_BLOCKS_PER_MESSAGE`.
 const REPLY_HISTORY_MAX_CHUNKS: usize = 8;
 
 /// Rejoins `paragraphs` (already in document order, nearest-to-the-reply
@@ -625,8 +628,10 @@ const REPLY_HISTORY_MAX_CHUNKS: usize = 8;
 /// A deep Outlook thread can otherwise contribute one quote block per
 /// quoted paragraph, which is unbounded and can alone exceed
 /// `MAX_BLOCKS_PER_MESSAGE`; once the chunk cap is reached, any remaining
-/// paragraphs are dropped (reply history is context only, never
-/// anchorable).
+/// paragraphs are dropped. Every chunk that is kept stays fully available
+/// as quoted context to the rest of the pipeline; only the dropped
+/// remainder is lost, and since it is never emitted it never reaches the
+/// model prompt or the anchor set, so nothing can cite it.
 fn chunk_reply_history(paragraphs: Vec<String>) -> Vec<String> {
     let mut chunks: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -1450,6 +1455,58 @@ mod tests {
         // `MessageError`'s `content_block_count` check (subject + body +
         // quote, `MAX_BLOCKS_PER_MESSAGE == 64`).
         assert!(1 + out.body_blocks.len() + out.quote_blocks.len() <= 64);
+    }
+
+    #[test]
+    fn reply_history_beyond_the_chunk_cap_is_dropped_and_body_is_unchanged() {
+        // The test above only fills 2 chunks, so it never exercises the
+        // cap-and-drop path itself. This fixture's quoted paragraphs alone
+        // total well over `8 * 4096` chars, forcing `chunk_reply_history`
+        // to actually drop the remainder once the 8th chunk fills up.
+        let header = concat!(
+            "<div>New text.</div>",
+            "<div id=\"appendonsend\"></div><hr>",
+            "<div id=\"divRplyFwdMsg\">",
+            "<b>From:</b> Alex &lt;alex@example.invalid&gt;<br>",
+            "<b>Sent:</b> Monday, 1 September 2025 09:00<br>",
+            "<b>To:</b> Me &lt;me@example.invalid&gt;<br>",
+            "<b>Subject:</b> Meeting time</div>",
+        );
+        let mut html = String::from(header);
+        let mut paragraph_texts: Vec<String> = Vec::new();
+        for i in 0..700 {
+            use core::fmt::Write as _;
+            let text = format!("Quoted line {i:04} of the original message body text.");
+            let _ = write!(html, "<div>{text}</div>");
+            paragraph_texts.push(text);
+        }
+        let paragraphs_total_chars: usize = paragraph_texts
+            .iter()
+            .map(|p| p.chars().count())
+            .sum::<usize>()
+            + 2 * (paragraph_texts.len() - 1);
+        assert!(
+            paragraphs_total_chars > 8 * 4096,
+            "fixture must exceed the 8-chunk cap on its own; got {paragraphs_total_chars} chars"
+        );
+
+        let out = canonicalize_html(&html).unwrap();
+        assert_eq!(out.body_blocks, vec!["New text.".to_string()]);
+        assert_eq!(
+            out.quote_blocks.len(),
+            8,
+            "expected exactly 8 quote chunks once the cap is exercised"
+        );
+        for chunk in &out.quote_blocks {
+            assert!(
+                chunk.chars().count() <= 4096,
+                "chunk exceeds 4096 chars: {}",
+                chunk.chars().count()
+            );
+        }
+        // Order preserved: the header block is the very first moved
+        // paragraph, so the first chunk must start with it.
+        assert!(out.quote_blocks[0].starts_with("From: Alex <alex@example.invalid>"));
     }
 
     #[test]
