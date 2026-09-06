@@ -212,7 +212,7 @@ impl ReviewState {
                     ui.collapsing("Why this was suggested · evidence and replies",|ui|{
                         show_anchor(ui,"Original expectation",&item.evidence,&self.messages);
                         if let Some(deadline)=&item.deadline {show_anchor(ui,"Deadline evidence",deadline,&self.messages);}
-                        if let Some(resolution)=&item.resolution {show_anchor(ui,resolution_anchor_label(item.resolution_kind),resolution,&self.messages);} else if item.unverified_resolution {ui.label("The analysis proposed a completion but its quotation could not be verified; treat as open.");} else {ui.label("No matching completion was identified in the scanned conversation. Work may have happened elsewhere or outside this history window.");}
+                        if let Some(resolution)=&item.resolution {show_anchor(ui,resolution_anchor_label(item.resolution_kind),resolution,&self.messages);} else if item.unverified_resolution {ui.label("The analysis proposed a completion but it could not be validated; treat as open.");} else {ui.label("No matching completion was identified in the scanned conversation. Work may have happened elsewhere or outside this history window.");}
                         ui.collapsing("Full scanned conversation",|ui| {for m in self.messages.iter().filter(|m|m.account==source.account && m.conversation==source.conversation) {ui.label(format!("{} · {}",m.date_label,if m.input.from_user {"You"} else {"Other participant"}));for b in &m.input.message.body_blocks {ui.label(b.as_string());}}});
                     });
                     ui.horizontal_wrapped(|ui|{
@@ -291,11 +291,12 @@ fn resolution_status_label(kind: Option<ResolutionKind>) -> &'static str {
     match kind {
         Some(ResolutionKind::Completed) | None => "Possible completion — confirm below",
         Some(ResolutionKind::Declined) => "Possible decline — confirm below",
+        Some(ResolutionKind::Withdrawn) => "Possibly withdrawn by the requester — confirm below",
         Some(ResolutionKind::Superseded) => {
             "Possibly superseded by a later message — confirm below"
         }
         Some(ResolutionKind::Renegotiated) => {
-            "Possibly renegotiated: new terms were proposed — confirm below"
+            "Possibly renegotiated (new terms proposed) — confirm below"
         }
     }
 }
@@ -303,6 +304,7 @@ fn resolution_anchor_label(kind: Option<ResolutionKind>) -> &'static str {
     match kind {
         Some(ResolutionKind::Completed) | None => "Later completion evidence",
         Some(ResolutionKind::Declined) => "Later decline evidence",
+        Some(ResolutionKind::Withdrawn) => "Later withdrawal by the requester",
         Some(ResolutionKind::Superseded) => "Later superseding message",
         Some(ResolutionKind::Renegotiated) => "Later renegotiation (counter-proposal)",
     }

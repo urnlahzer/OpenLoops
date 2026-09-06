@@ -414,11 +414,30 @@ const SEMANTIC_CASES: [(&str, bool, bool, bool, usize); 7] = [
 // Live semantic probe: a request that is renegotiated (a counter-proposal,
 // not a plain completion) one message later must still be recognized as
 // closure evidence, with resolution_kind reflecting the renegotiation or
-// supersession rather than a plain completion.
-const RESOLUTION_CASES: [(&str, &str); 1] = [(
+// supersession rather than a plain completion. The reply is a paraphrase of
+// the resolution_kind renegotiated example quoted in INSTRUCTIONS, not a
+// literal copy, so this exercises genuine semantic recognition rather than
+// an echo of the prompt's own example text.
+const RENEGOTIATION_CASE: (&str, &str) = (
     "Can we move our meeting to a different time?",
-    "Let's move it one hour later.",
-)];
+    "Could we push it back by an hour instead?",
+);
+// A plain completion must still resolve to resolution_kind Completed now
+// that resolution_kind distinguishes several closure kinds.
+const COMPLETED_RESOLUTION_CASE: (&str, &str) = (
+    "Please send me the signed engagement letter.",
+    "Attached is the signed engagement letter.",
+);
+fn resolution_kind_name(kind: Option<ResolutionKind>) -> &'static str {
+    match kind {
+        None => "none",
+        Some(ResolutionKind::Completed) => "completed",
+        Some(ResolutionKind::Declined) => "declined",
+        Some(ResolutionKind::Withdrawn) => "withdrawn",
+        Some(ResolutionKind::Superseded) => "superseded",
+        Some(ResolutionKind::Renegotiated) => "renegotiated",
+    }
+}
 pub fn probe(key: String, model: &str) -> Result<usize, ProviderError> {
     let provider = OllamaCloud::connect(key, model)?;
     let mut passed = 0;
@@ -510,51 +529,117 @@ pub fn probe(key: String, model: &str) -> Result<usize, ProviderError> {
         "Semantic case {}: acknowledgement did not close the request.",
         passed + 2
     );
-    probe_resolution_cases(&provider, passed + 2)?;
-    Ok(passed + 2 + RESOLUTION_CASES.len())
+    probe_renegotiation_case(&provider, passed + 3)?;
+    probe_completed_resolution_case(&provider, passed + 4)?;
+    Ok(passed + 4)
 }
 
-/// Runs `RESOLUTION_CASES` against `provider`: a request renegotiated (a
+/// Runs `RENEGOTIATION_CASE` against `provider`: a request renegotiated (a
 /// counter-proposal, not a plain completion) one message later must still
 /// be recognized as closure evidence, with `resolution_kind` reflecting the
-/// renegotiation or supersession rather than a plain completion.
-/// `numbered_from` is the case number of the previous case, for print
-/// numbering only. Prints counts only; never returned content.
-fn probe_resolution_cases(
+/// renegotiation or supersession rather than a plain completion. The reply
+/// may itself read as a new request, so 1 or 2 items are both acceptable;
+/// what matters is that the item anchored on the original request (`m0`)
+/// carries the expected resolution kind. `case_number` is only for print
+/// numbering. Prints counts and the observed kind name (both fixed
+/// strings) only; never returned content.
+fn probe_renegotiation_case(
     provider: &OllamaCloud,
-    numbered_from: usize,
+    case_number: usize,
 ) -> Result<(), ProviderError> {
-    for (offset, (request, reply)) in RESOLUTION_CASES.into_iter().enumerate() {
-        let request_item = synthetic(request, 0, "c");
-        let mut request_message = prepare(&request_item, "Synthetic", 0)
-            .map_err(|_| ProviderError::InvalidAnalysis)?
-            .input;
-        request_message.to_user = true;
-        let reply_item = synthetic(reply, 1, "c");
-        let mut reply_message = prepare(&reply_item, "Synthetic", 1)
-            .map_err(|_| ProviderError::InvalidAnalysis)?
-            .input;
-        reply_message.from_user = true;
-        set_outgoing(&mut reply_message);
-        let result = provider.expectations(&[request_message, reply_message])?;
-        println!(
-            "Semantic case {}: {} accepted, {} rejected, {} degraded.",
-            numbered_from + 1 + offset,
-            result.items.len(),
-            result.rejected,
-            result.degraded
-        );
-        if result.items.len() != 1
-            || result.rejected != 0
-            || result.degraded != 0
-            || result.items[0].resolution.is_none()
-            || !matches!(
-                result.items[0].resolution_kind,
-                Some(ResolutionKind::Renegotiated | ResolutionKind::Superseded)
-            )
-        {
-            return Err(ProviderError::InvalidAnalysis);
-        }
+    let (request, reply) = RENEGOTIATION_CASE;
+    let request_item = synthetic(request, 0, "c");
+    let mut request_message = prepare(&request_item, "Synthetic", 0)
+        .map_err(|_| ProviderError::InvalidAnalysis)?
+        .input;
+    request_message.to_user = true;
+    let reply_item = synthetic(reply, 2, "c");
+    let mut reply_message = prepare(&reply_item, "Synthetic", 1)
+        .map_err(|_| ProviderError::InvalidAnalysis)?
+        .input;
+    reply_message.from_user = true;
+    set_outgoing(&mut reply_message);
+    let result = provider.expectations(&[request_message, reply_message])?;
+    let anchored = result
+        .items
+        .iter()
+        .find(|item| item.evidence.message == "m0");
+    println!(
+        "Semantic case {}: {} accepted, {} rejected, {} degraded.",
+        case_number,
+        result.items.len(),
+        result.rejected,
+        result.degraded
+    );
+    println!(
+        "Semantic case {}: observed resolution kind {}.",
+        case_number,
+        resolution_kind_name(anchored.and_then(|item| item.resolution_kind))
+    );
+    for reason in &result.rejection_reasons {
+        println!("{reason}");
+    }
+    if !(1..=2).contains(&result.items.len()) || result.rejected != 0 || result.degraded != 0 {
+        return Err(ProviderError::InvalidAnalysis);
+    }
+    let Some(item) = anchored else {
+        return Err(ProviderError::InvalidAnalysis);
+    };
+    if item.resolution.is_none()
+        || !matches!(
+            item.resolution_kind,
+            Some(ResolutionKind::Renegotiated | ResolutionKind::Superseded)
+        )
+    {
+        return Err(ProviderError::InvalidAnalysis);
+    }
+    Ok(())
+}
+
+/// Runs `COMPLETED_RESOLUTION_CASE` against `provider`: a plain completion
+/// must still resolve to exactly one item with `resolution_kind` Completed.
+/// `case_number` is only for print numbering. Prints counts and the
+/// observed kind name (both fixed strings) only; never returned content.
+fn probe_completed_resolution_case(
+    provider: &OllamaCloud,
+    case_number: usize,
+) -> Result<(), ProviderError> {
+    let (request, reply) = COMPLETED_RESOLUTION_CASE;
+    let request_item = synthetic(request, 0, "d");
+    let mut request_message = prepare(&request_item, "Synthetic", 0)
+        .map_err(|_| ProviderError::InvalidAnalysis)?
+        .input;
+    request_message.to_user = true;
+    let reply_item = synthetic(reply, 2, "d");
+    let mut reply_message = prepare(&reply_item, "Synthetic", 1)
+        .map_err(|_| ProviderError::InvalidAnalysis)?
+        .input;
+    reply_message.from_user = true;
+    set_outgoing(&mut reply_message);
+    let result = provider.expectations(&[request_message, reply_message])?;
+    println!(
+        "Semantic case {}: {} accepted, {} rejected, {} degraded.",
+        case_number,
+        result.items.len(),
+        result.rejected,
+        result.degraded
+    );
+    println!(
+        "Semantic case {}: observed resolution kind {}.",
+        case_number,
+        resolution_kind_name(result.items.first().and_then(|item| item.resolution_kind))
+    );
+    for reason in &result.rejection_reasons {
+        println!("{reason}");
+    }
+    if result.items.len() != 1 || result.rejected != 0 || result.degraded != 0 {
+        return Err(ProviderError::InvalidAnalysis);
+    }
+    if !matches!(
+        result.items[0].resolution_kind,
+        Some(ResolutionKind::Completed)
+    ) {
+        return Err(ProviderError::InvalidAnalysis);
     }
     Ok(())
 }
