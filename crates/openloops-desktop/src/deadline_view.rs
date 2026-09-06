@@ -180,10 +180,9 @@ pub fn label(view: &DeadlineView) -> String {
                 )
             } else {
                 format!(
-                    "Due by end of {} (range {} to {})",
+                    "Due by end of {} (range started {})",
                     format_day(*end_day),
-                    format_day(*start_day),
-                    format_day(*end_day)
+                    format_day(*start_day)
                 )
             }
         }
@@ -403,7 +402,7 @@ mod tests {
                 end_day: 20_702,
                 past: false
             }),
-            "Due by end of Sun Sep 06, 2026 (range Mon Aug 31, 2026 to Sun Sep 06, 2026)"
+            "Due by end of Sun Sep 06, 2026 (range started Mon Aug 31, 2026)"
         );
         assert_eq!(
             label(&DeadlineView::DueRange {

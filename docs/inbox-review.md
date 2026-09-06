@@ -9,12 +9,19 @@ in the normal application.
    There is no individual message selection. Inbox and Sent Items are joined
    by conversation identity. Groups retain their own thread identity.
 2. Review each complete action, suggested owner, waiting party, and stated
-   deadline. Expand evidence to inspect original quotations and later replies.
-   A possible completion remains open until the user confirms it.
+   deadline. Under the stated deadline the card shows how it ages (due, past
+   due, a date range, tied to an event, or soft urgency); past-due open items
+   sort first. Expand evidence to inspect original quotations and later
+   replies. A later reply may be labelled a possible completion, decline,
+   withdrawal, supersession, or renegotiation; each remains open until the
+   user confirms it. If a quoted deadline or completion could not be
+   validated against the mail, the card says so and keeps the item open.
 3. **Track — this is mine** confirms personal responsibility. **Keep an eye on
    this** watches an unassigned team expectation without claiming ownership.
-   **Handled**, **Not mine / dismiss**, and **Reopen for review** save abstract
-   decisions. Model summaries and source text are not saved locally.
+   **Handled**, **Not mine / dismiss**, **No longer relevant**, and **Reopen for
+   review** save abstract decisions. The checkbox **Show handled, dismissed,
+   and no-longer-relevant items** reveals closed cards. Model summaries and
+   source text are not saved locally.
 4. After choosing to track or watch, **Set To Do reminder** previews an editable
    title and future local reminder time. The explicit create button authorizes
    one task in the same Microsoft account's default personal Tasks list.
@@ -27,7 +34,10 @@ in the normal application.
 ## Coverage and interpretation
 
 Personal/shared Inbox and Sent Items each load up to 100 messages from the last
-30 days in pages of 25. Groups load up to 20 recent threads, each with up to 40
+30 days: message headers are listed newest-first in pages of 100 and each body
+is fetched separately, so one oversized message cannot fail the folder. Quoted
+Outlook reply history inside a message is treated as context, not current text.
+Groups load up to 20 recent threads, each with up to 40
 posts; threads active within 30 days can include earlier posts as context.
 There are at most 10 configured sources. Pagination is confined to the same
 Graph origin and collection path. A capped, inaccessible, or oversized source
