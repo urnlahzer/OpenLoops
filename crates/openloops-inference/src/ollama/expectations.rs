@@ -120,19 +120,56 @@ fn string<'a>(v: &'a Value, key: &str, max: usize) -> Result<&'a str, ProviderEr
         .ok_or(ProviderError::InvalidSchema)
 }
 
-/// Folds Unicode no-break-space variants (`U+00A0`, `U+2007`, `U+202F`) to a
-/// plain ASCII space. Outlook HTML bodies decode `&nbsp;` to `U+00A0`, and a
+/// Normalizes text for anchor matching and display: every Unicode `Zs`
+/// space (`U+0020`, `U+00A0`, `U+1680`, `U+2000..=U+200A`, `U+202F`,
+/// `U+205F`, `U+3000`) and horizontal tab fold to a plain `U+0020`;
+/// `U+2028` (LINE SEPARATOR) and `U+2029` (PARAGRAPH SEPARATOR) fold to
+/// `\n`; the invisible formatting scalars `U+200B` (zero-width space),
+/// `U+FEFF` (BOM / zero-width no-break space), and `U+00AD` (soft hyphen)
+/// are deleted outright; `U+200C`/`U+200D` (zero-width non-joiner/joiner,
+/// load-bearing inside emoji and script ligature sequences) pass through
+/// unchanged. Any resulting run of two or more `U+0020` collapses to one.
+///
+/// Outlook HTML bodies decode `&nbsp;` to `U+00A0` and similar, and a
 /// model-supplied quote written with ordinary spaces would otherwise never
-/// exact-match the block text. This does no trimming and does not collapse
-/// runs of spaces; it only folds the scalar itself. The canonicalizer is
-/// contract-pinned and out of scope, so this runs at the matching site only.
-fn fold_spaces(text: &str) -> String {
-    text.chars()
-        .map(|c| match c {
-            '\u{00A0}' | '\u{2007}' | '\u{202F}' => ' ',
-            other => other,
-        })
-        .collect()
+/// exact-match the block text. The canonicalizer is contract-pinned and
+/// out of scope, so this runs at the matching site only.
+///
+/// `Anchor.quote` and `Anchor.context` are normalized for matching and
+/// display and are NOT scalar-index aligned with the `CanonicalBlock`
+/// backing them: this desktop review path never maps anchors back to
+/// block ranges. `validation.rs` has its own resolver and is unaffected.
+fn normalize_for_matching(text: &str) -> String {
+    let mut folded = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\u{0020}'
+            | '\t'
+            | '\u{00A0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200A}'
+            | '\u{202F}'
+            | '\u{205F}'
+            | '\u{3000}' => folded.push(' '),
+            '\u{2028}' | '\u{2029}' => folded.push('\n'),
+            '\u{200B}' | '\u{FEFF}' | '\u{00AD}' => {}
+            other => folded.push(other),
+        }
+    }
+    let mut out = String::with_capacity(folded.len());
+    let mut last_was_space = false;
+    for c in folded.chars() {
+        if c == ' ' {
+            if !last_was_space {
+                out.push(' ');
+            }
+            last_was_space = true;
+        } else {
+            out.push(c);
+            last_was_space = false;
+        }
+    }
+    out
 }
 
 fn anchor(
@@ -150,14 +187,16 @@ fn anchor(
         .strip_prefix('b')
         .and_then(|n| n.parse::<usize>().ok())
         .ok_or(ProviderError::InvalidAnalysis)?;
-    let context = fold_spaces(
+    let context = normalize_for_matching(
         &m.message
             .body_blocks
             .get(block)
             .ok_or(ProviderError::InvalidAnalysis)?
             .as_string(),
     );
-    let quote = fold_spaces(string(v, "quote", 4000)?).trim().to_string();
+    let quote = normalize_for_matching(string(v, "quote", 4000)?)
+        .trim()
+        .to_string();
     if quote.chars().count() < min {
         return Err(ProviderError::InvalidAnalysis);
     }
@@ -249,12 +288,14 @@ fn candidate(v: &Value, messages: &[ConversationMessage]) -> Result<Expectation,
         return Err(ProviderError::InvalidSchema);
     }
     let evidence = anchor(&v["evidence"], messages, 12)?;
-    let action_phrase = fold_spaces(string(v, "action_phrase", 1000)?)
+    let action_phrase = normalize_for_matching(string(v, "action_phrase", 1000)?)
         .trim()
         .to_string();
     if action_phrase.chars().count() < 4 || !evidence.quote.contains(action_phrase.as_str()) {
         return Err(ProviderError::InvalidAnalysis);
     }
+    // anchor() re-normalizes the already-normalized action_phrase below;
+    // normalize_for_matching is idempotent by design, so this is a no-op.
     anchor(
         &json!({"message":evidence.message,"block":format!("b{}",evidence.block),"quote":action_phrase.as_str()}),
         messages,
@@ -436,9 +477,62 @@ mod tests {
     }
     #[test]
     fn nbsp_fold_still_rejects_partial_word() {
-        let m = nbsp_messages();
-        let v = json!({"message":"m0","block":"b0","quote":"move it one hou"});
-        assert!(anchor(&v, &m, 2).is_err());
+        let mut m = nbsp_messages();
+        m[0].message.body_blocks =
+            vec![CanonicalBlock::new("Let's\u{a0}move it one hour later.").unwrap()];
+        // Sanity: the full word resolves uniquely, so the partial-word
+        // rejection below is not masking a uniqueness or fold failure.
+        let full = json!({"message":"m0","block":"b0","quote":"move it one hour"});
+        assert!(anchor(&full, &m, 2).is_ok());
+        let partial = json!({"message":"m0","block":"b0","quote":"move it one hou"});
+        assert!(anchor(&partial, &m, 2).is_err());
+    }
+    #[test]
+    fn nbsp_followed_by_ascii_space_collapses_to_one_space() {
+        let mut m = nbsp_messages();
+        m[0].message.body_blocks =
+            vec![CanonicalBlock::new("Please send the draft\u{a0} budget.").unwrap()];
+        let v = json!({"message":"m0","block":"b0","quote":"draft budget"});
+        let a = anchor(&v, &m, 4).unwrap();
+        assert_eq!(a.quote, "draft budget");
+    }
+    #[test]
+    fn figure_space_quote_resolves() {
+        let mut m = nbsp_messages();
+        m[0].message.body_blocks =
+            vec![CanonicalBlock::new("Let's\u{2007}move it one\u{2007}hour later.").unwrap()];
+        let v = json!({"message":"m0","block":"b0","quote":"Let's move it one hour later."});
+        let a = anchor(&v, &m, 12).unwrap();
+        assert_eq!(a.quote, "Let's move it one hour later.");
+    }
+    #[test]
+    fn thin_space_quote_resolves() {
+        let mut m = nbsp_messages();
+        m[0].message.body_blocks =
+            vec![CanonicalBlock::new("Let's\u{2009}move it one\u{2009}hour later.").unwrap()];
+        let v = json!({"message":"m0","block":"b0","quote":"Let's move it one hour later."});
+        let a = anchor(&v, &m, 12).unwrap();
+        assert_eq!(a.quote, "Let's move it one hour later.");
+    }
+    #[test]
+    fn zero_width_space_inside_word_is_deleted() {
+        let mut m = nbsp_messages();
+        m[0].message.body_blocks =
+            vec![CanonicalBlock::new("Please send the bud\u{200b}get.").unwrap()];
+        let v = json!({"message":"m0","block":"b0","quote":"budget"});
+        let a = anchor(&v, &m, 4).unwrap();
+        assert_eq!(a.quote, "budget");
+    }
+    #[test]
+    fn zero_width_joiner_in_emoji_sequence_is_preserved() {
+        let mut m = nbsp_messages();
+        let emoji = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        m[0].message.body_blocks =
+            vec![CanonicalBlock::new(&format!("Family photo: {emoji} attached.")).unwrap()];
+        let v = json!({"message":"m0","block":"b0","quote": emoji});
+        let a = anchor(&v, &m, 2).unwrap();
+        assert_eq!(a.quote, emoji);
+        assert!(a.quote.contains('\u{200D}'));
     }
     #[test]
     fn narrow_no_break_space_quote_resolves() {
