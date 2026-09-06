@@ -58,25 +58,34 @@ fn block(text: &str) -> Result<CanonicalBlock, ConnectionError> {
 /// `reply_history::is_reply_history_start` directly.
 ///
 /// Mirrors `reply_history::split_reply_history`'s "match at paragraph 0"
-/// guard: if the scan classifies every line as history (so `body` ends up
-/// empty after trimming) -- which is what happens when the very first
-/// line already looks like a reply-history header, with nothing else
-/// preceding it -- the whole input is returned as `body` with an empty
-/// `quote`, rather than emptying the message into an all-quote message.
+/// guard: if the very first line already looks like a reply-history
+/// header, with nothing else preceding it, the whole input is returned as
+/// `body` with an empty `quote`, rather than emptying the message into an
+/// all-quote message. This is narrower than "body ended up empty": a
+/// message consisting only of `>`-quoted lines (with no history marker at
+/// all, or one that starts later than line 0) also ends up with an empty
+/// `body`, and that must still go to `quote` as before -- `history_start`
+/// tracks the line index where the reply-history marker itself was found
+/// (not the unrelated `>`-prefix quoting rule), so the guard only fires
+/// when that marker was the very first line.
 fn plain_body(text: &str) -> (String, String) {
     let lines: Vec<&str> = text.lines().collect();
     let mut body = String::new();
     let mut quote = String::new();
     let mut history = false;
+    let mut history_start: Option<usize> = None;
     for (idx, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        if trimmed.starts_with("On ") && trimmed.ends_with("wrote:")
-            // Exact match on the trimmed line, not `contains`: narrowing
-            // this deliberately avoids treating prose that merely mentions
-            // the phrase mid-sentence as reply history.
-            || trimmed == "-----Original Message-----"
+        if !history
+            && (trimmed.starts_with("On ") && trimmed.ends_with("wrote:")
+                // Exact match on the trimmed line, not `contains`:
+                // narrowing this deliberately avoids treating prose that
+                // merely mentions the phrase mid-sentence as reply
+                // history.
+                || trimmed == "-----Original Message-----")
         {
             history = true;
+            history_start = Some(idx);
         }
         let leading = line.trim_start();
         // Outlook plain-text reply: a From: line with both a Subject: line
@@ -94,6 +103,7 @@ fn plain_body(text: &str) -> (String, String) {
             });
             if has_subject && has_sent_or_date {
                 history = true;
+                history_start = Some(idx);
             }
         }
         // Outlook's underscore separator, immediately followed (within 2
@@ -105,6 +115,7 @@ fn plain_body(text: &str) -> (String, String) {
                 .any(|l| starts_with_ascii_ci(l.trim_start(), "From:"))
             {
                 history = true;
+                history_start = Some(idx);
             }
         }
         let target = if history || line.trim_start().starts_with('>') {
@@ -115,7 +126,7 @@ fn plain_body(text: &str) -> (String, String) {
         target.push_str(line);
         target.push('\n');
     }
-    if body.trim().is_empty() {
+    if history_start == Some(0) {
         return (text.to_string(), String::new());
     }
     (body, quote)
@@ -657,6 +668,38 @@ mod tests {
         );
         let m = prepare(&item, "Inbox", 0).unwrap();
         assert!(!m.input.message.body_blocks.is_empty());
+    }
+    #[test]
+    fn plain_text_all_quoted_lines_with_no_history_marker_stay_in_quote() {
+        // Regression: the "match at paragraph 0" guard must NOT fire just
+        // because `body` ends up empty -- a message made entirely of
+        // `>`-prefixed lines has no reply-history marker at all
+        // (`history_start` stays `None`), so this is not the header-first
+        // case and everything belongs in quote, not body.
+        let (body, quote) = plain_body("> old text line one\n> old text line two");
+        assert!(body.trim().is_empty());
+        assert_eq!(quote.trim(), "> old text line one\n> old text line two");
+    }
+    #[test]
+    fn plain_text_quoted_line_before_original_message_header_stays_in_quote() {
+        // Regression: the reply-history marker ("-----Original
+        // Message-----") is found at line index 1, not 0 (a `>`-quoted
+        // line precedes it), so the guard must not fire even though body
+        // ends up empty -- everything, including the leading `>` line,
+        // belongs in quote.
+        let (body, quote) = plain_body(concat!(
+            "> old\n",
+            "-----Original Message-----\n",
+            "From: A\n",
+            "Sent: B\n",
+            "Subject: C\n",
+            "body",
+        ));
+        assert!(body.trim().is_empty());
+        assert_eq!(
+            quote.trim(),
+            "> old\n-----Original Message-----\nFrom: A\nSent: B\nSubject: C\nbody"
+        );
     }
     #[test]
     fn plain_text_hard_wrapped_quote_with_no_blank_lines_chunks_by_line() {
