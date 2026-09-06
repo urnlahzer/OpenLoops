@@ -7,6 +7,7 @@ use openloops_inference::{
         OllamaCloud, ProviderError,
         expectations::{ConversationMessage, Expectations},
     },
+    reply_history::{chunk_reply_history, is_underscore_separator, starts_with_ascii_ci},
     walker::canonicalize_html,
 };
 use std::collections::BTreeMap;
@@ -43,33 +44,42 @@ fn block(text: &str) -> Result<CanonicalBlock, ConnectionError> {
     }
     CanonicalBlock::new(&text).map_err(|_| ConnectionError::ResponseTooLarge)
 }
-/// Outlook's separator rule: a line consisting solely of 10 or more `_`
-/// characters, after trimming.
-fn is_underscore_separator(s: &str) -> bool {
-    let trimmed = s.trim();
-    trimmed.len() >= 10 && trimmed.chars().all(|c| c == '_')
-}
-
+/// Plain-text analog of `reply_history`'s HTML-path detection, at line
+/// granularity: `From:` detection is case-insensitive (via
+/// [`starts_with_ascii_ci`]) and requires both a `Subject:` line and a
+/// `Sent:`/`Date:` line within the following 5 lines; the underscore rule
+/// is the shared [`is_underscore_separator`]; `-----Original Message-----`
+/// is matched on the trimmed line, not merely contained within it. The
+/// window sizes deliberately differ from the HTML path's (paragraph-block
+/// granularity there vs. line granularity here), so this does not call
+/// `reply_history::is_reply_history_start` directly.
 fn plain_body(text: &str) -> (String, String) {
     let lines: Vec<&str> = text.lines().collect();
     let mut body = String::new();
     let mut quote = String::new();
     let mut history = false;
     for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
         if line.starts_with("On ") && line.ends_with("wrote:")
-            || line.contains("-----Original Message-----")
+            || trimmed == "-----Original Message-----"
         {
             history = true;
         }
-        let trimmed = line.trim_start();
-        // Outlook plain-text reply: a From: line with a Subject: line
-        // within the next 5 lines starts the quoted original.
-        if !history && trimmed.starts_with("From:") {
+        let leading = line.trim_start();
+        // Outlook plain-text reply: a From: line with both a Subject: line
+        // and a Sent:/Date: line within the next 5 lines starts the
+        // quoted original.
+        if !history && starts_with_ascii_ci(leading, "From:") {
             let end = (idx + 6).min(lines.len());
-            if lines[idx + 1..end]
+            let window = &lines[idx + 1..end];
+            let has_subject = window
                 .iter()
-                .any(|l| l.trim_start().starts_with("Subject:"))
-            {
+                .any(|l| starts_with_ascii_ci(l.trim_start(), "Subject:"));
+            let has_sent_or_date = window.iter().any(|l| {
+                let t = l.trim_start();
+                starts_with_ascii_ci(t, "Sent:") || starts_with_ascii_ci(t, "Date:")
+            });
+            if has_subject && has_sent_or_date {
                 history = true;
             }
         }
@@ -79,7 +89,7 @@ fn plain_body(text: &str) -> (String, String) {
             let end = (idx + 3).min(lines.len());
             if lines[idx + 1..end]
                 .iter()
-                .any(|l| l.trim_start().starts_with("From:"))
+                .any(|l| starts_with_ascii_ci(l.trim_start(), "From:"))
             {
                 history = true;
             }
@@ -122,15 +132,26 @@ pub fn prepare(
         )
     } else {
         let (body, quote) = plain_body(&item.body);
-        (
-            vec![block(body.trim())?],
-            if quote.is_empty() {
-                vec![]
-            } else {
-                vec![block(quote.trim())?]
-            },
-            vec![],
-        )
+        let trimmed_body = body.trim();
+        let body_blocks = if trimmed_body.is_empty() {
+            vec![]
+        } else {
+            vec![block(trimmed_body)?]
+        };
+        // Bound the quote text the same way the HTML path bounds detected
+        // reply history: split it into blank-line-separated paragraphs and
+        // chunk them, instead of pushing one unbounded quote block.
+        let quote_paragraphs: Vec<String> = quote
+            .split("\n\n")
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect();
+        let quote_blocks = chunk_reply_history(quote_paragraphs)
+            .iter()
+            .map(|s| block(s))
+            .collect::<Result<Vec<_>, _>>()?;
+        (body_blocks, quote_blocks, vec![])
     };
     if 1 + body_blocks.len() + quote_blocks.len() > 64 {
         return Err(ConnectionError::ResponseTooLarge);
@@ -530,6 +551,23 @@ mod tests {
         assert_eq!(
             body.trim(),
             "Sure.\nFrom: Alex, checking in on this.\nHave a good day."
+        );
+        assert!(quote.is_empty());
+    }
+    #[test]
+    fn plain_text_from_with_subject_but_no_sent_or_date_stays_in_body() {
+        // Both a Subject: line AND a Sent:/Date: line are now required
+        // within the next 5 lines; Subject: alone is not enough.
+        let (body, quote) = plain_body(concat!(
+            "Sure.\n",
+            "From: Alex\n",
+            "Subject: Meeting\n",
+            "\n",
+            "Can we change the meeting time?",
+        ));
+        assert_eq!(
+            body.trim(),
+            "Sure.\nFrom: Alex\nSubject: Meeting\n\nCan we change the meeting time?"
         );
         assert!(quote.is_empty());
     }

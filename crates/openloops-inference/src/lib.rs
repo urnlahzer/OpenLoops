@@ -24,6 +24,7 @@ pub mod blocks;
 pub mod canonical;
 pub mod error;
 pub mod message;
+pub mod reply_history;
 pub mod validation;
 pub mod walker;
 
