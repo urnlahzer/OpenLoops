@@ -103,18 +103,14 @@ pub fn classify(
 }
 
 fn normalize_quote(quote: &str) -> String {
-    let lower = quote.to_ascii_lowercase();
-    // The strict datetime grammar accepts uppercase T or a space, not lowercase t.
-    let lower = if lower.as_bytes().get(10) == Some(&b't') {
-        format!("{} {}", &lower[..10], &lower[11..])
-    } else {
-        lower
-    };
     let trim = |c: char| c.is_ascii_punctuation() || c.is_whitespace();
-    let text = lower.trim_matches(trim);
-    for prefix in ["no later than ", "due by ", "before ", "due ", "by ", "on "] {
-        if let Some(rest) = text.strip_prefix(prefix) {
-            return rest.trim_matches(trim).to_string();
+    let text = quote.trim_matches(trim);
+    for prefix in ["no later than ", "due by ", "due ", "by ", "on "] {
+        if text
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        {
+            return text[prefix.len()..].trim_matches(trim).to_string();
         }
     }
     text.to_string()
@@ -272,7 +268,6 @@ mod tests {
             "Friday.",
             "due by Friday",
             "no later than Friday",
-            "before Friday",
             "due Friday",
             "on Friday",
         ] {
@@ -284,6 +279,10 @@ mod tests {
                 );
             }
         }
+        assert_eq!(
+            classify("before Friday", MESSAGE, MESSAGE, 0),
+            DeadlineView::Unknown
+        );
     }
 
     #[test]
@@ -323,6 +322,20 @@ mod tests {
                 DeadlineView::Due {
                     boundary: boundary + 25_200,
                     offset_seconds: -25_200
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn parenthesized_datetime_still_parses_as_an_instant() {
+        let boundary = 1_788_274_800; // 2026-09-01T15:00Z
+        for quote in ["2026-09-01T15:00", "(2026-09-01T15:00)"] {
+            assert_eq!(
+                classify(quote, MESSAGE, MESSAGE, 0),
+                DeadlineView::PastDue {
+                    boundary,
+                    offset_seconds: 0
                 }
             );
         }
