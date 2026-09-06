@@ -7,7 +7,10 @@ use openloops_inference::{
         OllamaCloud, ProviderError,
         expectations::{ConversationMessage, Expectations},
     },
-    reply_history::{chunk_reply_history, is_underscore_separator, starts_with_ascii_ci},
+    reply_history::{
+        REPLY_HISTORY_CHUNK_MAX_CHARS, chunk_reply_history, is_underscore_separator,
+        starts_with_ascii_ci,
+    },
     walker::canonicalize_html,
 };
 use std::collections::BTreeMap;
@@ -53,6 +56,13 @@ fn block(text: &str) -> Result<CanonicalBlock, ConnectionError> {
 /// window sizes deliberately differ from the HTML path's (paragraph-block
 /// granularity there vs. line granularity here), so this does not call
 /// `reply_history::is_reply_history_start` directly.
+///
+/// Mirrors `reply_history::split_reply_history`'s "match at paragraph 0"
+/// guard: if the scan classifies every line as history (so `body` ends up
+/// empty after trimming) -- which is what happens when the very first
+/// line already looks like a reply-history header, with nothing else
+/// preceding it -- the whole input is returned as `body` with an empty
+/// `quote`, rather than emptying the message into an all-quote message.
 fn plain_body(text: &str) -> (String, String) {
     let lines: Vec<&str> = text.lines().collect();
     let mut body = String::new();
@@ -60,7 +70,10 @@ fn plain_body(text: &str) -> (String, String) {
     let mut history = false;
     for (idx, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        if line.starts_with("On ") && line.ends_with("wrote:")
+        if trimmed.starts_with("On ") && trimmed.ends_with("wrote:")
+            // Exact match on the trimmed line, not `contains`: narrowing
+            // this deliberately avoids treating prose that merely mentions
+            // the phrase mid-sentence as reply history.
             || trimmed == "-----Original Message-----"
         {
             history = true;
@@ -102,7 +115,50 @@ fn plain_body(text: &str) -> (String, String) {
         target.push_str(line);
         target.push('\n');
     }
+    if body.trim().is_empty() {
+        return (text.to_string(), String::new());
+    }
     (body, quote)
+}
+
+/// Splits `paragraph` into line-grouped pieces of at most
+/// `REPLY_HISTORY_CHUNK_MAX_CHARS` characters each, if it exceeds that
+/// limit; otherwise returns it unchanged as the only element. Plain-text
+/// quoted history sometimes has no blank lines at all (one giant
+/// hard-wrapped paragraph), which would otherwise make
+/// `chunk_reply_history` -- which only ever splits on paragraph boundaries
+/// -- powerless to bound it: with only one paragraph, there is nothing to
+/// split on. Grouping consecutive lines into sub-paragraphs first restores
+/// a splittable boundary every `REPLY_HISTORY_CHUNK_MAX_CHARS` characters
+/// or so. A single line longer than the limit still becomes its own
+/// oversized piece rather than being cut mid-line.
+fn split_oversized_paragraph_by_lines(paragraph: &str) -> Vec<String> {
+    if paragraph.chars().count() <= REPLY_HISTORY_CHUNK_MAX_CHARS {
+        return vec![paragraph.to_string()];
+    }
+    let mut pieces: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0usize;
+    for line in paragraph.lines() {
+        let line_len = line.chars().count();
+        let separator_len = usize::from(!current.is_empty());
+        if !current.is_empty()
+            && current_len + separator_len + line_len > REPLY_HISTORY_CHUNK_MAX_CHARS
+        {
+            pieces.push(std::mem::take(&mut current));
+            current_len = 0;
+        }
+        if !current.is_empty() {
+            current.push('\n');
+            current_len += 1;
+        }
+        current.push_str(line);
+        current_len += line_len;
+    }
+    if !current.is_empty() {
+        pieces.push(current);
+    }
+    pieces
 }
 
 pub fn prepare(
@@ -139,13 +195,15 @@ pub fn prepare(
             vec![block(trimmed_body)?]
         };
         // Bound the quote text the same way the HTML path bounds detected
-        // reply history: split it into blank-line-separated paragraphs and
+        // reply history: split it into blank-line-separated paragraphs
+        // (further splitting by line any paragraph that is itself over
+        // the chunk limit -- see `split_oversized_paragraph_by_lines`) and
         // chunk them, instead of pushing one unbounded quote block.
         let quote_paragraphs: Vec<String> = quote
             .split("\n\n")
             .map(str::trim)
             .filter(|p| !p.is_empty())
-            .map(str::to_string)
+            .flat_map(split_oversized_paragraph_by_lines)
             .collect();
         let quote_blocks = chunk_reply_history(quote_paragraphs)
             .iter()
@@ -570,6 +628,61 @@ mod tests {
             "Sure.\nFrom: Alex\nSubject: Meeting\n\nCan we change the meeting time?"
         );
         assert!(quote.is_empty());
+    }
+    #[test]
+    fn plain_text_header_first_message_with_nothing_before_it_is_not_split() {
+        // Mirrors the HTML path's "match at paragraph 0" guard: if the
+        // very first line already looks like a reply-history header, with
+        // nothing preceding it, the whole message stays in the body
+        // rather than being emptied into an all-quote message.
+        let (body, quote) = plain_body(concat!(
+            "From: Alex\n",
+            "Sent: Monday\n",
+            "Subject: Meeting\n",
+            "\n",
+            "FYI, can you handle this?",
+        ));
+        assert_eq!(
+            body.trim(),
+            "From: Alex\nSent: Monday\nSubject: Meeting\n\nFYI, can you handle this?"
+        );
+        assert!(quote.is_empty());
+    }
+    #[test]
+    fn prepare_keeps_header_first_plain_text_message_as_nonempty_body() {
+        let item = synthetic(
+            "From: Alex\nSent: Monday\nSubject: Meeting\n\nFYI, can you handle this?",
+            0,
+            "a",
+        );
+        let m = prepare(&item, "Inbox", 0).unwrap();
+        assert!(!m.input.message.body_blocks.is_empty());
+    }
+    #[test]
+    fn plain_text_hard_wrapped_quote_with_no_blank_lines_chunks_by_line() {
+        // A quoted original with no blank lines at all collapses to ONE
+        // paragraph under the blank-line split, which would leave
+        // `chunk_reply_history` powerless to bound it (nothing to split
+        // on). `split_oversized_paragraph_by_lines` restores line-level
+        // splitting boundaries so the 4096-char chunk cap still applies.
+        let mut text = String::from("Sure.\n-----Original Message-----\n");
+        for i in 0..300 {
+            use std::fmt::Write as _;
+            let _ = writeln!(
+                text,
+                "Line {i:03} of the original hard-wrapped message body text here."
+            );
+        }
+        let item = synthetic(&text, 0, "a");
+        let m = prepare(&item, "Inbox", 0).unwrap();
+        assert!(
+            m.input.message.quote_blocks.len() > 1,
+            "expected more than one quote block, got {}",
+            m.input.message.quote_blocks.len()
+        );
+        for block in &m.input.message.quote_blocks {
+            assert!(block.as_string().chars().count() <= 4096);
+        }
     }
     #[test]
     fn cancellation_and_provider_failure_do_not_start_more_conversations() {

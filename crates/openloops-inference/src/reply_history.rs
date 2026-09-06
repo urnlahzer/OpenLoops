@@ -79,9 +79,14 @@ fn has_subject_and_sent_lines(lines: &[&str]) -> bool {
 /// subsumed by (c), whose window always includes this paragraph's own
 /// (uncapped) lines as its first element, so anything (a) could match,
 /// (c) already matches too.
+///
+/// Never panics: an out-of-range `index` returns `false` rather than
+/// indexing `paragraphs` directly.
 #[must_use]
 pub fn is_reply_history_start(paragraphs: &[&str], index: usize) -> bool {
-    let paragraph = paragraphs[index];
+    let Some(paragraph) = paragraphs.get(index).copied() else {
+        return false;
+    };
     let mut lines = paragraph.lines().filter(|l| !l.trim().is_empty());
     let Some(first_line) = lines.next() else {
         return false;
@@ -145,11 +150,17 @@ pub fn is_reply_history_start(paragraphs: &[&str], index: usize) -> bool {
 /// [`chunk_reply_history`]), appended to the end of `quote_blocks`. Any
 /// entries before or after the matching one are left exactly as they are
 /// (an entry after the matching one can only exist following a real
-/// `<blockquote>`, whose own quote block already precedes the matching
-/// entry in document order). Blockquote-derived `quote_blocks` entries are
-/// therefore always first; the appended reply-history chunk(s) come after
-/// them, so the final `quote_blocks` order is grouped by *source*
-/// (blockquote, then reply-history), not strictly by document position.
+/// `<blockquote>`).
+///
+/// `quote_blocks` therefore ends up grouped by *source*, not strictly by
+/// document position: every blockquote-derived block is already present
+/// in `quote_blocks` before this function ever runs (the walker pushes
+/// them during the walk itself, well before this post-pass), and this
+/// function only ever *appends* the reply-history chunk(s) to the end of
+/// that vector. So blockquote-derived blocks always come first and
+/// reply-history chunks always come last, even in a document where a
+/// `<blockquote>` comes AFTER the `body_blocks` entry that contains the
+/// reply-history match.
 pub(crate) fn split_reply_history(
     body_blocks: Vec<String>,
     mut quote_blocks: Vec<String>,
@@ -218,9 +229,9 @@ pub const REPLY_HISTORY_MAX_CHUNKS: usize = 8;
 /// still becomes its own, oversized, chunk rather than being cut
 /// mid-text; if that single paragraph exceeds `message::
 /// MAX_SCALARS_PER_BLOCK` (8192 scalars), `message.rs`'s `bounded_block`
-/// then fails the whole message with `MessageError::BlockTooLarge` when it
-/// builds the final `CanonicalMessage` -- this function itself never
-/// truncates a paragraph to force it under either limit.
+/// then fails the whole message with `MessageError::TooManyScalarsInBlock`
+/// when it builds the final `CanonicalMessage` -- this function itself
+/// never truncates a paragraph to force it under either limit.
 ///
 /// Once the chunk cap is reached, any remaining paragraphs are dropped:
 /// see the module docs for why that is safe (dropped text is never
@@ -604,6 +615,65 @@ mod tests {
     }
 
     #[test]
+    fn from_paragraph_with_subject_but_no_sent_or_date_stays_in_body() {
+        // Both Subject: AND Sent:/Date: are required in the window;
+        // Subject: alone (no Sent:/Date: anywhere in the same paragraph or
+        // the next three) must not trigger a move.
+        let out = canonicalize_html(concat!(
+            "<div>New text.</div>",
+            "<div><b>From:</b> Alex &lt;alex@example.invalid&gt;<br>",
+            "<b>Subject:</b> Meeting time</div>",
+            "<div>Can we change the meeting time?</div>",
+        ))
+        .unwrap();
+        assert_eq!(
+            out.body_blocks,
+            vec![
+                concat!(
+                    "New text.\n\n",
+                    "From: Alex <alex@example.invalid>\n",
+                    "Subject: Meeting time\n\n",
+                    "Can we change the meeting time?",
+                )
+                .to_string()
+            ]
+        );
+        assert!(out.quote_blocks.is_empty());
+    }
+
+    #[test]
+    fn underscore_look_back_landing_on_index_zero_leaves_input_unchanged() {
+        // The match itself is found at index 1 (the header paragraph), but
+        // the underscore look-back pulls it back to index 0 (the very
+        // first paragraph of the very first entry) -- per the same "no
+        // split when the match lands on paragraph 0" rule as
+        // `header_first_message_with_nothing_before_it_is_not_split`, this
+        // must leave the input completely unchanged.
+        let out = canonicalize_html(concat!(
+            "<div>________________________________</div>",
+            "<div><b>From:</b> Alex &lt;alex@example.invalid&gt;<br>",
+            "<b>Sent:</b> Monday, 1 September 2025 09:00<br>",
+            "<b>Subject:</b> Meeting time</div>",
+            "<div>FYI, can you handle this?</div>",
+        ))
+        .unwrap();
+        assert_eq!(
+            out.body_blocks,
+            vec![
+                concat!(
+                    "________________________________\n\n",
+                    "From: Alex <alex@example.invalid>\n",
+                    "Sent: Monday, 1 September 2025 09:00\n",
+                    "Subject: Meeting time\n\n",
+                    "FYI, can you handle this?",
+                )
+                .to_string()
+            ]
+        );
+        assert!(out.quote_blocks.is_empty());
+    }
+
+    #[test]
     fn from_mid_sentence_or_without_header_context_is_not_reply_history() {
         // A "From:" that isn't the start of a header block must never be
         // moved: mid-sentence text, and a block that starts with "From:"
@@ -659,5 +729,52 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n\n");
         assert_eq!(reconstructed, original);
+    }
+
+    #[test]
+    fn multi_entry_round_trip_reassembles_the_matching_entrys_paragraph_sequence() {
+        // Two body_blocks entries (the shape a real <blockquote> produces),
+        // with the reply-history match in the FIRST entry and a
+        // pre-existing (blockquote-derived) quote_blocks entry already in
+        // place. The second body entry and the pre-existing quote entry
+        // must be untouched; the first entry's kept prefix plus the newly
+        // appended chunk(s) must reproduce that entry's original
+        // paragraph sequence exactly.
+        let first_entry_paragraphs = [
+            "New text.",
+            "From: Alex\nSent: Monday\nSubject: Meeting",
+            "Original message body.",
+        ];
+        let first_entry = first_entry_paragraphs.join("\n\n");
+        let second_entry = "Trailing body after quote.".to_string();
+        let existing_quote = vec!["Q".to_string()];
+
+        let (body_blocks, quote_blocks) = split_reply_history(
+            vec![first_entry.clone(), second_entry.clone()],
+            existing_quote.clone(),
+        );
+
+        assert_eq!(body_blocks.len(), 2);
+        assert_eq!(body_blocks[1], second_entry);
+        assert_eq!(
+            &quote_blocks[..existing_quote.len()],
+            existing_quote.as_slice()
+        );
+
+        let moved_chunks = &quote_blocks[existing_quote.len()..];
+        let reconstructed_first_entry = std::iter::once(body_blocks[0].clone())
+            .chain(moved_chunks.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert_eq!(reconstructed_first_entry, first_entry);
+    }
+
+    #[test]
+    fn is_reply_history_start_never_panics_on_an_out_of_range_index() {
+        assert!(!is_reply_history_start(&[], 0));
+        assert!(!is_reply_history_start(
+            &["From: Alex\nSubject: X\nSent: Y"],
+            5
+        ));
     }
 }
