@@ -518,6 +518,20 @@ pub fn parse_analysis_output(bytes: &[u8]) -> Result<AnalysisOutput, ParseReject
     }
 }
 
+/// Parses a bounded provider envelope with duplicate rejection at every depth.
+/// Unknown envelope fields remain available for adapter-specific validation.
+/// # Errors
+/// Returns fixed rejection codes for size, UTF-8, syntax, or duplicate members.
+pub fn parse_strict_json(bytes: &[u8]) -> Result<serde_json::Value, ParseRejection> {
+    if bytes.len() > MAXIMUM_RESPONSE_BYTES {
+        return Err(ParseRejection::ResponseTooLarge);
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| ParseRejection::InvalidUtf8)?;
+    let value = serde_json::from_str(text).map_err(|_| ParseRejection::InvalidJson)?;
+    serde_json::from_str::<StrictJson>(text).map_err(|_| ParseRejection::InvalidSchema)?;
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

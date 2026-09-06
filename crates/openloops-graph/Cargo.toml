@@ -24,6 +24,17 @@ publish.workspace = true
 openloops-application = { path = "../openloops-application" }
 openloops-domain = { path = "../openloops-domain" }
 openloops-persistence = { path = "../openloops-persistence" }
+oauth2 = { version = "=5.0.0", default-features = false, features = ["timing-resistant-secret-traits"], optional = true }
+reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "rustls-tls-native-roots"], optional = true }
+url = { version = "=2.5.8", default-features = false, features = ["std"], optional = true }
+webbrowser = { version = "=1.2.1", default-features = false, features = ["hardened"], optional = true }
+httparse = { version = "=1.10.1", default-features = false, features = ["std"], optional = true }
+serde_json = { version = "=1.0.150", optional = true }
+chrono = { version = "=0.4.45", default-features = false, features = ["std"], optional = true }
+
+[features]
+default = []
+live-connection = ["dep:oauth2", "dep:reqwest", "dep:url", "dep:webbrowser", "dep:httparse", "dep:serde_json", "dep:chrono"]
 
 [lints]
 workspace = true

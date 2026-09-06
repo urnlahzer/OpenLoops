@@ -1,0 +1,68 @@
+# Ollama Cloud provider
+
+Use the [native setup window](native-setup.md) to enter a key, load models, and
+switch between them without a terminal. The window restores the key and selected
+model from the current user's Windows Credential Manager on subsequent launches.
+
+For command-line diagnostics, run `pwsh ./tools/connect-ollama.ps1` in a PowerShell 7 terminal. Enter an Ollama
+API key using the masked prompt. The command fetches available model names from
+`https://ollama.com/api/tags` and presents a numbered chooser. Enter selects
+`deepseek-v4-flash` when listed, including a dated version when that is the
+available label. Select another number to switch models. Rerun to
+change the selection; this development command does not yet save settings.
+
+The command sends a content-free generation request to `https://ollama.com/api/chat`
+and verifies an empty analysis object. It does not read Microsoft messages or
+create tasks. A successful check does not establish extraction quality for that
+model. Some listed models may not support the required text-chat response;
+unsupported or invalid output fails visibly with no automatic model fallback.
+Failures distinguish timeouts, connection errors, rate limiting, account balance,
+HTTP request/server status codes, malformed JSON, and invalid response fields.
+Raw upstream error bodies are not exposed.
+
+The opt-in `ollama-cloud` inference feature also provides `OllamaCloud::analyze`,
+which serializes bounded canonical message projections and sends them for
+analysis. It applies the existing schema/evidence validation before returning
+reviewable hypotheses. This is cloud processing: selected subjects, message
+blocks, participant text, attachment names, and link labels leave the computer.
+No attachment content is sent. The caller must provide only messages within the
+user-authorized scan scope and disclose the external transmission. The native
+[inbox review](inbox-review.md) now calls `expectations` with complete bounded
+conversations, recipient context, and signed-in ownership facts. Its separate
+live contract returns action summaries and exact source quotations resolved
+locally, rather than model-supplied character offsets. Scanning requires no
+manual message selection. Attachments are not sent by this path.
+
+The command-line checker does not persist credentials, payloads, or outputs. The
+native setup window stores its key and settings in Windows Credential Manager;
+it does not save provider payloads or outputs. The launcher restores
+its process environment after exit. The key and raw response buffers are held
+in zeroizing wrappers, without claiming removal of every allocator, TLS, OS, or
+provider copy. Requests use fixed HTTPS endpoints, disabled redirects/proxies,
+5-second connection and 60-second total timeouts, no tools, no automatic retries,
+and bounded request/response sizes. Model names are validated before display.
+Responses must match the selected model, complete normally, and contain no tool
+calls or generated images/audio. Duplicate JSON members are rejected at every
+depth, including the provider envelope. One outer Markdown JSON fence is removed
+before strict validation; surrounding prose and unsupported fields are not accepted.
+Canonical participant handles are mapped
+to validated message slots before transmission, and source/loop handles are
+checked before constructing the request. The adapter does not enable automatic
+actions or pass a release gate.
+
+Validation: `cargo test -p openloops-inference --features ollama-cloud --locked`.
+The unit tests do not contact Ollama; live authentication and generation require
+the user's API key entered locally. Repository Phase 0 no-network checks remain
+unchanged and are not passing runtime-integration gates.
+
+For developer diagnosis, `openloops-ui.exe --probe-saved-model` runs nine synthetic
+conversation cases with the saved model/key: requests, promises, non-actionable
+recaps, third-party promises, team responsibility, independent actions, quoted
+history, completion, and acknowledgement. It reads only OpenLoops setup
+credentials, never Microsoft mail, and reports fixed case/count/validation
+diagnostics. It does not start the GUI or persist provider output. This is a
+semantic smoke suite, not a held-out estimate of production accuracy.
+
+References: [Ollama Cloud API](https://docs.ollama.com/cloud),
+[authentication](https://docs.ollama.com/api/authentication),
+[chat](https://docs.ollama.com/api/chat).

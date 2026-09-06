@@ -63,6 +63,10 @@ pub mod todo;
 pub mod transaction;
 pub mod transport;
 
+/// Explicitly selected live connection tooling; not part of the default smoke build.
+#[cfg(feature = "live-connection")]
+pub mod live;
+
 /// Phase 0 supplies no Graph transport, permission, or network path.
 #[must_use]
 pub const fn is_available() -> bool {

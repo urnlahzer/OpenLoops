@@ -27,6 +27,9 @@ pub mod message;
 pub mod validation;
 pub mod walker;
 
+#[cfg(feature = "ollama-cloud")]
+pub mod ollama;
+
 /// Phase 0 supplies no model provider or content-analysis path.
 #[must_use]
 pub const fn is_available() -> bool {

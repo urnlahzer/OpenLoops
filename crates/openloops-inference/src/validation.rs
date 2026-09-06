@@ -243,7 +243,7 @@ pub enum AnalysisResult {
 // own bounded types rather than parallel definitions.
 // ---------------------------------------------------------------------------
 
-fn resolve_block(
+pub(crate) fn resolve_block(
     message: &CanonicalMessage,
     component: EvidenceComponent,
     block_ordinal: u16,
