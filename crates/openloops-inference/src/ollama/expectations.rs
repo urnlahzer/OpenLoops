@@ -120,6 +120,21 @@ fn string<'a>(v: &'a Value, key: &str, max: usize) -> Result<&'a str, ProviderEr
         .ok_or(ProviderError::InvalidSchema)
 }
 
+/// Folds Unicode no-break-space variants (`U+00A0`, `U+2007`, `U+202F`) to a
+/// plain ASCII space. Outlook HTML bodies decode `&nbsp;` to `U+00A0`, and a
+/// model-supplied quote written with ordinary spaces would otherwise never
+/// exact-match the block text. This does no trimming and does not collapse
+/// runs of spaces; it only folds the scalar itself. The canonicalizer is
+/// contract-pinned and out of scope, so this runs at the matching site only.
+fn fold_spaces(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\u{00A0}' | '\u{2007}' | '\u{202F}' => ' ',
+            other => other,
+        })
+        .collect()
+}
+
 fn anchor(
     v: &Value,
     messages: &[ConversationMessage],
@@ -135,17 +150,18 @@ fn anchor(
         .strip_prefix('b')
         .and_then(|n| n.parse::<usize>().ok())
         .ok_or(ProviderError::InvalidAnalysis)?;
-    let context = m
-        .message
-        .body_blocks
-        .get(block)
-        .ok_or(ProviderError::InvalidAnalysis)?
-        .as_string();
-    let quote = string(v, "quote", 4000)?.trim();
+    let context = fold_spaces(
+        &m.message
+            .body_blocks
+            .get(block)
+            .ok_or(ProviderError::InvalidAnalysis)?
+            .as_string(),
+    );
+    let quote = fold_spaces(string(v, "quote", 4000)?).trim().to_string();
     if quote.chars().count() < min {
         return Err(ProviderError::InvalidAnalysis);
     }
-    let mut matches = context.match_indices(quote);
+    let mut matches = context.match_indices(&quote);
     let (start, _) = matches.next().ok_or(ProviderError::InvalidAnalysis)?;
     if matches.next().is_some() {
         return Err(ProviderError::InvalidAnalysis);
@@ -168,7 +184,7 @@ fn anchor(
     Ok(Anchor {
         message: message.into(),
         block,
-        quote: quote.into(),
+        quote,
         context,
     })
 }
@@ -233,12 +249,12 @@ fn candidate(v: &Value, messages: &[ConversationMessage]) -> Result<Expectation,
         return Err(ProviderError::InvalidSchema);
     }
     let evidence = anchor(&v["evidence"], messages, 12)?;
-    let action_phrase = string(v, "action_phrase", 1000)?.trim();
-    if action_phrase.chars().count() < 4 || !evidence.quote.contains(action_phrase) {
+    let action_phrase = fold_spaces(string(v, "action_phrase", 1000)?.trim());
+    if action_phrase.chars().count() < 4 || !evidence.quote.contains(action_phrase.as_str()) {
         return Err(ProviderError::InvalidAnalysis);
     }
     anchor(
-        &json!({"message":evidence.message,"block":format!("b{}",evidence.block),"quote":action_phrase}),
+        &json!({"message":evidence.message,"block":format!("b{}",evidence.block),"quote":action_phrase.as_str()}),
         messages,
         4,
     )?;
@@ -366,6 +382,68 @@ mod tests {
     }
     fn claim() -> Value {
         json!({"action":"Send the résumé to Alex","action_phrase":"send the résumé","owner":"you","waiting_party":"m0:sender","kind":"request","evidence":{"message":"m0","block":"b0","quote":"Please send the résumé by Friday."},"deadline":{"message":"m0","block":"b0","quote":"Friday"},"resolution":null,"uncertainty":""})
+    }
+    /// A body block with `&nbsp;`-decoded (U+00A0) no-break spaces, the way
+    /// the walker hands back Outlook HTML content.
+    fn nbsp_messages() -> Vec<ConversationMessage> {
+        vec![ConversationMessage {
+            handle: "m0".into(),
+            timestamp: 1,
+            from_user: false,
+            to_user: true,
+            team: false,
+            message: CanonicalMessage {
+                subject: CanonicalBlock::new("Reschedule").unwrap(),
+                body_blocks: vec![
+                    CanonicalBlock::new("Let's\u{a0}move it one\u{a0}hour later.").unwrap(),
+                ],
+                quote_blocks: vec![],
+                sender: Some(CanonicalBlock::new("Alex").unwrap()),
+                to: vec![],
+                cc: vec![],
+                attachment_names: vec![],
+                link_labels: vec![],
+            },
+        }]
+    }
+    #[test]
+    fn nbsp_body_matches_plain_space_quote() {
+        let m = nbsp_messages();
+        let v = json!({"message":"m0","block":"b0","quote":"Let's move it one hour later."});
+        let a = anchor(&v, &m, 12).unwrap();
+        assert_eq!(a.quote, "Let's move it one hour later.");
+        assert_eq!(a.context, "Let's move it one hour later.");
+        assert!(!a.quote.contains('\u{a0}'));
+        assert!(!a.context.contains('\u{a0}'));
+    }
+    #[test]
+    fn nbsp_body_deadline_anchor_resolves() {
+        let m = nbsp_messages();
+        let v = json!({"message":"m0","block":"b0","quote":"one hour"});
+        let a = anchor(&v, &m, 2).unwrap();
+        assert_eq!(a.quote, "one hour");
+    }
+    #[test]
+    fn nbsp_fold_still_enforces_uniqueness() {
+        let mut m = nbsp_messages();
+        m[0].message.body_blocks = vec![
+            CanonicalBlock::new("Let's\u{a0}move it one\u{a0}hour later, one hour later.").unwrap(),
+        ];
+        let v = json!({"message":"m0","block":"b0","quote":"one hour"});
+        assert!(anchor(&v, &m, 2).is_err());
+    }
+    #[test]
+    fn nbsp_fold_still_rejects_partial_word() {
+        let m = nbsp_messages();
+        let v = json!({"message":"m0","block":"b0","quote":"move it one hou"});
+        assert!(anchor(&v, &m, 2).is_err());
+    }
+    #[test]
+    fn action_phrase_with_plain_spaces_matches_nbsp_evidence_block() {
+        let m = nbsp_messages();
+        let v = json!({"action":"Move the meeting one hour later","action_phrase":"move it one hour later","owner":"you","waiting_party":null,"kind":"request","evidence":{"message":"m0","block":"b0","quote":"Let's\u{a0}move it one\u{a0}hour later."},"deadline":null,"resolution":null,"uncertainty":""});
+        let item = candidate(&v, &m).unwrap();
+        assert_eq!(item.action_phrase, "move it one hour later");
     }
     #[test]
     fn unicode_quotes_resolve_without_model_offsets() {
