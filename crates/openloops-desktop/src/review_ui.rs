@@ -2,7 +2,7 @@
 use crate::loop_state::{Decision, Decisions, Reminder, marker, now};
 use eframe::egui::{self, Color32, RichText};
 use openloops_graph::live::{reminders::ReminderRequest, review::SourceReview};
-use openloops_inference::ollama::expectations::{Anchor, Expectations, Owner};
+use openloops_inference::ollama::expectations::{Anchor, Expectations, Owner, ResolutionKind};
 #[path = "review_scan.rs"]
 mod scanning;
 pub use scanning::{ReviewMessage, ScanProgress, ScanResult, probe, scan};
@@ -200,20 +200,19 @@ impl ReviewState {
             ui.push_id(i,|ui|{
                 egui::Frame::group(ui.style()).show(ui,|ui|{
                     ui.set_width(ui.available_width());
-                    let status=if record.decision==Decision::Done {"Handled"} else if record.decision==Decision::Dismissed {"Dismissed / not mine"} else if item.resolution.is_some() {"Possible completion — confirm below"} else if record.decision==Decision::Mine {"Tracking"} else if record.decision==Decision::Watching {"Watching team follow-up"} else {"Needs your review"};
+                    let status=if record.decision==Decision::Done {"Handled"} else if record.decision==Decision::Dismissed {"Dismissed / not mine"} else if item.resolution.is_some() {resolution_status_label(item.resolution_kind)} else if record.decision==Decision::Mine {"Tracking"} else if record.decision==Decision::Watching {"Watching team follow-up"} else {"Needs your review"};
                     ui.label(RichText::new(status).color(Color32::from_rgb(29,87,67)));
                     ui.label(RichText::new(&item.action).size(21.0).strong());
                     let owner=if record.decision==Decision::Mine {"You (confirmed)"} else {match item.owner {Owner::You=>"You (suggested)",Owner::Team=>"Team — no individual owner established",Owner::Unclear=>"Unclear — confirm responsibility"}};
                     ui.label(format!("Responsible: {owner}"));
                     ui.label(format!("Waiting: {}",item.waiting_party));
-                    let deadline_text=item.deadline.as_ref().map_or(if item.unverified_deadline {"stated, but its quotation could not be verified"} else {"Not specified"},|a|a.quote.as_str());
-                    ui.label(format!("Deadline stated in email: {deadline_text}"));
+                    if let Some(deadline)=&item.deadline {ui.label(format!("Deadline stated in email: {}",deadline.quote));} else if item.unverified_deadline {ui.label("A deadline was stated, but its quotation could not be verified.");} else {ui.label("Deadline stated in email: Not specified");}
                     if !item.uncertainty.is_empty() {ui.label(format!("Uncertainty: {}",item.uncertainty));}
                     ui.label(RichText::new(format!("{} · {} · {}",source.source,source.date_label,item.kind)).small());
                     ui.collapsing("Why this was suggested · evidence and replies",|ui|{
                         show_anchor(ui,"Original expectation",&item.evidence,&self.messages);
                         if let Some(deadline)=&item.deadline {show_anchor(ui,"Deadline evidence",deadline,&self.messages);}
-                        if let Some(resolution)=&item.resolution {show_anchor(ui,"Later possible completion / resolution",resolution,&self.messages);} else if item.unverified_resolution {ui.label("The analysis proposed a completion but its quotation could not be verified; treat as open.");} else {ui.label("No matching completion was identified in the scanned conversation. Work may have happened elsewhere or outside this history window.");}
+                        if let Some(resolution)=&item.resolution {show_anchor(ui,resolution_anchor_label(item.resolution_kind),resolution,&self.messages);} else if item.unverified_resolution {ui.label("The analysis proposed a completion but its quotation could not be verified; treat as open.");} else {ui.label("No matching completion was identified in the scanned conversation. Work may have happened elsewhere or outside this history window.");}
                         ui.collapsing("Full scanned conversation",|ui| {for m in self.messages.iter().filter(|m|m.account==source.account && m.conversation==source.conversation) {ui.label(format!("{} · {}",m.date_label,if m.input.from_user {"You"} else {"Other participant"}));for b in &m.input.message.body_blocks {ui.label(b.as_string());}}});
                     });
                     ui.horizontal_wrapped(|ui|{
@@ -288,6 +287,26 @@ impl ReviewState {
     }
 }
 
+fn resolution_status_label(kind: Option<ResolutionKind>) -> &'static str {
+    match kind {
+        Some(ResolutionKind::Completed) | None => "Possible completion — confirm below",
+        Some(ResolutionKind::Declined) => "Possible decline — confirm below",
+        Some(ResolutionKind::Superseded) => {
+            "Possibly superseded by a later message — confirm below"
+        }
+        Some(ResolutionKind::Renegotiated) => {
+            "Possibly renegotiated: new terms were proposed — confirm below"
+        }
+    }
+}
+fn resolution_anchor_label(kind: Option<ResolutionKind>) -> &'static str {
+    match kind {
+        Some(ResolutionKind::Completed) | None => "Later completion evidence",
+        Some(ResolutionKind::Declined) => "Later decline evidence",
+        Some(ResolutionKind::Superseded) => "Later superseding message",
+        Some(ResolutionKind::Renegotiated) => "Later renegotiation (counter-proposal)",
+    }
+}
 fn open_link(ui: &mut egui::Ui, url: &str) {
     if url.starts_with("https://outlook.office.com/")
         || url.starts_with("https://outlook.office365.com/")
@@ -387,6 +406,7 @@ pub fn layout_fixture() -> ReviewState {
                 context: body.into(),
             }),
             resolution: None,
+            resolution_kind: None,
             uncertainty: if index == 0 {
                 String::new()
             } else {

@@ -5,7 +5,7 @@ use openloops_inference::{
     message::CanonicalMessage,
     ollama::{
         OllamaCloud, ProviderError,
-        expectations::{ConversationMessage, Expectations},
+        expectations::{ConversationMessage, Expectations, ResolutionKind},
     },
     reply_history::{
         REPLY_HISTORY_CHUNK_MAX_CHARS, chunk_reply_history, is_underscore_separator,
@@ -411,6 +411,14 @@ const SEMANTIC_CASES: [(&str, bool, bool, bool, usize); 7] = [
         0,
     ),
 ];
+// Live semantic probe: a request that is renegotiated (a counter-proposal,
+// not a plain completion) one message later must still be recognized as
+// closure evidence, with resolution_kind reflecting the renegotiation or
+// supersession rather than a plain completion.
+const RESOLUTION_CASES: [(&str, &str); 1] = [(
+    "Can we move our meeting to a different time?",
+    "Let's move it one hour later.",
+)];
 pub fn probe(key: String, model: &str) -> Result<usize, ProviderError> {
     let provider = OllamaCloud::connect(key, model)?;
     let mut passed = 0;
@@ -502,7 +510,53 @@ pub fn probe(key: String, model: &str) -> Result<usize, ProviderError> {
         "Semantic case {}: acknowledgement did not close the request.",
         passed + 2
     );
-    Ok(passed + 2)
+    probe_resolution_cases(&provider, passed + 2)?;
+    Ok(passed + 2 + RESOLUTION_CASES.len())
+}
+
+/// Runs `RESOLUTION_CASES` against `provider`: a request renegotiated (a
+/// counter-proposal, not a plain completion) one message later must still
+/// be recognized as closure evidence, with `resolution_kind` reflecting the
+/// renegotiation or supersession rather than a plain completion.
+/// `numbered_from` is the case number of the previous case, for print
+/// numbering only. Prints counts only; never returned content.
+fn probe_resolution_cases(
+    provider: &OllamaCloud,
+    numbered_from: usize,
+) -> Result<(), ProviderError> {
+    for (offset, (request, reply)) in RESOLUTION_CASES.into_iter().enumerate() {
+        let request_item = synthetic(request, 0, "c");
+        let mut request_message = prepare(&request_item, "Synthetic", 0)
+            .map_err(|_| ProviderError::InvalidAnalysis)?
+            .input;
+        request_message.to_user = true;
+        let reply_item = synthetic(reply, 1, "c");
+        let mut reply_message = prepare(&reply_item, "Synthetic", 1)
+            .map_err(|_| ProviderError::InvalidAnalysis)?
+            .input;
+        reply_message.from_user = true;
+        set_outgoing(&mut reply_message);
+        let result = provider.expectations(&[request_message, reply_message])?;
+        println!(
+            "Semantic case {}: {} accepted, {} rejected, {} degraded.",
+            numbered_from + 1 + offset,
+            result.items.len(),
+            result.rejected,
+            result.degraded
+        );
+        if result.items.len() != 1
+            || result.rejected != 0
+            || result.degraded != 0
+            || result.items[0].resolution.is_none()
+            || !matches!(
+                result.items[0].resolution_kind,
+                Some(ResolutionKind::Renegotiated | ResolutionKind::Superseded)
+            )
+        {
+            return Err(ProviderError::InvalidAnalysis);
+        }
+    }
+    Ok(())
 }
 
 fn set_outgoing(m: &mut ConversationMessage) {
