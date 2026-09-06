@@ -36,12 +36,17 @@ pub enum ConnectionError {
     Transport,
     TokenRejected,
     ResponseTooLarge,
+    MessageTooLarge,
     AccessDenied,
     Unauthorized,
     MissingSharedScope,
     Throttled,
     ResourceUnavailable,
     GroupNotFound,
+    BadRequest,
+    NotFound,
+    ServerError,
+    NextPageRejected,
 }
 
 impl std::fmt::Display for ConnectionError {
@@ -60,12 +65,23 @@ impl std::fmt::Display for ConnectionError {
                 "Microsoft rejected the sign-in exchange. Check the registration and redirect URI."
             }
             Self::ResponseTooLarge => "Microsoft returned a response above the allowed size.",
+            Self::MessageTooLarge => {
+                "A message body exceeded the review size limit and was skipped."
+            }
             Self::AccessDenied => "Microsoft Graph returned HTTP 403. Check consent and this signed-in account's access to the selected mailbox or group; an administrator role alone does not grant content access.",
             Self::Unauthorized => "Microsoft Graph returned HTTP 401. Sign in again; if it persists, check the organization's access policies.",
             Self::MissingSharedScope => "The token response did not grant Mail.Read.Shared. Check the app's delegated permissions and consent, then sign in again.",
             Self::Throttled => "Microsoft Graph returned HTTP 429. Wait before retrying the connection check.",
             Self::ResourceUnavailable => "The requested mailbox or resource is unavailable.",
             Self::GroupNotFound => "No unique Microsoft 365 Group matched that primary email address. Check the group's primary address and directory-read consent.",
+            Self::BadRequest => "Microsoft Graph rejected the request as malformed (HTTP 400).",
+            Self::NotFound => {
+                "Microsoft Graph reported the requested resource does not exist (HTTP 404)."
+            }
+            Self::ServerError => {
+                "Microsoft Graph reported a server-side failure (HTTP 5xx). Retry later."
+            }
+            Self::NextPageRejected => "Microsoft returned a next-page link outside the authorized collection; remaining pages were skipped.",
         })
     }
 }
@@ -355,9 +371,12 @@ fn check_inbox(http: &Client, token: &str, mailbox: Option<&str>) -> Result<(), 
 
 fn classify_status(status: u16) -> ConnectionError {
     match status {
+        400 => ConnectionError::BadRequest,
         401 => ConnectionError::Unauthorized,
         403 => ConnectionError::AccessDenied,
+        404 => ConnectionError::NotFound,
         429 => ConnectionError::Throttled,
+        500..=599 => ConnectionError::ServerError,
         _ => ConnectionError::ResourceUnavailable,
     }
 }
@@ -413,7 +432,35 @@ mod tests {
         assert_eq!(classify_status(401), ConnectionError::Unauthorized);
         assert_eq!(classify_status(403), ConnectionError::AccessDenied);
         assert_eq!(classify_status(429), ConnectionError::Throttled);
-        assert_eq!(classify_status(404), ConnectionError::ResourceUnavailable);
+    }
+
+    #[test]
+    fn bad_request_not_found_and_server_error_have_distinct_diagnostics() {
+        assert_eq!(classify_status(400), ConnectionError::BadRequest);
+        assert_eq!(classify_status(404), ConnectionError::NotFound);
+        assert_eq!(classify_status(500), ConnectionError::ServerError);
+        assert_eq!(classify_status(503), ConnectionError::ServerError);
+    }
+
+    #[test]
+    fn an_unmapped_status_falls_back_to_resource_unavailable() {
+        assert_eq!(classify_status(418), ConnectionError::ResourceUnavailable);
+    }
+
+    #[test]
+    fn new_status_class_variants_have_the_expected_display_text() {
+        assert_eq!(
+            ConnectionError::BadRequest.to_string(),
+            "Microsoft Graph rejected the request as malformed (HTTP 400)."
+        );
+        assert_eq!(
+            ConnectionError::NotFound.to_string(),
+            "Microsoft Graph reported the requested resource does not exist (HTTP 404)."
+        );
+        assert_eq!(
+            ConnectionError::ServerError.to_string(),
+            "Microsoft Graph reported a server-side failure (HTTP 5xx). Retry later."
+        );
     }
 
     #[test]

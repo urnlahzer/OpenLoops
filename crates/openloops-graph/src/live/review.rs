@@ -167,7 +167,7 @@ fn next_page(value: &Value, original: &Url) -> Result<Option<Url>, ConnectionErr
         || url.password().is_some()
         || url.fragment().is_some()
     {
-        return Err(ConnectionError::ResourceUnavailable);
+        return Err(ConnectionError::NextPageRejected);
     }
     Ok(Some(url))
 }
@@ -185,10 +185,23 @@ pub(super) fn pages(
         let value: Value =
             serde_json::from_slice(&bytes).map_err(|_| ConnectionError::ResourceUnavailable)?;
         let (rows, _) = page(&bytes)?;
-        let next = next_page(&value, original)?;
         let overflow = rows.len() > cap - all.len();
         all.extend(rows.into_iter().take(cap - all.len()));
-        if overflow || (all.len() == cap && next.is_some()) {
+        if overflow {
+            return Ok((all, true));
+        }
+        // `all` already holds every row fetched so far, including this page's,
+        // so a rejected next-link below only truncates pagination -- it cannot
+        // lose rows. We deliberately fold a next_page rejection into
+        // `partial: true` here instead of propagating ConnectionError::NextPageRejected
+        // through `?`: surfacing it would require widening this function's
+        // return type and touching `load_group`'s call site for no real benefit,
+        // since the caller already treats "stopped early" the same way
+        // regardless of cause.
+        let Ok(next) = next_page(&value, original) else {
+            return Ok((all, true));
+        };
+        if all.len() == cap && next.is_some() {
             return Ok((all, true));
         }
         let Some(next) = next else {
@@ -245,7 +258,10 @@ fn item(value: &Value, topic: Option<&str>) -> Result<MailItem, ConnectionError>
             Some(topic) => topic.into(),
             None => text(value, "subject", 8192)?,
         },
-        body: text(body, "content", 131_072)?,
+        body: text(body, "content", 131_072).map_err(|error| match error {
+            ConnectionError::ResponseTooLarge => ConnectionError::MessageTooLarge,
+            other => other,
+        })?,
         body_is_html: kind.eq_ignore_ascii_case("html"),
         sender,
         received: text(value, "receivedDateTime", 64)?,
@@ -349,7 +365,10 @@ fn hydrate(
     mut row: Value,
 ) -> Result<MailItem, ConnectionError> {
     let id = text(&row, "id", 2048)?;
-    let bytes = fetch(http, token, message_url(address, &id)?)?;
+    let bytes = fetch(http, token, message_url(address, &id)?).map_err(|error| match error {
+        ConnectionError::ResponseTooLarge => ConnectionError::MessageTooLarge,
+        other => other,
+    })?;
     let body_value: Value =
         serde_json::from_slice(&bytes).map_err(|_| ConnectionError::ResourceUnavailable)?;
     let body = body_value
@@ -375,8 +394,9 @@ fn load_sent(http: &Client, token: &str, address: Option<&str>) -> SourceReview 
 // every listing response small: no message bodies are ever requested in bulk.
 // `source.partial` semantics: false once the walk reaches the cutoff or the
 // collection ends with fewer than `cap` in-window rows taken; true once `cap`
-// in-window rows were taken (more could exist) or the 10-page limit was hit
-// before reaching the cutoff.
+// in-window rows were taken (more could exist), the 10-page limit was hit
+// before reaching the cutoff, or a fetched page's next-page link was rejected
+// (that page's rows are kept; more mail may exist beyond the rejected link).
 fn windowed_rows(
     http: &Client,
     token: &str,
@@ -390,6 +410,7 @@ fn windowed_rows(
     let mut collected: Vec<Value> = Vec::new();
     let mut reached_cutoff = false;
     let mut page_limit_hit = true;
+    let mut next_page_rejected = false;
     for _ in 0..10 {
         let bytes = match fetch(http, token, current.clone()) {
             Ok(bytes) => bytes,
@@ -412,14 +433,9 @@ fn windowed_rows(
                 break;
             }
         };
-        let next = match next_page(&value, original) {
-            Ok(next) => next,
-            Err(error) => {
-                errors.push(error);
-                page_limit_hit = false;
-                break;
-            }
-        };
+        // Fold this page's rows into `collected` before asking for the next
+        // link: a rejected/malformed next-link must not throw away a page
+        // that was already fetched and parsed successfully.
         let remaining = cap - collected.len();
         let (in_window, page_reached_cutoff, skipped) = window(rows, date_field, cutoff, remaining);
         for _ in 0..skipped {
@@ -435,6 +451,18 @@ fn windowed_rows(
             page_limit_hit = false;
             break;
         }
+        let next = match next_page(&value, original) {
+            Ok(next) => next,
+            Err(error) => {
+                // This page's rows are already in `collected`. Only
+                // pagination stops here; more mail may exist beyond the
+                // rejected link, so `partial` must stay true.
+                errors.push(error);
+                page_limit_hit = false;
+                next_page_rejected = true;
+                break;
+            }
+        };
         let Some(next_url) = next else {
             page_limit_hit = false;
             break;
@@ -446,7 +474,7 @@ fn windowed_rows(
     } else if reached_cutoff {
         false
     } else {
-        page_limit_hit
+        page_limit_hit || next_page_rejected
     };
     (collected, partial)
 }
@@ -611,9 +639,28 @@ mod tests {
             "https://example.invalid/v1.0/me/mailFolders/inbox/messages",
             "https://graph.microsoft.com/v1.0/me/contacts",
             "https://user@graph.microsoft.com/v1.0/me/mailFolders/inbox/messages",
+            "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages#frag",
         ] {
-            assert!(next_page(&serde_json::json!({"@odata.nextLink":next}), &original).is_err());
+            assert!(matches!(
+                next_page(&serde_json::json!({"@odata.nextLink":next}), &original),
+                Err(ConnectionError::NextPageRejected)
+            ));
         }
+        // A non-string nextLink is a different failure mode (malformed payload,
+        // not an out-of-collection redirect) and keeps the generic diagnostic.
+        assert!(matches!(
+            next_page(&serde_json::json!({"@odata.nextLink": 12345}), &original),
+            Err(ConnectionError::ResourceUnavailable)
+        ));
+        // An unparsable URL string is likewise a malformed payload, not a
+        // rejected-but-well-formed link.
+        assert!(matches!(
+            next_page(
+                &serde_json::json!({"@odata.nextLink": "not a url"}),
+                &original
+            ),
+            Err(ConnectionError::ResourceUnavailable)
+        ));
         let mut next = original.clone();
         next.query_pairs_mut().append_pair("$skip", "25");
         assert!(
@@ -644,8 +691,25 @@ mod tests {
         assert_eq!(message.subject, "Synthetic topic");
         assert!(message.body_is_html);
         value["body"]["content"] = Value::String("x".repeat(131_073));
-        assert!(item(&value, Some("topic")).is_err());
+        assert!(matches!(
+            item(&value, Some("topic")),
+            Err(ConnectionError::MessageTooLarge)
+        ));
         assert!(item(&serde_json::json!({}), None).is_err());
+    }
+    #[test]
+    fn message_too_large_has_a_distinct_message() {
+        assert_eq!(
+            ConnectionError::MessageTooLarge.to_string(),
+            "A message body exceeded the review size limit and was skipped."
+        );
+    }
+    #[test]
+    fn next_page_rejected_has_a_distinct_message() {
+        assert_eq!(
+            ConnectionError::NextPageRejected.to_string(),
+            "Microsoft returned a next-page link outside the authorized collection; remaining pages were skipped."
+        );
     }
     #[test]
     fn mailbox_url_excludes_body_and_orders_by_folder_date_field() {
