@@ -613,8 +613,12 @@ mod tests {
     #[test]
     fn deadline_uses_its_own_message_and_falls_back_to_evidence() {
         let (state, mut item) = aging_fixture();
-        // Saturday 2026-09-05 12:00 UTC.
-        let now = 1_788_609_600;
+        // Mon 2026-09-07T12:00:00Z — >=55h past the Friday EOD boundary
+        // anchored to message0 for any offset in [-12h,+14h] (see the
+        // margin comment in urgency_order_is_stable_and_moot_is_terminal_until_reopened),
+        // and still well before message1's own deadline so the `m1` case
+        // below stays "not past due" with wide margin too.
+        let now = 1_788_350_400 + 5 * 86_400;
         assert!(is_past_due(
             state
                 .card_context(&item, now, 0)
@@ -647,6 +651,28 @@ mod tests {
 
     #[test]
     fn urgency_order_is_stable_and_moot_is_terminal_until_reopened() {
+        // `card_context` derives each card's UTC offset from the real OS
+        // timezone (see 9ee9b69), so every `now` below that tests a
+        // past/due boundary must classify the same way for ANY real-world
+        // offset, not just this machine's — CI may run in a different
+        // zone. `aging_fixture`'s message0 is pinned at midweek noon UTC
+        // (`MESSAGE0`) specifically because noon UTC ± the full plausible
+        // offset range keeps the domain parser's local-day resolution
+        // within one calendar day either way, so "Friday"/"this week"
+        // always resolve to the same civil days regardless of offset.
+        // Each `now` constant below keeps at least 24h of margin from the
+        // relevant boundary across the full `[-12h, +14h]` UTC offset
+        // range (hand-verified): CLEARLY_DUE is >=39h before the Friday
+        // EOD boundary, CLEARLY_PAST_DUE is >=55h after it, and
+        // CLEARLY_PAST_WEEK is >=31h after the end-of-week boundary.
+        // Exact boundary-crossing behavior (the instant a deadline flips)
+        // is covered separately in deadline_view.rs's tests, which inject
+        // a fixed offset explicitly instead of depending on the OS zone.
+        const MESSAGE0: i64 = 1_788_350_400; // Wed 2026-09-02T12:00:00Z
+        const CLEARLY_DUE: i64 = MESSAGE0;
+        const CLEARLY_PAST_DUE: i64 = MESSAGE0 + 5 * 86_400; // Mon 2026-09-07T12:00:00Z
+        const CLEARLY_PAST_WEEK: i64 = MESSAGE0 + 6 * 86_400; // Tue 2026-09-08T12:00:00Z
+
         let (mut state, item) = aging_fixture();
         let source = &state.messages[0];
         let key = state
@@ -656,33 +682,33 @@ mod tests {
             let mut record = state.decisions.get(&key);
             record.decision = decision;
             state.decisions.records = vec![record];
-            let card = state.card_context(&item, 1_788_609_600, 0).unwrap();
+            let card = state.card_context(&item, CLEARLY_PAST_DUE, 0).unwrap();
             assert!(card.terminal);
             assert_eq!(card_rank(Some(&card)), 2);
         }
         state.decisions.records[0].decision = Decision::Review;
-        let overdue = state.card_context(&item, 1_788_609_600, 0);
+        let overdue = state.card_context(&item, CLEARLY_PAST_DUE, 0);
         assert!(!overdue.as_ref().unwrap().terminal);
-        let due = state.card_context(&item, 1_788_350_400, 0);
+        let due = state.card_context(&item, CLEARLY_DUE, 0);
         let mut range_item = item.clone();
         range_item.deadline.as_mut().unwrap().quote = "this week".into();
-        let range = state.card_context(&range_item, 1_788_800_400, 0);
+        let range = state.card_context(&range_item, CLEARLY_PAST_WEEK, 0);
         assert_eq!(card_rank(range.as_ref()), 0);
         let (mut terminal_state, terminal_item) = aging_fixture();
         let mut record = terminal_state
-            .card_context(&terminal_item, 1_788_609_600, 0)
+            .card_context(&terminal_item, CLEARLY_PAST_DUE, 0)
             .unwrap()
             .record;
         record.decision = Decision::Moot;
         terminal_state.decisions.records = vec![record];
-        let terminal = terminal_state.card_context(&terminal_item, 1_788_609_600, 0);
+        let terminal = terminal_state.card_context(&terminal_item, CLEARLY_PAST_DUE, 0);
         let cards = vec![
             terminal,
             due,
             overdue,
             None,
             range,
-            terminal_state.card_context(&terminal_item, 1_788_350_400, 0),
+            terminal_state.card_context(&terminal_item, CLEARLY_DUE, 0),
         ];
         assert_eq!(card_order(&cards), vec![2, 4, 1, 3, 0, 5]);
     }
