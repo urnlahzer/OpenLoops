@@ -132,6 +132,10 @@ fn cutoff() -> String {
     (now - chrono::Duration::days(30)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+fn cutoff_timestamp() -> i64 {
+    chrono::DateTime::parse_from_rfc3339(&cutoff()).map_or(0, |value| value.timestamp())
+}
+
 fn recipients(value: &Value, field: &str) -> Result<Vec<String>, ConnectionError> {
     let Some(rows) = value.get(field).and_then(Value::as_array) else {
         return Ok(vec![]);
@@ -264,16 +268,13 @@ fn mailbox_url(address: Option<&str>, sent: bool) -> Result<Url, ConnectionError
         );
     }
     url.set_query(None);
-    let date_field = if sent {
-        "sentDateTime"
-    } else {
-        "receivedDateTime"
-    };
     url.query_pairs_mut()
         .append_pair("$select", "id,conversationId,subject,body,sender,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,webLink")
-        .append_pair("$filter", &format!("{date_field} ge {}", cutoff()))
-        .append_pair("$orderby", &format!("{date_field} desc"))
-        .append_pair("$top", "25");
+        .append_pair(
+            "$orderby",
+            if sent { "sentDateTime desc" } else { "receivedDateTime desc" },
+        )
+        .append_pair("$top", "100");
     Ok(url)
 }
 
@@ -302,6 +303,18 @@ fn load_folder(http: &Client, token: &str, address: Option<&str>, sent: bool) ->
         Ok((rows, partial)) => {
             source.partial = partial;
             for row in &rows {
+                let date_field = if sent {
+                    "sentDateTime"
+                } else {
+                    "receivedDateTime"
+                };
+                let in_window = text(row, date_field, 64)
+                    .ok()
+                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
+                    .is_some_and(|value| value.timestamp() >= cutoff_timestamp());
+                if !in_window {
+                    continue;
+                }
                 match item(row, None) {
                     Ok(mut message) => {
                         message.sent = sent;
@@ -407,7 +420,7 @@ mod tests {
     fn content_paths_are_read_only_bounded_and_encode_identifiers() {
         let url = mailbox_url(Some("synthetic@example.invalid"), false).unwrap();
         assert_eq!(url.host_str(), Some("graph.microsoft.com"));
-        assert!(url.query_pairs().any(|(k, v)| k == "$top" && v == "25"));
+        assert!(url.query_pairs().any(|(k, v)| k == "$top" && v == "100"));
         let url = group_url("synthetic-group", Some("thread/id?query")).unwrap();
         assert!(url.path().contains("thread%2Fid%3Fquery/posts"));
         assert!(
@@ -441,10 +454,7 @@ mod tests {
         );
         let sent = mailbox_url(None, true).unwrap();
         assert!(sent.path().contains("/sentitems/messages"));
-        assert!(
-            sent.query_pairs()
-                .any(|(k, v)| k == "$filter" && v.starts_with("sentDateTime ge "))
-        );
+        assert!(!sent.query_pairs().any(|(k, _)| k == "$filter"));
     }
     #[test]
     fn mail_projection_preserves_conversation_and_recipient_context() {
