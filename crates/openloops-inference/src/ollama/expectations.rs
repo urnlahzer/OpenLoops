@@ -367,14 +367,63 @@ fn parse(bytes: &[u8], messages: &[ConversationMessage]) -> Result<Expectations,
         rejected: 0,
         rejection_reasons: vec![],
     };
+    let push_unique = |items: &mut Vec<Expectation>, item: Expectation| {
+        if !items.iter().any(|existing| {
+            existing.action.eq_ignore_ascii_case(&item.action)
+                && existing.evidence.message == item.evidence.message
+        }) {
+            items.push(item);
+        }
+    };
     for row in rows {
         if let Ok(item) = candidate(row, messages) {
-            if !result.items.iter().any(|existing| {
-                existing.action.eq_ignore_ascii_case(&item.action)
-                    && existing.evidence.message == item.evidence.message
-            }) {
-                result.items.push(item);
+            push_unique(&mut result.items, item);
+            continue;
+        }
+        // The evidence anchor may be sound even though the model's
+        // resolution or deadline quote does not resolve (e.g. a slight
+        // misquote). Retry with the offending anchor(s) degraded to null
+        // rather than dropping a real request from the review.
+        let resolution_present = !row["resolution"].is_null();
+        let deadline_present = !row["deadline"].is_null();
+        let mut retried: Option<(Expectation, Vec<&'static str>)> = None;
+        if resolution_present {
+            let mut degraded = row.clone();
+            degraded["resolution"] = Value::Null;
+            if let Ok(item) = candidate(&degraded, messages) {
+                retried = Some((
+                    item,
+                    vec!["Completion evidence was invalid; the request was kept open without it."],
+                ));
             }
+        }
+        if retried.is_none() && deadline_present {
+            let mut degraded = row.clone();
+            degraded["deadline"] = Value::Null;
+            if let Ok(item) = candidate(&degraded, messages) {
+                retried = Some((
+                    item,
+                    vec!["Deadline evidence was invalid; the request was kept without a deadline."],
+                ));
+            }
+        }
+        if retried.is_none() && resolution_present && deadline_present {
+            let mut degraded = row.clone();
+            degraded["resolution"] = Value::Null;
+            degraded["deadline"] = Value::Null;
+            if let Ok(item) = candidate(&degraded, messages) {
+                retried = Some((
+                    item,
+                    vec![
+                        "Completion evidence was invalid; the request was kept open without it.",
+                        "Deadline evidence was invalid; the request was kept without a deadline.",
+                    ],
+                ));
+            }
+        }
+        if let Some((item, reasons)) = retried {
+            push_unique(&mut result.items, item);
+            result.rejection_reasons.extend(reasons);
         } else {
             result.rejected += 1;
             result
@@ -425,6 +474,38 @@ mod tests {
     }
     fn claim() -> Value {
         json!({"action":"Send the résumé to Alex","action_phrase":"send the résumé","owner":"you","waiting_party":"m0:sender","kind":"request","evidence":{"message":"m0","block":"b0","quote":"Please send the résumé by Friday."},"deadline":{"message":"m0","block":"b0","quote":"Friday"},"resolution":null,"uncertainty":""})
+    }
+    /// `messages()` plus a later m1 with a resolution sentence, for tests
+    /// exercising the resolution anchor.
+    fn resolution_messages() -> Vec<ConversationMessage> {
+        let mut m = messages();
+        m.push(ConversationMessage {
+            handle: "m1".into(),
+            timestamp: 2,
+            from_user: true,
+            to_user: false,
+            team: false,
+            message: CanonicalMessage {
+                subject: CanonicalBlock::new("Re: Budget").unwrap(),
+                body_blocks: vec![CanonicalBlock::new("I sent the résumé as requested.").unwrap()],
+                quote_blocks: vec![],
+                sender: None,
+                to: vec![],
+                cc: vec![],
+                attachment_names: vec![],
+                link_labels: vec![],
+            },
+        });
+        m
+    }
+    fn parse_row(row: &Value, messages: &[ConversationMessage]) -> Expectations {
+        parse(
+            json!({"version":1,"expectations":[row]})
+                .to_string()
+                .as_bytes(),
+            messages,
+        )
+        .unwrap()
     }
     /// A body block with `&nbsp;`-decoded (U+00A0) no-break spaces, the way
     /// the walker hands back Outlook HTML content.
@@ -602,6 +683,84 @@ mod tests {
         assert_ne!(first.action_phrase, second.action_phrase);
         a["action_phrase"] = json!("delete all records");
         assert!(candidate(&a, &m).is_err());
+    }
+    #[test]
+    fn misquoted_resolution_keeps_expectation_open_without_it() {
+        let m = resolution_messages();
+        let mut row = claim();
+        row["resolution"] =
+            json!({"message":"m1","block":"b0","quote":"I sent the resume as requested"});
+        let result = parse_row(&row, &m);
+        assert_eq!(result.items.len(), 1);
+        assert!(result.items[0].resolution.is_none());
+        assert_eq!(result.rejected, 0);
+        assert!(
+            result.rejection_reasons.contains(
+                &"Completion evidence was invalid; the request was kept open without it."
+            )
+        );
+    }
+    #[test]
+    fn unresolvable_deadline_keeps_expectation_without_it() {
+        let m = messages();
+        let mut row = claim();
+        row["deadline"] = json!({"message":"m0","block":"b0","quote":"Thursday"});
+        let result = parse_row(&row, &m);
+        assert_eq!(result.items.len(), 1);
+        assert!(result.items[0].deadline.is_none());
+        assert_eq!(result.rejected, 0);
+        assert!(
+            result.rejection_reasons.contains(
+                &"Deadline evidence was invalid; the request was kept without a deadline."
+            )
+        );
+    }
+    #[test]
+    fn bad_resolution_and_deadline_keep_expectation_with_neither() {
+        let m = resolution_messages();
+        let mut row = claim();
+        row["resolution"] =
+            json!({"message":"m1","block":"b0","quote":"I sent the resume as requested"});
+        row["deadline"] = json!({"message":"m0","block":"b0","quote":"Thursday"});
+        let result = parse_row(&row, &m);
+        assert_eq!(result.items.len(), 1);
+        assert!(result.items[0].resolution.is_none());
+        assert!(result.items[0].deadline.is_none());
+        assert_eq!(result.rejected, 0);
+        assert!(
+            result.rejection_reasons.contains(
+                &"Completion evidence was invalid; the request was kept open without it."
+            )
+        );
+        assert!(
+            result.rejection_reasons.contains(
+                &"Deadline evidence was invalid; the request was kept without a deadline."
+            )
+        );
+    }
+    #[test]
+    fn bad_evidence_is_still_rejected_with_no_kept_item() {
+        let m = messages();
+        let mut row = claim();
+        row["evidence"]["quote"] = json!("Please send money tomorrow.");
+        let result = parse_row(&row, &m);
+        assert_eq!(result.items.len(), 0);
+        assert_eq!(result.rejected, 1);
+        assert!(result.rejection_reasons.contains(
+            &"Original evidence was not a unique exact quotation in a current message block."
+        ));
+    }
+    #[test]
+    fn valid_resolution_still_resolves_no_regression() {
+        let m = resolution_messages();
+        let mut row = claim();
+        row["resolution"] =
+            json!({"message":"m1","block":"b0","quote":"I sent the résumé as requested."});
+        let result = parse_row(&row, &m);
+        assert_eq!(result.items.len(), 1);
+        assert!(result.items[0].resolution.is_some());
+        assert_eq!(result.rejected, 0);
+        assert!(result.rejection_reasons.is_empty());
     }
     #[test]
     fn strict_top_level_schema_rejects_duplicates_and_unknown_fields() {
