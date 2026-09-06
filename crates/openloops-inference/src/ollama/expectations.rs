@@ -249,7 +249,9 @@ fn candidate(v: &Value, messages: &[ConversationMessage]) -> Result<Expectation,
         return Err(ProviderError::InvalidSchema);
     }
     let evidence = anchor(&v["evidence"], messages, 12)?;
-    let action_phrase = fold_spaces(string(v, "action_phrase", 1000)?.trim());
+    let action_phrase = fold_spaces(string(v, "action_phrase", 1000)?)
+        .trim()
+        .to_string();
     if action_phrase.chars().count() < 4 || !evidence.quote.contains(action_phrase.as_str()) {
         return Err(ProviderError::InvalidAnalysis);
     }
@@ -297,7 +299,7 @@ fn candidate(v: &Value, messages: &[ConversationMessage]) -> Result<Expectation,
     }
     Ok(Expectation {
         action: action.into(),
-        action_phrase: action_phrase.into(),
+        action_phrase,
         owner,
         waiting_party,
         kind: kind.into(),
@@ -437,6 +439,16 @@ mod tests {
         let m = nbsp_messages();
         let v = json!({"message":"m0","block":"b0","quote":"move it one hou"});
         assert!(anchor(&v, &m, 2).is_err());
+    }
+    #[test]
+    fn narrow_no_break_space_quote_resolves() {
+        let mut m = nbsp_messages();
+        m[0].message.body_blocks =
+            vec![CanonicalBlock::new("Let's\u{202f}move it one\u{202f}hour later.").unwrap()];
+        let v = json!({"message":"m0","block":"b0","quote":"Let's move it one hour later."});
+        let a = anchor(&v, &m, 12).unwrap();
+        assert_eq!(a.quote, "Let's move it one hour later.");
+        assert!(!a.context.contains('\u{202f}'));
     }
     #[test]
     fn action_phrase_with_plain_spaces_matches_nbsp_evidence_block() {
