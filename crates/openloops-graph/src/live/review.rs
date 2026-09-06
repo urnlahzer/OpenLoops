@@ -269,7 +269,7 @@ fn mailbox_url(address: Option<&str>, sent: bool) -> Result<Url, ConnectionError
     }
     url.set_query(None);
     url.query_pairs_mut()
-        .append_pair("$select", "id,conversationId,subject,body,sender,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,webLink")
+        .append_pair("$select", "id,conversationId,subject,sender,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,webLink")
         .append_pair(
             "$orderby",
             if sent { "sentDateTime desc" } else { "receivedDateTime desc" },
@@ -278,12 +278,177 @@ fn mailbox_url(address: Option<&str>, sent: bool) -> Result<Url, ConnectionError
     Ok(url)
 }
 
+/// Bounded, read-only body fetch for a single message already discovered via
+/// `mailbox_url`. Never follows a server-provided URL; always the fixed Graph origin.
+fn message_url(address: Option<&str>, id: &str) -> Result<Url, ConnectionError> {
+    if id.is_empty() || id == "." || id == ".." {
+        return Err(ConnectionError::InvalidConfiguration);
+    }
+    let mut url = Url::parse("https://graph.microsoft.com/v1.0/")
+        .map_err(|_| ConnectionError::InvalidConfiguration)?;
+    {
+        let mut path = url
+            .path_segments_mut()
+            .map_err(|()| ConnectionError::InvalidConfiguration)?;
+        path.pop_if_empty();
+        match address {
+            None => {
+                path.push("me");
+            }
+            Some(value) => {
+                path.push("users").push(value);
+            }
+        }
+        path.push("messages").push(id);
+    }
+    url.query_pairs_mut().append_pair("$select", "body");
+    Ok(url)
+}
+
+/// Splits newest-first `rows` into the in-window prefix (timestamp >= `cutoff`,
+/// capped at `cap`) and reports whether the walk reached a row older than the
+/// cutoff. Rows with a missing or unparseable date are skipped (not counted as
+/// in-window); the caller is told how many were skipped so it can record errors.
+fn window(
+    rows: Vec<Value>,
+    date_field: &str,
+    cutoff: i64,
+    cap: usize,
+) -> (Vec<Value>, bool, usize) {
+    let mut kept = Vec::new();
+    let mut reached_cutoff = false;
+    let mut skipped = 0usize;
+    for row in rows {
+        if kept.len() >= cap {
+            break;
+        }
+        match text(&row, date_field, 64)
+            .ok()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
+        {
+            Some(parsed) => {
+                if parsed.timestamp() < cutoff {
+                    reached_cutoff = true;
+                    break;
+                }
+                kept.push(row);
+            }
+            None => skipped += 1,
+        }
+    }
+    (kept, reached_cutoff, skipped)
+}
+
+/// Fetches the body for one listing row and folds it into `row`, then projects
+/// the result through `item`. The body request is independently bounded by
+/// `bounded_body` and by the content-length limit inside `item`.
+fn hydrate(
+    http: &Client,
+    token: &str,
+    address: Option<&str>,
+    mut row: Value,
+) -> Result<MailItem, ConnectionError> {
+    let id = text(&row, "id", 2048)?;
+    let bytes = fetch(http, token, message_url(address, &id)?)?;
+    let body_value: Value =
+        serde_json::from_slice(&bytes).map_err(|_| ConnectionError::ResourceUnavailable)?;
+    let body = body_value
+        .get("body")
+        .cloned()
+        .ok_or(ConnectionError::ResourceUnavailable)?;
+    row.as_object_mut()
+        .ok_or(ConnectionError::ResourceUnavailable)?
+        .insert("body".to_string(), body);
+    item(&row, None)
+}
+
 fn load_mailbox(http: &Client, token: &str, address: Option<&str>) -> SourceReview {
     load_folder(http, token, address, false)
 }
 
 fn load_sent(http: &Client, token: &str, address: Option<&str>) -> SourceReview {
     load_folder(http, token, address, true)
+}
+
+// Walks the newest-first listing page by page, stopping as soon as a row older
+// than `cutoff` is seen (or the cap / the 10-page hard limit is hit). Keeps
+// every listing response small: no message bodies are ever requested in bulk.
+// `source.partial` semantics: false once the walk reaches the cutoff or the
+// collection ends with fewer than `cap` in-window rows taken; true once `cap`
+// in-window rows were taken (more could exist) or the 10-page limit was hit
+// before reaching the cutoff.
+fn windowed_rows(
+    http: &Client,
+    token: &str,
+    original: &Url,
+    date_field: &str,
+    cutoff: i64,
+    cap: usize,
+    errors: &mut Vec<ConnectionError>,
+) -> (Vec<Value>, bool) {
+    let mut current = original.clone();
+    let mut collected: Vec<Value> = Vec::new();
+    let mut reached_cutoff = false;
+    let mut page_limit_hit = true;
+    for _ in 0..10 {
+        let bytes = match fetch(http, token, current.clone()) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                errors.push(error);
+                page_limit_hit = false;
+                break;
+            }
+        };
+        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+            errors.push(ConnectionError::ResourceUnavailable);
+            page_limit_hit = false;
+            break;
+        };
+        let rows = match page(&bytes) {
+            Ok((rows, _)) => rows,
+            Err(error) => {
+                errors.push(error);
+                page_limit_hit = false;
+                break;
+            }
+        };
+        let next = match next_page(&value, original) {
+            Ok(next) => next,
+            Err(error) => {
+                errors.push(error);
+                page_limit_hit = false;
+                break;
+            }
+        };
+        let remaining = cap - collected.len();
+        let (in_window, page_reached_cutoff, skipped) = window(rows, date_field, cutoff, remaining);
+        for _ in 0..skipped {
+            errors.push(ConnectionError::ResourceUnavailable);
+        }
+        collected.extend(in_window);
+        if page_reached_cutoff {
+            reached_cutoff = true;
+            page_limit_hit = false;
+            break;
+        }
+        if collected.len() >= cap {
+            page_limit_hit = false;
+            break;
+        }
+        let Some(next_url) = next else {
+            page_limit_hit = false;
+            break;
+        };
+        current = next_url;
+    }
+    let partial = if collected.len() >= cap {
+        true
+    } else if reached_cutoff {
+        false
+    } else {
+        page_limit_hit
+    };
+    (collected, partial)
 }
 
 fn load_folder(http: &Client, token: &str, address: Option<&str>, sent: bool) -> SourceReview {
@@ -297,41 +462,48 @@ fn load_folder(http: &Client, token: &str, address: Option<&str>, sent: bool) ->
         errors: vec![],
         partial: false,
     };
-    let result = mailbox_url(address, sent).and_then(|url| pages(http, token, &url, 100));
-    match result {
-        Err(error) => source.errors.push(error),
-        Ok((rows, partial)) => {
-            source.partial = partial;
-            for row in &rows {
-                let date_field = if sent {
-                    "sentDateTime"
-                } else {
-                    "receivedDateTime"
-                };
-                let in_window = text(row, date_field, 64)
-                    .ok()
-                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
-                    .is_some_and(|value| value.timestamp() >= cutoff_timestamp());
-                if !in_window {
-                    continue;
+    let date_field = if sent {
+        "sentDateTime"
+    } else {
+        "receivedDateTime"
+    };
+    let original = match mailbox_url(address, sent) {
+        Ok(url) => url,
+        Err(error) => {
+            source.errors.push(error);
+            return source;
+        }
+    };
+    let (collected, partial) = windowed_rows(
+        http,
+        token,
+        &original,
+        date_field,
+        cutoff_timestamp(),
+        100,
+        &mut source.errors,
+    );
+    source.partial = partial;
+    for row in collected {
+        let sent_time = if sent {
+            text(&row, "sentDateTime", 64).ok()
+        } else {
+            None
+        };
+        match hydrate(http, token, address, row) {
+            Ok(mut message) => {
+                message.sent = sent;
+                message.team = address.is_some();
+                if let Some(sent_time) = sent_time {
+                    message.received = sent_time;
                 }
-                match item(row, None) {
-                    Ok(mut message) => {
-                        message.sent = sent;
-                        message.team = address.is_some();
-                        if sent {
-                            message.received =
-                                text(row, "sentDateTime", 64).unwrap_or(message.received);
-                        }
-                        if message.id.is_empty() || message.conversation.is_empty() {
-                            source.errors.push(ConnectionError::ResourceUnavailable);
-                        } else {
-                            source.messages.push(message);
-                        }
-                    }
-                    Err(error) => source.errors.push(error),
+                if message.id.is_empty() || message.conversation.is_empty() {
+                    source.errors.push(ConnectionError::ResourceUnavailable);
+                } else {
+                    source.messages.push(message);
                 }
             }
+            Err(error) => source.errors.push(error),
         }
     }
     source
@@ -474,5 +646,88 @@ mod tests {
         value["body"]["content"] = Value::String("x".repeat(131_073));
         assert!(item(&value, Some("topic")).is_err());
         assert!(item(&serde_json::json!({}), None).is_err());
+    }
+    #[test]
+    fn mailbox_url_excludes_body_and_orders_by_folder_date_field() {
+        let inbox = mailbox_url(None, false).unwrap();
+        let select = inbox
+            .query_pairs()
+            .find(|(k, _)| k == "$select")
+            .unwrap()
+            .1
+            .into_owned();
+        assert!(!select.split(',').any(|field| field == "body"));
+        assert!(!inbox.query_pairs().any(|(k, _)| k == "$filter"));
+        assert!(inbox.query_pairs().any(|(k, v)| k == "$top" && v == "100"));
+        assert!(
+            inbox
+                .query_pairs()
+                .any(|(k, v)| k == "$orderby" && v == "receivedDateTime desc")
+        );
+        let sent = mailbox_url(None, true).unwrap();
+        let select = sent
+            .query_pairs()
+            .find(|(k, _)| k == "$select")
+            .unwrap()
+            .1
+            .into_owned();
+        assert!(!select.split(',').any(|field| field == "body"));
+        assert!(!sent.query_pairs().any(|(k, _)| k == "$filter"));
+        assert!(sent.query_pairs().any(|(k, v)| k == "$top" && v == "100"));
+        assert!(
+            sent.query_pairs()
+                .any(|(k, v)| k == "$orderby" && v == "sentDateTime desc")
+        );
+    }
+    #[test]
+    fn message_url_scopes_and_encodes_the_identifier() {
+        let personal = message_url(None, "synthetic-id").unwrap();
+        assert_eq!(personal.path(), "/v1.0/me/messages/synthetic-id");
+        assert!(
+            personal
+                .query_pairs()
+                .any(|(k, v)| k == "$select" && v == "body")
+        );
+        let shared = message_url(Some("shared@example.invalid"), "synthetic-id").unwrap();
+        assert_eq!(
+            shared.path(),
+            "/v1.0/users/shared@example.invalid/messages/synthetic-id"
+        );
+        let encoded = message_url(None, "a/b?c").unwrap();
+        assert!(encoded.path().contains("a%2Fb%3Fc"));
+        for id in ["", ".", ".."] {
+            assert!(message_url(None, id).is_err());
+        }
+    }
+    #[test]
+    fn window_walks_newest_first_rows_until_the_cutoff() {
+        let cutoff = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        let rows = vec![
+            serde_json::json!({"receivedDateTime": "2026-01-05T00:00:00Z", "id": "a"}),
+            serde_json::json!({"id": "missing-date"}),
+            serde_json::json!({"receivedDateTime": "2026-01-01T00:00:00Z", "id": "b"}),
+            serde_json::json!({"receivedDateTime": "2025-12-31T00:00:00Z", "id": "c"}),
+            serde_json::json!({"receivedDateTime": "2025-12-01T00:00:00Z", "id": "d"}),
+        ];
+        let (kept, reached_cutoff, skipped) = window(rows.clone(), "receivedDateTime", cutoff, 100);
+        assert_eq!(
+            kept.iter()
+                .map(|row| row["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert!(reached_cutoff);
+        assert_eq!(skipped, 1);
+
+        let (kept, reached_cutoff, _) = window(rows.clone(), "receivedDateTime", cutoff, 1);
+        assert_eq!(kept.len(), 1);
+        assert!(!reached_cutoff);
+
+        let (kept, reached_cutoff, skipped) = window(vec![], "receivedDateTime", cutoff, 100);
+        assert!(kept.is_empty());
+        assert!(!reached_cutoff);
+        assert_eq!(skipped, 0);
     }
 }
