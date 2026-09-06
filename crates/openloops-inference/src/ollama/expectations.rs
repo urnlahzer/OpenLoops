@@ -39,12 +39,21 @@ pub struct Expectation {
     pub deadline: Option<Anchor>,
     pub resolution: Option<Anchor>,
     pub uncertainty: String,
+    /// True when a deadline quote was supplied but did not resolve, and the
+    /// expectation was kept anyway with `deadline: None`.
+    pub unverified_deadline: bool,
+    /// True when a resolution quote was supplied but did not resolve, and
+    /// the expectation was kept anyway with `resolution: None`.
+    pub unverified_resolution: bool,
 }
 
 pub struct Expectations {
     pub items: Vec<Expectation>,
     pub rejected: usize,
     pub rejection_reasons: Vec<&'static str>,
+    /// Number of items pushed to `items` after a resolution or deadline
+    /// anchor (or both) was dropped because it did not resolve.
+    pub degraded: usize,
 }
 
 const INSTRUCTIONS: &str = r#"Find actionable expectations in this single email conversation, answering: what does the signed-in user owe someone, who is waiting, and is there later evidence it was handled?
@@ -348,7 +357,24 @@ fn candidate(v: &Value, messages: &[ConversationMessage]) -> Result<Expectation,
         deadline,
         resolution,
         uncertainty: string(v, "uncertainty", 400)?.into(),
+        unverified_deadline: false,
+        unverified_resolution: false,
     })
+}
+
+/// Pushes `item` unless an item with the same action (case-insensitively)
+/// and the same evidence message is already present. Returns whether it was
+/// actually pushed.
+fn push_unique(items: &mut Vec<Expectation>, item: Expectation) -> bool {
+    if items.iter().any(|existing| {
+        existing.action.eq_ignore_ascii_case(&item.action)
+            && existing.evidence.message == item.evidence.message
+    }) {
+        false
+    } else {
+        items.push(item);
+        true
+    }
 }
 
 fn parse(bytes: &[u8], messages: &[ConversationMessage]) -> Result<Expectations, ProviderError> {
@@ -366,14 +392,7 @@ fn parse(bytes: &[u8], messages: &[ConversationMessage]) -> Result<Expectations,
         items: vec![],
         rejected: 0,
         rejection_reasons: vec![],
-    };
-    let push_unique = |items: &mut Vec<Expectation>, item: Expectation| {
-        if !items.iter().any(|existing| {
-            existing.action.eq_ignore_ascii_case(&item.action)
-                && existing.evidence.message == item.evidence.message
-        }) {
-            items.push(item);
-        }
+        degraded: 0,
     };
     for row in rows {
         if let Ok(item) = candidate(row, messages) {
@@ -383,47 +402,60 @@ fn parse(bytes: &[u8], messages: &[ConversationMessage]) -> Result<Expectations,
         // The evidence anchor may be sound even though the model's
         // resolution or deadline quote does not resolve (e.g. a slight
         // misquote). Retry with the offending anchor(s) degraded to null
-        // rather than dropping a real request from the review.
+        // rather than dropping a real request from the review. One clone
+        // is reused across the attempts: take() nulls a field in place and
+        // returns its old value so a failed attempt can be undone before
+        // trying the next degradation.
         let resolution_present = !row["resolution"].is_null();
         let deadline_present = !row["deadline"].is_null();
-        let mut retried: Option<(Expectation, Vec<&'static str>)> = None;
+        let mut degraded = row.clone();
+        let mut salvaged: Option<Expectation> = None;
+        let mut dropped_resolution = false;
+        let mut dropped_deadline = false;
         if resolution_present {
-            let mut degraded = row.clone();
-            degraded["resolution"] = Value::Null;
-            if let Ok(item) = candidate(&degraded, messages) {
-                retried = Some((
-                    item,
-                    vec!["Completion evidence was invalid; the request was kept open without it."],
-                ));
+            let saved_resolution = degraded["resolution"].take();
+            match candidate(&degraded, messages) {
+                Ok(mut item) => {
+                    item.unverified_resolution = true;
+                    dropped_resolution = true;
+                    salvaged = Some(item);
+                }
+                Err(_) => degraded["resolution"] = saved_resolution,
             }
         }
-        if retried.is_none() && deadline_present {
-            let mut degraded = row.clone();
-            degraded["deadline"] = Value::Null;
-            if let Ok(item) = candidate(&degraded, messages) {
-                retried = Some((
-                    item,
-                    vec!["Deadline evidence was invalid; the request was kept without a deadline."],
-                ));
+        if salvaged.is_none() && deadline_present {
+            let _ = degraded["deadline"].take();
+            if let Ok(mut item) = candidate(&degraded, messages) {
+                item.unverified_deadline = true;
+                dropped_deadline = true;
+                salvaged = Some(item);
             }
         }
-        if retried.is_none() && resolution_present && deadline_present {
-            let mut degraded = row.clone();
+        if salvaged.is_none() && resolution_present && deadline_present {
             degraded["resolution"] = Value::Null;
-            degraded["deadline"] = Value::Null;
-            if let Ok(item) = candidate(&degraded, messages) {
-                retried = Some((
-                    item,
-                    vec![
+            // degraded["deadline"] is already Value::Null from the take() above.
+            if let Ok(mut item) = candidate(&degraded, messages) {
+                item.unverified_resolution = true;
+                item.unverified_deadline = true;
+                dropped_resolution = true;
+                dropped_deadline = true;
+                salvaged = Some(item);
+            }
+        }
+        if let Some(item) = salvaged {
+            if push_unique(&mut result.items, item) {
+                result.degraded += 1;
+                if dropped_resolution {
+                    result.rejection_reasons.push(
                         "Completion evidence was invalid; the request was kept open without it.",
+                    );
+                }
+                if dropped_deadline {
+                    result.rejection_reasons.push(
                         "Deadline evidence was invalid; the request was kept without a deadline.",
-                    ],
-                ));
+                    );
+                }
             }
-        }
-        if let Some((item, reasons)) = retried {
-            push_unique(&mut result.items, item);
-            result.rejection_reasons.extend(reasons);
         } else {
             result.rejected += 1;
             result
@@ -693,7 +725,11 @@ mod tests {
         let result = parse_row(&row, &m);
         assert_eq!(result.items.len(), 1);
         assert!(result.items[0].resolution.is_none());
+        assert!(result.items[0].deadline.is_some());
+        assert!(result.items[0].unverified_resolution);
+        assert!(!result.items[0].unverified_deadline);
         assert_eq!(result.rejected, 0);
+        assert_eq!(result.degraded, 1);
         assert!(
             result.rejection_reasons.contains(
                 &"Completion evidence was invalid; the request was kept open without it."
@@ -702,13 +738,22 @@ mod tests {
     }
     #[test]
     fn unresolvable_deadline_keeps_expectation_without_it() {
-        let m = messages();
+        // A valid resolution is supplied alongside the bad deadline, so
+        // this also exercises that the resolution anchor survives when
+        // only the deadline is degraded.
+        let m = resolution_messages();
         let mut row = claim();
+        row["resolution"] =
+            json!({"message":"m1","block":"b0","quote":"I sent the résumé as requested."});
         row["deadline"] = json!({"message":"m0","block":"b0","quote":"Thursday"});
         let result = parse_row(&row, &m);
         assert_eq!(result.items.len(), 1);
+        assert!(result.items[0].resolution.is_some());
         assert!(result.items[0].deadline.is_none());
+        assert!(result.items[0].unverified_deadline);
+        assert!(!result.items[0].unverified_resolution);
         assert_eq!(result.rejected, 0);
+        assert_eq!(result.degraded, 1);
         assert!(
             result.rejection_reasons.contains(
                 &"Deadline evidence was invalid; the request was kept without a deadline."
@@ -726,7 +771,10 @@ mod tests {
         assert_eq!(result.items.len(), 1);
         assert!(result.items[0].resolution.is_none());
         assert!(result.items[0].deadline.is_none());
+        assert!(result.items[0].unverified_resolution);
+        assert!(result.items[0].unverified_deadline);
         assert_eq!(result.rejected, 0);
+        assert_eq!(result.degraded, 1);
         assert!(
             result.rejection_reasons.contains(
                 &"Completion evidence was invalid; the request was kept open without it."
@@ -746,6 +794,7 @@ mod tests {
         let result = parse_row(&row, &m);
         assert_eq!(result.items.len(), 0);
         assert_eq!(result.rejected, 1);
+        assert_eq!(result.degraded, 0);
         assert!(result.rejection_reasons.contains(
             &"Original evidence was not a unique exact quotation in a current message block."
         ));
@@ -759,8 +808,49 @@ mod tests {
         let result = parse_row(&row, &m);
         assert_eq!(result.items.len(), 1);
         assert!(result.items[0].resolution.is_some());
+        assert!(!result.items[0].unverified_resolution);
+        assert!(!result.items[0].unverified_deadline);
         assert_eq!(result.rejected, 0);
+        assert_eq!(result.degraded, 0);
         assert!(result.rejection_reasons.is_empty());
+    }
+    #[test]
+    fn second_row_with_misquoted_resolution_does_not_double_count_a_dedupe() {
+        // Row 1 succeeds outright with a valid resolution. Row 2 repeats
+        // the same action against the same evidence but with a misquoted
+        // resolution: dropping it salvages a candidate, but push_unique
+        // recognizes it as a duplicate of row 1 and discards it, so
+        // nothing about the duplicate should be counted or reported.
+        let m = resolution_messages();
+        let mut row1 = claim();
+        row1["resolution"] =
+            json!({"message":"m1","block":"b0","quote":"I sent the résumé as requested."});
+        let mut row2 = row1.clone();
+        row2["resolution"] =
+            json!({"message":"m1","block":"b0","quote":"I sent the resume as requested"});
+        let result = parse(
+            json!({"version":1,"expectations":[row1, row2]})
+                .to_string()
+                .as_bytes(),
+            &m,
+        )
+        .unwrap();
+        assert_eq!(result.items.len(), 1);
+        assert!(result.items[0].resolution.is_some());
+        assert_eq!(result.degraded, 0);
+        assert_eq!(result.rejected, 0);
+        assert!(
+            !result.rejection_reasons.contains(
+                &"Completion evidence was invalid; the request was kept open without it."
+            )
+        );
+    }
+    #[test]
+    fn non_object_row_does_not_panic_and_is_rejected() {
+        let result = parse(br#"{"version":1,"expectations":[42]}"#, &messages()).unwrap();
+        assert_eq!(result.items.len(), 0);
+        assert_eq!(result.rejected, 1);
+        assert_eq!(result.degraded, 0);
     }
     #[test]
     fn strict_top_level_schema_rejects_duplicates_and_unknown_fields() {

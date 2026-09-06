@@ -93,7 +93,8 @@ impl ReviewState {
         );
         self.scan_incomplete = result.analyzed < result.total
             || self.source_failures > 0
-            || result.analysis.rejected > 0;
+            || result.analysis.rejected > 0
+            || result.analysis.degraded > 0;
         self.scan_errors = result.failures;
         for reason in &result.analysis.rejection_reasons {
             if !self.scan_errors.iter().any(|existing| existing == reason) {
@@ -161,10 +162,16 @@ impl ReviewState {
         };
         ui.separator();
         ui.heading("What may need your attention");
+        let degraded_note = if analysis.degraded > 0 {
+            format!(" · {} kept with unverified evidence", analysis.degraded)
+        } else {
+            String::new()
+        };
         ui.label(format!(
-            "{} expectations · {} rejected for invalid evidence · {}",
+            "{} expectations · {} rejected for invalid evidence{} · {}",
             analysis.items.len(),
             analysis.rejected,
+            degraded_note,
             self.analysis_model
         ));
         ui.label("Review the action and evidence. A missing reply in this scan does not prove the work is unfinished.");
@@ -199,13 +206,14 @@ impl ReviewState {
                     let owner=if record.decision==Decision::Mine {"You (confirmed)"} else {match item.owner {Owner::You=>"You (suggested)",Owner::Team=>"Team — no individual owner established",Owner::Unclear=>"Unclear — confirm responsibility"}};
                     ui.label(format!("Responsible: {owner}"));
                     ui.label(format!("Waiting: {}",item.waiting_party));
-                    ui.label(format!("Deadline stated in email: {}",item.deadline.as_ref().map_or("Not specified",|a|a.quote.as_str())));
+                    let deadline_text=item.deadline.as_ref().map_or(if item.unverified_deadline {"stated, but its quotation could not be verified"} else {"Not specified"},|a|a.quote.as_str());
+                    ui.label(format!("Deadline stated in email: {deadline_text}"));
                     if !item.uncertainty.is_empty() {ui.label(format!("Uncertainty: {}",item.uncertainty));}
                     ui.label(RichText::new(format!("{} · {} · {}",source.source,source.date_label,item.kind)).small());
                     ui.collapsing("Why this was suggested · evidence and replies",|ui|{
                         show_anchor(ui,"Original expectation",&item.evidence,&self.messages);
                         if let Some(deadline)=&item.deadline {show_anchor(ui,"Deadline evidence",deadline,&self.messages);}
-                        if let Some(resolution)=&item.resolution {show_anchor(ui,"Later possible completion / resolution",resolution,&self.messages);} else {ui.label("No matching completion was identified in the scanned conversation. Work may have happened elsewhere or outside this history window.");}
+                        if let Some(resolution)=&item.resolution {show_anchor(ui,"Later possible completion / resolution",resolution,&self.messages);} else if item.unverified_resolution {ui.label("The analysis proposed a completion but its quotation could not be verified; treat as open.");} else {ui.label("No matching completion was identified in the scanned conversation. Work may have happened elsewhere or outside this history window.");}
                         ui.collapsing("Full scanned conversation",|ui| {for m in self.messages.iter().filter(|m|m.account==source.account && m.conversation==source.conversation) {ui.label(format!("{} · {}",m.date_label,if m.input.from_user {"You"} else {"Other participant"}));for b in &m.input.message.body_blocks {ui.label(b.as_string());}}});
                     });
                     ui.horizontal_wrapped(|ui|{
@@ -384,6 +392,8 @@ pub fn layout_fixture() -> ReviewState {
             } else {
                 "The request was sent to the Group; no individual owner is named.".into()
             },
+            unverified_deadline: false,
+            unverified_resolution: false,
         })
         .collect();
     state.set_scan(
@@ -392,6 +402,7 @@ pub fn layout_fixture() -> ReviewState {
                 items,
                 rejected: 0,
                 rejection_reasons: vec![],
+                degraded: 0,
             },
             failures: vec![],
             analyzed: 2,

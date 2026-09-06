@@ -302,6 +302,7 @@ fn scan_conversations(
             items: vec![],
             rejected: 0,
             rejection_reasons: vec![],
+            degraded: 0,
         },
         failures: vec![],
         analyzed: 0,
@@ -326,6 +327,7 @@ fn scan_conversations(
                 result.analyzed += conversation.len();
                 result.analysis.items.extend(analysis.items);
                 result.analysis.rejected += analysis.rejected;
+                result.analysis.degraded += analysis.degraded;
                 result
                     .analysis
                     .rejection_reasons
@@ -425,16 +427,17 @@ pub fn probe(key: String, model: &str) -> Result<usize, ProviderError> {
         }
         let result = provider.expectations(&[m])?;
         println!(
-            "Semantic case {}: {} accepted, {} rejected; expected {}.",
+            "Semantic case {}: {} accepted, {} rejected, {} degraded; expected {}.",
             passed + 1,
             result.items.len(),
             result.rejected,
+            result.degraded,
             expected
         );
         for reason in &result.rejection_reasons {
             println!("{reason}");
         }
-        if result.items.len() != expected || result.rejected != 0 {
+        if result.items.len() != expected || result.rejected != 0 || result.degraded != 0 {
             return Err(ProviderError::InvalidAnalysis);
         }
         if expected > 0
@@ -544,6 +547,7 @@ mod tests {
                 items: vec![],
                 rejected: 0,
                 rejection_reasons: vec![],
+                degraded: 0,
             })
         });
         assert_eq!(lengths, [2, 1]);
@@ -738,6 +742,7 @@ mod tests {
                 items: vec![],
                 rejected: 0,
                 rejection_reasons: vec![],
+                degraded: 0,
             })
         });
         assert_eq!(result.analyzed, 1);
