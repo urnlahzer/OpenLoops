@@ -92,8 +92,12 @@ pub struct WalkOutput {
     /// `component_block_order.body_block`: current-body blocks in document
     /// order.
     pub body_blocks: Vec<String>,
-    /// `component_block_order.quote_block`: quoted/forwarded blocks in
-    /// document order.
+    /// `component_block_order.quote_block`: quoted/forwarded blocks.
+    /// Blockquote-derived blocks come first, in document order. Any
+    /// Outlook-style reply history detected in `body_blocks` (text-based,
+    /// used when there is no `<blockquote>`) is appended after them as a
+    /// bounded number of chunks, still in document order (see
+    /// `split_reply_history`).
     pub quote_blocks: Vec<String>,
     /// `component_block_order.link_label`: sanitized visible link labels in
     /// document order.
@@ -560,7 +564,8 @@ fn is_reply_history_start(paragraphs: &[String], start: usize) -> bool {
 /// `<blockquote>`s; sibling top-level blocks within one flush are joined
 /// by the blank-line separator, so splitting on it recovers per-block
 /// granularity), finds the first paragraph that starts reply history per
-/// [`is_reply_history_start`], and moves it plus every following paragraph
+/// [`is_reply_history_start`], and moves it plus every following paragraph,
+/// rejoined into a bounded number of chunks (see [`chunk_reply_history`]),
 /// to the end of `quote_blocks`, preserving order. If the paragraph
 /// immediately before the match is an Outlook underscore separator (see
 /// [`is_underscore_separator`]), it is moved too. Blockquote-derived
@@ -598,8 +603,51 @@ fn split_reply_history(
         idx += len;
     }
 
-    quote_blocks.extend(moved);
+    quote_blocks.extend(chunk_reply_history(moved));
     (new_body_blocks, quote_blocks)
+}
+
+/// Maximum characters (`char` count, matching this codebase's other block
+/// size bounds) in one reply-history quote chunk.
+const REPLY_HISTORY_CHUNK_MAX_CHARS: usize = 4096;
+/// Maximum number of reply-history quote chunks a single message may add.
+/// Reply history is historical context, never anchorable evidence, so once
+/// this many chunks are full the remainder is simply dropped rather than
+/// risking the whole message's block count tripping
+/// `MAX_BLOCKS_PER_MESSAGE`.
+const REPLY_HISTORY_MAX_CHUNKS: usize = 8;
+
+/// Rejoins `paragraphs` (already in document order, nearest-to-the-reply
+/// first) into at most [`REPLY_HISTORY_MAX_CHUNKS`] `"\n\n"`-joined chunks,
+/// each at most [`REPLY_HISTORY_CHUNK_MAX_CHARS`] characters, splitting
+/// only on paragraph boundaries (a single paragraph longer than the limit
+/// still becomes its own, oversized, chunk rather than being cut mid-text).
+/// A deep Outlook thread can otherwise contribute one quote block per
+/// quoted paragraph, which is unbounded and can alone exceed
+/// `MAX_BLOCKS_PER_MESSAGE`; once the chunk cap is reached, any remaining
+/// paragraphs are dropped (reply history is context only, never
+/// anchorable).
+fn chunk_reply_history(paragraphs: Vec<String>) -> Vec<String> {
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for paragraph in paragraphs {
+        let separator_len = if current.is_empty() { 0 } else { 2 };
+        let would_be_len = current.chars().count() + separator_len + paragraph.chars().count();
+        if !current.is_empty() && would_be_len > REPLY_HISTORY_CHUNK_MAX_CHARS {
+            chunks.push(std::mem::take(&mut current));
+            if chunks.len() >= REPLY_HISTORY_MAX_CHUNKS {
+                return chunks;
+            }
+        }
+        if !current.is_empty() {
+            current.push_str("\n\n");
+        }
+        current.push_str(&paragraph);
+    }
+    if !current.is_empty() && chunks.len() < REPLY_HISTORY_MAX_CHUNKS {
+        chunks.push(current);
+    }
+    chunks
 }
 
 fn is_tag_name_start(c: char) -> bool {
@@ -1267,11 +1315,12 @@ mod tests {
             out.body_blocks,
             vec!["Let's move it one hour later.".to_string()]
         );
+        // Both moved paragraphs are well under the 4096-char chunk limit,
+        // so `chunk_reply_history` merges them into a single quote chunk.
         assert_eq!(
             out.quote_blocks,
             vec![
-                "From: Alex <alex@example.invalid>\nSent: Monday, 1 September 2025 09:00\nTo: Me <me@example.invalid>\nSubject: Meeting time".to_string(),
-                "Can we change the meeting time?".to_string(),
+                "From: Alex <alex@example.invalid>\nSent: Monday, 1 September 2025 09:00\nTo: Me <me@example.invalid>\nSubject: Meeting time\n\nCan we change the meeting time?".to_string(),
             ]
         );
     }
@@ -1291,16 +1340,116 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(out.body_blocks, vec!["New text here.".to_string()]);
+        // All five moved paragraphs are well under the 4096-char chunk
+        // limit, so `chunk_reply_history` merges them into one chunk.
         assert_eq!(
             out.quote_blocks,
             vec![
-                "From: Alex <alex@example.invalid>".to_string(),
-                "Sent: Monday, 1 September 2025 09:00".to_string(),
-                "To: Me <me@example.invalid>".to_string(),
-                "Subject: Meeting time".to_string(),
-                "Can we change the meeting time?".to_string(),
+                concat!(
+                    "From: Alex <alex@example.invalid>\n\n",
+                    "Sent: Monday, 1 September 2025 09:00\n\n",
+                    "To: Me <me@example.invalid>\n\n",
+                    "Subject: Meeting time\n\n",
+                    "Can we change the meeting time?",
+                )
+                .to_string()
             ]
         );
+    }
+
+    #[test]
+    fn underscore_separator_before_reply_header_is_moved_on_html_path() {
+        // Outlook's separator rule: a lone underscore-run block immediately
+        // before the header block is moved along with it, exercising the
+        // `k -= 1` step on the HTML (blockquote-free) path.
+        let out = canonicalize_html(concat!(
+            "<div>New text.</div>",
+            "<div>________________________________</div>",
+            "<div><b>From:</b> Alex &lt;alex@example.invalid&gt;<br>",
+            "<b>Sent:</b> Monday, 1 September 2025 09:00<br>",
+            "<b>To:</b> Me &lt;me@example.invalid&gt;<br>",
+            "<b>Subject:</b> Meeting time</div>",
+            "<div>Original message text.</div>",
+        ))
+        .unwrap();
+        assert_eq!(out.body_blocks, vec!["New text.".to_string()]);
+        assert_eq!(
+            out.quote_blocks,
+            vec![
+                concat!(
+                    "________________________________\n\n",
+                    "From: Alex <alex@example.invalid>\n",
+                    "Sent: Monday, 1 September 2025 09:00\n",
+                    "To: Me <me@example.invalid>\n",
+                    "Subject: Meeting time\n\n",
+                    "Original message text.",
+                )
+                .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn original_message_separator_moves_itself_and_everything_after() {
+        // Rule (b): a standalone "-----Original Message-----" block starts
+        // reply history on its own, with no From:/Subject: requirement.
+        let out = canonicalize_html(concat!(
+            "<div>New text.</div>",
+            "<div>-----Original Message-----</div>",
+            "<div><b>From:</b> Alex &lt;alex@example.invalid&gt;<br>",
+            "<b>Sent:</b> Monday, 1 September 2025 09:00</div>",
+            "<div>Original message text.</div>",
+        ))
+        .unwrap();
+        assert_eq!(out.body_blocks, vec!["New text.".to_string()]);
+        assert_eq!(
+            out.quote_blocks,
+            vec![
+                concat!(
+                    "-----Original Message-----\n\n",
+                    "From: Alex <alex@example.invalid>\n",
+                    "Sent: Monday, 1 September 2025 09:00\n\n",
+                    "Original message text.",
+                )
+                .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn deep_reply_history_is_bounded_to_at_most_eight_quote_chunks() {
+        // Scaling risk: without chunking, one quote block per quoted
+        // paragraph is unbounded and a deep Outlook thread can alone blow
+        // past `MAX_BLOCKS_PER_MESSAGE` (64 in `message.rs`), rejecting the
+        // whole message. `chunk_reply_history` bounds the moved history to
+        // at most 8 chunks regardless of how many paragraphs it started as.
+        let mut html = String::from(concat!(
+            "<div>New text.</div>",
+            "<div id=\"appendonsend\"></div><hr>",
+            "<div id=\"divRplyFwdMsg\">",
+            "<b>From:</b> Alex &lt;alex@example.invalid&gt;<br>",
+            "<b>Sent:</b> Monday, 1 September 2025 09:00<br>",
+            "<b>To:</b> Me &lt;me@example.invalid&gt;<br>",
+            "<b>Subject:</b> Meeting time</div>",
+        ));
+        for i in 0..100 {
+            use core::fmt::Write as _;
+            let _ = write!(
+                html,
+                "<div>Quoted paragraph number {i} of the original message.</div>"
+            );
+        }
+        let out = canonicalize_html(&html).unwrap();
+        assert_eq!(out.body_blocks, vec!["New text.".to_string()]);
+        assert!(
+            out.quote_blocks.len() <= 8,
+            "expected at most 8 quote chunks, got {}",
+            out.quote_blocks.len()
+        );
+        // `1 + body_blocks.len() + quote_blocks.len()` mirrors
+        // `MessageError`'s `content_block_count` check (subject + body +
+        // quote, `MAX_BLOCKS_PER_MESSAGE == 64`).
+        assert!(1 + out.body_blocks.len() + out.quote_blocks.len() <= 64);
     }
 
     #[test]

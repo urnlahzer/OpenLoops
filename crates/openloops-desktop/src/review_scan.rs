@@ -502,6 +502,38 @@ mod tests {
         assert_eq!(body.trim(), "Sure.");
     }
     #[test]
+    fn plain_text_from_with_subject_nearby_starts_history_without_underscore_line() {
+        // Exercises the From:+Subject: rule directly: no underscore
+        // separator line precedes the header, so the underscore rule
+        // cannot be what triggers history here.
+        let (body, quote) = plain_body(concat!(
+            "Sure.\n",
+            "From: Alex\n",
+            "Sent: Monday\n",
+            "To: Me\n",
+            "Subject: Meeting\n",
+            "\n",
+            "Can we change the meeting time?",
+        ));
+        assert_eq!(body.trim(), "Sure.");
+        assert!(quote.contains("Can we change the meeting time?"));
+    }
+    #[test]
+    fn plain_text_from_without_nearby_subject_stays_in_body() {
+        // A "From:" line with no "Subject:" line within the next 5 lines
+        // must not be treated as the start of reply history.
+        let (body, quote) = plain_body(concat!(
+            "Sure.\n",
+            "From: Alex, checking in on this.\n",
+            "Have a good day.",
+        ));
+        assert_eq!(
+            body.trim(),
+            "Sure.\nFrom: Alex, checking in on this.\nHave a good day."
+        );
+        assert!(quote.is_empty());
+    }
+    #[test]
     fn cancellation_and_provider_failure_do_not_start_more_conversations() {
         let a = prepare(&synthetic("Please send the draft.", 0, "a"), "Inbox", 0).unwrap();
         let b = prepare(&synthetic("Please send the agenda.", 1, "b"), "Inbox", 1).unwrap();
