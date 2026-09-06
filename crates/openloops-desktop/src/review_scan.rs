@@ -43,15 +43,46 @@ fn block(text: &str) -> Result<CanonicalBlock, ConnectionError> {
     }
     CanonicalBlock::new(&text).map_err(|_| ConnectionError::ResponseTooLarge)
 }
+/// Outlook's separator rule: a line consisting solely of 10 or more `_`
+/// characters, after trimming.
+fn is_underscore_separator(s: &str) -> bool {
+    let trimmed = s.trim();
+    trimmed.len() >= 10 && trimmed.chars().all(|c| c == '_')
+}
+
 fn plain_body(text: &str) -> (String, String) {
+    let lines: Vec<&str> = text.lines().collect();
     let mut body = String::new();
     let mut quote = String::new();
     let mut history = false;
-    for line in text.lines() {
+    for (idx, line) in lines.iter().enumerate() {
         if line.starts_with("On ") && line.ends_with("wrote:")
             || line.contains("-----Original Message-----")
         {
             history = true;
+        }
+        let trimmed = line.trim_start();
+        // Outlook plain-text reply: a From: line with a Subject: line
+        // within the next 5 lines starts the quoted original.
+        if !history && trimmed.starts_with("From:") {
+            let end = (idx + 6).min(lines.len());
+            if lines[idx + 1..end]
+                .iter()
+                .any(|l| l.trim_start().starts_with("Subject:"))
+            {
+                history = true;
+            }
+        }
+        // Outlook's underscore separator, immediately followed (within 2
+        // lines) by a From: line, also starts the quoted original.
+        if !history && is_underscore_separator(trimmed) {
+            let end = (idx + 3).min(lines.len());
+            if lines[idx + 1..end]
+                .iter()
+                .any(|l| l.trim_start().starts_with("From:"))
+            {
+                history = true;
+            }
         }
         let target = if history || line.trim_start().starts_with('>') {
             &mut quote
@@ -452,6 +483,23 @@ mod tests {
                 .contains("send the draft")
         );
         assert!(!m.input.message.quote_blocks.is_empty());
+    }
+    #[test]
+    fn outlook_style_plain_text_reply_history_is_not_current_evidence() {
+        // Plain-text Outlook replies put an underscore separator and a
+        // From:/Sent:/To:/Subject: header before the quoted original, with
+        // no "On ... wrote:" marker at all.
+        let (body, _quote) = plain_body(concat!(
+            "Sure.\n",
+            "________________________________\n",
+            "From: Alex\n",
+            "Sent: Monday\n",
+            "To: Me\n",
+            "Subject: Meeting\n",
+            "\n",
+            "Can we change the meeting time?",
+        ));
+        assert_eq!(body.trim(), "Sure.");
     }
     #[test]
     fn cancellation_and_provider_failure_do_not_start_more_conversations() {

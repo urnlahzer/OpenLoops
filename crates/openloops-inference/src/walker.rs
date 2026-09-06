@@ -478,12 +478,128 @@ impl Walker {
         } else {
             self.flush_body_if_nonempty();
         }
+        let (body_blocks, quote_blocks) = split_reply_history(self.body_blocks, self.quote_blocks);
         WalkOutput {
-            body_blocks: self.body_blocks,
-            quote_blocks: self.quote_blocks,
+            body_blocks,
+            quote_blocks,
             link_labels: self.link_labels,
         }
     }
+}
+
+/// Whether `s`, compared ASCII case-insensitively, starts with `prefix`.
+/// Never panics on a non-ASCII-boundary mismatch: `str::get` returns `None`
+/// (so this returns `false`) instead of slicing at an invalid boundary.
+fn starts_with_ascii_ci(s: &str, prefix: &str) -> bool {
+    s.get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
+/// Outlook's separator rule: a line consisting solely of 10 or more `_`
+/// characters, after trimming.
+fn is_underscore_separator(s: &str) -> bool {
+    let trimmed = s.trim();
+    trimmed.len() >= 10 && trimmed.chars().all(|c| c == '_')
+}
+
+/// Whether the paragraph at `paragraphs[start]` begins Outlook-style
+/// reply-history header text (task: Outlook reply-history detection).
+/// Matches any of:
+/// (a) the paragraph's first non-empty line starts with `From:` and, among
+///     the paragraph's first 6 lines, there is a `Subject:` line and a
+///     `Sent:`/`Date:` line;
+/// (b) the paragraph, trimmed, is exactly `-----Original Message-----`;
+/// (c) the paragraph's first non-empty line starts with `From:` and,
+///     looking at this paragraph plus up to the next 3 paragraphs
+///     together, there are `Subject:` and `Sent:`/`Date:` lines (header
+///     split across separate blocks, e.g. separate `<p>`s).
+fn is_reply_history_start(paragraphs: &[String], start: usize) -> bool {
+    let first = &paragraphs[start];
+    if first.trim() == "-----Original Message-----" {
+        return true;
+    }
+    let Some(first_line) = first.lines().find(|l| !l.trim().is_empty()) else {
+        return false;
+    };
+    if !starts_with_ascii_ci(first_line.trim_start(), "From:") {
+        return false;
+    }
+
+    let has_subject_and_sent = |lines: &[&str]| {
+        let has_subject = lines
+            .iter()
+            .any(|l| starts_with_ascii_ci(l.trim_start(), "Subject:"));
+        let has_sent_or_date = lines.iter().any(|l| {
+            let t = l.trim_start();
+            starts_with_ascii_ci(t, "Sent:") || starts_with_ascii_ci(t, "Date:")
+        });
+        has_subject && has_sent_or_date
+    };
+
+    // (a): header entirely within this paragraph's first 6 lines.
+    let own_lines: Vec<&str> = first.lines().take(6).collect();
+    if has_subject_and_sent(&own_lines) {
+        return true;
+    }
+
+    // (c): header split across this paragraph plus up to the next 3.
+    let window_end = (start + 4).min(paragraphs.len());
+    let window_lines: Vec<&str> = paragraphs[start..window_end]
+        .iter()
+        .flat_map(|block| block.lines())
+        .collect();
+    has_subject_and_sent(&window_lines)
+}
+
+/// Post-pass implementing Outlook reply-history detection: Outlook HTML
+/// replies place new text first, then the quoted original, with no
+/// `<blockquote>` marking the boundary (unlike top-posting clients, which
+/// this walker already handles via `Category::Quote`). This treats each
+/// blank-line-separated paragraph within `body_blocks` as a unit (the
+/// walker only flushes multiple `body_blocks` entries around real
+/// `<blockquote>`s; sibling top-level blocks within one flush are joined
+/// by the blank-line separator, so splitting on it recovers per-block
+/// granularity), finds the first paragraph that starts reply history per
+/// [`is_reply_history_start`], and moves it plus every following paragraph
+/// to the end of `quote_blocks`, preserving order. If the paragraph
+/// immediately before the match is an Outlook underscore separator (see
+/// [`is_underscore_separator`]), it is moved too. Blockquote-derived
+/// `quote_blocks` entries are left exactly as they were; if no history
+/// start is found, both inputs are returned unchanged.
+fn split_reply_history(
+    body_blocks: Vec<String>,
+    mut quote_blocks: Vec<String>,
+) -> (Vec<String>, Vec<String>) {
+    let mut paragraphs: Vec<String> = Vec::new();
+    let mut group_lens: Vec<usize> = Vec::with_capacity(body_blocks.len());
+    for block in &body_blocks {
+        let parts: Vec<&str> = block.split("\n\n").collect();
+        group_lens.push(parts.len());
+        paragraphs.extend(parts.into_iter().map(str::to_string));
+    }
+
+    let Some(mut k) = (0..paragraphs.len()).find(|&i| is_reply_history_start(&paragraphs, i))
+    else {
+        return (body_blocks, quote_blocks);
+    };
+    if k > 0 && is_underscore_separator(&paragraphs[k - 1]) {
+        k -= 1;
+    }
+
+    let moved = paragraphs.split_off(k);
+
+    let mut new_body_blocks = Vec::with_capacity(group_lens.len());
+    let mut idx = 0usize;
+    for len in group_lens {
+        let end = (idx + len).min(paragraphs.len());
+        if idx < end {
+            new_body_blocks.push(paragraphs[idx..end].join("\n\n"));
+        }
+        idx += len;
+    }
+
+    quote_blocks.extend(moved);
+    (new_body_blocks, quote_blocks)
 }
 
 fn is_tag_name_start(c: char) -> bool {
@@ -1125,5 +1241,98 @@ mod tests {
         assert_eq!(out.body_blocks, vec!["A\n\nB".to_string()]);
         let out = canonicalize_html("<ul><li>a</li><li>b</li></ul>").unwrap();
         assert_eq!(out.body_blocks, vec!["a\n\nb".to_string()]);
+    }
+
+    // --- Outlook reply-history detection (task 1) ---
+
+    #[test]
+    fn outlook_style_reply_header_is_moved_to_quote_blocks() {
+        // Outlook HTML replies put new text first, then an <hr>, then a
+        // From:/Sent:/To:/Subject: header block, then the original message
+        // -- with no <blockquote> anywhere. The walker does not parse
+        // attributes, so `id="appendonsend"`/`id="divRplyFwdMsg"` are inert
+        // noise; detection must be purely text-based.
+        let out = canonicalize_html(concat!(
+            "<div>Let's move it one hour later.</div>",
+            "<div id=\"appendonsend\"></div><hr>",
+            "<div id=\"divRplyFwdMsg\">",
+            "<b>From:</b> Alex &lt;alex@example.invalid&gt;<br>",
+            "<b>Sent:</b> Monday, 1 September 2025 09:00<br>",
+            "<b>To:</b> Me &lt;me@example.invalid&gt;<br>",
+            "<b>Subject:</b> Meeting time</div>",
+            "<div>Can we change the meeting time?</div>",
+        ))
+        .unwrap();
+        assert_eq!(
+            out.body_blocks,
+            vec!["Let's move it one hour later.".to_string()]
+        );
+        assert_eq!(
+            out.quote_blocks,
+            vec![
+                "From: Alex <alex@example.invalid>\nSent: Monday, 1 September 2025 09:00\nTo: Me <me@example.invalid>\nSubject: Meeting time".to_string(),
+                "Can we change the meeting time?".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn outlook_reply_header_split_across_p_blocks_is_moved() {
+        // Case (c): the From:/Sent:/To:/Subject: header lines land in
+        // separate top-level blocks (e.g. separate <p>s) instead of one
+        // <br>-joined block; detection must look ahead across blocks.
+        let out = canonicalize_html(concat!(
+            "<p>New text here.</p>",
+            "<p><b>From:</b> Alex &lt;alex@example.invalid&gt;</p>",
+            "<p><b>Sent:</b> Monday, 1 September 2025 09:00</p>",
+            "<p><b>To:</b> Me &lt;me@example.invalid&gt;</p>",
+            "<p><b>Subject:</b> Meeting time</p>",
+            "<p>Can we change the meeting time?</p>",
+        ))
+        .unwrap();
+        assert_eq!(out.body_blocks, vec!["New text here.".to_string()]);
+        assert_eq!(
+            out.quote_blocks,
+            vec![
+                "From: Alex <alex@example.invalid>".to_string(),
+                "Sent: Monday, 1 September 2025 09:00".to_string(),
+                "To: Me <me@example.invalid>".to_string(),
+                "Subject: Meeting time".to_string(),
+                "Can we change the meeting time?".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn from_mid_sentence_or_without_header_context_is_not_reply_history() {
+        // A "From:" that isn't the start of a header block must never be
+        // moved: mid-sentence text, and a block that starts with "From:"
+        // but has no accompanying Subject:/Sent:/Date: line nearby.
+        let out =
+            canonicalize_html("<div>Please see From: field below for details.</div>").unwrap();
+        assert_eq!(
+            out.body_blocks,
+            vec!["Please see From: field below for details.".to_string()]
+        );
+        assert!(out.quote_blocks.is_empty());
+
+        let out = canonicalize_html(
+            "<div>Let's talk.</div><div>From: Alex, following up on our call.</div>",
+        )
+        .unwrap();
+        assert_eq!(
+            out.body_blocks,
+            vec!["Let's talk.\n\nFrom: Alex, following up on our call.".to_string()]
+        );
+        assert!(out.quote_blocks.is_empty());
+    }
+
+    #[test]
+    fn existing_blockquote_case_is_unaffected_by_reply_history_detection() {
+        // Blockquote-derived quote blocks must stay exactly as they were
+        // before this feature existed.
+        let out = canonicalize_html("<p>A&amp;B<br>C</p><blockquote>Q</blockquote>").unwrap();
+        assert_eq!(out.body_blocks, vec!["A&B\nC".to_string()]);
+        assert_eq!(out.quote_blocks, vec!["Q".to_string()]);
     }
 }
