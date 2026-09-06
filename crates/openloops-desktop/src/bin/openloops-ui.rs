@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+#[path = "../deadline_view.rs"]
+mod deadline_view;
 #[path = "../loop_state.rs"]
 mod loop_state;
 #[path = "../review_ui.rs"]

@@ -15,6 +15,7 @@ pub enum Decision {
     Done,
     Dismissed,
     Watching,
+    Moot,
 }
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum Reminder {
@@ -259,6 +260,7 @@ fn encode(secret: &[u8; 32], records: &[Record]) -> Result<Zeroizing<Vec<u8>>, (
             Decision::Done => 2,
             Decision::Dismissed => 3,
             Decision::Watching => 4,
+            Decision::Moot => 5,
         });
         bytes.push(match r.reminder {
             Reminder::None => 0,
@@ -293,6 +295,7 @@ fn decode(bytes: &[u8]) -> Result<([u8; 32], Vec<Record>), ()> {
                 2 => Decision::Done,
                 3 => Decision::Dismissed,
                 4 => Decision::Watching,
+                5 => Decision::Moot,
                 _ => return Err(()),
             },
             reminder: match row[33] {
@@ -310,6 +313,35 @@ fn decode(bytes: &[u8]) -> Result<([u8; 32], Vec<Record>), ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn every_decision_round_trips_with_stable_tags() {
+        for (tag, decision) in [
+            Decision::Review,
+            Decision::Mine,
+            Decision::Done,
+            Decision::Dismissed,
+            Decision::Watching,
+            Decision::Moot,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let record = Record {
+                key: [7; 32],
+                decision,
+                reminder: Reminder::Created,
+                updated: 1_788_350_400,
+            };
+            let bytes = encode(&[0; 32], &[record]).unwrap();
+            assert_eq!(usize::from(bytes[MAGIC.len() + 33 + 32]), tag);
+            let (_, records) = decode(&bytes).unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].key, record.key);
+            assert!(records[0].decision == record.decision);
+            assert!(records[0].reminder == record.reminder);
+            assert_eq!(records[0].updated, record.updated);
+        }
+    }
     #[test]
     fn decisions_replay_without_readable_mail_and_are_account_bound() {
         let mut state = Decisions::default();

@@ -1,8 +1,11 @@
 //! Conversation review and explicit decisions. Readable mail stays in memory.
-use crate::loop_state::{Decision, Decisions, Reminder, marker, now};
+use crate::deadline_view::{DeadlineView, classify, label};
+use crate::loop_state::{Decision, Decisions, Record, Reminder, marker, now};
 use eframe::egui::{self, Color32, RichText};
 use openloops_graph::live::{reminders::ReminderRequest, review::SourceReview};
-use openloops_inference::ollama::expectations::{Anchor, Expectations, Owner, ResolutionKind};
+use openloops_inference::ollama::expectations::{
+    Anchor, Expectation, Expectations, Owner, ResolutionKind,
+};
 #[path = "review_scan.rs"]
 mod scanning;
 pub use scanning::{ReviewMessage, ScanProgress, ScanResult, probe, scan};
@@ -13,6 +16,34 @@ struct ReminderDraft {
     title: String,
     when: String,
     error: String,
+}
+
+struct CardContext<'a> {
+    source: &'a ReviewMessage,
+    record: Record,
+    terminal: bool,
+    deadline: Option<DeadlineView>,
+}
+
+fn is_past_due(view: &DeadlineView) -> bool {
+    matches!(
+        view,
+        DeadlineView::PastDue { .. } | DeadlineView::DueRange { past: true, .. }
+    )
+}
+
+fn card_rank(card: Option<&CardContext<'_>>) -> u8 {
+    match card {
+        Some(card) if card.terminal => 2,
+        Some(card) if card.deadline.as_ref().is_some_and(is_past_due) => 0,
+        _ => 1,
+    }
+}
+
+fn card_order(cards: &[Option<CardContext<'_>>]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..cards.len()).collect();
+    order.sort_by_key(|&i| (card_rank(cards[i].as_ref()), i));
+    order
 }
 
 #[derive(Default)]
@@ -156,6 +187,45 @@ impl ReviewState {
             },
         );
     }
+    fn card_context(&self, item: &Expectation, now: i64, offset: i32) -> Option<CardContext<'_>> {
+        let source = self
+            .messages
+            .iter()
+            .find(|m| m.input.handle == item.evidence.message)?;
+        let key = self
+            .decisions
+            .fingerprint(&source.account, &source.id, &item.action_phrase);
+        let record = self.decisions.get(&key);
+        let terminal = matches!(
+            record.decision,
+            Decision::Done | Decision::Dismissed | Decision::Moot
+        );
+        let deadline = item.deadline.as_ref().map(|anchor| {
+            let message = self
+                .messages
+                .iter()
+                .find(|m| m.input.handle == anchor.message)
+                .unwrap_or(source);
+            classify(&anchor.quote, message.input.timestamp, now, offset)
+        });
+        Some(CardContext {
+            source,
+            record,
+            terminal,
+            deadline,
+        })
+    }
+
+    fn card_contexts(&self, items: &[Expectation]) -> Vec<Option<CardContext<'_>>> {
+        let clock = chrono::Local::now();
+        items
+            .iter()
+            .map(|item| {
+                self.card_context(item, clock.timestamp(), clock.offset().local_minus_utc())
+            })
+            .collect()
+    }
+
     fn show_analysis(&mut self, ui: &mut egui::Ui) {
         let Some(analysis) = &self.analysis else {
             return;
@@ -181,32 +251,35 @@ impl ReviewState {
         }
         let mut change = None;
         let mut draft = None;
-        for (i, item) in analysis.items.iter().enumerate() {
-            let Some(source) = self
-                .messages
-                .iter()
-                .find(|m| m.input.handle == item.evidence.message)
+        let cards = self.card_contexts(&analysis.items);
+        let order = card_order(&cards);
+        for &i in &order {
+            let item = &analysis.items[i];
+            let Some(CardContext {
+                source,
+                record,
+                terminal,
+                deadline: deadline_view,
+            }) = &cards[i]
             else {
                 continue;
             };
-            let key = self
-                .decisions
-                .fingerprint(&source.account, &source.id, &item.action_phrase);
-            let record = self.decisions.get(&key);
-            let terminal = matches!(record.decision, Decision::Done | Decision::Dismissed);
+            let key = record.key;
+            let terminal = *terminal;
             if terminal && !self.show_handled {
                 continue;
             }
             ui.push_id(i,|ui|{
                 egui::Frame::group(ui.style()).show(ui,|ui|{
                     ui.set_width(ui.available_width());
-                    let status=if record.decision==Decision::Done {"Handled"} else if record.decision==Decision::Dismissed {"Dismissed / not mine"} else if item.resolution.is_some() {resolution_status_label(item.resolution_kind)} else if record.decision==Decision::Mine {"Tracking"} else if record.decision==Decision::Watching {"Watching team follow-up"} else {"Needs your review"};
+                    let status=if record.decision==Decision::Done {"Handled"} else if record.decision==Decision::Dismissed {"Dismissed / not mine"} else if record.decision==Decision::Moot {"No longer relevant"} else if item.resolution.is_some() {resolution_status_label(item.resolution_kind)} else if record.decision==Decision::Mine {"Tracking"} else if record.decision==Decision::Watching {"Watching team follow-up"} else {"Needs your review"};
                     ui.label(RichText::new(status).color(Color32::from_rgb(29,87,67)));
                     ui.label(RichText::new(&item.action).size(21.0).strong());
                     let owner=if record.decision==Decision::Mine {"You (confirmed)"} else {match item.owner {Owner::You=>"You (suggested)",Owner::Team=>"Team — no individual owner established",Owner::Unclear=>"Unclear — confirm responsibility"}};
                     ui.label(format!("Responsible: {owner}"));
                     ui.label(format!("Waiting: {}",item.waiting_party));
                     if let Some(deadline)=&item.deadline {ui.label(format!("Deadline stated in email: {}",deadline.quote));} else if item.unverified_deadline {ui.label("A deadline was stated, but its quotation could not be verified.");} else {ui.label("Deadline stated in email: Not specified");}
+                    if let Some(view)=deadline_view {if is_past_due(view) {ui.colored_label(Color32::DARK_RED,label(view));} else {ui.label(label(view));}}
                     if !item.uncertainty.is_empty() {ui.label(format!("Uncertainty: {}",item.uncertainty));}
                     ui.label(RichText::new(format!("{} · {} · {}",source.source,source.date_label,item.kind)).small());
                     ui.collapsing("Why this was suggested · evidence and replies",|ui|{
@@ -222,6 +295,7 @@ impl ReviewState {
                             if item.owner!=Owner::You && record.decision!=Decision::Watching && ui.button("Keep an eye on this").clicked(){change=Some((key,Decision::Watching,record.reminder));}
                             if ui.button("Handled").clicked(){change=Some((key,Decision::Done,record.reminder));}
                             if ui.button("Not mine / dismiss").clicked(){change=Some((key,Decision::Dismissed,record.reminder));}
+                            if ui.button("No longer relevant").clicked(){change=Some((key,Decision::Moot,record.reminder));}
                             if record.reminder==Reminder::None && ui.add_enabled(matches!(record.decision,Decision::Mine|Decision::Watching),egui::Button::new("Set To Do reminder…")).clicked(){draft=Some(ReminderDraft {key,account:source.account.clone(),title:if record.decision==Decision::Watching {format!("Follow up: {}",item.action)} else {item.action.clone()},when:default_reminder(),error:String::new()});}
                         }
                     });
@@ -439,6 +513,122 @@ pub fn layout_fixture() -> ReviewState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn aging_fixture() -> (ReviewState, Expectation) {
+        let mut state = ReviewState::default();
+        for (index, received) in ["2026-09-02T12:00:00Z", "2026-09-09T12:00:00Z"]
+            .into_iter()
+            .enumerate()
+        {
+            let mail = openloops_graph::live::review::MailItem {
+                id: format!("synthetic-{index}"),
+                account: "synthetic".into(),
+                received: received.into(),
+                body: "Send the draft by Friday.".into(),
+                ..Default::default()
+            };
+            state
+                .messages
+                .push(scanning::prepare(&mail, "Synthetic", index).unwrap());
+        }
+        let anchor = Anchor {
+            message: "m0".into(),
+            block: 0,
+            quote: "Friday".into(),
+            context: String::new(),
+        };
+        let item = Expectation {
+            action: "Send the draft".into(),
+            action_phrase: "send the draft".into(),
+            owner: Owner::You,
+            waiting_party: String::new(),
+            kind: "request".into(),
+            evidence: anchor.clone(),
+            deadline: Some(anchor),
+            resolution: None,
+            resolution_kind: None,
+            uncertainty: String::new(),
+            unverified_deadline: false,
+            unverified_resolution: false,
+        };
+        (state, item)
+    }
+
+    #[test]
+    fn deadline_uses_its_own_message_and_falls_back_to_evidence() {
+        let (state, mut item) = aging_fixture();
+        // Saturday 2026-09-05 12:00 UTC.
+        let now = 1_788_609_600;
+        assert!(is_past_due(
+            state
+                .card_context(&item, now, 0)
+                .unwrap()
+                .deadline
+                .as_ref()
+                .unwrap()
+        ));
+        item.deadline.as_mut().unwrap().message = "m1".into();
+        assert!(!is_past_due(
+            state
+                .card_context(&item, now, 0)
+                .unwrap()
+                .deadline
+                .as_ref()
+                .unwrap()
+        ));
+        item.deadline.as_mut().unwrap().message = "missing".into();
+        assert!(is_past_due(
+            state
+                .card_context(&item, now, 0)
+                .unwrap()
+                .deadline
+                .as_ref()
+                .unwrap()
+        ));
+        item.evidence.message = "missing".into();
+        assert!(state.card_context(&item, now, 0).is_none());
+    }
+
+    #[test]
+    fn urgency_order_is_stable_and_moot_is_terminal_until_reopened() {
+        let (mut state, item) = aging_fixture();
+        let source = &state.messages[0];
+        let key = state
+            .decisions
+            .fingerprint(&source.account, &source.id, &item.action_phrase);
+        for decision in [Decision::Done, Decision::Dismissed, Decision::Moot] {
+            let mut record = state.decisions.get(&key);
+            record.decision = decision;
+            state.decisions.records = vec![record];
+            let card = state.card_context(&item, 1_788_609_600, 0).unwrap();
+            assert!(card.terminal);
+            assert_eq!(card_rank(Some(&card)), 2);
+        }
+        state.decisions.records[0].decision = Decision::Review;
+        let overdue = state.card_context(&item, 1_788_609_600, 0);
+        assert!(!overdue.as_ref().unwrap().terminal);
+        let due = state.card_context(&item, 1_788_350_400, 0);
+        let mut range_item = item.clone();
+        range_item.deadline.as_mut().unwrap().quote = "this week".into();
+        let range = state.card_context(&range_item, 1_788_714_001, 0);
+        assert_eq!(card_rank(range.as_ref()), 0);
+        let (mut terminal_state, terminal_item) = aging_fixture();
+        let mut record = terminal_state
+            .card_context(&terminal_item, 1_788_609_600, 0)
+            .unwrap()
+            .record;
+        record.decision = Decision::Moot;
+        terminal_state.decisions.records = vec![record];
+        let terminal = terminal_state.card_context(&terminal_item, 1_788_609_600, 0);
+        let cards = vec![
+            terminal,
+            due,
+            overdue,
+            None,
+            range,
+            terminal_state.card_context(&terminal_item, 1_788_350_400, 0),
+        ];
+        assert_eq!(card_order(&cards), vec![2, 4, 1, 3, 0, 5]);
+    }
     #[test]
     fn past_reminder_times_are_rejected() {
         assert!(reminder_time("2000-01-01 12:00").is_err());
