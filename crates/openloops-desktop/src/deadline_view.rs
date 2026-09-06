@@ -9,9 +9,19 @@ use openloops_domain::deadline_parse::{
 pub enum DeadlineView {
     PastDue {
         boundary: i64,
+        offset_seconds: i32,
     },
     Due {
         boundary: i64,
+        offset_seconds: i32,
+    },
+    DueDate {
+        day: i64,
+        past: bool,
+    },
+    DueBusinessDay {
+        day: i64,
+        past: bool,
     },
     DueRange {
         start_day: i64,
@@ -38,24 +48,35 @@ pub fn classify(
         eod_seconds_since_midnight: DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT,
         week_start: Weekday::Monday,
     };
+    let normalized = normalize_quote(quote);
+    // SoftWindow is redundant: see asap_is_soft_in_the_relative_grammar.
     let parsed = [
         TemporalKind::LocalDatetime,
         TemporalKind::Date,
         TemporalKind::Relative,
-        TemporalKind::SoftWindow,
     ]
     .into_iter()
-    .find_map(|kind| reparse(kind, quote, &context).ok());
+    .find_map(|kind| reparse(kind, &normalized, &context).ok());
     match parsed {
-        Some(ParsedValue::Instant(resolution)) => instant_view(resolution, now),
-        Some(value @ (ParsedValue::Date(_) | ParsedValue::BusinessDay(_))) => instant_view(
-            policy_boundary(&value, &context).expect("calendar date has an EOD boundary"),
-            now,
-        ),
+        Some(ParsedValue::Instant(resolution)) => {
+            instant_view(resolution, now, local_offset_seconds)
+        }
+        Some(value @ (ParsedValue::Date(day) | ParsedValue::BusinessDay(day))) => {
+            let Some(boundary) = policy_boundary(&value, &context).and_then(boundary_seconds)
+            else {
+                return DeadlineView::Unknown;
+            };
+            let past = now > boundary;
+            match value {
+                ParsedValue::Date(_) => DeadlineView::DueDate { day: day.0, past },
+                _ => DeadlineView::DueBusinessDay { day: day.0, past },
+            }
+        }
         Some(value @ ParsedValue::Week { start, end }) => {
-            let boundary = boundary_seconds(
-                policy_boundary(&value, &context).expect("week has an EOD boundary"),
-            );
+            let Some(boundary) = policy_boundary(&value, &context).and_then(boundary_seconds)
+            else {
+                return DeadlineView::Unknown;
+            };
             DeadlineView::DueRange {
                 start_day: start.0,
                 end_day: end.0,
@@ -67,18 +88,12 @@ pub fn classify(
         Some(ParsedValue::EventRelative) => DeadlineView::EventTied,
         None => {
             let lower = quote.to_ascii_lowercase();
-            if [
-                "meeting",
-                "call",
-                "event",
-                "session",
-                "hearing",
-                "closing",
-                "deposition",
-            ]
-            .iter()
-            .any(|word| lower.contains(word))
-            {
+            if lower.split_ascii_whitespace().any(|token| {
+                matches!(
+                    token.trim_matches(|c: char| c.is_ascii_punctuation()),
+                    "meeting" | "call" | "event" | "session" | "hearing" | "closing" | "deposition"
+                )
+            }) {
                 DeadlineView::EventTied
             } else {
                 DeadlineView::Unknown
@@ -87,37 +102,93 @@ pub fn classify(
     }
 }
 
-fn boundary_seconds(resolution: LocalResolution) -> i64 {
-    match resolution {
-        LocalResolution::Unambiguous(time) => time.0,
-        // A fixed offset with no transition cannot produce this arm. Choose the
-        // earlier reading for exhaustiveness and future transition support.
-        LocalResolution::Ambiguous { candidates, .. } => {
-            candidates.iter().map(|time| time.0).min().unwrap()
+fn normalize_quote(quote: &str) -> String {
+    let lower = quote.to_ascii_lowercase();
+    // The strict datetime grammar accepts uppercase T or a space, not lowercase t.
+    let lower = if lower.as_bytes().get(10) == Some(&b't') {
+        format!("{} {}", &lower[..10], &lower[11..])
+    } else {
+        lower
+    };
+    let trim = |c: char| c.is_ascii_punctuation() || c.is_whitespace();
+    let text = lower.trim_matches(trim);
+    for prefix in ["no later than ", "due by ", "before ", "due ", "by ", "on "] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            return rest.trim_matches(trim).to_string();
         }
+    }
+    text.to_string()
+}
+
+fn boundary_seconds(resolution: LocalResolution) -> Option<i64> {
+    match resolution {
+        LocalResolution::Unambiguous(time) => Some(time.0),
+        // Defensive: a fixed offset with transition: None cannot produce ambiguity.
+        // If transitions are supported later, aging must never choose a candidate.
+        LocalResolution::Ambiguous { .. } => None,
     }
 }
 
-fn instant_view(resolution: LocalResolution, now: i64) -> DeadlineView {
-    let boundary = boundary_seconds(resolution);
+fn instant_view(resolution: LocalResolution, now: i64, offset_seconds: i32) -> DeadlineView {
+    let Some(boundary) = boundary_seconds(resolution) else {
+        return DeadlineView::Unknown;
+    };
     if now > boundary {
-        DeadlineView::PastDue { boundary }
+        DeadlineView::PastDue {
+            boundary,
+            offset_seconds,
+        }
     } else {
-        DeadlineView::Due { boundary }
+        DeadlineView::Due {
+            boundary,
+            offset_seconds,
+        }
     }
 }
 
 pub fn label(view: &DeadlineView) -> String {
     match view {
-        DeadlineView::PastDue { boundary } => {
-            format!("Past due since {}", format_instant(*boundary))
+        DeadlineView::PastDue {
+            boundary,
+            offset_seconds,
+        } => {
+            format!(
+                "Past due since {}",
+                format_instant(*boundary, *offset_seconds)
+            )
         }
-        DeadlineView::Due { boundary } => format!("Due {}", format_instant(*boundary)),
-        DeadlineView::DueRange { end_day, past, .. } => {
+        DeadlineView::Due {
+            boundary,
+            offset_seconds,
+        } => format!("Due {}", format_instant(*boundary, *offset_seconds)),
+        DeadlineView::DueDate { day, past: false } => format!("Due by end of {}", format_day(*day)),
+        DeadlineView::DueDate { day, past: true } => {
+            format!("Past due: {} has ended", format_day(*day))
+        }
+        DeadlineView::DueBusinessDay { day, past: false } => {
+            format!("Due by end of business {}", format_day(*day))
+        }
+        DeadlineView::DueBusinessDay { day, past: true } => {
+            format!("Past due: business day {} has ended", format_day(*day))
+        }
+        DeadlineView::DueRange {
+            start_day,
+            end_day,
+            past,
+        } => {
             if *past {
-                format!("Past due: range ended {}", format_day(*end_day))
+                format!(
+                    "Past due: range {} to {} has ended",
+                    format_day(*start_day),
+                    format_day(*end_day)
+                )
             } else {
-                format!("Due by end of {}", format_day(*end_day))
+                format!(
+                    "Due by end of {} (range {} to {})",
+                    format_day(*end_day),
+                    format_day(*start_day),
+                    format_day(*end_day)
+                )
             }
         }
         DeadlineView::EventTied => "Tied to an event; time not stated".to_string(),
@@ -126,15 +197,15 @@ pub fn label(view: &DeadlineView) -> String {
     }
 }
 
-fn format_instant(boundary: i64) -> String {
-    chrono::DateTime::from_timestamp(boundary, 0).map_or_else(
-        || boundary.to_string(),
-        |time| {
-            time.with_timezone(&chrono::Local)
-                .format("%a %b %d, %Y %H:%M")
-                .to_string()
-        },
-    )
+fn format_instant(boundary: i64, offset_seconds: i32) -> String {
+    let offset = chrono::FixedOffset::east_opt(offset_seconds);
+    match (chrono::DateTime::from_timestamp(boundary, 0), offset) {
+        (Some(time), Some(offset)) => time
+            .with_timezone(&offset)
+            .format("%a %b %d, %Y %H:%M %:z")
+            .to_string(),
+        _ => boundary.to_string(),
+    }
 }
 
 fn format_day(day: i64) -> String {
@@ -156,19 +227,81 @@ mod tests {
     const SUNDAY_EOD: i64 = 1_788_714_000;
 
     #[test]
+    fn date_only_labels_never_invent_clock_times() {
+        let view = classify("Friday", MESSAGE, MESSAGE, 0);
+        assert!(!label(&view).contains(':'));
+        assert!(matches!(view, DeadlineView::DueDate { .. }));
+        let business = classify("in 2 business days", MESSAGE, MESSAGE, 0);
+        assert!(matches!(business, DeadlineView::DueBusinessDay { .. }));
+        assert!(!label(&business).contains(':'));
+    }
+
+    #[test]
+    fn instant_labels_use_the_resolved_offset() {
+        let view = classify("2026-09-01 15:00", MESSAGE, MESSAGE, -5 * 3600);
+        assert!(label(&view).contains("15:00 -05:00"));
+    }
+
+    #[test]
+    fn event_fallback_requires_whole_tokens() {
+        for quote in [
+            "practically",
+            "recall",
+            "prevent",
+            "possession",
+            "disclosing",
+        ] {
+            assert_eq!(
+                classify(quote, MESSAGE, MESSAGE, 0),
+                DeadlineView::Unknown,
+                "{quote}"
+            );
+        }
+        for quote in ["before the meeting", "before the (meeting)."] {
+            assert_eq!(
+                classify(quote, MESSAGE, MESSAGE, 0),
+                DeadlineView::EventTied
+            );
+        }
+    }
+
+    #[test]
+    fn normalized_quotes_age_like_their_baseline() {
+        for input in [
+            "by Friday",
+            "Friday.",
+            "due by Friday",
+            "no later than Friday",
+            "before Friday",
+            "due Friday",
+            "on Friday",
+        ] {
+            for now in [MESSAGE, FRIDAY_EOD + 1] {
+                assert_eq!(
+                    classify(input, MESSAGE, now, 0),
+                    classify("Friday", MESSAGE, now, 0),
+                    "{input}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn friday_ages_at_eod_and_is_due_at_the_boundary() {
         for now in [MESSAGE, FRIDAY_EOD] {
             assert_eq!(
                 classify("Friday", MESSAGE, now, 0),
-                DeadlineView::Due {
-                    boundary: FRIDAY_EOD
+                DeadlineView::DueDate {
+                    day: FRIDAY_EOD / 86400,
+                    past: false
                 }
             );
         }
         assert_eq!(
             classify("Friday", MESSAGE, FRIDAY_EOD + 1, 0),
-            DeadlineView::PastDue {
-                boundary: FRIDAY_EOD
+            DeadlineView::DueDate {
+                day: FRIDAY_EOD / 86400,
+                past: true
             }
         );
     }
@@ -180,12 +313,16 @@ mod tests {
         for quote in ["2026-09-01 15:00", "2026-09-01T15:00"] {
             assert_eq!(
                 classify(quote, MESSAGE, MESSAGE, 0),
-                DeadlineView::PastDue { boundary }
+                DeadlineView::PastDue {
+                    boundary,
+                    offset_seconds: 0
+                }
             );
             assert_eq!(
                 classify(quote, MESSAGE, boundary + 25_200, -25_200),
                 DeadlineView::Due {
-                    boundary: boundary + 25_200
+                    boundary: boundary + 25_200,
+                    offset_seconds: -25_200
                 }
             );
         }
@@ -224,7 +361,9 @@ mod tests {
             reparse(TemporalKind::Relative, "ASAP", &context),
             Ok(ParsedValue::Soft)
         ));
-        assert_eq!(classify("ASAP", MESSAGE, MESSAGE, 0), DeadlineView::Soft);
+        for quote in ["ASAP", "when you can", "when you get a chance"] {
+            assert_eq!(classify(quote, MESSAGE, MESSAGE, 0), DeadlineView::Soft);
+        }
     }
 
     #[test]
@@ -251,7 +390,7 @@ mod tests {
                 end_day: 20_702,
                 past: false
             }),
-            "Due by end of Sun Sep 06, 2026"
+            "Due by end of Sun Sep 06, 2026 (range Mon Aug 31, 2026 to Sun Sep 06, 2026)"
         );
         assert_eq!(
             label(&DeadlineView::DueRange {
@@ -259,10 +398,13 @@ mod tests {
                 end_day: 20_702,
                 past: true
             }),
-            "Past due: range ended Sun Sep 06, 2026"
+            "Past due: range Mon Aug 31, 2026 to Sun Sep 06, 2026 has ended"
         );
         assert_eq!(
-            label(&DeadlineView::Due { boundary: i64::MAX }),
+            label(&DeadlineView::Due {
+                boundary: i64::MAX,
+                offset_seconds: 0
+            }),
             format!("Due {}", i64::MAX)
         );
         assert_eq!(format_day(i64::MAX), i64::MAX.to_string());

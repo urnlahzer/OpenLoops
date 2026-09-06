@@ -1,6 +1,7 @@
 //! Conversation review and explicit decisions. Readable mail stays in memory.
 use crate::deadline_view::{DeadlineView, classify, label};
 use crate::loop_state::{Decision, Decisions, Record, Reminder, marker, now};
+use chrono::TimeZone;
 use eframe::egui::{self, Color32, RichText};
 use openloops_graph::live::{reminders::ReminderRequest, review::SourceReview};
 use openloops_inference::ollama::expectations::{
@@ -9,6 +10,8 @@ use openloops_inference::ollama::expectations::{
 #[path = "review_scan.rs"]
 mod scanning;
 pub use scanning::{ReviewMessage, ScanProgress, ScanResult, probe, scan};
+
+const SHOW_HANDLED_LABEL: &str = "Show handled, dismissed, and no-longer-relevant items";
 
 struct ReminderDraft {
     key: [u8; 32],
@@ -28,7 +31,10 @@ struct CardContext<'a> {
 fn is_past_due(view: &DeadlineView) -> bool {
     matches!(
         view,
-        DeadlineView::PastDue { .. } | DeadlineView::DueRange { past: true, .. }
+        DeadlineView::PastDue { .. }
+            | DeadlineView::DueRange { past: true, .. }
+            | DeadlineView::DueDate { past: true, .. }
+            | DeadlineView::DueBusinessDay { past: true, .. }
     )
 }
 
@@ -187,7 +193,12 @@ impl ReviewState {
             },
         );
     }
-    fn card_context(&self, item: &Expectation, now: i64, offset: i32) -> Option<CardContext<'_>> {
+    fn card_context(
+        &self,
+        item: &Expectation,
+        now: i64,
+        now_offset: i32,
+    ) -> Option<CardContext<'_>> {
         let source = self
             .messages
             .iter()
@@ -206,6 +217,10 @@ impl ReviewState {
                 .iter()
                 .find(|m| m.input.handle == anchor.message)
                 .unwrap_or(source);
+            let offset = chrono::Local
+                .timestamp_opt(message.input.timestamp, 0)
+                .single()
+                .map_or(now_offset, |t| t.offset().local_minus_utc());
             classify(&anchor.quote, message.input.timestamp, now, offset)
         });
         Some(CardContext {
@@ -245,7 +260,7 @@ impl ReviewState {
             self.analysis_model
         ));
         ui.label("Review the action and evidence. A missing reply in this scan does not prove the work is unfinished.");
-        ui.checkbox(&mut self.show_handled, "Show handled and dismissed items");
+        ui.checkbox(&mut self.show_handled, SHOW_HANDLED_LABEL);
         if analysis.items.is_empty() {
             ui.label(if analysis.rejected>0 {"No usable expectations were returned. Evidence validation rejected suggestions; this is not a clean bill of health."} else {"No actionable expectations were identified in the successfully reviewed conversations."});
         }
@@ -279,7 +294,7 @@ impl ReviewState {
                     ui.label(format!("Responsible: {owner}"));
                     ui.label(format!("Waiting: {}",item.waiting_party));
                     if let Some(deadline)=&item.deadline {ui.label(format!("Deadline stated in email: {}",deadline.quote));} else if item.unverified_deadline {ui.label("A deadline was stated, but its quotation could not be verified.");} else {ui.label("Deadline stated in email: Not specified");}
-                    if let Some(view)=deadline_view {if is_past_due(view) {ui.colored_label(Color32::DARK_RED,label(view));} else {ui.label(label(view));}}
+                    if let Some(view)=deadline_view {if !terminal && is_past_due(view) {ui.colored_label(Color32::DARK_RED,label(view));} else {ui.label(label(view));}}
                     if !item.uncertainty.is_empty() {ui.label(format!("Uncertainty: {}",item.uncertainty));}
                     ui.label(RichText::new(format!("{} · {} · {}",source.source,source.date_label,item.kind)).small());
                     ui.collapsing("Why this was suggested · evidence and replies",|ui|{
@@ -554,6 +569,48 @@ mod tests {
     }
 
     #[test]
+    fn card_offset_comes_from_the_deadline_message_timestamp() {
+        use chrono::TimeZone;
+        let (mut state, mut item) = aging_fixture();
+        state.messages[0].input.timestamp = 1_767_268_800;
+        for handle in ["m1", "missing"] {
+            let anchor = item.deadline.as_mut().unwrap();
+            anchor.message = handle.into();
+            anchor.quote = "2026-09-01 15:00".into();
+            let message = &state.messages[usize::from(handle == "m1")];
+            let offset = chrono::Local
+                .timestamp_opt(message.input.timestamp, 0)
+                .single()
+                .unwrap()
+                .offset()
+                .local_minus_utc();
+            assert_eq!(
+                state
+                    .card_context(&item, 1_788_609_600, 1234)
+                    .unwrap()
+                    .deadline,
+                Some(classify(
+                    "2026-09-01 15:00",
+                    message.input.timestamp,
+                    1_788_609_600,
+                    offset
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn date_and_business_day_urgency_tracks_past_flag() {
+        for past in [false, true] {
+            assert_eq!(is_past_due(&DeadlineView::DueDate { day: 0, past }), past);
+            assert_eq!(
+                is_past_due(&DeadlineView::DueBusinessDay { day: 0, past }),
+                past
+            );
+        }
+    }
+
+    #[test]
     fn deadline_uses_its_own_message_and_falls_back_to_evidence() {
         let (state, mut item) = aging_fixture();
         // Saturday 2026-09-05 12:00 UTC.
@@ -609,7 +666,7 @@ mod tests {
         let due = state.card_context(&item, 1_788_350_400, 0);
         let mut range_item = item.clone();
         range_item.deadline.as_mut().unwrap().quote = "this week".into();
-        let range = state.card_context(&range_item, 1_788_714_001, 0);
+        let range = state.card_context(&range_item, 1_788_800_400, 0);
         assert_eq!(card_rank(range.as_ref()), 0);
         let (mut terminal_state, terminal_item) = aging_fixture();
         let mut record = terminal_state
