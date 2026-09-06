@@ -1,0 +1,37 @@
+{
+  "id": "quote-duplicate-trap-01",
+  "category": "quote_duplicate_trap",
+  "message": {
+    "subject": "Signed contract",
+    "body_html": "<p>Please send the signed contract back by Monday.</p>",
+    "sender_name": "Alex Doe",
+    "sender_address": "alex@synthetic.invalid",
+    "to": [],
+    "cc": []
+  },
+  "participants": [],
+  "loop_candidate_handles": [],
+  "mock_model_output_json": "{\"schema_version\":1,\"claims\":[{\"claim_type\":\"request\",\"evidence\":[{\"source_handle\":\"msg-1\",\"component\":\"body_block\",\"block_ordinal\":0,\"range_start\":0,\"range_end\":47}],\"waiting_party_handle\":null,\"related_loop_handles\":[],\"temporal\":null,\"confidence_micros\":900000,\"ambiguity_codes\":[]},{\"claim_type\":\"request\",\"evidence\":[{\"source_handle\":\"msg-1\",\"component\":\"body_block\",\"block_ordinal\":0,\"range_start\":0,\"range_end\":47}],\"waiting_party_handle\":null,\"related_loop_handles\":[],\"temporal\":null,\"confidence_micros\":900000,\"ambiguity_codes\":[]}]}",
+  "expected_top_level": "reviewed",
+  "expected_claims": [
+    {
+      "validation": {
+        "kind": "accept_for_review"
+      },
+      "establishment": {
+        "case": "direct_incoming_request_or_question",
+        "validity": true,
+        "deterministic_identity": true,
+        "confidence": "high",
+        "core_ambiguity": false
+      }
+    },
+    {
+      "validation": {
+        "kind": "reject",
+        "reason_debug_contains": "DuplicateClaim"
+      },
+      "establishment": null
+    }
+  ]
+}

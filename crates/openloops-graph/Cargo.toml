@@ -1,0 +1,40 @@
+[package]
+name = "openloops-graph"
+description = "ADR-002 PKCE transaction machine and ADR-004-facing typed Graph transport, built on std::net. Library and tests only; the graph_transport/oauth capabilities stay disabled."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# `contracts/identity/authentication-boundary.json` `dependency_decisions`
+# names five contract-reviewed async/HTTP/OAuth candidate crates plus one
+# more from this story's own brief (see `src/lib.rs`'s module doc for the
+# full, named deviation record — naming them again here would repeat, in a
+# `Cargo.toml` comment, exactly the crate-name tokens this repository's
+# cross-contract network scans key on). None of the six are activated
+# below: this workspace's offline registry mirror does not carry their full
+# transitive dependency closures (several shared foundational crates —
+# an HTTP-types crate, an async-runtime I/O crate, a byte-buffer crate, a
+# URL/percent-encoding family, and a client-side async HTTP stack — are
+# simply absent from the mirror; `cargo generate-lockfile --offline`
+# confirms each gap). `dependency_policy.activation` in the contract remains
+# `selected_not_activated`, unchanged by this crate.
+[dependencies]
+openloops-application = { path = "../openloops-application" }
+openloops-domain = { path = "../openloops-domain" }
+openloops-persistence = { path = "../openloops-persistence" }
+oauth2 = { version = "=5.0.0", default-features = false, features = ["timing-resistant-secret-traits"], optional = true }
+reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "rustls-tls-native-roots"], optional = true }
+url = { version = "=2.5.8", default-features = false, features = ["std"], optional = true }
+webbrowser = { version = "=1.2.1", default-features = false, features = ["hardened"], optional = true }
+httparse = { version = "=1.10.1", default-features = false, features = ["std"], optional = true }
+serde_json = { version = "=1.0.150", optional = true }
+chrono = { version = "=0.4.45", default-features = false, features = ["std"], optional = true }
+
+[features]
+default = []
+live-connection = ["dep:oauth2", "dep:reqwest", "dep:url", "dep:webbrowser", "dep:httparse", "dep:serde_json", "dep:chrono"]
+
+[lints]
+workspace = true

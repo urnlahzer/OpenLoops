@@ -1,0 +1,17 @@
+{
+  "id": "invalid-model-output-03",
+  "category": "invalid_model_output",
+  "message": {
+    "subject": "Unknown field",
+    "body_html": "<p>This message is unremarkable.</p>",
+    "sender_name": "Alex Doe",
+    "sender_address": "alex@synthetic.invalid",
+    "to": [],
+    "cc": []
+  },
+  "participants": [],
+  "loop_candidate_handles": [],
+  "mock_model_output_json": "{\"schema_version\":1,\"claims\":[],\"unexpected_field\":true}",
+  "expected_top_level": "analysis_unavailable",
+  "expected_claims": []
+}

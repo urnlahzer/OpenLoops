@@ -1,0 +1,24 @@
+{
+  "id": "deadline-event-relative-01",
+  "category": "deadline_event_relative",
+  "message": {
+    "subject": "Board deck",
+    "body_html": "<p>Please have the deck ready before the board meeting.</p>",
+    "sender_name": "Alex Doe",
+    "sender_address": "alex@synthetic.invalid",
+    "to": [],
+    "cc": []
+  },
+  "participants": [],
+  "loop_candidate_handles": [],
+  "mock_model_output_json": "{\"schema_version\":1,\"claims\":[{\"claim_type\":\"deadline_change\",\"evidence\":[{\"source_handle\":\"msg-1\",\"component\":\"body_block\",\"block_ordinal\":0,\"range_start\":0,\"range_end\":52}],\"waiting_party_handle\":null,\"related_loop_handles\":[],\"temporal\":{\"text_evidence_index\":0,\"kind\":\"event_relative\",\"value\":\"before the board meeting\"},\"confidence_micros\":900000,\"ambiguity_codes\":[]}]}",
+  "expected_top_level": "reviewed",
+  "expected_claims": [
+    {
+      "validation": {
+        "kind": "accept_for_review"
+      },
+      "establishment": null
+    }
+  ]
+}

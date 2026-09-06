@@ -1,0 +1,42 @@
+[package]
+name = "openloops-desktop"
+default-run = "openloops-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+openloops-application = { path = "../openloops-application" }
+openloops-contracts = { path = "../openloops-contracts" }
+openloops-domain = { path = "../openloops-domain" }
+openloops-graph = { path = "../openloops-graph" }
+openloops-inference = { path = "../openloops-inference" }
+openloops-persistence = { path = "../openloops-persistence" }
+eframe = { version = "=0.36.1", default-features = false, features = ["default_fonts", "glow", "accesskit", "links"], optional = true }
+zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"], optional = true }
+image = { version = "=0.25.10", default-features = false, features = ["png"], optional = true }
+keyring-core = { version = "=1.0.0", default-features = false, optional = true }
+chrono = { version = "=0.4.45", default-features = false, features = ["std", "clock"], optional = true }
+hmac = { version = "=0.13.0", optional = true }
+sha2 = { version = "=0.11.0", optional = true }
+getrandom = { version = "=0.4.3", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-native-keyring-store = { version = "=1.1.0", default-features = false, optional = true }
+
+[lints]
+workspace = true
+
+[features]
+default = []
+live-connection = ["openloops-graph/live-connection"]
+ollama-cloud = ["openloops-inference/ollama-cloud"]
+native-ui = ["live-connection", "ollama-cloud", "dep:eframe", "dep:zeroize", "dep:keyring-core", "dep:windows-native-keyring-store", "dep:chrono", "dep:hmac", "dep:sha2", "dep:getrandom"]
+ui-screenshot = ["native-ui", "dep:image"]
+
+[[bin]]
+name = "openloops-ui"
+path = "src/bin/openloops-ui.rs"
+required-features = ["native-ui"]

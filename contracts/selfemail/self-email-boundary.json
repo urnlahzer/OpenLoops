@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "work_item": "P0-WI-16",
+  "adr": "ADR-013",
+  "decision_status": "accepted_contract_runtime_unimplemented",
+  "snapshot_date": "2026-07-21",
+  "owner_decisions": ["OWN-10"],
+  "owned_requirements": ["OL-SUM-002", "OL-SUM-003", "OL-SUM-004"],
+  "consumed_requirements": [],
+  "primary_acceptance_criteria": [],
+  "dependent_acceptance_criteria": [],
+  "primary_scenarios": [],
+  "scenario_dependencies": [],
+  "blocking_gates": ["G-SELFMAIL", "G-PRIV"],
+  "input_authorities": [
+    {"owner": "ADR-003", "input": "Self-email adds Mail.Send only through separate explicit consent after G-SELFMAIL and may address only the contract-tested authenticated self recipient"},
+    {"owner": "ADR-004", "input": "a saved sent copy may be analyzed once, but drafts and compose activity never activate loops; the product says sent copy observed, never delivered"},
+    {"owner": "ADR-005", "input": "pending operation identity precedes an external request; ambiguous writes reconcile before retry"},
+    {"owner": "ADR-009", "input": "every remote mutation begins with a pending encrypted operation-ledger record committed under ADR-005 before a request"},
+    {"owner": "ADR-PRIV-001", "input": "the allowlist prohibits generated summaries or explanations among other mailbox-derived text"}
+  ],
+  "separate_decisions": {
+    "canonical_self_recipient_source": "unresolved_pending_G-SELFMAIL",
+    "marker_mechanism": "unresolved_pending_G-SELFMAIL",
+    "durable_operation_ledger_mechanics": "ADR-005",
+    "operation_replay_and_ambiguous_write_protocol": "ADR-009",
+    "sent_copy_observation_and_delivery_wording": "ADR-004",
+    "generated_summary_persistence_prohibition": "ADR-PRIV-001",
+    "mail_send_incremental_consent_boundary": "ADR-003"
+  },
+  "catalogs": {
+    "canonical_recipient_source_candidate_code": [
+      "graph_me_mail_field",
+      "graph_me_user_principal_name_field",
+      "primary_smtp_proxy_address",
+      "authenticated_id_token_email_claim"
+    ],
+    "marker_mechanism_candidate_code": [
+      "custom_internet_message_header",
+      "graph_single_value_extended_property",
+      "graph_multi_value_extended_property",
+      "proven_equivalent_field"
+    ],
+    "recipient_policy_code": [
+      "canonical_contract_tested_address_only",
+      "no_arbitrary_or_additional_recipient",
+      "no_user_input_sourced_recipient",
+      "no_cc_or_bcc",
+      "no_reply_to_redirection",
+      "no_distribution_list"
+    ],
+    "consent_policy_code": [
+      "separate_explicit_feature_enablement",
+      "separate_incremental_mail_send_consent_after_G-SELFMAIL",
+      "disablement_stops_sends_before_request",
+      "consent_loss_stops_sends_before_request"
+    ],
+    "generation_policy_code": [
+      "transient_reconstruction_under_OL-SUM-003",
+      "no_stored_summary_copy",
+      "no_stored_draft_or_template_output",
+      "content_rules_inherit_privacy_boundary"
+    ],
+    "marker_policy_code": [
+      "candidate_mechanism_unresolved_pending_G-SELFMAIL",
+      "survives_full_round_trip_to_saved_sent_copy",
+      "verifiable_on_saved_sent_copy",
+      "excludes_only_openloops_generated_summaries",
+      "never_excludes_user_authored_mail",
+      "never_carries_content_identifier_or_secret",
+      "never_marker_by_subject_text"
+    ],
+    "recursion_suppression_code": [
+      "detected_marker_prevents_loop_creation",
+      "detected_marker_prevents_summary_of_summary_inclusion",
+      "detected_marker_prevents_re_summarization",
+      "suppression_failure_fails_closed_to_no_send"
+    ],
+    "operation_protocol_code": [
+      "durable_pending_operation_before_request",
+      "one_request_per_recorded_attempt",
+      "ambiguous_outcome_reconciles_against_ledger_and_sent_items_before_retry",
+      "lost_response_never_blindly_retried",
+      "definitive_failure_surfaces_visibly"
+    ],
+    "schedule_policy_code": [
+      "runs_only_while_enabled_consented_and_authenticated",
+      "missed_schedules_coalesce",
+      "no_catch_up_burst"
+    ],
+    "failure_boundary_code": [
+      "secure_store_loss_causes_zero_requests",
+      "rollback_suspicion_causes_zero_requests",
+      "account_mismatch_causes_zero_requests",
+      "marker_verification_failure_causes_zero_requests"
+    ]
+  },
+  "recipient_policy": {
+    "legal_recipient": "the only legal recipient is the canonical contract-tested address of the authenticated account",
+    "canonical_source": "unresolved_pending_G-SELFMAIL; candidate sources may be listed but not selected",
+    "prohibited": ["arbitrary or additional recipients", "a recipient sourced from user input", "Cc", "Bcc", "reply-to redirection", "distribution lists"]
+  },
+  "consent_policy": {
+    "enablement": "separate explicit enablement of the feature",
+    "consent": "separate incremental Mail.Send consent granted only after G-SELFMAIL passes",
+    "loss_behavior": "disablement or consent loss stops sends before any request; a send in flight when consent is lost is not exempted"
+  },
+  "generation_policy": {
+    "reconstruction": "summary body reconstructed transiently under OL-SUM-003 from the same approved evidence and policy state as the in-add-in summary",
+    "no_stored_copy": "no summary copy, draft, or template output is stored by OpenLoops before, during, or after a send",
+    "content_rules": "content rules inherit the ADR-PRIV-001 privacy boundary in full; enabling self-email creates no new persistence exception"
+  },
+  "marker_policy": {
+    "mechanism_candidates": "candidate mechanisms are listed for G-SELFMAIL to evaluate; selection of one is unresolved_pending_G-SELFMAIL",
+    "round_trip": "must survive the full round trip from send through the Sent Items saved copy",
+    "verification": "must be verifiable on the saved sent copy without relying on subject text",
+    "exclusion_scope": "excludes from loop detection only messages OpenLoops itself generated; never excludes a user-authored message that merely resembles or quotes a summary",
+    "content_boundary": "never carries summary content, an identifier, or a secret; recoverable only through a keyed derivation, never a plaintext content signal"
+  },
+  "recursion_suppression": {
+    "prevented_paths": ["loop creation", "summary-of-summary inclusion", "re-summarization"],
+    "check_order": "detection logic must check the marker before any other loop-creation or summarization path considers the message",
+    "failure_mode": "a suppression failure is a no-send, not a best-effort filter; the fail-closed answer is to withhold the send entirely"
+  },
+  "send_operation_protocol": {
+    "durability": "a pending encrypted operation-ledger entry is committed before any send request",
+    "request_cardinality": "exactly one request is issued per recorded attempt",
+    "ambiguous_reconciliation": "an ambiguous outcome is never blindly retried; it reconciles against both the durable ledger entry and the Sent Items delta observation before any retry decision is made",
+    "definitive_failure": "a definitively failed send surfaces visibly to the user rather than being silently swallowed or silently retried"
+  },
+  "schedule_policy": {
+    "eligibility": "a scheduled self-email may run only while the feature is enabled, Mail.Send consent is current, and the account remains authenticated",
+    "missed_schedule_handling": "missed scheduled sends coalesce into the next eligible run",
+    "catch_up_prohibition": "there is no catch-up burst that reissues every missed occurrence"
+  },
+  "failure_boundary": {
+    "triggers": ["secure-store loss", "rollback suspicion", "account mismatch", "marker-verification failure"],
+    "result": "each independently causes zero send requests for the affected operation; none is a partial or best-effort success"
+  },
+  "unresolved_pending_G-SELFMAIL": ["canonical self-recipient source", "marker mechanism"],
+  "runtime_boundary": {
+    "mail_send_requested": false,
+    "self_email_sent": false,
+    "marker_mechanism_selected": false,
+    "scheduled_send_active": false,
+    "acceptance_criteria_completed": [],
+    "scenarios_completed": [],
+    "gates_passed": []
+  },
+  "claims": {
+    "capabilities_enabled": [],
+    "capabilities_advertised": [],
+    "recipient_sources_advertised": [],
+    "marker_mechanisms_advertised": []
+  },
+  "sources": [
+    {"id": "SRC-SPEC-OWN-10", "location": "docs/product-spec.md#3-research-backed-product-decisions"},
+    {"id": "SRC-SPEC-SUM", "location": "docs/product-spec.md#610-test-mode-summaries-and-reward"},
+    {"id": "SRC-SPEC-AMBIENT", "location": "docs/product-spec.md#88-ambient-review-and-summary-delivery"},
+    {"id": "SRC-SPEC-GATES", "location": "docs/product-spec.md#10-quality-and-safety-gates"},
+    {"id": "SRC-PLAN-PHASE1", "location": "docs/implementation-plan.md#phase-1--disposable-tenant-graph-and-add-in-contract-harness"},
+    {"id": "SRC-PLAN-PHASE6", "location": "docs/implementation-plan.md#phase-6--calendar-summaries-reward-and-test-mode"},
+    {"id": "SRC-PLAN-ADR", "location": "docs/implementation-plan.md#10-required-architecture-decision-records"},
+    {"id": "SRC-PLAN-RISK", "location": "docs/implementation-plan.md#9-risk-register"},
+    {"id": "SRC-ADR-003", "location": "docs/adr/ADR-003-incremental-authorization.md"},
+    {"id": "SRC-ADR-004", "location": "docs/adr/ADR-004-synchronization.md"},
+    {"id": "SRC-ADR-005", "location": "docs/adr/ADR-005-persistence-and-cryptography.md"},
+    {"id": "SRC-ADR-009", "location": "docs/adr/ADR-009-reminder-adapters.md"},
+    {"id": "SRC-ADR-PRIV-001", "location": "docs/adr/ADR-PRIV-001-derived-metadata-and-source-boundary.md"},
+    {"id": "SRC-THREAT-INDEX", "location": "docs/threat-model/README.md"}
+  ]
+}

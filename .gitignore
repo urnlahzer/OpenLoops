@@ -142,6 +142,7 @@ temp/
 
 # JavaScript / TypeScript
 node_modules/
+outlook-addin/.generated/
 .npm/
 .pnpm-store/
 .yarn/cache/

@@ -1,0 +1,177 @@
+{
+  "schema_version": 1,
+  "work_item": "P0-WI-12",
+  "adr": "ADR-009",
+  "decision_status": "accepted_contract_runtime_unimplemented",
+  "snapshot_date": "2026-07-21",
+  "owner_decisions": ["OWN-03", "OWN-04", "OWN-05", "OWN-07"],
+  "owned_requirements": ["OL-GOV-001", "OL-REM-001", "OL-REM-002", "OL-REM-003", "OL-REM-004", "OL-REM-005", "OL-REM-006", "OL-REM-007", "OL-REM-008", "OL-REM-009", "OL-REM-011", "OL-REM-012", "OL-REM-013", "OL-REM-014", "OL-REM-015", "OL-REM-016"],
+  "consumed_requirements": ["OL-AUTH-003", "OL-AUTH-004", "OL-AUTH-005", "OL-SYNC-001", "OL-SYNC-006", "OL-SYNC-007", "OL-SYNC-012", "OL-INV-002", "OL-INV-004", "OL-INV-005", "OL-INV-006", "OL-CLOSE-003", "OL-CLOSE-004", "OL-CLOSE-006", "OL-REM-010", "OL-REM-017", "OL-UX-001", "OL-UX-002", "OL-UX-009", "OL-UX-010", "OL-NFR-004", "OL-NFR-005", "OL-NFR-006", "OL-NFR-007", "OL-NFR-012"],
+  "primary_acceptance_criteria": ["AC-05c", "AC-10"],
+  "dependent_acceptance_criteria": ["AC-12", "AC-15", "AC-17", "AC-24"],
+  "primary_scenarios": ["AS-07", "AS-11", "AS-15"],
+  "scenario_dependencies": [
+    {"id":"AS-02","status":"unpassed_detection_and_adapter_runtime_required"},
+    {"id":"AS-10","status":"unpassed_evidence_runtime_required"},
+    {"id":"AS-14","status":"unpassed_G-CAL_and_G-MAIL_required"},
+    {"id":"AS-17","status":"unpassed_rollback_recovery_runtime_required"},
+    {"id":"AS-19","status":"unpassed_manual_artifact_and_privacy_gates_required"},
+    {"id":"AS-21","status":"unpassed_G-AUTO_required"},
+    {"id":"AS-23","status":"unpassed_G-AUTO_and_G-AUTO-FULL_required"}
+  ],
+  "blocking_gates": ["G-ID", "G-MAIL", "G-TODO", "G-CAL", "G-ADDIN", "G-STATE", "G-PRIV", "G-AUTO", "G-AUTO-FULL", "G-SEC-AUDIT", "G-RELEASE"],
+  "input_authorities": [
+    {"owner":"ADR-003","input":"disabled incremental delegated permission rows and account-bound feature composition"},
+    {"owner":"ADR-004","input":"collection enumeration cadence checkpoints and cursor advancement"},
+    {"owner":"ADR-005","input":"encrypted records atomic transactions rollback recovery and HMAC domains"},
+    {"owner":"ADR-006","input":"source artifact invitation and navigation identity"},
+    {"owner":"ADR-008","input":"local lifecycle authorization reminder facets and independent terminal commit"},
+    {"owner":"ADR-PRIV-001","input":"exact record fields retention and prohibited content"}
+  ],
+  "separate_decisions": {
+    "mode_semantics_eligibility_evaluation_flags_and_rollback": "ADR-011",
+    "review_link_activation_pairing_session_and_client_matrix": "ADR-010",
+    "self_email_send_recipient_and_operation_protocol": "ADR-013",
+    "calendar_exact_scope_and_endpoint_behavior": "G-CAL and a dependent contract revision",
+    "todo_endpoint_marker_conditional_write_and_collection_behavior": "G-TODO disposable-tenant contract evidence",
+    "storage_encryption_atomicity_and_rollback": "ADR-005",
+    "persistent_field_allowlist_and_retention": "ADR-PRIV-001"
+  },
+  "record_contracts": [
+    {
+      "id":"reminder_link",
+      "unknown_fields":"reject",
+      "exact_fields_in_order":["reminder_link_id","loop_id","list_locator","artifact_locator","adapter_code","operation_state_code","reconciliation_state_code","title_ownership_code","body_ownership_code","due_ownership_code","title_digest_hmac","body_digest_hmac","due_digest_hmac","artifact_version_hmac","observed_remote_version_hmac","remote_correlation_hmac","reminder_due_override","last_reconciled_at"],
+      "required_fields":["reminder_link_id","loop_id","adapter_code","operation_state_code","reconciliation_state_code","title_ownership_code","body_ownership_code","due_ownership_code"],
+      "nullable_fields":["list_locator","artifact_locator","title_digest_hmac","body_digest_hmac","due_digest_hmac","artifact_version_hmac","observed_remote_version_hmac","remote_correlation_hmac","reminder_due_override","last_reconciled_at"],
+      "linked_rule":"linked changed completed_needs_evidence missing conflict and ambiguous_write require an encrypted list and artifact locator unless the state is a pre-link proposal",
+      "text_rule":"no title body due phrase reminder-time value URL raw identifier or generated explanation"
+    },
+    {
+      "id":"operation_ledger",
+      "unknown_fields":"reject",
+      "exact_fields_in_order":["record_id","account_ref","operation_id","loop_id","source_ref_id","operation_key_hmac","operation_kind_code","adapter_code","state_code","reconciliation_code","field_mask_codes","ownership_codes","ambiguity_or_failure_code","destination_locator","expected_remote_version_hmac","remote_correlation_hmac","attempt_count","retry_at","completed_at"],
+      "required_fields":["record_id","account_ref","operation_id","loop_id","operation_key_hmac","operation_kind_code","adapter_code","state_code","reconciliation_code","field_mask_codes","ownership_codes","ambiguity_or_failure_code","attempt_count"],
+      "nullable_fields":["source_ref_id","destination_locator","expected_remote_version_hmac","remote_correlation_hmac","retry_at","completed_at"],
+      "bounds":{"field_mask_codes":5,"ownership_codes":4,"attempt_count_max":3},
+      "text_rule":"no intended readable value request response URL error body or raw marker"
+    },
+    {
+      "id":"user_authored_artifact_ref",
+      "unknown_fields":"reject",
+      "exact_fields_in_order":["source_ref_id","account_ref","adapter_locator","list_locator","artifact_locator","title_digest_hmac","body_digest_hmac","due_digest_hmac","title_version_hmac","body_version_hmac","due_version_hmac","artifact_type_code","title_ownership_code","body_ownership_code","due_ownership_code","title_version_state","body_version_state","due_version_state","origin_state_code","source_availability_code","observed_at"],
+      "required_fields":["source_ref_id","account_ref","adapter_locator","list_locator","artifact_locator","title_digest_hmac","body_digest_hmac","due_digest_hmac","title_version_hmac","body_version_hmac","due_version_hmac","artifact_type_code","title_ownership_code","body_ownership_code","due_ownership_code","title_version_state","body_version_state","due_version_state","origin_state_code","source_availability_code","observed_at"],
+      "nullable_fields":[],
+      "authority_rule":"exactly one proven Microsoft artifact is the authoritative readable source; title body and due ownership are user_authoritative",
+      "text_rule":"no locally persisted draft title body due phrase reminder-time value or generated summary"
+    }
+  ],
+  "catalogs": {
+    "adapter_code":["microsoft_todo","outlook_calendar"],
+    "artifact_type_code":["todo_task","calendar_reminder_event"],
+    "operation_kind_code":["todo_create","todo_update_owned_fields","todo_complete","calendar_reminder_create","calendar_reminder_update_owned_fields","manual_todo_create","manual_calendar_create","recreate_after_user_confirmation"],
+    "operation_state_code":["pending","attempt_started","known_no_send_retryable","ambiguous","reconciling","user_assisted","succeeded","definitive_failed","abandoned"],
+    "reconciliation_code":["not_required","pending","complete_zero","complete_one","complete_many","incomplete","marker_missing","marker_unsupported","marker_removed","version_changed","account_mismatch","authority_changed","rollback_suspected"],
+    "ambiguity_or_failure_code":["none","timeout_unknown","transport_known_no_send","throttled_known_no_send","complete_zero","complete_many","enumeration_incomplete","marker_missing","marker_unsupported","marker_removed","stale_version","ownership_conflict","account_mismatch","authority_changed","secure_store_unavailable","rollback_suspected","manual_draft_unrecoverable"],
+    "field_mask_code":["title","body","due","reminder_time","completion"],
+    "ownership_code":["service_projection","user_owned","user_authoritative","not_applicable"],
+    "version_state_code":["current","changed","stale","unavailable","conflict"],
+    "source_availability_code":["available","changed","unavailable"],
+    "calendar_response_state_code":["unknown","none","not_responded","accepted","tentative","declined","cancelled"],
+    "calendar_relation_code":["invitation_mail_only","single_event_correlated","event_ambiguous","event_unavailable","correlation_incomplete"]
+  },
+  "todo_boundary": {
+    "permission":"Tasks.ReadWrite from disabled PERM-TODO-WRITE-001 only after explicit user enablement and G-ID G-TODO G-PRIV",
+    "read_diagnostic":"Tasks.Read remains validation-only and never combines with Tasks.ReadWrite for product use",
+    "reconciliation_baseline":"ordinary bounded complete list and task enumeration; To Do delta is not a launch dependency",
+    "collection_selection":"explicit user-selected eligible owned list after enumeration; no guessed Tasks or Flagged Email target",
+    "unproven_until_G_TODO":["built-in and Flagged Email list behavior","movement between lists","paging completeness bounds","durable remote marker field","conditional writes","delayed visibility","marker removal and duplicate marker behavior","personal account support"],
+    "prohibited":["application permissions","shared list authority","automatic delete","title body or due identity matching","Calendar substitution after denial"]
+  },
+  "operation_protocol": {
+    "intent_hmac_input_order":["operation-key-v1","account_ref","adapter_code","collection_ref","loop_id","source_ref_id_or_none","source_generation","operation_kind_code","canonical_field_mask_codes","expected_loop_version","expected_remote_version_hmac_or_none","transient_title_digest_hmac_or_none","transient_body_digest_hmac_or_none","transient_due_digest_hmac_or_none","transient_reminder_time_digest_hmac_or_none","policy_version","authorization_generation","recreate_generation"],
+    "durability_order":["validate current account source loop ownership policy and authorization generations","compute operation_key_hmac without retaining readable intent","commit pending ledger entry under ADR-005 before request","revalidate account authority versions and rollback state","mark attempt_started atomically","make at most one adapter request","classify response before any retry or cursor advancement"],
+    "same_key":"a duplicate external invocation with the same key and canonical intent returns the prior recorded state or result with zero new request whenever no bounded retry is currently eligible; the same key with different intent is an operation_key_collision",
+    "known_no_send":"only endpoint-independent proof that no request was sent enables a serialized, durably recorded eligible retry that commits the next attempt before its one bounded request after revalidation, with retry_at and attempt_count at most 3; a duplicate external invocation never substitutes for this eligible-retry path",
+    "cursor_rule":"pending attempt_started ambiguous reconciling and user_assisted are nonterminal and prevent dependent cursor advancement",
+    "restart_rule":"detected-loop intent must be reconstructed from current evidence and policy then match operation_key_hmac; mismatch or unavailable evidence makes zero request",
+    "manual_draft_rule":"a pre-request manual draft is never persisted and cannot auto-resume after restart; require re-entry and reconfirmation",
+    "terminal_local_rule":"ADR-008 local terminal transition commits independently; remote failure never rolls it back"
+  },
+  "remote_marker_protocol": {
+    "support_status":"unproven until the selected endpoint field and query contract pass G-TODO or G-CAL",
+    "derivation":"base32url of SHA-256 over remote-marker-v1 plus canonical operation_id bytes; operation_id is encrypted approved opaque state and the marker is non-secret",
+    "persisted_verifier":"remote_correlation_hmac only; no raw marker is persisted",
+    "request_rule":"send the derived marker only through an endpoint-supported contract-tested opaque field; never a title body due URL or link label",
+    "enumeration_rule":"ambiguous create first performs bounded complete enumeration of the exact account adapter and collection; incomplete paging is never zero",
+    "outcomes":{"complete_zero":"safe bounded same-marker retry only when marker support remains proven and authority is unchanged","complete_one":"link the single verified marker match","complete_many":"user-assisted duplicate selection; no automatic linkage or retry","incomplete":"user-assisted or continue bounded enumeration; never infer zero","missing_removed_or_unsupported":"user-assisted select abandon or explicit recreate; no automatic retry"},
+    "recreate_rule":"explicit user confirmation with duplicate warning increments recreate_generation and produces a new operation identity"
+  },
+  "ownership_matrix": [
+    {"origin":"email_evidence","field":"title","initial":"service_projection","direct_edit":"user_owned","service_update":"prohibited after direct edit"},
+    {"origin":"email_evidence","field":"body","initial":"service_projection","direct_edit":"user_owned","service_update":"prohibited after direct edit"},
+    {"origin":"email_evidence","field":"due","initial":"service_projection from operative deadline","direct_edit":"user_owned reminder_due_override","service_update":"requires keep-override or update-reminder choice"},
+    {"origin":"calendar_invitation","field":"title","initial":"service_projection","direct_edit":"user_owned","service_update":"prohibited after direct edit"},
+    {"origin":"calendar_invitation","field":"body","initial":"service_projection","direct_edit":"user_owned","service_update":"prohibited after direct edit"},
+    {"origin":"calendar_invitation","field":"due","initial":"service_projection from operative deadline","direct_edit":"user_owned reminder_due_override","service_update":"requires keep-override or update-reminder choice"},
+    {"origin":"user_authored_microsoft_artifact","field":"title","initial":"user_authoritative","direct_edit":"user_authoritative","service_update":"prohibited"},
+    {"origin":"user_authored_microsoft_artifact","field":"body","initial":"user_authoritative","direct_edit":"user_authoritative","service_update":"prohibited"},
+    {"origin":"user_authored_microsoft_artifact","field":"due","initial":"user_authoritative","direct_edit":"user_authoritative","service_update":"prohibited"}
+  ],
+  "reminder_time_boundary": {
+    "rule":"transiently recompute from the approved operative due value plus encrypted user reminder_lead_rule at every authorized write",
+    "persistence":"no reminder-time value ownership digest or override field is approved; ADR-009 invents none",
+    "direct_edit":"independent remote reminder-time edits are not durably modeled; surface fixed review/unmanaged behavior and make zero automatic overwrite pending an approved privacy revision",
+    "intent_commitment":"the transient reminder-time digest participates only inside operation_key_hmac"
+  },
+  "direct_edit_and_conflict": {
+    "enumeration":"re-fetch current artifact before any update and compare exact owned field digests and version",
+    "stale_or_changed":"stop at reminder conflict; no PATCH until adapter-specific conditional-write behavior is proven",
+    "partial_update":"patch only the exact service-owned field mask; preserve every user-owned sibling field",
+    "completion":"To Do completion for detected loops projects completed_needs_evidence and never closes; manual source completion enters explicit confirmation flow",
+    "deletion":"detected reminder deletion projects missing; manual artifact deletion makes source unavailable; neither fabricates closure",
+    "automatic_delete":"prohibited"
+  },
+  "manual_artifact_protocol": {
+    "precondition":"explicit user action current account adapter gate privacy gate and complete nonpersistent draft",
+    "atomic_success":"after proven single success or explicit selection atomically create exactly one user_authored_artifact_ref loop source relation and reminder link",
+    "failure":"cancelled or definitive failed create leaves no durable manual loop or readable draft",
+    "ambiguous":"reconcile only by proven marker; never recreate automatically",
+    "identity":"origin user_authored_microsoft_artifact if and only if exactly one authoritative artifact source is proven",
+    "locator_binding":"source and reminder records derive from the same verified account adapter collection and artifact locator tuple"
+  },
+  "calendar_boundary": {
+    "permission":"unresolved_least_delegated_calendar_scope:G-CAL; no guessed scope or request",
+    "reminder_event":"application-owned self-only event with zero attendees no online meeting no response request and no invitation update cancellation mail; all behavior unproven until G-CAL",
+    "invitation_event":"evidence only; OpenLoops never responds changes attendees updates deletes or cancels the invitation event",
+    "correlation":"requires complete ADR-006 identity evidence plus G-MAIL and G-CAL; zero multiple or incomplete results stay unavailable or ambiguous",
+    "completion":"calendar has no completion operation or invented completion state",
+    "claim":"To Do-first preview does not support complete-MVP calendar or invitation claims"
+  },
+  "review_link_boundary": {
+    "payload":"one random non-secret opaque loop handle only",
+    "authority":"none; resolution requires ADR-010 authenticated per-user account-bound session and current-loop validation",
+    "prohibited":["bearer token","pairing token","session secret","Graph or Office ID","account identifier","mailbox content","host port or URL authority","raw evidence link"],
+    "activation":"unavailable pending ADR-010 and G-ADDIN; unsupported clients omit the link or show fixed safe fallback"
+  },
+  "privacy_boundary": {
+    "approved_record_types":["reminder_link","operation_ledger","user_authored_artifact_ref"],
+    "prohibited_values":["human-readable title body due phrase reminder text or draft","raw Microsoft Graph Office account list artifact event task or URL identifier","raw remote marker request response error or authorization value","free-text conflict correction explanation or note","generic JSON map extension bag open enum unbounded string bytes array or blob","prompt model request response output rationale embedding transcript or vector"],
+    "diagnostics":"fixed non-content adapter operation reconciliation failure and count codes only",
+    "persistence_runtime":"disabled; records remain unaccepted until ADR-005 G-STATE G-PRIV and adapter gates pass"
+  },
+  "runtime_boundary": {"adapter_runtime":false,"logical_records_accepted":false,"persistent_records_created":[],"network_calls":[],"graph_office_calls":[],"mutations":[],"permissions_requested":[],"dependencies_activated":[],"acceptance_criteria_completed":[],"scenarios_completed":[],"gates_passed":[]},
+  "claims": {"capabilities_enabled":[],"capabilities_advertised":[],"support_rows_advertised":[],"todo_collections_supported":[],"calendar_behaviors_supported":[],"remote_markers_proven":[],"conditional_writes_proven":[]},
+  "sources": [
+    {"id":"SRC-SPEC-MANUAL","location":"docs/product-spec.md#58-manual-loop-origin"},
+    {"id":"SRC-SPEC-REMINDER","location":"docs/product-spec.md#68-reminder-artifacts"},
+    {"id":"SRC-SPEC-DIRECT","location":"docs/product-spec.md#84-direct-reminder-editcompletiondeletion"},
+    {"id":"SRC-SPEC-GATES","location":"docs/product-spec.md#10-quality-and-safety-gates"},
+    {"id":"SRC-PLAN-OP","location":"docs/implementation-plan.md#45-reminder-operation-protocol"},
+    {"id":"SRC-PLAN-ADR","location":"docs/implementation-plan.md#10-required-architecture-decision-records"},
+    {"id":"SRC-RESEARCH-CONNECTION","location":"research/microsoft-graph/connection-options.md"},
+    {"id":"SRC-RESEARCH-SECURITY","location":"research/microsoft-graph/security-and-local-state.md"},
+    {"id":"SRC-RESEARCH-VALIDATION","location":"research/microsoft-graph/validation-plan.md"},
+    {"id":"SRC-OWNERS","location":"research/microsoft-graph/product-decisions.md#stable-owner-decision-crosswalk"}
+  ]
+}

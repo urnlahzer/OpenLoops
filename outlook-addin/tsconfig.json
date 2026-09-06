@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmitOnError": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "forceConsistentCasingInFileNames": true,
+    "rootDir": ".",
+    "outDir": "../target/outlook-addin",
+    "sourceMap": false,
+    "inlineSourceMap": false,
+    "declaration": false,
+    "declarationMap": false,
+    "types": ["node", "office-js"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", ".generated/**/*.ts"]
+}

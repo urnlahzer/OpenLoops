@@ -1,0 +1,237 @@
+{
+  "schema_version": 1,
+  "work_item": "P0-WI-06",
+  "adr": "ADR-003",
+  "decision_status": "accepted_contract_permissions_unrequested",
+  "snapshot_date": "2026-07-20",
+  "owner_decisions": ["OWN-02"],
+  "referenced_owner_decisions": [
+    { "id": "OWN-04", "features": ["calendar_reminders"], "governing_adrs": ["ADR-009"] },
+    { "id": "OWN-05", "features": ["calendar_invitation_loops"], "governing_adrs": ["ADR-004", "ADR-006", "ADR-009"] },
+    { "id": "OWN-10", "features": ["self_email_summary"], "governing_adrs": ["ADR-013"] }
+  ],
+  "requirements": ["OL-GOV-001", "OL-AUTH-003", "OL-SYNC-005", "OL-REM-001", "OL-REM-002", "OL-SUM-002"],
+  "claims": {
+    "permissions_requested": [],
+    "network_contacts": [],
+    "gates_passed": [],
+    "acceptance_criteria_completed": [],
+    "capabilities_enabled": [],
+    "capabilities_advertised": [],
+    "supported_rows": []
+  },
+  "permission_rows": [
+    {
+      "id": "PERM-SIGNIN-001",
+      "kind": "oidc_delegated",
+      "permission": "unresolved_sign_in_refresh_scopes:G-ID",
+      "use": "bind exactly one commercial-global work-school primary-mailbox account",
+      "state": "disabled",
+      "advertised": false,
+      "activation": "explicit_sign_in_after_G-ID",
+      "gates": ["G-ID", "G-PRIV"],
+      "denial_fallback": "no account binding or Microsoft capability; explicit retry only",
+      "revocation_fallback": "stop identity-dependent access and require explicit reconnect"
+    },
+    {
+      "id": "PERM-MAIL-DIAG-001",
+      "kind": "graph_delegated_validation_only",
+      "permission": "Mail.ReadBasic",
+      "use": "synthetic metadata-only permission boundary testing; never detection or evidence",
+      "state": "disabled",
+      "advertised": false,
+      "activation": "disposable_tenant_contract_test_only",
+      "gates": ["G-ID", "G-MAIL", "G-PRIV"],
+      "denial_fallback": "record sanitized denied outcome only",
+      "revocation_fallback": "stop the synthetic contract test"
+    },
+    {
+      "id": "PERM-MAIL-DETECT-001",
+      "kind": "graph_delegated_feature",
+      "permission": "Mail.Read",
+      "use": "mail detection evidence and transient reconstruction under configured folder policy",
+      "state": "disabled",
+      "advertised": false,
+      "activation": "explicit_mail_detection_enablement",
+      "gates": ["G-ID", "G-MAIL", "G-PRIV"],
+      "denial_fallback": "mail detection and evidence remain disabled; no metadata-only product downgrade",
+      "revocation_fallback": "stop mail work and mark evidence or analysis stale or unavailable"
+    },
+    {
+      "id": "PERM-MAIL-MUTATION-DIAG-001",
+      "kind": "graph_delegated_validation_only",
+      "permission": "Mail.ReadWrite",
+      "use": "synthetic mutation-without-Mail.Send contract testing only; never product mail mutation",
+      "state": "disabled",
+      "advertised": false,
+      "activation": "disposable_tenant_contract_test_only",
+      "gates": ["G-ID", "G-MAIL", "G-PRIV"],
+      "denial_fallback": "record sanitized denied outcome only",
+      "revocation_fallback": "stop the synthetic contract test"
+    },
+    {
+      "id": "PERM-TODO-DIAG-001",
+      "kind": "graph_delegated_validation_only",
+      "permission": "Tasks.Read",
+      "use": "synthetic ordinary enumeration and disputed-delta diagnostics only",
+      "state": "disabled",
+      "advertised": false,
+      "activation": "disposable_tenant_contract_test_only",
+      "gates": ["G-ID", "G-TODO", "G-PRIV"],
+      "denial_fallback": "record sanitized denied outcome only",
+      "revocation_fallback": "stop the synthetic contract test"
+    },
+    {
+      "id": "PERM-TODO-WRITE-001",
+      "kind": "graph_delegated_feature",
+      "permission": "Tasks.ReadWrite",
+      "use": "enumerate create update and reconcile supported authenticated-user lists and linked artifacts; never automatic delete",
+      "state": "disabled",
+      "advertised": false,
+      "activation": "explicit_todo_enablement",
+      "gates": ["G-ID", "G-TODO", "G-PRIV"],
+      "denial_fallback": "To Do mutations remain disabled; no Calendar substitution",
+      "revocation_fallback": "stop new mutations and preserve pending or ambiguous reconciliation state"
+    },
+    {
+      "id": "PERM-CALENDAR-001",
+      "kind": "graph_delegated_unresolved",
+      "permission": "unresolved_least_delegated_calendar_scope:G-CAL",
+      "use": "no processing until G-CAL; future invitation correlation and self-only reminder artifacts only",
+      "state": "disabled",
+      "advertised": false,
+      "activation": "explicit_calendar_enablement_after_G-CAL",
+      "gates": ["G-ID", "G-CAL", "G-PRIV"],
+      "denial_fallback": "calendar reminders and invitation loops remain disabled; independently gated To Do is not affected",
+      "revocation_fallback": "stop Calendar work and require reconciliation after explicit restored authority"
+    },
+    {
+      "id": "PERM-SELFMAIL-001",
+      "kind": "graph_delegated_feature",
+      "permission": "Mail.Send",
+      "use": "send a generated summary only to the contract-tested canonical authenticated mailbox recipient",
+      "state": "disabled",
+      "advertised": false,
+      "activation": "separate_explicit_self_email_enablement",
+      "gates": ["G-ID", "G-SELFMAIL", "G-PRIV"],
+      "denial_fallback": "self-email remains unavailable; add-in summary only if independently gated",
+      "revocation_fallback": "stop sends and reconcile any ambiguous operation before restored use"
+    },
+    {
+      "id": "PERM-ADDIN-001",
+      "kind": "office_manifest_unresolved",
+      "permission": "unresolved_office_manifest_permission:G-ADDIN",
+      "use": "selected-item read and transient companion projection only; no Graph token or synchronization authority",
+      "state": "disabled",
+      "advertised": false,
+      "activation": "packaged_G-ADDIN_prototype_only",
+      "gates": ["G-ADDIN", "G-PRIV"],
+      "denial_fallback": "add-in remains disabled; native recovery is not feature equivalence",
+      "revocation_fallback": "end the bridge session and keep add-in capability disabled"
+    },
+    {
+      "id": "PERM-ADDIN-REQ-001",
+      "kind": "office_requirement_set_unresolved",
+      "permission": "unresolved_office_requirement_set:G-ADDIN",
+      "use": "no client support claim until the packaged add-in matrix passes",
+      "state": "disabled",
+      "advertised": false,
+      "activation": "packaged_G-ADDIN_prototype_only",
+      "gates": ["G-ADDIN", "G-RELEASE"],
+      "denial_fallback": "unsupported actions are absent or disabled",
+      "revocation_fallback": "add-in capability remains disabled"
+    },
+    {
+      "id": "PERM-LOCAL-001",
+      "kind": "no_external_permission",
+      "permission": "none",
+      "use": "local settings state deterministic processing and native recovery under their own gates",
+      "state": "disabled",
+      "advertised": false,
+      "activation": "no_permission_request",
+      "gates": ["G-STATE", "G-PRIV"],
+      "denial_fallback": "no permission-dependent behavior",
+      "revocation_fallback": "no permission-dependent behavior"
+    }
+  ],
+  "feature_composition": [
+    { "feature": "calendar_invitation_loops", "permission_rows": ["PERM-MAIL-DETECT-001", "PERM-CALENDAR-001"], "additional_scope": "none", "gates": ["G-MAIL", "G-CAL", "G-PRIV"], "state": "disabled" },
+    { "feature": "addin_summary", "permission_rows": ["PERM-ADDIN-001", "PERM-ADDIN-REQ-001"], "additional_scope": "none", "gates": ["G-ADDIN", "G-PRIV"], "state": "disabled" },
+    { "feature": "hybrid_reminder_mode", "permission_rows": ["PERM-TODO-WRITE-001"], "additional_scope": "none", "gates": ["G-TODO", "G-AUTO", "G-PRIV"], "state": "disabled" },
+    { "feature": "fully_automatic_reminder_mode", "permission_rows": ["PERM-TODO-WRITE-001"], "additional_scope": "none", "gates": ["G-TODO", "G-AUTO-FULL", "G-PRIV"], "state": "disabled" }
+  ],
+  "mail_folder_policy": {
+    "authorization_disclosure": "Mail.Read is mailbox-wide delegated authorization; configured folders are application processing policy, not an OAuth restriction",
+    "account": "explicitly bound supported primary mailbox only",
+    "default_folders": ["Inbox", "Sent Items"],
+    "additional_folders": "explicit per-folder opt-in of owned folders only after G-MAIL",
+    "automatic_expansion": "prohibited",
+    "shared_or_delegated_folders": "prohibited",
+    "history_window_days": { "default": 30, "minimum": 1, "maximum": 365 },
+    "backfill": "bounded review-only batch; zero automatic reminder creation",
+    "folder_removal": "stop new processing; delete the application-owned folder checkpoint under ADR-005 and ADR-PRIV-001; preserve only separately governed active-loop lineage; disclose coverage loss; no consent-revocation claim",
+    "coverage_limit": "selected-folder polling may miss an item that enters is read and leaves between observations",
+    "filters": "sender domain category and selected-field policies narrow processing only and never change OAuth scope"
+  },
+  "addin_manifest_boundary": {
+    "production_permission_status": "unresolved_pending_G-ADDIN",
+    "validation_permission_target": "ReadItem",
+    "production_requirement_set_status": "unresolved_pending_G-ADDIN",
+    "validation_requirement_set": "Mailbox",
+    "validation_requirement_version": "1.13",
+    "validation_form_factor": "desktop",
+    "support_claim": false,
+    "manifest_activation": "disabled",
+    "graph_scope_equivalence": false,
+    "prohibited_authority": ["ReadWriteMailbox", "Mailbox.SharedFolder", "mailbox_token_ownership", "synchronization_authority", "event_based_loop_creation"]
+  },
+  "incremental_consent_policy": {
+    "initial_combined_grant": "prohibited",
+    "request_trigger": "explicit user action for exactly one feature delta",
+    "returned_scope_superset": "never activates an unrequested feature",
+    "missing_scope": "reject dependent use before any API call",
+    "denial": "disable only dependent feature; no broader request or weaker authentication flow",
+    "admin_required": "show exact state and wait for explicit resolution",
+    "conditional_access_change": "stop access and require explicit reconnect or admin resolution",
+    "feature_disable": "stop use and do not silently reacquire; Microsoft consent revocation remains separate",
+    "account_mismatch": "block fetch and mutation; never inherit prior grants"
+  },
+  "prohibited_permissions_or_forms": [
+    "application_permissions", "client_credentials", "tenant_wide_access", "*.All", "/.default",
+    "User.Read_without_traced_revision", "Mail.ReadWrite_product_use", "Mail.ReadWrite.Shared", "Mail.Read.Shared",
+    "Mail.Send.Shared", "Tasks.Read.All", "Tasks.ReadWrite.All", "shared_mailbox_or_task_authority",
+    "shared_calendar_authority", "directory_contacts_people_files_sites_teams_chat_group_presence",
+    "combined_request_everything", "guessed_calendar_scope", "Mail.Send_at_signin_or_detection",
+    "Mail.ReadBasic_as_detection", "Tasks.Read_plus_Tasks.ReadWrite_product_bundle",
+    "ReadWriteMailbox", "Mailbox.SharedFolder", "addin_mailbox_token_ownership",
+    "addin_synchronization_authority", "addin_event_based_loop_creation"
+  ],
+  "cross_contract_invariants": [
+    "permission grant never passes a capability gate",
+    "Graph scopes configured processing and Office permissions never inherit from one another",
+    "unrun or failed gate produces no API call for its feature",
+    "denial or revocation never selects broader permission weaker auth or different mutation adapter",
+    "Mail.Send never targets another person",
+    "task or calendar authority never permits automatic delete loop closure attendee creation or external communication",
+    "validation-only permission success never enables or advertises a feature",
+    "personal sign-in success never enables feature scopes before the complete matrix passes"
+  ],
+  "separate_decisions": {
+    "authentication_flow_redirect_and_transaction": "ADR-002",
+    "protected_token_cache_and_checkpoints": "ADR-005",
+    "mail_sync_and_selected_fields": "ADR-004 and ADR-006",
+    "calendar_exact_scope_and_contract": "G-CAL and dependent ADR revision",
+    "addin_bridge_and_runtime": "ADR-010",
+    "self_email_recipient_and_idempotency": "ADR-013",
+    "registration_and_distribution": "ADR-012"
+  },
+  "sources": [
+    { "id": "SRC-SPEC-AUTH", "location": "docs/product-spec.md#61-authentication-and-authorization" },
+    { "id": "SRC-SPEC-SYNC", "location": "docs/product-spec.md#62-synchronization-and-triggers" },
+    { "id": "SRC-PLAN-PHASE0", "location": "docs/implementation-plan.md#phase-0--adrs-threat-model-and-rust-skeleton" },
+    { "id": "SRC-RESEARCH-CONNECTION", "location": "research/microsoft-graph/connection-options.md" },
+    { "id": "SRC-RESEARCH-VALIDATION", "location": "research/microsoft-graph/validation-plan.md" },
+    { "id": "SRC-SUPPORT-ADDIN", "location": "contracts/support/support-matrix.json" },
+    { "id": "SRC-AUTHN-BOUNDARY", "location": "contracts/identity/authentication-boundary.json" }
+  ]
+}

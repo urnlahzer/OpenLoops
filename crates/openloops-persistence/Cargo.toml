@@ -1,0 +1,37 @@
+[package]
+name = "openloops-persistence"
+description = "ADR-005 protected-state engine: AEAD envelope, DPAPI key layer, SQLite store, and rollback-anchor sequence. Library and tests only; the persistence capability stays disabled."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+openloops-domain = { path = "../openloops-domain" }
+aes-gcm = { version = "=0.11.0", default-features = false, features = ["aes", "alloc", "getrandom"] }
+hmac = { version = "=0.13.0", default-features = false, features = ["zeroize"] }
+sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
+getrandom = { version = "=0.4.3", default-features = false, features = ["std"] }
+rusqlite = { version = "=0.40.1", default-features = false, features = ["backup", "bundled"] }
+windows-sys = { version = "=0.61.2", default-features = false, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Memory", "Win32_System_Threading", "Win32_UI_Shell"] }
+zeroize = { version = "=1.9.0", default-features = false, features = ["alloc", "derive"] }
+
+# ADR-005 `dependency_policy.unsafe_boundary`: "future minimal Windows FFI must
+# be isolated documented tested and independently audited; current workspace
+# remains unsafe-code-free". The workspace-level `unsafe_code = "forbid"`
+# cannot be locally overridden with `#[allow(unsafe_code)]` because `forbid`
+# rejects any attempt to lower it, by design. This crate alone does not
+# inherit the workspace `[lints]` table (there is no `workspace = true` key
+# below) and instead restates it verbatim except `unsafe_code`, which drops
+# from `forbid` to `deny` so that exactly one module (`src/dpapi_ffi.rs`) can
+# carry a narrowly scoped `#[allow(unsafe_code)]` on its FFI declarations.
+# Every other module in this crate — and every other crate in the workspace,
+# which still inherits the workspace table unchanged — keeps unsafe code
+# forbidden outright.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "deny"
+pedantic = "deny"

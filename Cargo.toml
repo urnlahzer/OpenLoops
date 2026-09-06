@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/openloops-domain",
+  "crates/openloops-contracts",
+  "crates/openloops-application",
+  "crates/openloops-graph",
+  "crates/openloops-inference",
+  "crates/openloops-persistence",
+  "crates/openloops-desktop",
+  "crates/openloops-eval",
+  "crates/openloops-harness",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.97.1"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "deny"
+pedantic = "deny"
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
+
+[profile.release]
+debug = 0
+strip = "symbols"
+lto = "thin"
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,25 @@
+{
+  "id": "deadline-ambiguous-01",
+  "category": "deadline_ambiguous",
+  "message": {
+    "subject": "Soonish",
+    "body_html": "<p>Let's get this done sometime soon-ish.</p>",
+    "sender_name": "Alex Doe",
+    "sender_address": "alex@synthetic.invalid",
+    "to": [],
+    "cc": []
+  },
+  "participants": [],
+  "loop_candidate_handles": [],
+  "mock_model_output_json": "{\"schema_version\":1,\"claims\":[{\"claim_type\":\"deadline_change\",\"evidence\":[{\"source_handle\":\"msg-1\",\"component\":\"body_block\",\"block_ordinal\":0,\"range_start\":0,\"range_end\":38}],\"waiting_party_handle\":null,\"related_loop_handles\":[],\"temporal\":{\"text_evidence_index\":0,\"kind\":\"relative\",\"value\":\"soon-ish\"},\"confidence_micros\":500000,\"ambiguity_codes\":[]}]}",
+  "expected_top_level": "reviewed",
+  "expected_claims": [
+    {
+      "validation": {
+        "kind": "reject",
+        "reason_debug_contains": "Unreproducible"
+      },
+      "establishment": null
+    }
+  ]
+}

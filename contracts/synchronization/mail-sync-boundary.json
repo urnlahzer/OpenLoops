@@ -1,0 +1,216 @@
+{
+  "schema_version": 1,
+  "work_item": "P0-WI-07",
+  "adr": "ADR-004",
+  "decision_status": "accepted_contract_runtime_unimplemented",
+  "snapshot_date": "2026-07-20",
+  "owner_decisions": ["OWN-05", "OWN-09"],
+  "requirements": [
+    "OL-GOV-001", "OL-AUTH-004", "OL-SYNC-001", "OL-SYNC-002", "OL-SYNC-003", "OL-SYNC-004",
+    "OL-SYNC-005", "OL-SYNC-006", "OL-SYNC-007", "OL-SYNC-008", "OL-SYNC-009",
+    "OL-SYNC-010", "OL-SYNC-011", "OL-SYNC-012", "OL-SYNC-013",
+    "OL-NFR-001", "OL-NFR-003", "OL-NFR-004", "OL-NFR-005", "OL-NFR-007", "OL-NFR-012"
+  ],
+  "claims": {
+    "graph_calls": [],
+    "network_contacts": [],
+    "configured_accounts": [],
+    "configured_collections": [],
+    "checkpoints_persisted": [],
+    "gates_passed": [],
+    "acceptance_criteria_completed": [],
+    "capabilities_enabled": [],
+    "capabilities_advertised": [],
+    "supported_rows": []
+  },
+  "runtime_boundary": {
+    "status": "unimplemented",
+    "graph_transport": false,
+    "scheduler": false,
+    "durable_state": false,
+    "selected_dependencies": [],
+    "network_origins": [],
+    "accepted_secrets": [],
+    "addin_authority": false
+  },
+  "collection_contracts": [
+    {
+      "id": "SYNC-MAIL-FOLDER-001",
+      "kind": "mail_folder_delta",
+      "scope": "one explicitly selected owned folder in the bound primary mailbox",
+      "checkpoint": "independent encrypted checkpoint after ADR-005 and G-STATE/G-PRIV",
+      "state": "disabled",
+      "advertised": false,
+      "gates": ["G-ID", "G-MAIL", "G-STATE", "G-PRIV"]
+    },
+    {
+      "id": "SYNC-REMINDER-COLLECTION-001",
+      "kind": "ordinary_enumeration_until_adapter_contract",
+      "scope": "one supported authenticated-user reminder collection",
+      "checkpoint": "independent encrypted checkpoint only after its adapter ADR and state gates",
+      "state": "disabled",
+      "advertised": false,
+      "gates": ["G-ID", "G-TODO", "G-STATE", "G-PRIV"]
+    },
+    {
+      "id": "SYNC-CALENDAR-COLLECTION-001",
+      "kind": "unresolved_calendar_enumeration_pending_G-CAL",
+      "scope": "no calendar collection until the least delegated contract and invitation correlation pass",
+      "checkpoint": "independent encrypted checkpoint only after ADR-005 ADR-006 G-CAL G-STATE and G-PRIV",
+      "state": "disabled",
+      "advertised": false,
+      "gates": ["G-ID", "G-CAL", "G-STATE", "G-PRIV"]
+    }
+  ],
+  "checkpoint_contract": {
+    "cardinality": "one independent record per bound account and selected collection",
+    "fields": ["record_id", "account_ref", "collection_locator", "delta_or_next_locator", "query_fingerprint_hmac", "collection_kind", "status_code", "last_complete_at"],
+    "binding": "account_ref collection_locator endpoint API version exact selected fields initial window or filter immutable-id preference schema version and policy version",
+    "continuation": "opaque encrypted full nextLink or deltaLink; never parse for business data reconstruct edit append export or reuse across a binding",
+    "retention": "checkpoint_until_scope_removed",
+    "deletion": "delete_local_only",
+    "reset": "scope_removal_or_disconnect",
+    "binding_drift": "delete only the affected checkpoint and require visible bounded rebaseline"
+  },
+  "poll_policy": {
+    "mode": "per_folder_delta_plus_periodic_bounded_reconciliation",
+    "webhooks": "prohibited_for_mvp",
+    "single_flight": "exactly one active poll or reconciliation job per account and collection",
+    "cadence_seconds": { "default": 60, "minimum": 60, "maximum": 900 },
+    "cadence_status": "internal validation target until measured G-MAIL load evidence passes",
+    "schedule_basis": "start_to_start with no overlap; throttling and offline states delay the next start",
+    "background_boundary": "per-user companion while the user is logged in; no coverage claim while stopped sleeping signed out offline unauthenticated or throttled",
+    "freshness_projection": ["last_complete_at", "stale_status_code", "coverage_status_code"]
+  },
+  "cycle_budgets": {
+    "status": "finite exact values pending measured G-MAIL experiments",
+    "dimensions": ["page_count", "item_count", "elapsed_time", "retry_count"],
+    "stop_rule": "stop at the first reached bound; retain encrypted continuation state; resume in a later non-overlapping cycle",
+    "priority": "incremental continuation before bounded rescan; no tight loop or overlapping continuation",
+    "scope_bound": "configured folder and visible history window only; never enumerate the mailbox root as a substitute"
+  },
+  "delta_protocol": {
+    "endpoint_shape": "/me/mailFolders/{selected-folder}/messages/delta",
+    "endpoint_status": "shape_only_unimplemented_under_ADR-006_pending_G-MAIL",
+    "initial_query": "ADR-006 defines the selected-field and immutable-id request contract; execution remains blocked on G-MAIL",
+    "continuations": "follow the exact same-origin nextLink supplied by Graph; never reconstruct or add query parameters",
+    "completion": "deltaLink marks a completed round only after every page item has a durable safe outcome; last_complete_at updates only at that committed deltaLink",
+    "at_least_once": true,
+    "ordering_assumption": "none across pages retries or reconciliation",
+    "tombstones": "process as source availability change; never infer loop closure or Microsoft artifact deletion",
+    "cursor_invalid": "mark resync visible; discard only the affected checkpoint; bounded review-only rescan the same selected folder and history window",
+    "cursor_invalid_trigger": "exact status and error signature pending G-MAIL; all other auth account scope folder and query errors fail closed without resync",
+    "cursor_logging": "prohibited",
+    "plaintext_cursor_persistence": "prohibited"
+  },
+  "page_transaction": {
+    "steps": [
+      "stage encrypted continuation and keyed source-version observation keys",
+      "deduplicate every item within the bound account collection and policy version",
+      "apply eligibility without treating isRead or sent-copy observation as proof of review or delivery",
+      "fetch only the exact G-MAIL and ADR-006 field contract transiently",
+      "persist only an ADR-PRIV-001-approved safe outcome or recoverable quarantine record",
+      "atomically commit page outcomes before replacing the durable collection checkpoint"
+    ],
+    "durable_safe_outcomes": ["no_candidate", "needs_review", "processed", "source_unavailable", "recoverable_quarantine"],
+    "nonterminal_outcomes": ["queued", "retry_scheduled", "ambiguous_write", "failed_without_recoverability"],
+    "crash_rule": "a crash before atomic commit replays the page; source-version idempotency prevents duplicate transitions or mutations",
+    "whole_page_failure": "transport parse or schema failure blocks checkpoint replacement because no safe per-item disposition exists",
+    "cursor_advance_rule": "prohibited until every page item is durable and safe"
+  },
+  "eligibility_policy": {
+    "initial_or_backfill": {
+      "window_days": { "default": 30, "minimum": 1, "maximum": 365 },
+      "incoming_already_read": "analyze into one noninterruptive history-review batch",
+      "incoming_unread": "record the unread observation and wait for a later read observation after the baseline",
+      "saved_sent_copy": "analyze into the history-review batch",
+      "automatic_mutation": "prohibited"
+    },
+    "post_baseline_incoming": {
+      "observed_unread_then_read": "analyze once when the later observation establishes unread-to-read",
+      "first_observed_already_read": "analyze once with first-observation marker because polling may have coalesced states",
+      "first_observed_unread": "wait for a later read observation",
+      "isRead_meaning": "trigger only; never evidence of careful review"
+    },
+    "post_baseline_outgoing": {
+      "saved_sent_copy_first_observed": "analyze once",
+      "draft_or_compose": "never activates a loop",
+      "claim_language": "sent copy observed; never delivered"
+    },
+    "idempotency": "purpose-separated keyed digest of bound account tested locator observed version and policy version"
+  },
+  "reconciliation_policy": {
+    "frequency": "periodic finite cadence pending measured G-MAIL experiments; also after stale recovery validated cursor reset rollback recovery configured query change or explicit user request",
+    "bounds": "same selected folders 1-to-365-day visible history window and per-cycle page item and elapsed bounds",
+    "handles": ["missed_changes", "duplicate_changes", "out_of_order_changes", "tombstones", "folder_missing_or_deleted", "direct_reminder_edits"],
+    "folder_rename": "do not infer identity from a display name; continue only if the tested opaque folder locator remains valid",
+    "folder_missing_or_deleted": "stop that collection delete its application-owned checkpoint disclose coverage loss and require explicit remap; never auto-follow another folder",
+    "move_between_folders": "ADR-006 makes folder context non-identity; preserve identity across a same-mailbox move only after the G-MAIL matrix validates the immutable locator",
+    "known_unrecoverable": [
+      "an item that enters is read and leaves selected scope between observations",
+      "a sent copy not saved or moved or deleted before observation",
+      "send-as on-behalf-of and alternate sent-folder behavior not proven by G-MAIL",
+      "time outside the configured history window"
+    ],
+    "completeness_claim": "prohibited"
+  },
+  "retry_policy": {
+    "retry_after": "honor a valid Graph Retry-After and make no request before it expires",
+    "missing_or_invalid_retry_after": "bounded exponential backoff with positive jitter and finite cap; exact values pending measured G-MAIL experiments",
+    "automatic_attempts_per_item_generation": "finite exact value pending G-MAIL; exhaustion enters recoverable quarantine rather than discard",
+    "retryable_classes": ["http_429", "http_503", "http_504", "timeout", "connection_interrupted"],
+    "nonretryable_classes": ["permission_denied", "account_mismatch", "invalid_request_contract", "unsupported_cloud", "host_or_origin_mismatch"],
+    "status_projection": ["retry_scheduled", "stale", "reconnect_required", "resync_required", "quarantined"],
+    "raw_error_url_header_body_logging": "prohibited"
+  },
+  "quarantine_policy": {
+    "before_cursor_advance": "persist one validated recoverable record or keep the cursor blocked",
+    "approved_fields": [
+      "record_id", "account_ref", "source_version_hmac", "observed_version_hmac", "quarantined_locator",
+      "direction_code", "read_observation_code", "first_observation_code", "job_outcome_code",
+      "failure_class", "retry_state", "policy_version", "retry_generation", "observed_at"
+    ],
+    "locator_protection": "validated encrypted locator under ADR-005; never plaintext log diagnostic fixture or package",
+    "user_actions": ["retry", "dismiss_analysis_job"],
+    "dismiss_semantics": "ends only that analysis job; never closes or deletes a loop or Microsoft artifact",
+    "resolution_cleanup": "retry success dismissal or recovery atomically deletes the related job_health record before returning message_observation to ordinary retention; no quarantine_ref may dangle",
+    "disconnect_cleanup": "atomically delete local message_observation and related job_health regardless of age; zero Graph mutation",
+    "generation_limit": "finite exact value pending G-MAIL",
+    "failed_bounded_without_recoverability": "prohibited_terminal_outcome"
+  },
+  "replay_policy": {
+    "triggers": ["provider_change", "parser_change", "policy_change", "identity_change", "folder_change", "quarantine_retry", "analysis_unavailable_recovery"],
+    "bounds": "explicit user-visible selected scope and 1-to-365-day history window under cycle budgets",
+    "idempotency": "reuse the same bound source-version and transition keys",
+    "presentation": "newly detected historical results enter a review batch",
+    "automatic_reminders": "prohibited",
+    "silent_retroactive_mutation": "prohibited"
+  },
+  "privacy_boundary": {
+    "approved_persistent_records": ["sync_checkpoint", "message_observation", "job_health", "operation_ledger"],
+    "human_readable_mailbox_or_generated_text": "prohibited",
+    "raw_identifier_url_payload_header_or_error": "prohibited",
+    "diagnostic_event_allowlist": [],
+    "persistence_requires": ["ADR-005", "G-STATE", "G-PRIV"],
+    "content_processing": "transient only after G-MAIL and exact ADR-006 fields"
+  },
+  "separate_decisions": {
+    "permissions_and_folder_selection": "ADR-003",
+    "encryption_and_transaction_implementation": "ADR-005",
+    "message_identity_exact_fields_and_anchors": "ADR-006",
+    "reminder_mutation_and_reconciliation": "ADR-009 and ADR-011",
+    "calendar_invitation_correlation": "ADR-006 ADR-009 and G-CAL"
+  },
+  "sources": [
+    { "id": "SRC-SPEC-SYNC", "location": "docs/product-spec.md#62-synchronization-and-triggers" },
+    { "id": "SRC-PLAN-INGEST", "location": "docs/implementation-plan.md#44-ingestion-transaction" },
+    { "id": "SRC-RESEARCH-CONNECTION", "location": "research/microsoft-graph/connection-options.md#change-discovery-options" },
+    { "id": "SRC-RESEARCH-STATE", "location": "research/microsoft-graph/security-and-local-state.md#minimum-persistent-state" },
+    { "id": "SRC-RESEARCH-VALIDATION", "location": "research/microsoft-graph/validation-plan.md#mail-experiments" },
+    { "id": "SRC-MS-MESSAGE-DELTA", "location": "https://learn.microsoft.com/graph/api/message-delta?view=graph-rest-1.0" },
+    { "id": "SRC-MS-DELTA-ROUND", "location": "https://learn.microsoft.com/graph/delta-query-messages" },
+    { "id": "SRC-MS-THROTTLING", "location": "https://learn.microsoft.com/graph/throttling" },
+    { "id": "SRC-PRIVACY", "location": "contracts/privacy/persistence-boundary.json" },
+    { "id": "SRC-AUTHZ", "location": "contracts/identity/permission-boundary.json" }
+  ]
+}

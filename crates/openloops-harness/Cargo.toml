@@ -1,0 +1,18 @@
+[package]
+name = "openloops-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "openloops-harness"
+path = "src/main.rs"
+
+[dependencies]
+openloops-graph = { path = "../openloops-graph" }
+openloops-persistence = { path = "../openloops-persistence" }
+
+[lints]
+workspace = true

@@ -1,0 +1,42 @@
+{
+  "id": "delegation-02",
+  "category": "delegation",
+  "message": {
+    "subject": "Unclear owner",
+    "body_html": "<p>Maybe Taylor can pick this up, or maybe not, unclear.</p>",
+    "sender_name": "Alex Doe",
+    "sender_address": "alex@synthetic.invalid",
+    "to": [
+      {
+        "name": "Taylor Kim",
+        "address": "taylor@synthetic.invalid"
+      }
+    ],
+    "cc": []
+  },
+  "participants": [
+    {
+      "handle": "to-0",
+      "slot": {
+        "kind": "to",
+        "index": 0
+      }
+    }
+  ],
+  "loop_candidate_handles": [],
+  "mock_model_output_json": "{\"schema_version\":1,\"claims\":[{\"claim_type\":\"delegation\",\"evidence\":[{\"source_handle\":\"msg-1\",\"component\":\"body_block\",\"block_ordinal\":0,\"range_start\":0,\"range_end\":53}],\"waiting_party_handle\":\"to-0\",\"related_loop_handles\":[],\"temporal\":null,\"confidence_micros\":350000,\"ambiguity_codes\":[\"delegation\"]}]}",
+  "expected_top_level": "reviewed",
+  "expected_claims": [
+    {
+      "validation": {
+        "kind": "accept_for_review"
+      },
+      "establishment": {
+        "case": "explicit_deterministic_attribution",
+        "validity": true,
+        "confidence": "medium",
+        "transfer_ambiguity": true
+      }
+    }
+  ]
+}

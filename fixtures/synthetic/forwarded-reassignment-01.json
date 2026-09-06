@@ -1,0 +1,42 @@
+{
+  "id": "forwarded-reassignment-01",
+  "category": "forwarded_reassignment",
+  "message": {
+    "subject": "Fwd: Vendor contract",
+    "body_html": "<p>Forwarding this to you, please pick it up from here.</p><blockquote>Can you finalize the vendor contract.</blockquote>",
+    "sender_name": "Alex Doe",
+    "sender_address": "alex@synthetic.invalid",
+    "to": [
+      {
+        "name": "Sam Lee",
+        "address": "sam@synthetic.invalid"
+      }
+    ],
+    "cc": []
+  },
+  "participants": [
+    {
+      "handle": "to-0",
+      "slot": {
+        "kind": "to",
+        "index": 0
+      }
+    }
+  ],
+  "loop_candidate_handles": [],
+  "mock_model_output_json": "{\"schema_version\":1,\"claims\":[{\"claim_type\":\"delegation\",\"evidence\":[{\"source_handle\":\"msg-1\",\"component\":\"body_block\",\"block_ordinal\":0,\"range_start\":0,\"range_end\":52}],\"waiting_party_handle\":\"to-0\",\"related_loop_handles\":[],\"temporal\":null,\"confidence_micros\":910000,\"ambiguity_codes\":[]}]}",
+  "expected_top_level": "reviewed",
+  "expected_claims": [
+    {
+      "validation": {
+        "kind": "accept_for_review"
+      },
+      "establishment": {
+        "case": "explicit_deterministic_attribution",
+        "validity": true,
+        "confidence": "high",
+        "transfer_ambiguity": false
+      }
+    }
+  ]
+}

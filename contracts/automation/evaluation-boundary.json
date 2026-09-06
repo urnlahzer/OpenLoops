@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "work_item": "P0-WI-14",
+  "adr": "ADR-011",
+  "decision_status": "accepted_contract_runtime_unimplemented",
+  "snapshot_date": "2026-07-21",
+  "owner_decisions": ["OWN-03"],
+  "owned_requirements": ["OL-REM-010", "OL-REM-017"],
+  "consumed_requirements": [],
+  "primary_acceptance_criteria": [],
+  "dependent_acceptance_criteria": ["AC-10"],
+  "primary_scenarios": ["AS-21", "AS-23"],
+  "scenario_dependencies": [],
+  "blocking_gates": ["G-AUTO", "G-AUTO-FULL"],
+  "input_authorities": [
+    {"owner": "ADR-005", "input": "encrypted user_setting record storage and atomic commit for any future flag value; this ADR accepts no runtime record"},
+    {"owner": "ADR-007", "input": "provider/model/schema/prompt/policy drift invalidation rules and the mandatory deterministic positive-constraint/semantic-adversarial requirement"},
+    {"owner": "ADR-008", "input": "independent local facet transitions and the disabled OL-REM-010/OL-REM-017 mode/gate boundary this ADR alone completes"},
+    {"owner": "ADR-009", "input": "reminder-adapter operation ledger, field ownership, and ambiguous-write reconciliation that any future automatic mutation must still satisfy"},
+    {"owner": "ADR-PRIV-001", "input": "exact record fields, retention, and prohibited content for any future flag record and the sealed-corpus content prohibition"}
+  ],
+  "separate_decisions": {
+    "reminder_adapter_operations_and_ownership": "ADR-009",
+    "local_facet_and_lifecycle_transitions": "ADR-008",
+    "provider_transport_and_drift_detection": "ADR-007",
+    "persisted_flag_record_encryption": "ADR-005",
+    "sealed_corpus_and_flag_record_privacy": "ADR-PRIV-001",
+    "review_link_and_bridge_activation": "ADR-010",
+    "self_email_send_recipient_and_operation_protocol": "ADR-013"
+  },
+  "catalogs": {
+    "mode_code": ["confirmation_first", "hybrid", "automatic"],
+    "hybrid_create_category_code": ["explicit_promise", "explicit_directly_addressed_request", "explicit_deterministic_attribution"],
+    "automatic_always_review_category_code": ["candidate", "ambiguous", "identity_ambiguous", "delegation_ambiguous", "quote_ambiguous", "undated", "historical_backfill", "stale_write_conflict"],
+    "hybrid_update_field_scope_code": ["title", "body", "due"],
+    "flag_code": ["hybrid_enabled", "automatic_enabled"],
+    "calibration_drift_trigger_code": ["provider_change", "model_digest_or_label_change", "schema_change", "prompt_change", "policy_change", "review_threshold_change", "category_change"],
+    "reported_metric_code": ["macro_recall_precision_f2", "per_stratum_recall_precision_f2", "atomic_split_merge_errors", "evidence_span_f1", "attribution", "deadline_normalization", "dedup", "association", "review_routing", "calibration", "latency_cost", "unintended_mutations", "privacy_canaries"]
+  },
+  "mode_catalog": {
+    "confirmation_first": {
+      "create": "every reminder creation requires an explicit user action",
+      "update": "every evidence-driven service update to a Microsoft artifact requires an explicit user action",
+      "automatic_exception": "read-only reconciliation and local review-state updates still run automatically"
+    },
+    "hybrid": {
+      "create_eligibility": "live narrow-category cases only: explicit promise, explicit directly addressed request, or explicit deterministic attribution, with a valid resolved deadline, high calibrated confidence, deterministic identity, and no quote/delegation/coreference ambiguity",
+      "update_eligibility": "OpenLoops-owned artifact fields only, when later evidence deterministically changes them, no user override or conflict exists, and the update class passed G-AUTO",
+      "otherwise": "every other mutation is proposed for confirmation",
+      "gate": "G-AUTO"
+    },
+    "automatic": {
+      "precondition": "explicit opt-in and risk disclosure plus G-AUTO-FULL",
+      "create_update_eligibility": "every live established loop in the user's enabled non-ambiguous categories whose exact category/confidence/deadline/update stratum independently passed G-AUTO-FULL",
+      "always_review": "candidate, ambiguous, identity-ambiguous, delegation-ambiguous, quote-ambiguous, undated, historical/backfill, and stale-write cases always require review in every mode",
+      "gate": "G-AUTO-FULL"
+    },
+    "mode_change_rule": "a mode change is prospective only; no mode silently creates or rewrites a historical batch, closes a loop, deletes an artifact, or communicates with another person; inferred closure and external communication are never automatic in any mode"
+  },
+  "flag_topology": {
+    "flags": [
+      {"id": "hybrid_enabled", "default": false, "flip_requires": ["G-AUTO passed", "accountable owner release decision citing that gate evidence"]},
+      {"id": "automatic_enabled", "default": false, "flip_requires": ["G-AUTO-FULL passed", "accountable owner release decision citing that gate evidence", "user explicit opt-in and risk acknowledgement"]}
+    ],
+    "prohibited_flip_paths": ["code default", "configuration drift", "mode-change UI alone", "settings preference alone"],
+    "effective_mode_rule": "the effective mode is always the narrower of the user's selected preference and the modes currently permitted by passed-gate evidence and flipped flags"
+  },
+  "corpus_governance": {
+    "location": "outside the repository, outside the implementation-LLM's context, and outside the maker workflow",
+    "content": "wholly synthetic; never real mailbox content",
+    "difficult_ambiguous_share": "at least 30% of held examples",
+    "quoted_history_share": "at least 20% of held examples",
+    "split_rule": "split by conversation family, never by message row; no family straddles a split",
+    "sample_size_rule": "per-stratum positive and negative sample sizes are declared before evaluation and support the claimed lower-bound confidence procedure",
+    "confidence_rule": "a point estimate alone never substitutes for a declared lower bound; each release threshold is a lower-bound confidence claim",
+    "immutability": "corpus content, version, and hashes are immutable once sealed",
+    "tuning_budget": "a maximum tuning-attempt budget is pinned before evaluation begins; exceeding it requires a fresh corpus version, never a silent extra round against the same sealed data",
+    "contamination_checks": "no sealed-corpus example, label, or identifier reaches a public development fixture, the repository, or any maker/implementation-LLM context",
+    "observation_framing": "zero observed unintended mutations in at least 10,000 events is reported strictly as a finite-sample observation, never a guarantee"
+  },
+  "calibration_invalidation": {
+    "triggers": ["provider change", "model digest or label change", "schema change", "prompt change", "policy change", "review threshold change", "category change"],
+    "effect": "invalidates the corresponding calibration; any already-flipped flag reverts to confirmation_first pending re-evaluation",
+    "post_drift_action": "only an explicit review-only replay is permitted; no automatic terminal, Graph, Office, or reminder mutation follows a drift-triggered reversion"
+  },
+  "rollback_boundary": {
+    "trigger": "user request at any time, regardless of flag state, gate status, or pending evaluation",
+    "properties": ["instant", "unilateral", "lossless", "prospective_only"],
+    "prohibited": ["historical batch mutation", "recreation of a prior artifact", "deletion of a prior artifact", "mutation of a prior loop transition", "required additional confirmation or owner approval to take effect"]
+  },
+  "evaluation_privacy_boundary": {
+    "prohibited_values": ["corpus content", "label", "prediction", "prompt", "transcript", "model output", "rationale", "real fixture sample"],
+    "prohibited_locations": ["repository", "package", "diagnostic artifact", "log"],
+    "approved_values": ["sanitized aggregate counts", "stable non-content identifiers"],
+    "reported_metrics": ["macro and per-stratum recall/precision/F2", "atomic split/merge errors", "evidence span F1", "attribution", "deadline normalization", "dedup", "association", "review routing", "calibration", "latency/cost", "unintended mutations", "privacy canaries"],
+    "profiling_claim": "prohibited; no reported metric implies persistent user profiling"
+  },
+  "mode_change_boundary": {
+    "prospective_only": true,
+    "prohibited": ["retroactive historical batch creation or rewrite", "loop closure", "artifact deletion", "communication with another person"],
+    "phase_gating": {
+      "development_test_limited_preview": "confirmation_first until G-AUTO passes",
+      "full_mvp_new_install_default": "hybrid, only after G-AUTO passes",
+      "fully_automatic": "requires G-AUTO-FULL plus explicit opt-in and risk acknowledgement"
+    },
+    "fallback": "the user can revert to confirmation_first instantly and unilaterally at any time"
+  },
+  "runtime_boundary": {
+    "hybrid_enabled": false,
+    "automatic_enabled": false,
+    "evaluation_run": false,
+    "corpus_created": false,
+    "tuning_rounds_used": 0,
+    "flags_flipped": [],
+    "acceptance_criteria_completed": [],
+    "scenarios_completed": [],
+    "gates_passed": []
+  },
+  "claims": {
+    "capabilities_enabled": [],
+    "capabilities_advertised": [],
+    "modes_advertised": [],
+    "corpus_results_reported": [],
+    "calibration_proven_strata": []
+  },
+  "sources": [
+    {"id": "SRC-SPEC-DECISIONS", "location": "docs/product-spec.md#3-research-backed-product-decisions"},
+    {"id": "SRC-SPEC-OWNER", "location": "docs/product-spec.md#31-approved-owner-decisions"},
+    {"id": "SRC-SPEC-REMINDER", "location": "docs/product-spec.md#68-reminder-artifacts"},
+    {"id": "SRC-SPEC-GATES", "location": "docs/product-spec.md#10-quality-and-safety-gates"},
+    {"id": "SRC-PLAN-EVAL", "location": "docs/implementation-plan.md#82-synthetic-model-evaluation"},
+    {"id": "SRC-PLAN-ADR", "location": "docs/implementation-plan.md#10-required-architecture-decision-records"},
+    {"id": "SRC-ADR-007", "location": "docs/adr/ADR-007-model-boundary.md"},
+    {"id": "SRC-ADR-008", "location": "docs/adr/ADR-008-policy-and-state-model.md"},
+    {"id": "SRC-ADR-009", "location": "docs/adr/ADR-009-reminder-adapters.md"},
+    {"id": "SRC-THREAT-INDEX", "location": "docs/threat-model/README.md"}
+  ]
+}

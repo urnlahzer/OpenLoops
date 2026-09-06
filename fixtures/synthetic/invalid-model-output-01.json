@@ -1,0 +1,17 @@
+{
+  "id": "invalid-model-output-01",
+  "category": "invalid_model_output",
+  "message": {
+    "subject": "Not JSON",
+    "body_html": "<p>This message is unremarkable.</p>",
+    "sender_name": "Alex Doe",
+    "sender_address": "alex@synthetic.invalid",
+    "to": [],
+    "cc": []
+  },
+  "participants": [],
+  "loop_candidate_handles": [],
+  "mock_model_output_json": "this is not valid json at all",
+  "expected_top_level": "analysis_unavailable",
+  "expected_claims": []
+}

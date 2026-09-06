@@ -1,0 +1,26 @@
+{
+  "id": "closure-candidate-01",
+  "category": "closure_candidate",
+  "message": {
+    "subject": "All set",
+    "body_html": "<p>This should be all set now, thanks everyone.</p>",
+    "sender_name": "Alex Doe",
+    "sender_address": "alex@synthetic.invalid",
+    "to": [],
+    "cc": []
+  },
+  "participants": [],
+  "loop_candidate_handles": [
+    "loop-c"
+  ],
+  "mock_model_output_json": "{\"schema_version\":1,\"claims\":[{\"claim_type\":\"possible_closure\",\"evidence\":[{\"source_handle\":\"msg-1\",\"component\":\"body_block\",\"block_ordinal\":0,\"range_start\":0,\"range_end\":44}],\"waiting_party_handle\":null,\"related_loop_handles\":[\"loop-c\"],\"temporal\":null,\"confidence_micros\":850000,\"ambiguity_codes\":[]}]}",
+  "expected_top_level": "reviewed",
+  "expected_claims": [
+    {
+      "validation": {
+        "kind": "accept_for_review"
+      },
+      "establishment": null
+    }
+  ]
+}

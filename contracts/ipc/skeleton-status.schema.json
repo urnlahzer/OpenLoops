@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openloops.invalid/contracts/ipc/skeleton-status.schema.json",
+  "title": "SkeletonStatus",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "companion_state", "enabled_capabilities", "gates_passed"],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "companion_state": { "enum": ["skeleton_disabled"] },
+    "enabled_capabilities": { "type": "array", "maxItems": 0 },
+    "gates_passed": { "type": "array", "maxItems": 0 }
+  }
+}

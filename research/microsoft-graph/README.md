@@ -2,15 +2,16 @@
 
 **Snapshot date:** 2026-07-18
 
-**Status:** Research complete; product decisions remain open
+**Status:** Research snapshot complete; product decisions recorded 2026-07-19
 
 **Scope:** Connecting a public, local-first OpenLoops application to Outlook
 Mail and Microsoft To Do through Microsoft Graph
 
 This package memorializes the research as it stood on the snapshot date. It is
-not an approved architecture or product specification. The project decision
-record should be updated as product choices and disposable-tenant tests resolve
-the open issues.
+not itself the approved architecture or product specification. The accepted
+decisions are recorded in [product decisions](product-decisions.md) and the
+current normative documents under `docs/`; disposable-tenant gates still resolve
+unverified implementation contracts.
 
 ## Documents
 
@@ -39,15 +40,16 @@ research and the critiques together. Claims were classified as:
 
 ## Provisional synthesis
 
-The strongest research-backed starting point is a per-user desktop connector
-using delegated Microsoft Graph permissions, a public-client Entra
+The research snapshot's strongest starting point was a per-user desktop
+connector using delegated Microsoft Graph permissions, a public-client Entra
 registration, WAM or system-browser authorization code with PKCE, protected
-local token state, and outbound polling rather than a public webhook.
+local token state, and outbound polling rather than a public webhook. The owner
+subsequently selected a pure-Rust system-browser PKCE implementation; WAM is a
+future gated adapter, not an MVP dependency.
 
-The final review recommended a Windows-first release to reduce the initial
-security and packaging surface. That is a provisional recommendation, not a
-product decision. The product questions in [product-decisions.md](product-decisions.md)
-determine whether it remains appropriate.
+The final research review recommended a Windows-first release to reduce the
+initial security and packaging surface. The product owner accepted that boundary
+on 2026-07-19, subject to the security and capability gates in the specification.
 
 ### Confidence at the snapshot date
 

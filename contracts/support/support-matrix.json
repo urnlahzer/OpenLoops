@@ -1,0 +1,414 @@
+{
+  "schema_version": 1,
+  "work_item": "P0-WI-03",
+  "matrix_disposition": {
+    "id": "P0-MATRIX-001",
+    "status": "accepted",
+    "approved_on": "2026-07-19",
+    "meaning": "approved validation targets only; no support, capability, or release claim"
+  },
+  "owner_decisions": ["OWN-00", "OWN-01", "OWN-02", "OWN-08"],
+  "requirements": [
+    "OL-GOV-001", "OL-REM-016", "OL-UX-001", "OL-UX-009",
+    "OL-MODEL-007", "OL-MODEL-008", "OL-MODEL-011", "OL-MODEL-013",
+    "OL-MODEL-014", "OL-MODEL-015", "OL-NFR-005", "OL-NFR-011"
+  ],
+  "acceptance_criteria": [],
+  "blocking_gates": [
+    "G-ID", "G-MAIL", "G-TODO", "G-CAL", "G-ADDIN", "G-STATE",
+    "G-MODEL", "G-PRIV", "G-SEC-AUDIT", "G-RELEASE"
+  ],
+  "claim_state": {
+    "supported_rows": [],
+    "enabled_capabilities": [],
+    "advertised_capabilities": [],
+    "gates_passed": [],
+    "acceptance_criteria_completed": []
+  },
+  "freshness_policy": {
+    "official_source_snapshot": "2026-07-19",
+    "release_recheck_required": true,
+    "recheck_subjects": [
+      "windows_servicing", "office_builds", "mailbox_requirement_sets",
+      "new_outlook_account_cloud_limits", "no_item_context", "web_browsers",
+      "national_cloud_availability", "personal_account_endpoints",
+      "ollama_origins_auth_versions_cloud_locality_and_structured_outputs"
+    ],
+    "stale_or_changed_result": "affected row remains disabled and unadvertised; route scope changes to the product owner"
+  },
+  "matrices": {
+    "windows": [
+      {
+        "id": "windows_11_24h2_x64",
+        "disposition": "approved_validation_target",
+        "current_state": "unverified_disabled",
+        "advertised": false,
+        "boundary": {
+          "os": "Windows 11", "version": "24H2", "architecture": "x64",
+          "servicing_rule": "only while the installed edition remains in Microsoft servicing and the exact build passes release tests",
+          "runtime": "unelevated per-user local companion for one signed-in OS user"
+        },
+        "gates": ["G-STATE", "G-ADDIN", "G-SEC-AUDIT", "G-RELEASE"],
+        "required_evidence": ["pinned_toolchain_build", "secure_store", "single_user_isolation", "addin_bridge", "package_update_uninstall", "fresh_machine_source_build"],
+        "fallback": "refuse unsupported installation before accepting secrets or creating durable state",
+        "sources": ["SRC-WIN-RELEASE", "SRC-SPEC-OWN-01"]
+      },
+      {
+        "id": "windows_11_25h2_x64",
+        "disposition": "approved_validation_target",
+        "current_state": "unverified_disabled",
+        "advertised": false,
+        "boundary": {
+          "os": "Windows 11", "version": "25H2", "architecture": "x64",
+          "servicing_rule": "only while the installed edition remains in Microsoft servicing and the exact build passes release tests",
+          "runtime": "unelevated per-user local companion for one signed-in OS user"
+        },
+        "gates": ["G-STATE", "G-ADDIN", "G-SEC-AUDIT", "G-RELEASE"],
+        "required_evidence": ["pinned_toolchain_build", "secure_store", "single_user_isolation", "addin_bridge", "package_update_uninstall", "fresh_machine_source_build"],
+        "fallback": "refuse unsupported installation before accepting secrets or creating durable state",
+        "sources": ["SRC-WIN-RELEASE", "SRC-SPEC-OWN-01"]
+      },
+      {
+        "id": "windows_11_26h1_or_arm64",
+        "disposition": "deferred",
+        "current_state": "unavailable",
+        "advertised": false,
+        "boundary": { "includes": ["Windows 11 26H1", "Windows on Arm", "native ARM64", "x64 emulation on ARM64"] },
+        "gates": ["G-STATE", "G-ADDIN", "G-SEC-AUDIT", "G-RELEASE"],
+        "required_evidence": ["new_owner_scope_disposition", "native_or_emulated_dependency_matrix", "secure_store", "bridge", "packaging_update"],
+        "fallback": "no ARM package and no emulation support claim",
+        "sources": ["SRC-WIN-RELEASE", "SRC-WIN-ARM"]
+      },
+      {
+        "id": "windows_10_or_x86",
+        "disposition": "deferred",
+        "current_state": "unavailable",
+        "advertised": false,
+        "boundary": { "includes": ["Windows 10", "ESU", "LTSC", "32-bit x86"] },
+        "gates": ["G-STATE", "G-SEC-AUDIT", "G-RELEASE"],
+        "required_evidence": ["new_owner_scope_disposition", "exact_lifecycle_matrix", "full_security_and_release_matrix"],
+        "fallback": "refuse installation with content-free supported-version guidance",
+        "sources": ["SRC-WIN-10-EOS", "SRC-SPEC-OWN-01"]
+      },
+      {
+        "id": "macos_or_linux",
+        "disposition": "deferred",
+        "current_state": "unavailable",
+        "advertised": false,
+        "boundary": { "includes": ["macOS", "Linux"] },
+        "gates": ["G-STATE", "G-ADDIN", "G-SEC-AUDIT", "G-RELEASE"],
+        "required_evidence": ["new_owner_runtime_disposition", "os_secret_store", "identity", "bridge", "package_update_uninstall"],
+        "fallback": "no binary or support claim and never a plaintext secret or state fallback",
+        "sources": ["SRC-SPEC-OWN-01", "SRC-RESEARCH-SECURITY"]
+      },
+      {
+        "id": "remote_container_nas_headless",
+        "disposition": "outside_mvp",
+        "current_state": "unavailable",
+        "advertised": false,
+        "boundary": { "includes": ["remote browser", "container", "NAS", "LAN-hosted", "headless", "Windows service"] },
+        "gates": ["G-ID", "G-STATE", "G-PRIV", "G-SEC-AUDIT", "G-RELEASE"],
+        "required_evidence": ["new_owner_runtime_disposition", "separate_remote_threat_model"],
+        "fallback": "local same-user companion only",
+        "sources": ["SRC-SPEC-OWN-01", "SRC-RESEARCH-CONNECTION"]
+      }
+    ],
+    "outlook": [
+      {
+        "id": "classic_outlook_windows_m365",
+        "disposition": "approved_validation_target",
+        "current_state": "disabled_pending_G-ADDIN",
+        "advertised": false,
+        "boundary": {
+          "client": "classic Outlook on Windows", "license": "Microsoft 365 subscription",
+          "build_rule": "current Microsoft-supported update channel and release-tested build",
+          "mailbox": "commercial-global Exchange Online work or school primary mailbox"
+        },
+        "gates": ["G-ADDIN", "G-MAIL", "G-PRIV", "G-RELEASE"],
+        "required_evidence": ["manifest_install", "selected_item", "no_item_context", "evidence_navigation", "compose_hint", "bridge_pairing_rotation", "account_switch", "uninstall_cleanup"],
+        "fallback": "native companion review status and recovery; add-in remains disabled",
+        "sources": ["SRC-OUTLOOK-OVERVIEW", "SRC-OUTLOOK-SETS", "SRC-SPEC-G-ADDIN"]
+      },
+      {
+        "id": "new_outlook_windows",
+        "disposition": "approved_validation_target",
+        "current_state": "disabled_pending_G-ADDIN",
+        "advertised": false,
+        "boundary": {
+          "client": "new Outlook for Windows", "build_rule": "current serviced client tested at release",
+          "mailbox": "commercial-global Exchange Online work or school primary mailbox",
+          "activation": "selected-item activation; no always-available no-item dashboard claim"
+        },
+        "gates": ["G-ADDIN", "G-MAIL", "G-PRIV", "G-RELEASE"],
+        "required_evidence": ["manifest_install", "selected_item", "evidence_navigation", "compose_hint", "bridge_pairing_rotation", "account_switch", "uninstall_cleanup", "no_item_safe_fallback"],
+        "fallback": "native companion review status and recovery; add-in remains disabled",
+        "sources": ["SRC-OUTLOOK-NEW", "SRC-OUTLOOK-NOITEM", "SRC-SPEC-G-ADDIN"]
+      },
+      {
+        "id": "outlook_web_same_windows",
+        "disposition": "approved_validation_target",
+        "current_state": "disabled_pending_G-ADDIN",
+        "advertised": false,
+        "boundary": {
+          "client": "Outlook on the web", "host_os": "an approved Windows validation target",
+          "browsers": ["current Microsoft Edge", "current Google Chrome", "current Mozilla Firefox"],
+          "mailbox": "commercial-global Exchange Online work or school primary mailbox",
+          "activation": "selected-item activation; same-machine companion only; no remote-companion claim"
+        },
+        "gates": ["G-ADDIN", "G-MAIL", "G-PRIV", "G-RELEASE"],
+        "required_evidence": ["per_browser_manifest_install", "selected_item", "evidence_navigation", "compose_hint", "loopback_origin_host_cors_csrf", "bridge_pairing_rotation", "browser_restart", "no_item_safe_fallback"],
+        "fallback": "native companion review status and recovery; add-in remains disabled",
+        "sources": ["SRC-OUTLOOK-OVERVIEW", "SRC-OUTLOOK-BROWSERS", "SRC-OUTLOOK-NOITEM", "SRC-SPEC-G-ADDIN"]
+      },
+      {
+        "id": "classic_outlook_perpetual",
+        "disposition": "deferred",
+        "current_state": "unavailable",
+        "advertised": false,
+        "boundary": { "includes": ["Office 2021 retail", "Office 2024 retail", "LTSC"] },
+        "gates": ["G-ADDIN", "G-PRIV", "G-RELEASE"],
+        "required_evidence": ["new_owner_scope_disposition", "exact_build_requirement_set_matrix", "full_bridge_and_release_tests"],
+        "fallback": "native companion only",
+        "sources": ["SRC-OUTLOOK-NEW", "SRC-OUTLOOK-SETS"]
+      },
+      {
+        "id": "outlook_mac_mobile",
+        "disposition": "deferred",
+        "current_state": "unavailable",
+        "advertised": false,
+        "boundary": { "includes": ["Outlook for Mac", "Outlook for iOS", "Outlook for Android"] },
+        "gates": ["G-ADDIN", "G-PRIV", "G-RELEASE"],
+        "required_evidence": ["new_owner_runtime_disposition", "same_machine_bridge_contract", "complete_client_matrix"],
+        "fallback": "no add-in support claim",
+        "sources": ["SRC-OUTLOOK-OVERVIEW", "SRC-SPEC-OWN-01"]
+      },
+      {
+        "id": "outlook_onprem_hybrid_or_sovereign",
+        "disposition": "deferred",
+        "current_state": "unavailable",
+        "advertised": false,
+        "boundary": { "includes": ["Exchange on-premises", "hybrid Exchange", "sovereign Exchange"] },
+        "gates": ["G-ID", "G-MAIL", "G-ADDIN", "G-PRIV", "G-RELEASE"],
+        "required_evidence": ["new_owner_cloud_disposition", "complete_identity_mail_addin_matrix"],
+        "fallback": "reject before Graph authorization and use no add-in capability",
+        "sources": ["SRC-OUTLOOK-NEW", "SRC-SPEC-OWN-02"]
+      }
+    ],
+    "accounts": [
+      {
+        "id": "commercial_global_work_school_primary",
+        "disposition": "approved_validation_target",
+        "current_state": "disabled_pending_feature_gates",
+        "advertised": false,
+        "boundary": { "identity": "Microsoft Entra work or school member", "mailbox": "own Exchange Online primary mailbox", "account_count": 1, "os_user_count": 1 },
+        "gates": ["G-ID", "G-MAIL", "G-TODO", "G-CAL", "G-ADDIN", "G-STATE", "G-PRIV"],
+        "required_evidence": ["browser_pkce", "account_authority", "mail", "todo", "calendar", "addin", "account_binding", "disconnect"],
+        "fallback": "reject account mismatch and keep every Microsoft 365 capability disabled",
+        "sources": ["SRC-SPEC-OWN-02", "SRC-RESEARCH-VALIDATION"]
+      },
+      {
+        "id": "personal_microsoft_account",
+        "disposition": "gated_target",
+        "current_state": "disabled",
+        "advertised": false,
+        "boundary": { "identity": "personal Microsoft account", "cloud": "global" },
+        "gates": ["G-ID", "G-MAIL", "G-TODO", "G-CAL", "G-ADDIN", "G-PRIV"],
+        "required_evidence": ["complete_identity_mail_todo_calendar_addin_matrix_not_signin_only"],
+        "fallback": "reject before durable account state or feature-scope requests",
+        "sources": ["SRC-SPEC-OWN-02", "SRC-IDENTITY-ACCOUNTS", "SRC-RESEARCH-VALIDATION"]
+      },
+      {
+        "id": "shared_or_delegated_mailbox",
+        "disposition": "deferred",
+        "current_state": "unavailable",
+        "advertised": false,
+        "boundary": { "includes": ["shared mailbox", "delegated mailbox", "shared folder"] },
+        "gates": ["G-ID", "G-MAIL", "G-ADDIN", "G-PRIV"],
+        "required_evidence": ["new_owner_scope_disposition", "separate_permissions_and_authority_matrix"],
+        "fallback": "do not request shared permissions and never enumerate or mutate shared resources",
+        "sources": ["SRC-SPEC-OWN-02", "SRC-RESEARCH-CONNECTION"]
+      },
+      {
+        "id": "multiple_accounts",
+        "disposition": "deferred",
+        "current_state": "unavailable",
+        "advertised": false,
+        "boundary": { "includes": ["multiple connected Microsoft accounts per OS user", "cross-account add-in switching"] },
+        "gates": ["G-ID", "G-STATE", "G-ADDIN", "G-PRIV"],
+        "required_evidence": ["new_owner_scope_disposition", "complete_account_isolation_and_bridge_matrix"],
+        "fallback": "exactly one binding; mismatch or switch blocks mutation",
+        "sources": ["SRC-SPEC-OWN-01", "SRC-SPEC-OWN-02"]
+      },
+      {
+        "id": "guest_without_supported_mailbox",
+        "disposition": "deferred",
+        "current_state": "unavailable",
+        "advertised": false,
+        "boundary": { "identity": "guest profile without its own proven supported Exchange Online mailbox" },
+        "gates": ["G-ID", "G-MAIL", "G-PRIV"],
+        "required_evidence": ["separate_account_authority_contract"],
+        "fallback": "reject rather than infer mailbox authority",
+        "sources": ["SRC-IDENTITY-ACCOUNTS", "SRC-RESEARCH-VALIDATION"]
+      },
+      {
+        "id": "non_microsoft_mailbox",
+        "disposition": "outside_mvp",
+        "current_state": "unavailable",
+        "advertised": false,
+        "boundary": { "includes": ["Gmail", "Yahoo", "IMAP", "other non-Microsoft mailbox"] },
+        "gates": ["G-ID", "G-MAIL", "G-ADDIN", "G-PRIV", "G-RELEASE"],
+        "required_evidence": ["new_owner_product_disposition", "new_provider_runtime_and_threat_model"],
+        "fallback": "companion and add-in features disabled",
+        "sources": ["SRC-OUTLOOK-OVERVIEW", "SRC-SPEC-OWN-02"]
+      }
+    ],
+    "clouds": [
+      {
+        "id": "commercial_global",
+        "disposition": "approved_validation_target",
+        "current_state": "disabled_pending_feature_gates",
+        "advertised": false,
+        "boundary": { "authority_origin": "https://login.microsoftonline.com", "graph_origin": "https://graph.microsoft.com", "tenant_class": "commercial-global organization" },
+        "gates": ["G-ID", "G-MAIL", "G-TODO", "G-CAL", "G-ADDIN", "G-PRIV"],
+        "required_evidence": ["exact_authority_audience", "token_cloud_binding", "graph_origin_binding", "account_cloud_mismatch_rejection"],
+        "fallback": "reject unknown or mismatched cloud before authorization or Graph access",
+        "sources": ["SRC-SPEC-OWN-02", "SRC-GRAPH-CLOUDS"]
+      },
+      {
+        "id": "government_clouds",
+        "disposition": "deferred",
+        "current_state": "unavailable",
+        "advertised": false,
+        "boundary": { "includes": ["GCC", "GCC High", "DoD"] },
+        "gates": ["G-ID", "G-MAIL", "G-TODO", "G-CAL", "G-ADDIN", "G-PRIV", "G-RELEASE"],
+        "required_evidence": ["new_owner_cloud_disposition", "complete_cloud_specific_matrix"],
+        "fallback": "reject before authorization and never rewrite endpoints opportunistically",
+        "sources": ["SRC-SPEC-OWN-02", "SRC-GRAPH-CLOUDS"]
+      },
+      {
+        "id": "china_21vianet",
+        "disposition": "deferred",
+        "current_state": "unavailable",
+        "advertised": false,
+        "boundary": { "cloud": "Microsoft 365 operated by 21Vianet in China" },
+        "gates": ["G-ID", "G-MAIL", "G-TODO", "G-CAL", "G-ADDIN", "G-PRIV", "G-RELEASE"],
+        "required_evidence": ["new_owner_cloud_disposition", "complete_cloud_specific_matrix"],
+        "fallback": "reject before authorization and never rewrite endpoints opportunistically",
+        "sources": ["SRC-SPEC-OWN-02", "SRC-GRAPH-CLOUDS"]
+      }
+    ],
+    "model_providers": [
+      {
+        "id": "disabled",
+        "disposition": "safe_default",
+        "current_state": "no_provider_requests",
+        "advertised": false,
+        "boundary": { "origin": "none", "credential": "none", "model_dependent_analysis": "unavailable" },
+        "gates": [],
+        "required_evidence": ["zero_provider_network", "zero_prompt_or_result_persistence", "analysis_unavailable_fallback", "zero_mutations"],
+        "fallback": "remain disabled; never silently select a provider",
+        "sources": ["SRC-SPEC-OWN-08", "SRC-SPEC-MODEL"]
+      },
+      {
+        "id": "ollama_local",
+        "disposition": "approved_gated_target",
+        "current_state": "disabled",
+        "advertised": false,
+        "boundary": {
+          "documented_default_api": "http://localhost:11434/api",
+          "origin_contract": "exact canonical loopback origin and path remain ADR-007 work; redirects and implicit proxies prohibited",
+          "credential": "OpenLoops accepts and sends no provider credential",
+          "locality": "loopback alone is not proof of local processing; verifiable cloud-disable and cloud-model rejection are mandatory"
+        },
+        "gates": ["G-MODEL", "G-PRIV", "G-SEC-AUDIT", "G-RELEASE"],
+        "required_evidence": ["ADR-007", "exact_loopback_origin", "dns_rebinding_redirect_proxy_rejection", "local_only_proof", "cloud_model_rejection", "version_probe", "model_digest", "strict_output_evidence_semantics", "canary_and_error_sanitation"],
+        "fallback": "disabled provider and reduced deterministic behavior; never fall through to cloud",
+        "sources": ["SRC-OLLAMA-API", "SRC-OLLAMA-AUTH", "SRC-OLLAMA-CLOUD", "SRC-OLLAMA-FAQ", "SRC-SPEC-OWN-08"]
+      },
+      {
+        "id": "ollama_cloud",
+        "disposition": "approved_gated_target",
+        "current_state": "disabled",
+        "advertised": false,
+        "boundary": {
+          "api_base": "https://ollama.com/api", "origin": "https://ollama.com", "editable": false,
+          "credential": "write-only user API key in OS secret store; bearer header only to the exact consented origin",
+          "transport": "valid TLS; redirects and implicit proxy inheritance prohibited; cross-origin authorization forwarding prohibited",
+          "structured_output": "official cloud limitation remains unresolved; strict application validation is mandatory and no server-side schema claim is made"
+        },
+        "gates": ["G-MODEL", "G-PRIV", "G-SEC-AUDIT", "G-RELEASE"],
+        "required_evidence": ["ADR-007", "live_synthetic_BYO_key_contract_outside_CI", "exact_origin_tls_dns_redirect_proxy", "auth_nonforwarding", "model_revision_or_digest", "strict_output_evidence_semantics", "provider_drift", "canary_and_error_sanitation"],
+        "fallback": "disabled provider and reduced deterministic behavior; no alternate origin model or provider",
+        "sources": ["SRC-OLLAMA-API", "SRC-OLLAMA-AUTH", "SRC-OLLAMA-STRUCTURED", "SRC-OLLAMA-TAGS", "SRC-SPEC-OWN-08"]
+      },
+      {
+        "id": "approved_https",
+        "disposition": "optional_gated_target",
+        "current_state": "disabled",
+        "advertised": false,
+        "boundary": {
+          "origin": "one user-approved canonical absolute public HTTPS origin plus adapter-fixed path",
+          "credential": "write-only OS-protected adapter credential; no arbitrary header bag",
+          "transport": "valid TLS and public-address policy; redirects, implicit proxies, userinfo, query, fragment, link-local, private, reserved, and metadata targets prohibited",
+          "substitution": "cannot substitute for the required tested Ollama Cloud hosted path"
+        },
+        "gates": ["G-MODEL", "G-PRIV", "G-SEC-AUDIT", "G-RELEASE"],
+        "required_evidence": ["ADR-007", "approved_adapter_wire_and_auth_schema", "exact_origin_consent", "ssrf_dns_redirect_proxy", "auth_nonforwarding", "strict_output_evidence_semantics", "version_and_drift", "canary_and_error_sanitation"],
+        "fallback": "disabled provider and reduced deterministic behavior; never another origin or provider",
+        "sources": ["SRC-SPEC-OWN-08", "SRC-SPEC-MODEL"]
+      }
+    ]
+  },
+  "addin_contract": {
+    "manifest_minimum": { "requirement_set": "Mailbox", "version": "1.13", "permission": "ReadItem", "form_factor": "desktop" },
+    "prohibited_permissions_or_authority": ["ReadWriteMailbox", "Mailbox.SharedFolder", "mailbox_token_ownership", "synchronization_authority", "event_based_loop_creation"],
+    "client_behavior": {
+      "classic_outlook_windows_m365": "test selected-item and no-item context",
+      "new_outlook_windows": "selected-item only; native no-item fallback",
+      "outlook_web_same_windows": "selected-item only; native no-item fallback"
+    },
+    "gate": "G-ADDIN",
+    "fallback": "unsupported actions are absent or disabled; native companion gives safe review and evidence instructions"
+  },
+  "cross_matrix_invariants": [
+    { "id": "SUP-X-001", "rule": "approved_validation_target never means supported enabled or advertised" },
+    { "id": "SUP-X-002", "rule": "only Windows 11 x64 24H2 and 25H2 are approved OS validation targets and only while serviced and release-tested" },
+    { "id": "SUP-X-003", "rule": "every Outlook target is confined to the same supported Windows machine and a commercial-global work or school primary Exchange Online mailbox" },
+    { "id": "SUP-X-004", "rule": "new Outlook and Outlook web never claim an always-available no-item dashboard; native fallback remains required" },
+    { "id": "SUP-X-005", "rule": "personal sign-in success never enables personal support; the complete named capability matrix must pass" },
+    { "id": "SUP-X-006", "rule": "government and China cloud endpoints are never selected or rewritten opportunistically" },
+    { "id": "SUP-X-007", "rule": "shared delegated multi-account guest and non-Microsoft resources never inherit the primary-account matrix" },
+    { "id": "SUP-X-008", "rule": "disabled is the only provider default and causes zero provider network requests" },
+    { "id": "SUP-X-009", "rule": "an Ollama loopback origin never proves local-only processing; cloud-disable evidence and cloud-model rejection are mandatory" },
+    { "id": "SUP-X-010", "rule": "provider endpoint model credential or transmitted-field change invalidates consent and calibrated use" },
+    { "id": "SUP-X-011", "rule": "no provider credential appears in repository configuration command lines logs diagnostics browser state or package output" },
+    { "id": "SUP-X-012", "rule": "a source freshness change disables the affected row until revalidation and product-owner review of any scope change" },
+    { "id": "SUP-X-013", "rule": "no matrix row advances a gate acceptance criterion governance capability or release claim" }
+  ],
+  "sources": [
+    { "id": "SRC-SPEC-OWN-01", "kind": "normative_local", "location": "docs/product-spec.md#3-research-backed-product-decisions" },
+    { "id": "SRC-SPEC-OWN-02", "kind": "normative_local", "location": "docs/product-spec.md#3-research-backed-product-decisions" },
+    { "id": "SRC-SPEC-OWN-08", "kind": "normative_local", "location": "docs/product-spec.md#3-research-backed-product-decisions" },
+    { "id": "SRC-SPEC-G-ADDIN", "kind": "normative_local", "location": "docs/product-spec.md#10-quality-and-safety-gates" },
+    { "id": "SRC-SPEC-MODEL", "kind": "normative_local", "location": "docs/product-spec.md#611-model-and-policy-contract" },
+    { "id": "SRC-RESEARCH-CONNECTION", "kind": "research_local", "location": "research/microsoft-graph/connection-options.md" },
+    { "id": "SRC-RESEARCH-SECURITY", "kind": "research_local", "location": "research/microsoft-graph/security-and-local-state.md" },
+    { "id": "SRC-RESEARCH-VALIDATION", "kind": "research_local", "location": "research/microsoft-graph/validation-plan.md" },
+    { "id": "SRC-WIN-RELEASE", "kind": "official_current", "location": "https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information" },
+    { "id": "SRC-WIN-10-EOS", "kind": "official_current", "location": "https://learn.microsoft.com/en-gb/lifecycle/announcements/windows-10-end-of-support" },
+    { "id": "SRC-WIN-ARM", "kind": "official_current", "location": "https://learn.microsoft.com/en-us/windows/arm/overview" },
+    { "id": "SRC-OUTLOOK-OVERVIEW", "kind": "official_current", "location": "https://learn.microsoft.com/en-us/office/dev/add-ins/outlook/outlook-add-ins-overview" },
+    { "id": "SRC-OUTLOOK-NEW", "kind": "official_current", "location": "https://learn.microsoft.com/en-us/office/dev/add-ins/outlook/one-outlook" },
+    { "id": "SRC-OUTLOOK-SETS", "kind": "official_current", "location": "https://learn.microsoft.com/en-us/javascript/api/requirement-sets/outlook/outlook-api-requirement-sets" },
+    { "id": "SRC-OUTLOOK-NOITEM", "kind": "official_current", "location": "https://learn.microsoft.com/en-us/office/dev/add-ins/outlook/contextless" },
+    { "id": "SRC-OUTLOOK-BROWSERS", "kind": "official_current", "location": "https://support.microsoft.com/en-us/outlook/supported-browsers-for-outlook-on-the-web-and-outlook-com" },
+    { "id": "SRC-IDENTITY-ACCOUNTS", "kind": "official_current", "location": "https://learn.microsoft.com/en-us/entra/identity-platform/howto-modify-supported-accounts" },
+    { "id": "SRC-GRAPH-CLOUDS", "kind": "official_current", "location": "https://learn.microsoft.com/en-us/graph/deployments" },
+    { "id": "SRC-OLLAMA-API", "kind": "official_current", "location": "https://docs.ollama.com/api/introduction" },
+    { "id": "SRC-OLLAMA-AUTH", "kind": "official_current", "location": "https://docs.ollama.com/api/authentication" },
+    { "id": "SRC-OLLAMA-CLOUD", "kind": "official_current", "location": "https://docs.ollama.com/cloud" },
+    { "id": "SRC-OLLAMA-FAQ", "kind": "official_current", "location": "https://docs.ollama.com/faq" },
+    { "id": "SRC-OLLAMA-STRUCTURED", "kind": "official_current", "location": "https://docs.ollama.com/capabilities/structured-outputs" },
+    { "id": "SRC-OLLAMA-TAGS", "kind": "official_current", "location": "https://docs.ollama.com/api/tags" }
+  ]
+}

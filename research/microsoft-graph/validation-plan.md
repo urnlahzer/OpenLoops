@@ -36,9 +36,9 @@ documented contract.
 
 ### Redirect URI selection
 
-Microsoft's general redirect guidance recommends `127.0.0.1`, while common
-MSAL.NET desktop configuration and portal flows use `http://localhost` with a
-random port. HTTP `127.0.0.1` may require manifest editing. The selected runtime,
+Microsoft's general redirect guidance recommends `127.0.0.1`, while some desktop
+library/portal flows use `http://localhost` with a random port. HTTP
+`127.0.0.1` may require manifest editing. The approved pure-Rust OAuth runtime,
 portal registration, IPv4/IPv6 behavior, firewall behavior, and port collision
 handling must be tested together before the redirect contract is frozen.
 
@@ -51,9 +51,9 @@ precondition tests prove it for each intended operation.
 
 ## Identity and consent experiments
 
-1. Work/school and personal-account WAM sign-in.
-2. Work/school and personal-account browser PKCE sign-in.
-3. `localhost` and `127.0.0.1` redirects with the selected MSAL runtime.
+1. Work/school browser-PKCE sign-in with the selected pure-Rust OAuth runtime.
+2. Personal-account browser-PKCE sign-in as a separately gated capability; sign-in success does not enable the account until mail/To Do/calendar/add-in tests also pass.
+3. `localhost` and `127.0.0.1` redirects with the selected pure-Rust OAuth runtime and Entra registration.
 4. Missing, incorrect, replayed, duplicated, and expired OAuth state.
 5. Loopback port races and non-loopback/LAN reachability.
 6. User consent enabled, disabled, admin-gated, and verified-publisher-only.
@@ -61,6 +61,10 @@ precondition tests prove it for each intended operation.
 8. Consent/session revocation and Conditional Access changes.
 9. Guest-account and multiple-tenant account selection.
 10. Cache loss, secure-store lock, reconnect, and disconnect.
+
+WAM/MSAL-specific experiments from the 2026-07-18 research snapshot are not MVP
+requirements. Run them only if a future WAM adapter is proposed, then gate that
+adapter independently without changing the browser-PKCE baseline implicitly.
 
 ## Mail experiments
 

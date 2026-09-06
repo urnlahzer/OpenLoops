@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "work_item": "P0-WI-15",
+  "adr": "ADR-012",
+  "decision_status": "accepted_contract_runtime_unimplemented",
+  "snapshot_date": "2026-07-21",
+  "owner_decisions": ["OWN-00", "OWN-01", "OWN-02"],
+  "owned_requirements": ["OL-NFR-010", "OL-NFR-011", "OL-NFR-012"],
+  "consumed_requirements": [],
+  "primary_acceptance_criteria": [],
+  "dependent_acceptance_criteria": [],
+  "primary_scenarios": [],
+  "scenario_dependencies": [],
+  "blocking_gates": ["G-ID", "G-RELEASE"],
+  "input_authorities": [
+    {"owner": "ADR-001", "input": "BYO registration is the source-build/development path; shared project registration remains gated by ADR-012, publisher governance, signed distribution, and release controls"},
+    {"owner": "ADR-005", "input": "exclusive copy-validate-encrypt-verify-swap migration state machine; older binary refuses to write a newer schema or ciphertext version; R-21/R-22 critical risk rows"},
+    {"owner": "ADR-010", "input": "any bridge certificate or trust is completely removed on disconnect and uninstall; failure of any trust-cleanup step blocks the add-in rather than leaving orphaned trust"},
+    {"owner": "ADR-PRIV-001", "input": "diagnostics allowlist is empty; any future diagnostic export needs an exact content-free schema plus ADR-012, G-PRIV, G-RELEASE, and G-SEC-AUDIT"}
+  ],
+  "separate_decisions": {
+    "exact_signing_technology_and_certificate_provider": "unresolved_pending_G-RELEASE",
+    "update_transport_and_channel_names": "unresolved_pending_G-RELEASE",
+    "bridge_certificate_lifecycle_and_addin_trust": "ADR-010",
+    "state_migration_encryption_and_rollback_anchor_mechanics": "ADR-005",
+    "diagnostics_export_schema_and_privacy_gates": "ADR-PRIV-001",
+    "independent_security_audit_scope": "G-SEC-AUDIT"
+  },
+  "catalogs": {
+    "registration_mode_code": ["byo_public_client", "shared_project_registration"],
+    "shared_registration_governance_control_code": [
+      "dedicated_publisher_tenant_and_verified_domain",
+      "publisher_verification",
+      "accurate_metadata_and_disclosures",
+      "two_registration_owners_with_recovery",
+      "exact_registered_redirects",
+      "incremental_consent_explanations",
+      "admin_consent_disabled_tenant_support",
+      "sign_in_monitoring_without_content",
+      "malicious_fork_client_id_abuse_incident_procedure",
+      "signed_builds_with_provenance",
+      "byo_documentation_for_rejecting_orgs"
+    ],
+    "update_trust_field_code": ["channel", "version", "expiry", "package_hash", "package_size", "signing_key_id", "source_revision"],
+    "artifact_allowlist_class_code": ["installer_package", "update_metadata", "sbom", "provenance_attestation", "release_notes_content_free"],
+    "installer_boundary_property_code": ["per_user", "unelevated", "complete_uninstall", "bridge_trust_removed", "residual_risk_disclosed"],
+    "diagnostics_rule_code": ["allowlist_empty", "future_export_requires_named_adrs_and_gates"]
+  },
+  "registration_boundary": {
+    "byo_public_client": {
+      "status": "the only enabled Phase 0/source-build path",
+      "configuration": "placeholder-only tracked configuration; no real client ID, tenant ID, or other Microsoft identifier in the repository, and no secret on a command line or in tracked configuration",
+      "authentication_limitation": "PKCE does not authenticate the binary requesting a token; it authenticates only the authorization-code exchange"
+    },
+    "shared_project_registration": {
+      "status": "disabled; a separately gated future option",
+      "enablement_prohibited_by": ["successful sign-in", "development convenience", "a passing test"],
+      "required_governance_controls": [
+        "dedicated organizational publisher tenant and a verified domain",
+        "Microsoft publisher verification",
+        "accurate name, logo, homepage, privacy statement, terms, and support contact",
+        "at least two controlled registration owners and an owner-recovery procedure",
+        "exact registered redirects with no unused platform configuration",
+        "incremental consent and plain-language permission explanations",
+        "support for tenants that disable user consent or require admin approval",
+        "sign-in/consent-failure monitoring without message or task content collection",
+        "a malicious-fork/client-ID-abuse and incident-response procedure",
+        "signed official builds and updates with published provenance",
+        "BYO registration documentation for organizations that reject the shared application"
+      ]
+    },
+    "pkce_limitation_preserved": true
+  },
+  "update_trust_chain": {
+    "metadata_signing": "signed independently of package signing; compromising one signing key does not silently authorize the other artifact class",
+    "key_inventory": "a trusted-key inventory records every signing key's purpose, holder, and rotation/revocation procedure; a revoked or rotated key can no longer produce accepted metadata or a package",
+    "version_policy": "monotonic anti-downgrade; an older binary refuses to write a newer schema or ciphertext version, and the client refuses update metadata whose version is not strictly greater than the currently installed version regardless of signature validity",
+    "channel_binding": "update metadata is bound to an exact release channel; a client on one channel never accepts metadata signed for another channel",
+    "expiry": "metadata carries an explicit expiry; expired metadata is refused even if otherwise validly signed",
+    "package_identity": "metadata pins the exact package hash and exact package size; a package matching neither, or only one, is refused before any part of it is applied",
+    "staging_and_replacement": "atomic and protected; a downloaded package is verified completely before staging, staging occurs where the current build cannot yet execute or the current data cannot yet reach, and replacement of the running installation is a single atomic step with a recovery path if it does not complete",
+    "provenance": "must be verifiable to the exact public source revision that produced the package; a package that cannot be tied to an inspectable source revision is refused regardless of valid signatures",
+    "elevation": "no installation or update step elevates privileges by default; any future elevation requires a separate explicit justification and its own review"
+  },
+  "artifact_boundary": {
+    "allowlist_rule": "every artifact class released or packaged has an explicit allowlist; an artifact outside its class's allowlist is rejected before release rather than filtered afterward",
+    "sbom_and_provenance": "required for every release; a release without either is incomplete",
+    "prohibited": ["source maps", "generated diagnostic artifacts"],
+    "npm_publishability": "disabled in Phase 0; package.json stays \"private\": true with an empty files allowlist",
+    "cargo_publishability": "disabled in Phase 0; every workspace crate stays publish = false",
+    "canary_and_public_repo_gates": "run at every required release point (staged commit, push, and package dry run) and never print a suspected secret or identifier value when they fail; a failing gate blocks the release rather than being silenced or bypassed"
+  },
+  "installer_boundary": {
+    "install_mode": "per-user and unelevated, matching ADR-001's runtime boundary; no administrator rights requested by default",
+    "uninstall_completeness": "repeats disconnect cleanup where possible and removes every local bridge trust, certificate, and protocol registration ADR-010 created, leaving no orphaned trust behind",
+    "residual_risk_disclosure": "OS paging, backups, snapshots, and endpoint-security exposure are disclosed limitations, not a physical-erasure claim, matching ADR-005 and ADR-PRIV-001",
+    "microsoft_artifact_handling": "zero Graph mutation and no bulk deletion of a Microsoft artifact by the uninstaller; existing artifacts are handled per the user's own disconnect choice"
+  },
+  "diagnostics_rule": {
+    "allowlist": "empty",
+    "future_export_requirement": "an exact content-free schema plus ADR-012, G-PRIV, G-RELEASE, and G-SEC-AUDIT; none of those four is satisfied by this ADR and none may be represented as satisfied by a partial subset"
+  },
+  "unresolved_pending_G-RELEASE": ["exact signing technology", "certificate provider", "update transport", "release-channel names"],
+  "runtime_boundary": {
+    "shared_registration_enabled": false,
+    "package_signed": false,
+    "update_metadata_published": false,
+    "installer_built": false,
+    "security_audit_completed": false,
+    "acceptance_criteria_completed": [],
+    "scenarios_completed": [],
+    "gates_passed": []
+  },
+  "claims": {
+    "capabilities_enabled": [],
+    "capabilities_advertised": [],
+    "registration_modes_advertised": [],
+    "release_channels_advertised": []
+  },
+  "sources": [
+    {"id": "SRC-SPEC-NFR", "location": "docs/product-spec.md#9-nonfunctional-requirements"},
+    {"id": "SRC-SPEC-GATES", "location": "docs/product-spec.md#10-quality-and-safety-gates"},
+    {"id": "SRC-SPEC-DISCONNECT", "location": "docs/product-spec.md#810-disconnect-uninstall-and-update-recovery"},
+    {"id": "SRC-PLAN-ADR", "location": "docs/implementation-plan.md#10-required-architecture-decision-records"},
+    {"id": "SRC-PLAN-PHASE7", "location": "docs/implementation-plan.md#phase-7--hardening-packaging-and-documentation"},
+    {"id": "SRC-ADR-001", "location": "docs/adr/ADR-001-runtime-and-self-hosting-boundary.md"},
+    {"id": "SRC-ADR-005", "location": "docs/adr/ADR-005-persistence-and-cryptography.md"},
+    {"id": "SRC-ADR-010", "location": "docs/adr/ADR-010-add-in-bridge.md"},
+    {"id": "SRC-ADR-PRIV-001", "location": "docs/adr/ADR-PRIV-001-derived-metadata-and-source-boundary.md"},
+    {"id": "SRC-RESEARCH-CONNECTION", "location": "research/microsoft-graph/connection-options.md"},
+    {"id": "SRC-AGENTS", "location": "AGENTS.md"},
+    {"id": "SRC-THREAT-INDEX", "location": "docs/threat-model/README.md"}
+  ]
+}

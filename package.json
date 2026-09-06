@@ -1,0 +1,30 @@
+{
+  "name": "openloops-build-skeleton",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "files": [],
+  "packageManager": "npm@11.16.0",
+  "engines": {
+    "node": "24.18.0",
+    "npm": "11.16.0"
+  },
+  "scripts": {
+    "generate:contracts": "node tools/generate-contracts.mjs",
+    "format:check": "prettier --no-config --no-editorconfig --check package.json outlook-addin/tsconfig.json outlook-addin/src outlook-addin/test tools/generate-contracts.mjs eslint.config.mjs",
+    "lint": "eslint outlook-addin/src outlook-addin/test tools/generate-contracts.mjs",
+    "build:addin": "npm run generate:contracts && tsc -p outlook-addin/tsconfig.json",
+    "check:addin": "npm run generate:contracts && tsc -p outlook-addin/tsconfig.json --noEmit",
+    "test:addin": "npm run build:addin && node --test target/outlook-addin/test/*.test.js"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.13.3",
+    "@types/office-js": "1.0.600",
+    "eslint": "10.7.0",
+    "prettier": "3.9.5",
+    "typescript": "6.0.2",
+    "typescript-eslint": "8.64.0"
+  }
+}
