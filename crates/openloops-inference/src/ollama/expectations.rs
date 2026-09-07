@@ -422,31 +422,44 @@ fn push_unique(items: &mut Vec<Expectation>, item: Expectation) -> bool {
 /// broken resolution quote together with a `kind: "request"` row whose
 /// evidence message the signed-in user actually sent.
 ///
-/// Evidence and waiting-party failures make a further probe uninformative
-/// (both fail `candidate()` regardless of resolution or deadline content),
-/// so the ownership/chronology/schema probe below only runs when both are
-/// sound: a fresh `candidate()` attempt with resolution and deadline fully
-/// cleared then isolates whether some other, unlisted validation --
-/// ownership, chronology, or schema -- is the (possibly additional)
-/// problem. Guarantees at least one reason is pushed.
+/// Evidence and waiting-party failures make the ownership/chronology/schema
+/// reason uninformative on their own (a broken evidence or waiting-party
+/// quote already fails `candidate()` regardless of resolution or deadline
+/// content). When both are sound, the row still failed for some other
+/// reason: `parse()` only calls this after every combination of clearing
+/// resolution and deadline has already been tried and still failed, so the
+/// fault is guaranteed to lie in ownership, chronology, or the output
+/// schema -- no further probe call is needed to confirm it. When the
+/// evidence value itself is missing or not an object (a malformed or
+/// non-object row), that is itself a schema problem, so it is reported
+/// under the same schema/ownership reason rather than as a bad quotation.
+/// Guarantees at least one reason is pushed.
 fn push_rejection_reasons(
     reasons: &mut Vec<&'static str>,
     row: &Value,
     messages: &[ConversationMessage],
 ) {
+    let evidence_is_object = row.get("evidence").is_some_and(Value::is_object);
     let evidence_bad = anchor(&row["evidence"], messages, 12).is_err();
     if evidence_bad {
-        reasons
-            .push("Original evidence was not a unique exact quotation in a current message block.");
+        if evidence_is_object {
+            reasons.push(
+                "Original evidence was not a unique exact quotation in a current message block.",
+            );
+        } else {
+            reasons.push("Ownership, chronology, or output schema was invalid.");
+        }
     }
     if optional_anchor(&row["deadline"], messages, 2).is_err() {
         reasons.push("Deadline evidence was invalid.");
     }
     let resolution_present = !row["resolution"].is_null();
-    if optional_anchor(&row["resolution"], messages, 12).is_err() {
+    let resolution_bad = optional_anchor(&row["resolution"], messages, 12).is_err();
+    if resolution_bad {
         reasons.push("Completion evidence was invalid.");
     }
     if resolution_present
+        && !resolution_bad
         && !matches!(
             row.get("resolution_kind").and_then(Value::as_str),
             Some("completed" | "declined" | "withdrawn" | "superseded" | "agreed")
@@ -461,15 +474,7 @@ fn push_rejection_reasons(
         reasons.push("Waiting-party reference was not a supplied participant.");
     }
     if !evidence_bad && !waiting_party_bad {
-        let mut cleared = row.clone();
-        if let Some(object) = cleared.as_object_mut() {
-            object.insert("resolution".into(), Value::Null);
-            object.insert("resolution_kind".into(), Value::Null);
-            object.insert("deadline".into(), Value::Null);
-        }
-        if candidate(&cleared, messages).is_err() {
-            reasons.push("Ownership, chronology, or output schema was invalid.");
-        }
+        reasons.push("Ownership, chronology, or output schema was invalid.");
     }
 }
 
@@ -1117,6 +1122,73 @@ mod tests {
         assert_eq!(result.items.len(), 0);
         assert_eq!(result.rejected, 1);
         assert_eq!(result.degraded, 0);
+    }
+    #[test]
+    fn missing_deadline_key_is_rejected_with_a_schema_reason() {
+        // A row rejected only because a required key (here `deadline`) is
+        // absent must not slip through push_rejection_reasons() with zero
+        // reasons recorded: the ownership/chronology/schema reason must
+        // fire even though evidence and waiting_party are both fine.
+        let m = messages();
+        let mut row = claim();
+        row.as_object_mut().unwrap().remove("deadline");
+        let result = parse_row(&row, &m);
+        assert_eq!(result.items.len(), 0);
+        assert_eq!(result.rejected, 1);
+        assert!(!result.rejection_reasons.is_empty());
+        assert!(
+            result
+                .rejection_reasons
+                .contains(&"Ownership, chronology, or output schema was invalid.")
+        );
+    }
+    #[test]
+    fn completion_kind_reason_is_not_reported_when_resolution_quote_itself_is_bad() {
+        // "Completion kind was missing or not one of the supported values."
+        // must be gated on the resolution anchor being valid: when the
+        // resolution quote itself does not resolve, only the "Completion
+        // evidence was invalid." reason is informative.
+        let m = resolution_messages();
+        let mut row = claim();
+        row["resolution"] =
+            json!({"message":"m1","block":"b0","quote":"I sent the resume as requested"});
+        row["resolution_kind"] = json!("not-a-real-kind");
+        // Break something else independently checkable (ownership) so the
+        // row is rejected outright rather than salvaged, exercising
+        // push_rejection_reasons directly.
+        row["kind"] = json!("promise");
+        let result = parse_row(&row, &m);
+        assert_eq!(result.items.len(), 0);
+        assert_eq!(result.rejected, 1);
+        assert!(
+            result
+                .rejection_reasons
+                .contains(&"Completion evidence was invalid.")
+        );
+        assert!(
+            !result
+                .rejection_reasons
+                .contains(&"Completion kind was missing or not one of the supported values.")
+        );
+    }
+    #[test]
+    fn missing_or_non_object_evidence_reports_schema_reason_not_quotation_reason() {
+        let m = messages();
+        for bad_evidence in [Value::Null, json!("not an object"), json!(42)] {
+            let mut row = claim();
+            row["evidence"] = bad_evidence;
+            let result = parse_row(&row, &m);
+            assert_eq!(result.items.len(), 0);
+            assert_eq!(result.rejected, 1);
+            assert!(
+                result
+                    .rejection_reasons
+                    .contains(&"Ownership, chronology, or output schema was invalid.")
+            );
+            assert!(!result.rejection_reasons.contains(
+                &"Original evidence was not a unique exact quotation in a current message block."
+            ));
+        }
     }
     #[test]
     fn strict_top_level_schema_rejects_duplicates_and_unknown_fields() {

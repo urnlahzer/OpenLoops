@@ -6,8 +6,10 @@ in the normal application.
 
 1. **Scan inboxes** opens Microsoft sign-in, reads the visible 30-day history,
    and automatically analyzes conversations with the selected Ollama model.
-   There is no individual message selection. Inbox and Sent Items are joined
-   by conversation identity. Groups retain their own thread identity.
+   There is no individual message selection. Personal Inbox and Sent Items
+   are joined by conversation identity, and a split identity is merged back
+   in when the subject, an outside participant, and the timing all match.
+   Groups keep their own thread identity and never merge.
 2. Review each complete action, suggested owner, waiting party, and stated
    deadline. Under the stated deadline the card shows how it ages (due, past
    due, a date range, tied to an event, or soft urgency); past-due open items
