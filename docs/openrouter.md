@@ -28,7 +28,19 @@ Create a key at <https://openrouter.ai/settings/keys>.
 The listing names every ZDR endpoint of every model, so many rows share a
 model. OpenLoops keeps the first healthy row per `model_id`, drops every
 endpoint whose `status` is non-zero, and never persists the raw response. Only
-models with a working ZDR endpoint are selectable.
+models with a working ZDR endpoint are selectable. A row OpenLoops cannot read
+is skipped rather than failing the whole menu, since one new or malformed row
+among hundreds must not make every model unselectable; a listing that is not a
+bounded `data` array does fail.
+
+Unlike a completion answer, the listing is not checked for duplicate JSON
+members. It is several hundred kilobytes, past the strict parser's bound, so it
+is parsed with a plain JSON reader where a repeated member silently takes its
+last value. That is acceptable only because the listing is never an authority:
+it populates a menu you choose from, the id you choose is revalidated before it
+reaches a request, and `provider.zdr=true` on every request enforces the routing
+whatever the listing said. Completion answers still go through the strict
+duplicate-rejecting parser.
 
 Each analysis request is a single non-streaming
 `POST https://openrouter.ai/api/v1/chat/completions` with the key as an

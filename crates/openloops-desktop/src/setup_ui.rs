@@ -176,6 +176,7 @@ impl SetupApp {
                 label: self.openrouter_selected.clone(),
             }]
         };
+        self.trim_keys();
         self.reveal_key = false;
         self.microsoft = Status::default();
         self.model_status = Status::default();
@@ -468,6 +469,18 @@ impl SetupApp {
         };
     }
 
+    /// Provider keys never contain whitespace. Trimming once, where the key
+    /// enters the app, keeps the enabled checks, the Test button, the scan,
+    /// and the saved record on exactly the same value.
+    fn trim_keys(&mut self) {
+        for key in [&mut self.key, &mut self.openrouter_key] {
+            let trimmed = key.trim().to_owned();
+            if trimmed.len() != key.len() {
+                **key = trimmed;
+            }
+        }
+    }
+
     /// The key for the selected provider. Each provider keeps its own, so
     /// switching back and forth never sends one provider's key to the other.
     fn active_key(&self) -> &Zeroizing<String> {
@@ -611,13 +624,13 @@ impl SetupApp {
         }
         if ui
             .add_enabled(
-                !self.selected_model().is_empty() && !self.active_key().trim().is_empty(),
+                !self.selected_model().is_empty() && !self.active_key().is_empty(),
                 egui::Button::new(RichText::new("Test selected model").color(Color32::WHITE))
                     .fill(GREEN),
             )
             .clicked()
         {
-            let key = Zeroizing::new(self.active_key().trim().to_owned());
+            let key = self.active_key().clone();
             let model = self.selected_model().to_owned();
             let provider = self.provider;
             self.model_status = Status::default();
@@ -668,6 +681,7 @@ impl SetupApp {
             )
             .changed()
         {
+            self.trim_keys();
             self.models.clear();
             self.selected.clear();
             self.model_status = Status::default();
@@ -678,13 +692,10 @@ impl SetupApp {
             ui.hyperlink_to("Create an API key", "https://ollama.com/settings/keys");
         });
         if ui
-            .add_enabled(
-                !self.key.trim().is_empty(),
-                egui::Button::new("Load cloud models"),
-            )
+            .add_enabled(!self.key.is_empty(), egui::Button::new("Load cloud models"))
             .clicked()
         {
-            let key = Zeroizing::new(self.key.trim().to_owned());
+            let key = self.key.clone();
             self.model_status = Status::default();
             self.start(
                 ui.ctx(),
@@ -726,6 +737,7 @@ impl SetupApp {
             )
             .changed()
         {
+            self.trim_keys();
             self.model_status = Status::default();
             self.pending_save = true;
         }
@@ -758,7 +770,11 @@ impl SetupApp {
                     ui.selectable_value(
                         &mut self.openrouter_selected,
                         model.id.clone(),
-                        format!("{} ({})", model.label, model.id),
+                        if model.label == model.id {
+                            model.id.clone()
+                        } else {
+                            format!("{} ({})", model.label, model.id)
+                        },
                     );
                 }
             });
@@ -792,7 +808,7 @@ impl SetupApp {
             if ui
                 .add_enabled(
                     !self.client_id.trim().is_empty()
-                        && !self.active_key().trim().is_empty()
+                        && !self.active_key().is_empty()
                         && !self.selected_model().is_empty(),
                     egui::Button::new(RichText::new("Scan inboxes").color(Color32::WHITE))
                         .fill(GREEN),
@@ -825,7 +841,7 @@ impl SetupApp {
             if ui
                 .add_enabled(
                     !self.review.messages.is_empty()
-                        && !self.active_key().trim().is_empty()
+                        && !self.active_key().is_empty()
                         && !self.selected_model().is_empty(),
                     egui::Button::new("Rescan loaded mail"),
                 )
@@ -1142,6 +1158,19 @@ mod tests {
         app.poll(&egui::Context::default());
         assert!(app.model_status.succeeded);
         assert!(app.model_status.lines[0].contains("other-model"));
+    }
+
+    #[test]
+    fn keys_are_trimmed_once_so_testing_and_scanning_use_the_same_value() {
+        let mut app = SetupApp::new(&egui::Context::default());
+        app.key = Zeroizing::new("  synthetic-ollama-key\n".into());
+        app.openrouter_key = Zeroizing::new("\tsynthetic-openrouter-key ".into());
+        app.trim_keys();
+        assert_eq!(&*app.key, "synthetic-ollama-key");
+        assert_eq!(&*app.openrouter_key, "synthetic-openrouter-key");
+        assert_eq!(&**app.active_key(), "synthetic-ollama-key");
+        app.provider = Provider::OpenRouter;
+        assert_eq!(&**app.active_key(), "synthetic-openrouter-key");
     }
 
     #[test]
