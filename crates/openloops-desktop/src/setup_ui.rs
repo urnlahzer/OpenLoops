@@ -4,12 +4,13 @@ use std::sync::{Arc, atomic::Ordering};
 use std::time::Instant;
 
 use crate::review_ui::ReviewState;
-use crate::settings::{Settings, SettingsError, SettingsStore, production_store};
+use crate::settings::{Provider, Settings, SettingsError, SettingsStore, production_store};
 use eframe::egui::{self, Color32, RichText};
 use openloops_graph::live::{
     ConnectionConfig, ConnectionError, ConnectionReport, check_connection,
 };
 use openloops_inference::ollama::{OllamaCloud, ProviderError, available_models, suggested_model};
+use openloops_inference::openrouter::{ModelChoice, OpenRouter, available_zdr_models};
 use zeroize::Zeroizing;
 
 const GREEN: Color32 = Color32::from_rgb(29, 87, 67);
@@ -19,6 +20,7 @@ const MUTED: Color32 = Color32::from_rgb(94, 111, 104);
 enum Outcome {
     Microsoft(Result<ConnectionReport, ConnectionError>),
     Models(Result<Vec<String>, ProviderError>),
+    ZdrModels(Result<Vec<ModelChoice>, ProviderError>),
     Generation(Result<(), ProviderError>),
     Mail(Result<Vec<openloops_graph::live::review::SourceReview>, ConnectionError>),
     Scan(Result<crate::review_ui::ScanResult, ProviderError>, String),
@@ -28,7 +30,7 @@ enum Outcome {
 #[derive(Clone, Copy)]
 enum Service {
     Microsoft,
-    Ollama,
+    Model,
     Review,
 }
 
@@ -52,8 +54,12 @@ pub struct SetupApp {
     reveal_key: bool,
     models: Vec<String>,
     selected: String,
+    provider: Provider,
+    openrouter_key: Zeroizing<String>,
+    zdr_models: Vec<ModelChoice>,
+    openrouter_selected: String,
     microsoft: Status,
-    ollama: Status,
+    model_status: Status,
     pending: Option<Receiver<Outcome>>,
     pending_service: Service,
     progress: &'static str,
@@ -97,8 +103,12 @@ impl SetupApp {
             reveal_key: false,
             models: vec![],
             selected: String::new(),
+            provider: Provider::default(),
+            openrouter_key: Zeroizing::new(String::new()),
+            zdr_models: vec![],
+            openrouter_selected: String::new(),
             microsoft: Status::default(),
-            ollama: Status::default(),
+            model_status: Status::default(),
             pending: None,
             pending_service: Service::Microsoft,
             progress: "",
@@ -130,6 +140,7 @@ impl SetupApp {
         if std::env::args().any(|arg| arg == "--preview-review") {
             app.review = crate::review_ui::layout_fixture();
             app.selected = "Synthetic layout check".into();
+            app.provider = Provider::OllamaCloud;
             app.active_tab = Tab::Review;
         }
         app
@@ -153,9 +164,20 @@ impl SetupApp {
         } else {
             vec![self.selected.clone()]
         };
+        self.provider = settings.provider;
+        self.openrouter_key = settings.openrouter_key;
+        self.openrouter_selected = settings.openrouter_selected;
+        self.zdr_models = if self.openrouter_selected.is_empty() {
+            vec![]
+        } else {
+            vec![ModelChoice {
+                id: self.openrouter_selected.clone(),
+                label: self.openrouter_selected.clone(),
+            }]
+        };
         self.reveal_key = false;
         self.microsoft = Status::default();
-        self.ollama = Status::default();
+        self.model_status = Status::default();
         self.pending_save = false;
         self.review = ReviewState::default();
         self.review_status = Status::default();
@@ -172,8 +194,8 @@ impl SetupApp {
                 self.automatic_save = true;
                 self.active_tab = if existed
                     && !self.client_id.is_empty()
-                    && !self.key.is_empty()
-                    && !self.selected.is_empty()
+                    && !self.active_key().is_empty()
+                    && !self.selected_model().is_empty()
                 {
                     Tab::Review
                 } else {
@@ -210,6 +232,9 @@ impl SetupApp {
             shared: self.shared.clone(),
             key: self.key.clone(),
             selected: self.selected.clone(),
+            provider: self.provider,
+            openrouter_key: self.openrouter_key.clone(),
+            openrouter_selected: self.openrouter_selected.clone(),
         };
         match store.save(&settings) {
             Ok(()) => {
@@ -305,7 +330,7 @@ impl SetupApp {
                 };
                 match self.pending_service {
                     Service::Microsoft => self.microsoft = status,
-                    Service::Ollama => self.ollama = status,
+                    Service::Model => self.model_status = status,
                     Service::Review => self.review_status = status,
                 }
                 return;
@@ -316,37 +341,22 @@ impl SetupApp {
             Outcome::Reminder(key, outcome) => {
                 self.reminder_outcome(key, outcome);
             }
-            Outcome::Models(Ok(models)) => {
-                if !models.contains(&self.selected) {
-                    self.selected = suggested_model(&models)
-                        .and_then(|index| models.get(index))
-                        .cloned()
-                        .or_else(|| models.first().cloned())
-                        .unwrap_or_default();
-                    self.pending_save = true;
-                }
-                self.ollama = Status {
-                    lines: vec![if models.is_empty() {
-                        "No cloud models were returned. Try loading the list again.".into()
-                    } else {
-                        format!(
-                            "{} cloud models loaded. Choose one and test it below.",
-                            models.len()
-                        )
-                    }],
-                    succeeded: false,
-                };
-                self.models = models;
-            }
-            Outcome::Models(Err(error)) | Outcome::Generation(Err(error)) => {
-                self.ollama = Status {
+            Outcome::Models(Ok(models)) => self.loaded_models(models),
+            Outcome::ZdrModels(Ok(models)) => self.loaded_zdr_models(models),
+            Outcome::Models(Err(error))
+            | Outcome::ZdrModels(Err(error))
+            | Outcome::Generation(Err(error)) => {
+                self.model_status = Status {
                     lines: vec![error.to_string()],
                     succeeded: false,
                 };
             }
             Outcome::Generation(Ok(())) => {
-                self.ollama = Status {
-                    lines: vec![format!("{} passed the generation check.", self.selected)],
+                self.model_status = Status {
+                    lines: vec![format!(
+                        "{} passed the generation check.",
+                        self.selected_model()
+                    )],
                     succeeded: true,
                 };
             }
@@ -385,6 +395,58 @@ impl SetupApp {
         }
     }
 
+    /// Keeps the Ollama Cloud selection only while the freshly loaded list
+    /// still offers it; otherwise falls back to the suggested model.
+    fn loaded_models(&mut self, models: Vec<String>) {
+        if !models.contains(&self.selected) {
+            self.selected = suggested_model(&models)
+                .and_then(|index| models.get(index))
+                .cloned()
+                .or_else(|| models.first().cloned())
+                .unwrap_or_default();
+            self.pending_save = true;
+        }
+        self.model_status = Status {
+            lines: vec![if models.is_empty() {
+                "No cloud models were returned. Try loading the list again.".into()
+            } else {
+                format!(
+                    "{} cloud models loaded. Choose one and test it below.",
+                    models.len()
+                )
+            }],
+            succeeded: false,
+        };
+        self.models = models;
+    }
+
+    /// Keeps the `OpenRouter` selection only while the model still has a
+    /// zero-data-retention endpoint; otherwise falls back to the first one.
+    fn loaded_zdr_models(&mut self, models: Vec<ModelChoice>) {
+        if !models
+            .iter()
+            .any(|model| model.id == self.openrouter_selected)
+        {
+            self.openrouter_selected = models
+                .first()
+                .map(|model| model.id.clone())
+                .unwrap_or_default();
+            self.pending_save = true;
+        }
+        self.model_status = Status {
+            lines: vec![if models.is_empty() {
+                "No zero-data-retention models were returned. Try loading the list again.".into()
+            } else {
+                format!(
+                    "{} zero-data-retention models loaded. Choose one and test it below.",
+                    models.len()
+                )
+            }],
+            succeeded: false,
+        };
+        self.zdr_models = models;
+    }
+
     fn reminder_outcome(
         &mut self,
         key: [u8; 32],
@@ -405,10 +467,28 @@ impl SetupApp {
         };
     }
 
+    /// The key for the selected provider. Each provider keeps its own, so
+    /// switching back and forth never sends one provider's key to the other.
+    fn active_key(&self) -> &Zeroizing<String> {
+        match self.provider {
+            Provider::OllamaCloud => &self.key,
+            Provider::OpenRouter => &self.openrouter_key,
+        }
+    }
+
+    /// The model chosen for the selected provider.
+    fn selected_model(&self) -> &str {
+        match self.provider {
+            Provider::OllamaCloud => &self.selected,
+            Provider::OpenRouter => &self.openrouter_selected,
+        }
+    }
+
     fn start_scan(&mut self, ctx: &egui::Context) {
         let messages = self.review.messages.clone();
-        let key = self.key.clone();
-        let model = self.selected.clone();
+        let key = self.active_key().clone();
+        let model = self.selected_model().to_owned();
+        let provider = self.provider;
         let progress = Arc::new(crate::review_ui::ScanProgress::default());
         progress.total.store(messages.len(), Ordering::Relaxed);
         self.scan_progress = Some(progress.clone());
@@ -419,10 +499,13 @@ impl SetupApp {
         self.start(
             ctx,
             Service::Review,
-            "Finding open loops with Ollama Cloud",
+            match provider {
+                Provider::OllamaCloud => "Finding open loops with Ollama Cloud",
+                Provider::OpenRouter => "Finding open loops with OpenRouter",
+            },
             move || {
                 Outcome::Scan(
-                    crate::review_ui::scan(key.to_string(), &model, &messages, &progress),
+                    crate::review_ui::scan(provider, key.to_string(), &model, &messages, &progress),
                     model,
                 )
             },
@@ -508,10 +591,71 @@ impl SetupApp {
         status(ui, &self.microsoft);
     }
 
-    fn ollama_card(&mut self, ui: &mut egui::Ui) {
+    fn model_card(&mut self, ui: &mut egui::Ui) {
         ui.heading("2  Choose your AI model");
-        ui.label("Ollama Cloud");
-        ui.add_space(4.0);
+        ui.label(RichText::new("Provider").strong());
+        let before = self.provider;
+        ui.horizontal(|ui| {
+            for provider in [Provider::OllamaCloud, Provider::OpenRouter] {
+                ui.selectable_value(&mut self.provider, provider, provider.label());
+            }
+        });
+        if before != self.provider {
+            self.model_status = Status::default();
+            self.pending_save = true;
+        }
+        match self.provider {
+            Provider::OllamaCloud => self.ollama_inputs(ui),
+            Provider::OpenRouter => self.openrouter_inputs(ui),
+        }
+        if ui
+            .add_enabled(
+                !self.selected_model().is_empty() && !self.active_key().trim().is_empty(),
+                egui::Button::new(RichText::new("Test selected model").color(Color32::WHITE))
+                    .fill(GREEN),
+            )
+            .clicked()
+        {
+            let key = Zeroizing::new(self.active_key().trim().to_owned());
+            let model = self.selected_model().to_owned();
+            let provider = self.provider;
+            self.model_status = Status::default();
+            self.start(
+                ui.ctx(),
+                Service::Model,
+                "Testing the selected cloud model (up to 60 seconds per request)",
+                move || {
+                    Outcome::Generation(match provider {
+                        Provider::OllamaCloud => OllamaCloud::connect(key.to_string(), &model)
+                            .and_then(|provider| provider.check_generation()),
+                        Provider::OpenRouter => OpenRouter::connect(key.to_string(), &model)
+                            .and_then(|provider| provider.check_generation()),
+                    })
+                },
+            );
+        }
+        status(ui, &self.model_status);
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new(format!(
+                "This connection test sends no email. Scanning inboxes sends recent message text from your configured inboxes to {}.",
+                self.provider_disclosure()
+            ))
+            .small()
+            .color(MUTED),
+        );
+    }
+
+    /// How the selected provider is named in every data-transmission
+    /// disclosure, including the routing restriction where one applies.
+    fn provider_disclosure(&self) -> &'static str {
+        match self.provider {
+            Provider::OllamaCloud => "Ollama Cloud",
+            Provider::OpenRouter => "OpenRouter, restricted to zero-data-retention endpoints",
+        }
+    }
+
+    fn ollama_inputs(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("API key").strong());
         if ui
             .add(
@@ -525,7 +669,7 @@ impl SetupApp {
         {
             self.models.clear();
             self.selected.clear();
-            self.ollama = Status::default();
+            self.model_status = Status::default();
             self.pending_save = true;
         }
         ui.horizontal(|ui| {
@@ -540,10 +684,10 @@ impl SetupApp {
             .clicked()
         {
             let key = Zeroizing::new(self.key.trim().to_owned());
-            self.ollama = Status::default();
+            self.model_status = Status::default();
             self.start(
                 ui.ctx(),
-                Service::Ollama,
+                Service::Model,
                 "Loading Ollama Cloud models",
                 move || Outcome::Models(available_models(&key)),
             );
@@ -564,52 +708,91 @@ impl SetupApp {
                 }
             });
         if before != self.selected {
-            self.ollama = Status::default();
+            self.model_status = Status::default();
             self.pending_save = true;
         }
+    }
+
+    fn openrouter_inputs(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("API key").strong());
         if ui
-            .add_enabled(
-                !self.selected.is_empty() && !self.key.trim().is_empty(),
-                egui::Button::new(RichText::new("Test selected model").color(Color32::WHITE))
-                    .fill(GREEN),
+            .add(
+                egui::TextEdit::singleline(&mut *self.openrouter_key)
+                    .char_limit(4096)
+                    .password(!self.reveal_key)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Paste your OpenRouter API key"),
             )
-            .clicked()
+            .changed()
         {
-            let key = Zeroizing::new(self.key.trim().to_owned());
-            let model = self.selected.clone();
-            self.ollama = Status::default();
+            self.model_status = Status::default();
+            self.pending_save = true;
+        }
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.reveal_key, "Show key");
+            ui.hyperlink_to("Create an API key", "https://openrouter.ai/settings/keys");
+        });
+        // The listing is public, so it loads without a key and sends none.
+        if ui.button("Load ZDR models").clicked() {
+            self.model_status = Status::default();
             self.start(
                 ui.ctx(),
-                Service::Ollama,
-                "Testing the selected cloud model (up to 60 seconds per request)",
-                move || {
-                    Outcome::Generation(
-                        OllamaCloud::connect(key.to_string(), &model)
-                            .and_then(|provider| provider.check_generation()),
-                    )
-                },
+                Service::Model,
+                "Loading OpenRouter zero-data-retention models",
+                || Outcome::ZdrModels(available_zdr_models()),
             );
         }
-        status(ui, &self.ollama);
-        ui.add_space(8.0);
-        ui.label(RichText::new("This connection test sends no email. Scanning inboxes sends recent message text from your configured inboxes to Ollama Cloud.").small().color(MUTED));
+        ui.add_space(6.0);
+        ui.label(RichText::new("Model").strong());
+        let before = self.openrouter_selected.clone();
+        egui::ComboBox::from_id_salt("openrouter-model")
+            .selected_text(if self.openrouter_selected.is_empty() {
+                "Load models to choose"
+            } else {
+                &self.openrouter_selected
+            })
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for model in &self.zdr_models {
+                    ui.selectable_value(
+                        &mut self.openrouter_selected,
+                        model.id.clone(),
+                        format!("{} ({})", model.label, model.id),
+                    );
+                }
+            });
+        if before != self.openrouter_selected {
+            self.model_status = Status::default();
+            self.pending_save = true;
+        }
+        ui.label(
+            RichText::new(
+                "Only models with a zero-data-retention endpoint are listed, and every request asks OpenRouter to route to those endpoints only. OpenRouter's own retention policy still applies.",
+            )
+            .small()
+            .color(MUTED),
+        );
     }
 
     fn review_card(&mut self, ui: &mut egui::Ui) {
         if self.review.analysis.is_none() {
             ui.label("Scan the last 30 days of Inbox and Sent Items, plus configured Groups and shared mailboxes. Each conversation is checked for expectations and later replies.");
-            ui.label("Message text and participants go to your chosen Ollama Cloud model. Attachments are not sent.");
+            ui.label(format!(
+                "Message text and participants go to your chosen model at {}. Attachments are not sent.",
+                self.provider_disclosure()
+            ));
         }
-        ui.collapsing("Scan scope and data sent to Ollama", |ui| {
+        let disclosure = self.provider_disclosure();
+        ui.collapsing("Scan scope and data sent to the model provider", |ui| {
             ui.label("The last 30 days of Inbox and Sent Items: up to 100 messages per folder. Groups: up to 20 recent threads and 40 posts per thread, including earlier thread context. At most 10 configured sources. Capped sources and large conversations are reported as incomplete.");
-            ui.label("Subjects, current text, quoted history and participants are sent to the selected Ollama Cloud model. Attachments are not sent. Scans run when you click Scan; this preview is not an unattended background service.");
+            ui.label(format!("Subjects, current text, quoted history and participants are sent to the selected provider ({disclosure}). Attachments are not sent. Scans run when you click Scan; this preview is not an unattended background service."));
         });
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(
                     !self.client_id.trim().is_empty()
-                        && !self.key.trim().is_empty()
-                        && !self.selected.is_empty(),
+                        && !self.active_key().trim().is_empty()
+                        && !self.selected_model().is_empty(),
                     egui::Button::new(RichText::new("Scan inboxes").color(Color32::WHITE))
                         .fill(GREEN),
                 )
@@ -641,8 +824,8 @@ impl SetupApp {
             if ui
                 .add_enabled(
                     !self.review.messages.is_empty()
-                        && !self.key.trim().is_empty()
-                        && !self.selected.is_empty(),
+                        && !self.active_key().trim().is_empty()
+                        && !self.selected_model().is_empty(),
                     egui::Button::new("Rescan loaded mail"),
                 )
                 .clicked()
@@ -656,12 +839,13 @@ impl SetupApp {
         });
         ui.add_space(8.0);
         ui.label(format!(
-            "Selected model: {}",
-            if self.selected.is_empty() {
+            "Selected model: {} ({})",
+            if self.selected_model().is_empty() {
                 "Choose one in Connections"
             } else {
-                &self.selected
-            }
+                self.selected_model()
+            },
+            self.provider.label()
         ));
         status(ui, &self.review_status);
         self.review.show(ui);
@@ -767,7 +951,7 @@ impl eframe::App for SetupApp {
                     if self.active_tab == Tab::Review { self.review_card(ui); } else {
                     ui.columns(2, |columns| {
                         egui::Frame::group(columns[0].style()).inner_margin(20.0).show(&mut columns[0], |ui| self.microsoft_card(ui));
-                        egui::Frame::group(columns[1].style()).inner_margin(20.0).show(&mut columns[1], |ui| self.ollama_card(ui));
+                        egui::Frame::group(columns[1].style()).inner_margin(20.0).show(&mut columns[1], |ui| self.model_card(ui));
                     });
                     }
                 });
@@ -863,6 +1047,8 @@ mod tests {
         app.shared = "shared@example.invalid".into();
         app.key = Zeroizing::new("synthetic-key".into());
         app.selected = "deepseek-v4-flash:0731".into();
+        app.openrouter_key = Zeroizing::new("synthetic-openrouter-key".into());
+        app.openrouter_selected = "vendor/model-1".into();
         app.reveal_key = true;
         app.pending_save = true;
         assert!(app.persist_changes());
@@ -875,12 +1061,16 @@ mod tests {
         assert_eq!(reopened.shared, "shared@example.invalid");
         assert_eq!(&*reopened.key, "synthetic-key");
         assert_eq!(reopened.selected, "deepseek-v4-flash:0731");
+        assert_eq!(reopened.provider, Provider::OllamaCloud);
+        assert_eq!(&*reopened.openrouter_key, "synthetic-openrouter-key");
+        assert_eq!(reopened.openrouter_selected, "vendor/model-1");
         assert!(!reopened.reveal_key);
         assert!(!reopened.microsoft.succeeded);
         assert!(reopened.pending.is_none());
         reopened.forget_settings();
         assert!(memory.saved.borrow().is_none());
         assert!(reopened.key.is_empty());
+        assert!(reopened.openrouter_key.is_empty());
         assert!(reopened.groups.is_empty());
         assert!(!reopened.persist_changes());
     }
@@ -941,7 +1131,7 @@ mod tests {
             .unwrap();
         app.poll(&egui::Context::default());
         assert_eq!(app.selected, "deepseek-v4-flash:0731");
-        assert!(!app.ollama.succeeded);
+        assert!(!app.model_status.succeeded);
         assert!(app.pending.is_none());
 
         app.selected = "other-model".into();
@@ -949,8 +1139,43 @@ mod tests {
         app.pending = Some(receiver);
         sender.send(Outcome::Generation(Ok(()))).unwrap();
         app.poll(&egui::Context::default());
-        assert!(app.ollama.succeeded);
-        assert!(app.ollama.lines[0].contains("other-model"));
+        assert!(app.model_status.succeeded);
+        assert!(app.model_status.lines[0].contains("other-model"));
+    }
+
+    #[test]
+    fn each_provider_keeps_its_own_key_and_model_selection() {
+        let mut app = SetupApp::new(&egui::Context::default());
+        app.key = Zeroizing::new("synthetic-ollama-key".into());
+        app.selected = "deepseek-v4-flash:0731".into();
+        app.openrouter_key = Zeroizing::new("synthetic-openrouter-key".into());
+        app.provider = Provider::OpenRouter;
+        assert_eq!(&**app.active_key(), "synthetic-openrouter-key");
+        assert_eq!(app.selected_model(), "");
+
+        let (sender, receiver) = mpsc::channel();
+        app.pending = Some(receiver);
+        sender
+            .send(Outcome::ZdrModels(Ok(vec![
+                ModelChoice {
+                    id: "vendor/model-1".into(),
+                    label: "Vendor: Model 1".into(),
+                },
+                ModelChoice {
+                    id: "vendor/model-2".into(),
+                    label: "Vendor: Model 2".into(),
+                },
+            ])))
+            .unwrap();
+        app.poll(&egui::Context::default());
+        assert_eq!(app.selected_model(), "vendor/model-1");
+        assert!(app.model_status.lines[0].contains("zero-data-retention"));
+
+        app.provider = Provider::OllamaCloud;
+        assert_eq!(&**app.active_key(), "synthetic-ollama-key");
+        assert_eq!(app.selected_model(), "deepseek-v4-flash:0731");
+        app.provider = Provider::OpenRouter;
+        assert_eq!(app.selected_model(), "vendor/model-1");
     }
 
     #[test]
@@ -963,7 +1188,7 @@ mod tests {
         app.poll(&egui::Context::default());
         assert!(app.pending.is_none());
         assert!(!app.microsoft.lines.is_empty());
-        assert!(app.ollama.lines.is_empty());
+        assert!(app.model_status.lines.is_empty());
     }
 
     #[test]

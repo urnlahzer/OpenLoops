@@ -5,6 +5,40 @@ use zeroize::Zeroizing;
 const MAGIC: &[u8] = b"OpenLoopsSetup\x01";
 const MAX_BYTES: usize = 2560; // Windows CRED_MAX_CREDENTIAL_BLOB_SIZE.
 
+/// The model provider a scan is sent to. One is selected at a time; each
+/// keeps its own key and model choice so switching back does not lose them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Provider {
+    #[default]
+    OllamaCloud,
+    OpenRouter,
+}
+
+impl Provider {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::OllamaCloud => "Ollama Cloud",
+            Self::OpenRouter => "OpenRouter",
+        }
+    }
+
+    const fn tag(self) -> &'static str {
+        match self {
+            Self::OllamaCloud => "ollama_cloud",
+            Self::OpenRouter => "openrouter",
+        }
+    }
+
+    fn parse(tag: &str) -> Result<Self, SettingsError> {
+        match tag {
+            "ollama_cloud" => Ok(Self::OllamaCloud),
+            "openrouter" => Ok(Self::OpenRouter),
+            _ => Err(SettingsError::Invalid),
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct Settings {
     pub client_id: String,
@@ -12,6 +46,9 @@ pub struct Settings {
     pub shared: String,
     pub key: Zeroizing<String>,
     pub selected: String,
+    pub provider: Provider,
+    pub openrouter_key: Zeroizing<String>,
+    pub openrouter_selected: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,13 +75,34 @@ pub trait SettingsStore {
 }
 
 impl Settings {
+    /// The key for the currently selected provider.
+    #[must_use]
+    pub fn active_key(&self) -> &Zeroizing<String> {
+        match self.provider {
+            Provider::OllamaCloud => &self.key,
+            Provider::OpenRouter => &self.openrouter_key,
+        }
+    }
+
+    /// The model label chosen for the currently selected provider.
+    #[must_use]
+    pub fn active_model(&self) -> &str {
+        match self.provider {
+            Provider::OllamaCloud => &self.selected,
+            Provider::OpenRouter => &self.openrouter_selected,
+        }
+    }
+
     fn encode(&self) -> Result<Zeroizing<Vec<u8>>, SettingsError> {
         let fields = [
-            &self.client_id,
-            &self.groups,
-            &self.shared,
-            &*self.key,
-            &self.selected,
+            self.client_id.as_str(),
+            self.groups.as_str(),
+            self.shared.as_str(),
+            self.key.as_str(),
+            self.selected.as_str(),
+            self.provider.tag(),
+            self.openrouter_key.as_str(),
+            self.openrouter_selected.as_str(),
         ];
         let size = fields
             .iter()
@@ -63,35 +121,46 @@ impl Settings {
         Ok(bytes)
     }
 
+    /// Records written before the provider selection existed end after the
+    /// fifth field; they load as Ollama Cloud with no `OpenRouter` inputs.
     fn decode(bytes: &[u8]) -> Result<Self, SettingsError> {
         if bytes.len() > MAX_BYTES {
             return Err(SettingsError::Invalid);
         }
         let mut remaining = bytes.strip_prefix(MAGIC).ok_or(SettingsError::Invalid)?;
-        let mut next = || -> Result<&str, SettingsError> {
-            let (length, tail) = remaining
-                .split_at_checked(4)
-                .ok_or(SettingsError::Invalid)?;
-            let length =
-                u32::from_le_bytes(length.try_into().map_err(|_| SettingsError::Invalid)?) as usize;
-            let (field, tail) = tail
-                .split_at_checked(length)
-                .ok_or(SettingsError::Invalid)?;
-            remaining = tail;
-            std::str::from_utf8(field).map_err(|_| SettingsError::Invalid)
+        let mut settings = Self {
+            client_id: next(&mut remaining)?,
+            groups: next(&mut remaining)?,
+            shared: next(&mut remaining)?,
+            key: Zeroizing::new(next(&mut remaining)?),
+            selected: next(&mut remaining)?,
+            ..Self::default()
         };
-        let settings = Self {
-            client_id: next()?.to_owned(),
-            groups: next()?.to_owned(),
-            shared: next()?.to_owned(),
-            key: Zeroizing::new(next()?.to_owned()),
-            selected: next()?.to_owned(),
-        };
+        if !remaining.is_empty() {
+            settings.provider = Provider::parse(&next(&mut remaining)?)?;
+            settings.openrouter_key = Zeroizing::new(next(&mut remaining)?);
+            settings.openrouter_selected = next(&mut remaining)?;
+        }
         if !remaining.is_empty() {
             return Err(SettingsError::Invalid);
         }
         Ok(settings)
     }
+}
+
+fn next(remaining: &mut &[u8]) -> Result<String, SettingsError> {
+    let (length, tail) = remaining
+        .split_at_checked(4)
+        .ok_or(SettingsError::Invalid)?;
+    let length =
+        u32::from_le_bytes(length.try_into().map_err(|_| SettingsError::Invalid)?) as usize;
+    let (field, tail) = tail
+        .split_at_checked(length)
+        .ok_or(SettingsError::Invalid)?;
+    *remaining = tail;
+    std::str::from_utf8(field)
+        .map(str::to_owned)
+        .map_err(|_| SettingsError::Invalid)
 }
 
 #[cfg(windows)]
@@ -166,13 +235,53 @@ mod tests {
             shared: "shared@example.invalid".into(),
             key: Zeroizing::new("synthetic-key".into()),
             selected: "deepseek-v4-flash:0731".into(),
+            provider: Provider::OpenRouter,
+            openrouter_key: Zeroizing::new("synthetic-openrouter-key".into()),
+            openrouter_selected: "vendor/model-1".into(),
         }
+    }
+
+    /// The five-field layout written before the provider selection existed.
+    fn legacy_record() -> Vec<u8> {
+        let mut bytes = MAGIC.to_vec();
+        for field in [
+            "00000000-0000-0000-0000-000000000000",
+            "hello@example.invalid",
+            "shared@example.invalid",
+            "synthetic-key",
+            "deepseek-v4-flash:0731",
+        ] {
+            bytes.extend_from_slice(&u32::try_from(field.len()).unwrap().to_le_bytes());
+            bytes.extend_from_slice(field.as_bytes());
+        }
+        bytes
     }
 
     #[test]
     fn versioned_encoding_rejects_truncation_trailing_data_and_unknown_version() {
         let encoded = synthetic().encode().unwrap();
+        let settings = synthetic();
+        let legacy_end = MAGIC.len()
+            + [
+                settings.client_id.as_str(),
+                settings.groups.as_str(),
+                settings.shared.as_str(),
+                settings.key.as_str(),
+                settings.selected.as_str(),
+            ]
+            .iter()
+            .map(|field| 4 + field.len())
+            .sum::<usize>();
         for length in 0..encoded.len() {
+            if length == legacy_end {
+                // A record truncated exactly at the pre-provider boundary is
+                // by construction identical to one written before the
+                // provider selection existed, and loads as that.
+                let truncated = Settings::decode(&encoded[..length]).unwrap();
+                assert_eq!(truncated.provider, Provider::OllamaCloud);
+                assert!(truncated.openrouter_key.is_empty());
+                continue;
+            }
             assert!(Settings::decode(&encoded[..length]).is_err());
         }
         let mut bad = encoded.to_vec();
@@ -184,6 +293,41 @@ mod tests {
         let decoded = Settings::decode(&encoded).unwrap();
         assert_eq!(decoded.groups, synthetic().groups);
         assert_eq!(&*decoded.key, "synthetic-key");
+        assert_eq!(decoded.provider, Provider::OpenRouter);
+        assert_eq!(&*decoded.openrouter_key, "synthetic-openrouter-key");
+        assert_eq!(decoded.openrouter_selected, "vendor/model-1");
+    }
+
+    #[test]
+    fn records_written_before_the_provider_selection_still_load() {
+        let decoded = Settings::decode(&legacy_record()).unwrap();
+        assert_eq!(decoded.selected, "deepseek-v4-flash:0731");
+        assert_eq!(&*decoded.key, "synthetic-key");
+        assert_eq!(decoded.provider, Provider::OllamaCloud);
+        assert!(decoded.openrouter_key.is_empty());
+        assert!(decoded.openrouter_selected.is_empty());
+        // Re-saving upgrades the record in place without changing the inputs.
+        let upgraded = Settings::decode(&decoded.encode().unwrap()).unwrap();
+        assert_eq!(upgraded.provider, Provider::OllamaCloud);
+        assert_eq!(upgraded.selected, decoded.selected);
+        assert_eq!(&*upgraded.key, "synthetic-key");
+    }
+
+    #[test]
+    fn an_unknown_or_truncated_provider_tag_is_rejected() {
+        let mut unknown = legacy_record();
+        for field in ["synthetic_provider", "", ""] {
+            unknown.extend_from_slice(&u32::try_from(field.len()).unwrap().to_le_bytes());
+            unknown.extend_from_slice(field.as_bytes());
+        }
+        assert_eq!(
+            Settings::decode(&unknown).err(),
+            Some(SettingsError::Invalid)
+        );
+        let mut short = legacy_record();
+        short.extend_from_slice(&u32::try_from("openrouter".len()).unwrap().to_le_bytes());
+        short.extend_from_slice(b"openrouter");
+        assert_eq!(Settings::decode(&short).err(), Some(SettingsError::Invalid));
     }
 
     #[test]

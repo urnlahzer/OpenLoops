@@ -1,4 +1,5 @@
 use crate::deadline_view::{DeadlineView, EVENT_GENERIC_NOUNS, classify};
+use crate::settings::Provider;
 use chrono::{Datelike, TimeZone};
 use openloops_domain::deadline_parse::DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT;
 use openloops_graph::live::{ConnectionError, review::MailItem};
@@ -10,9 +11,11 @@ use openloops_inference::{
         OllamaCloud, ProviderError,
         expectations::{
             Anchor, ConversationMessage, EventPassed, Expectation, Expectations, Owner,
-            ResolutionKind,
+            ResolutionKind, closure as closure_pass, expectations as expectations_pass,
         },
     },
+    openrouter::OpenRouter,
+    provider::ModelClient,
     reply_history::{
         REPLY_HISTORY_CHUNK_MAX_CHARS, chunk_reply_history, is_underscore_separator,
         starts_with_ascii_ci,
@@ -1271,16 +1274,33 @@ fn other_addresses(item: &MailItem) -> Vec<String> {
     addresses.into_iter().collect()
 }
 
+/// Builds the selected provider's client. Both adapters validate the key
+/// and confirm the exact model before any message text is transmitted.
+/// # Errors
+/// Returns the adapter's fixed provider error; no upstream text escapes.
+fn connect(
+    provider: Provider,
+    key: String,
+    model: &str,
+) -> Result<Box<dyn ModelClient>, ProviderError> {
+    Ok(match provider {
+        Provider::OllamaCloud => Box::new(OllamaCloud::connect(key, model)?),
+        Provider::OpenRouter => Box::new(OpenRouter::connect(key, model)?),
+    })
+}
+
 pub fn scan(
+    provider: Provider,
     key: String,
     model: &str,
     messages: &[ReviewMessage],
     progress: &ScanProgress,
 ) -> Result<ScanResult, ProviderError> {
     progress.total.store(messages.len(), Ordering::Relaxed);
-    let provider = OllamaCloud::connect(key, model)?;
+    let client = connect(provider, key, model)?;
+    let client = client.as_ref();
     let mut result = scan_conversations(messages, progress, |conversation| {
-        provider.expectations(conversation)
+        expectations_pass(client, conversation)
     });
     close_passed_events(&mut result, messages, chrono::Utc::now().timestamp());
     scan_closures(
@@ -1288,7 +1308,7 @@ pub fn scan(
         progress,
         &mut result,
         |item, evidence_timestamp, candidates| {
-            provider.closure(item, evidence_timestamp, candidates)
+            closure_pass(client, item, evidence_timestamp, candidates)
         },
     );
     Ok(result)
@@ -2423,8 +2443,9 @@ fn resolution_kind_name(kind: Option<ResolutionKind>) -> &'static str {
         Some(ResolutionKind::Agreed) => "agreed",
     }
 }
-pub fn probe(key: String, model: &str) -> Result<usize, ProviderError> {
-    let provider = OllamaCloud::connect(key, model)?;
+pub fn probe(provider: Provider, key: String, model: &str) -> Result<usize, ProviderError> {
+    let client = connect(provider, key, model)?;
+    let client = client.as_ref();
     let mut passed = 0;
     for (body, from_user, to_user, team, expected) in SEMANTIC_CASES {
         let item = synthetic(body, 0, "a");
@@ -2437,7 +2458,7 @@ pub fn probe(key: String, model: &str) -> Result<usize, ProviderError> {
         if from_user {
             set_outgoing(&mut m);
         }
-        let result = provider.expectations(&[m])?;
+        let result = expectations_pass(client, &[m])?;
         println!(
             "Semantic case {}: {} accepted, {} rejected, {} degraded; expected {}.",
             passed + 1,
@@ -2492,7 +2513,7 @@ pub fn probe(key: String, model: &str) -> Result<usize, ProviderError> {
         .input;
     b.from_user = true;
     set_outgoing(&mut b);
-    let result = provider.expectations(&[a.clone(), b])?;
+    let result = expectations_pass(client, &[a.clone(), b])?;
     if result.items.len() != 1 || result.items[0].resolution.is_none() {
         return Err(ProviderError::InvalidAnalysis);
     }
@@ -2506,7 +2527,7 @@ pub fn probe(key: String, model: &str) -> Result<usize, ProviderError> {
         .input;
     ack.from_user = true;
     set_outgoing(&mut ack);
-    let result = provider.expectations(&[a, ack])?;
+    let result = expectations_pass(client, &[a, ack])?;
     if result.items.len() != 1 || result.items[0].resolution.is_some() {
         return Err(ProviderError::InvalidAnalysis);
     }
@@ -2514,13 +2535,13 @@ pub fn probe(key: String, model: &str) -> Result<usize, ProviderError> {
         "Semantic case {}: acknowledgement did not close the request.",
         passed + 2
     );
-    probe_agreement_case(&provider, passed + 3)?;
-    probe_amendment_case(&provider, passed + 4)?;
-    probe_completed_resolution_case(&provider, passed + 5)?;
+    probe_agreement_case(client, passed + 3)?;
+    probe_amendment_case(client, passed + 4)?;
+    probe_completed_resolution_case(client, passed + 5)?;
     Ok(passed + 5)
 }
 
-/// Runs `AGREEMENT_CASE` against `provider`: a request that asked for the
+/// Runs `AGREEMENT_CASE` against `client`: a request that asked for the
 /// user's agreement or decision, and got it, one message later must still
 /// be recognized as closure evidence, with `resolution_kind` Agreed. The
 /// reply may itself read as a new request, so 1 or 2 items are both
@@ -2528,7 +2549,7 @@ pub fn probe(key: String, model: &str) -> Result<usize, ProviderError> {
 /// request (`m0`) carries the expected resolution kind. `case_number` is
 /// only for print numbering. Prints counts and the observed kind name (both
 /// fixed strings) only; never returned content.
-fn probe_agreement_case(provider: &OllamaCloud, case_number: usize) -> Result<(), ProviderError> {
+fn probe_agreement_case(client: &dyn ModelClient, case_number: usize) -> Result<(), ProviderError> {
     let (request, reply) = AGREEMENT_CASE;
     let request_item = synthetic(request, 0, "c");
     let mut request_message = prepare(&request_item, "Synthetic", 0)
@@ -2541,7 +2562,7 @@ fn probe_agreement_case(provider: &OllamaCloud, case_number: usize) -> Result<()
         .input;
     reply_message.from_user = true;
     set_outgoing(&mut reply_message);
-    let result = provider.expectations(&[request_message, reply_message])?;
+    let result = expectations_pass(client, &[request_message, reply_message])?;
     let anchored = result
         .items
         .iter()
@@ -2573,14 +2594,14 @@ fn probe_agreement_case(provider: &OllamaCloud, case_number: usize) -> Result<()
     Ok(())
 }
 
-/// Runs `AMENDMENT_CASE` against `provider`: a correction that leaves the
+/// Runs `AMENDMENT_CASE` against `client`: a correction that leaves the
 /// underlying action owed (only the amount changed) must NOT resolve the
 /// request -- it must stay open, with the corrected amount reflected in
 /// `action`, citing the original request as evidence. `case_number` is only
 /// for print numbering. Prints counts only (fixed strings); the corrected
 /// amount is asserted, never printed, since `action` is model-supplied free
 /// text derived from message content.
-fn probe_amendment_case(provider: &OllamaCloud, case_number: usize) -> Result<(), ProviderError> {
+fn probe_amendment_case(client: &dyn ModelClient, case_number: usize) -> Result<(), ProviderError> {
     let (request, correction) = AMENDMENT_CASE;
     let request_item = synthetic(request, 0, "e");
     let mut request_message = prepare(&request_item, "Synthetic", 0)
@@ -2592,7 +2613,7 @@ fn probe_amendment_case(provider: &OllamaCloud, case_number: usize) -> Result<()
         .map_err(|_| ProviderError::InvalidAnalysis)?
         .input;
     correction_message.to_user = true;
-    let result = provider.expectations(&[request_message, correction_message])?;
+    let result = expectations_pass(client, &[request_message, correction_message])?;
     println!(
         "Semantic case {}: {} accepted, {} rejected, {} degraded.",
         case_number,
@@ -2613,12 +2634,12 @@ fn probe_amendment_case(provider: &OllamaCloud, case_number: usize) -> Result<()
     Ok(())
 }
 
-/// Runs `COMPLETED_RESOLUTION_CASE` against `provider`: a plain completion
+/// Runs `COMPLETED_RESOLUTION_CASE` against `client`: a plain completion
 /// must still resolve to exactly one item with `resolution_kind` Completed.
 /// `case_number` is only for print numbering. Prints counts and the
 /// observed kind name (both fixed strings) only; never returned content.
 fn probe_completed_resolution_case(
-    provider: &OllamaCloud,
+    client: &dyn ModelClient,
     case_number: usize,
 ) -> Result<(), ProviderError> {
     let (request, reply) = COMPLETED_RESOLUTION_CASE;
@@ -2633,7 +2654,7 @@ fn probe_completed_resolution_case(
         .input;
     reply_message.from_user = true;
     set_outgoing(&mut reply_message);
-    let result = provider.expectations(&[request_message, reply_message])?;
+    let result = expectations_pass(client, &[request_message, reply_message])?;
     println!(
         "Semantic case {}: {} accepted, {} rejected, {} degraded.",
         case_number,
