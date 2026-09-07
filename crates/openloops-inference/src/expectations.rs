@@ -1,7 +1,7 @@
-//! Transient conversation expectations. The model supplies quotations, never offsets.
-use super::{OllamaCloud, ProviderError, json_document};
+//! Transient conversation expectations, over any consented provider. The
+//! model supplies quotations, never offsets.
 use crate::message::CanonicalMessage;
-use crate::provider::ModelClient;
+use crate::provider::{ModelClient, ProviderError, json_document, parse_error};
 use serde_json::{Value, json};
 
 #[derive(Clone)]
@@ -145,7 +145,8 @@ pub fn closure(
     ))
 }
 
-impl OllamaCloud {
+#[cfg(feature = "ollama-cloud")]
+impl crate::ollama::OllamaCloud {
     /// Thin delegate to [`expectations`] for the Ollama Cloud adapter.
     /// # Errors
     /// Returns fixed errors for unavailable providers, invalid schema or oversized input.
@@ -609,7 +610,7 @@ fn push_rejection_reasons(
 
 /// Best-effort parse of the cross-thread closure answer: never propagates
 /// a validation error, only `Some`/`None`, matching the "best-effort pass"
-/// contract of [`OllamaCloud::closure`]. A `resolution_kind` key absent
+/// contract of [`closure`]. A `resolution_kind` key absent
 /// from a null-resolution answer is normalized to `null` first, exactly
 /// like `parse()` does for the per-conversation `expectations()` answer,
 /// so both accepted response shapes in `CLOSURE_INSTRUCTIONS` validate
@@ -642,8 +643,7 @@ fn parse_closure(
 }
 
 fn parse(bytes: &[u8], messages: &[ConversationMessage]) -> Result<Expectations, ProviderError> {
-    let v = openloops_contracts::parse_strict_json(json_document(bytes)?)
-        .map_err(super::parse_error)?;
+    let v = openloops_contracts::parse_strict_json(json_document(bytes)?).map_err(parse_error)?;
     keys(&v, &["version", "expectations"])?;
     if v["version"].as_u64() != Some(1) {
         return Err(ProviderError::InvalidSchema);

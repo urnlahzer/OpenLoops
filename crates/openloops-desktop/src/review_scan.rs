@@ -6,16 +6,14 @@ use openloops_graph::live::{ConnectionError, review::MailItem};
 use openloops_inference::{
     blocks::CanonicalBlock,
     canonical::canonicalize_plain,
-    message::CanonicalMessage,
-    ollama::{
-        OllamaCloud, ProviderError,
-        expectations::{
-            Anchor, ConversationMessage, EventPassed, Expectation, Expectations, Owner,
-            ResolutionKind, closure as closure_pass, expectations as expectations_pass,
-        },
+    expectations::{
+        Anchor, ConversationMessage, EventPassed, Expectation, Expectations, Owner, ResolutionKind,
+        closure as closure_pass, expectations as expectations_pass,
     },
+    message::CanonicalMessage,
+    ollama::OllamaCloud,
     openrouter::OpenRouter,
-    provider::ModelClient,
+    provider::{ModelClient, ProviderError},
     reply_history::{
         REPLY_HISTORY_CHUNK_MAX_CHARS, chunk_reply_history, is_underscore_separator,
         starts_with_ascii_ci,
@@ -2477,9 +2475,9 @@ pub fn probe(provider: Provider, key: String, model: &str) -> Result<usize, Prov
             && result.items.iter().any(|item| {
                 item.owner
                     != if team {
-                        openloops_inference::ollama::expectations::Owner::Team
+                        openloops_inference::expectations::Owner::Team
                     } else {
-                        openloops_inference::ollama::expectations::Owner::You
+                        openloops_inference::expectations::Owner::You
                     }
             })
         {

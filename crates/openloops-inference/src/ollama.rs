@@ -11,7 +11,9 @@ use crate::validation::{AnalysisResult, ParticipantSlot, SuppliedContext, valida
 
 pub use crate::provider::ProviderError;
 
-pub mod expectations;
+/// The conversation passes live in [`crate::expectations`] because they are
+/// provider-neutral; this re-export keeps the original path working.
+pub use crate::expectations;
 
 pub const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 const TAGS: &str = "https://ollama.com/api/tags";

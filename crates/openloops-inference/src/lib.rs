@@ -31,6 +31,9 @@ pub mod walker;
 #[cfg(any(feature = "ollama-cloud", feature = "openrouter"))]
 pub mod provider;
 
+#[cfg(any(feature = "ollama-cloud", feature = "openrouter"))]
+pub mod expectations;
+
 #[cfg(feature = "ollama-cloud")]
 pub mod ollama;
 

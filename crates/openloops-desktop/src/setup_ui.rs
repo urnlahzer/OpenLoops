@@ -9,8 +9,9 @@ use eframe::egui::{self, Color32, RichText};
 use openloops_graph::live::{
     ConnectionConfig, ConnectionError, ConnectionReport, check_connection,
 };
-use openloops_inference::ollama::{OllamaCloud, ProviderError, available_models, suggested_model};
+use openloops_inference::ollama::{OllamaCloud, available_models, suggested_model};
 use openloops_inference::openrouter::{ModelChoice, OpenRouter, available_zdr_models};
+use openloops_inference::provider::ProviderError;
 use zeroize::Zeroizing;
 
 const GREEN: Color32 = Color32::from_rgb(29, 87, 67);
