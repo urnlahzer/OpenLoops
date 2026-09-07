@@ -5,7 +5,9 @@ use openloops_inference::{
     message::CanonicalMessage,
     ollama::{
         OllamaCloud, ProviderError,
-        expectations::{ConversationMessage, Expectations, ResolutionKind},
+        expectations::{
+            Anchor, ConversationMessage, Expectation, Expectations, Owner, ResolutionKind,
+        },
     },
     reply_history::{
         REPLY_HISTORY_CHUNK_MAX_CHARS, chunk_reply_history, is_underscore_separator,
@@ -49,6 +51,67 @@ pub struct ScanResult {
     /// subjects, so it must never be logged, saved, or emitted by
     /// [`probe`].
     pub conversation_notes: Vec<String>,
+    /// Number of open requests resolved by the cross-thread closure pass
+    /// (`scan_closures`), using evidence found in a different conversation
+    /// than the request itself.
+    pub cross_thread_closures: usize,
+}
+
+/// Extracts a lowercase email address from a participant label such as
+/// `Alex <alex@example.invalid>` or a bare address: the token inside angle
+/// brackets when present, otherwise the first whitespace-delimited token
+/// containing `@`. Returns `None` when neither form is found — for example
+/// the `"Not established"` placeholder `candidate()` uses when the model
+/// supplied no waiting party.
+pub fn waiting_party_address(label: &str) -> Option<String> {
+    if let Some(start) = label.find('<')
+        && let Some(rel_end) = label[start + 1..].find('>')
+    {
+        let inner = &label[start + 1..start + 1 + rel_end];
+        if !inner.is_empty() {
+            return Some(inner.to_lowercase());
+        }
+    }
+    label
+        .split_whitespace()
+        .find(|token| token.contains('@'))
+        .map(str::to_lowercase)
+}
+
+/// Candidate messages for the cross-thread closure pass: later messages
+/// the signed-in user sent to `item`'s waiting party, in a conversation
+/// other than `evidence_conversation`, for the same account as the
+/// evidence message. Sorted chronologically ascending and capped at 8 so
+/// the closure prompt stays small.
+pub fn closure_candidates<'a>(
+    item: &Expectation,
+    all: &'a [ReviewMessage],
+    evidence_conversation: &str,
+    evidence_timestamp: i64,
+) -> Vec<&'a ReviewMessage> {
+    let Some(address) = waiting_party_address(&item.waiting_party) else {
+        return vec![];
+    };
+    let Some(account) = all
+        .iter()
+        .find(|m| m.input.handle == item.evidence.message)
+        .map(|m| m.account.as_str())
+    else {
+        return vec![];
+    };
+    let mut candidates: Vec<&ReviewMessage> = all
+        .iter()
+        .filter(|m| {
+            m.account == account
+                && m.input.from_user
+                && m.conversation != evidence_conversation
+                && m.input.timestamp > evidence_timestamp
+                && m.other_addresses.contains(&address)
+        })
+        .collect();
+    candidates.sort_by_key(|m| m.input.timestamp);
+    candidates.truncate(8);
+    candidates
 }
 
 fn block(text: &str) -> Result<CanonicalBlock, ConnectionError> {
@@ -320,9 +383,18 @@ pub fn scan(
 ) -> Result<ScanResult, ProviderError> {
     progress.total.store(messages.len(), Ordering::Relaxed);
     let provider = OllamaCloud::connect(key, model)?;
-    Ok(scan_conversations(messages, progress, |conversation| {
+    let mut result = scan_conversations(messages, progress, |conversation| {
         provider.expectations(conversation)
-    }))
+    });
+    scan_closures(
+        messages,
+        progress,
+        &mut result,
+        |item, evidence_timestamp, candidates| {
+            provider.closure(item, evidence_timestamp, candidates)
+        },
+    );
+    Ok(result)
 }
 /// Builds the one-line diagnostic note for a successfully analyzed
 /// conversation (`index` is 0-based; the note is 1-based), or `None` when
@@ -404,6 +476,7 @@ fn scan_conversations(
         total: messages.len(),
         cancelled: false,
         conversation_notes: vec![],
+        cross_thread_closures: 0,
     };
     let mut conversations: BTreeMap<(&str, &str), Vec<ConversationMessage>> = BTreeMap::new();
     for m in messages {
@@ -456,6 +529,70 @@ fn scan_conversations(
             .fetch_add(conversation.len(), Ordering::Relaxed);
     }
     result
+}
+
+/// After the primary per-conversation scan, attempts to close any
+/// remaining open "you owe someone" requests using completion evidence the
+/// signed-in user sent to the same waiting party in a DIFFERENT
+/// conversation than the request — evidence `scan_conversations`'s
+/// per-conversation analysis never sees. Mutates `result.analysis.items`
+/// in place, sets `cross_thread: true` on every item it resolves, and
+/// counts them in `result.cross_thread_closures`. A provider error stops
+/// only this pass (recorded in `result.failures`), never the whole scan;
+/// `progress.cancel` is checked between calls exactly like
+/// `scan_conversations`.
+fn scan_closures(
+    messages: &[ReviewMessage],
+    progress: &ScanProgress,
+    result: &mut ScanResult,
+    mut closure: impl FnMut(
+        &Expectation,
+        i64,
+        &[ConversationMessage],
+    ) -> Result<Option<(Anchor, ResolutionKind)>, ProviderError>,
+) {
+    for item in &mut result.analysis.items {
+        if progress.cancel.load(Ordering::Relaxed) {
+            result.cancelled = true;
+            break;
+        }
+        if item.resolution.is_some() || item.kind != "request" || item.owner != Owner::You {
+            continue;
+        }
+        let Some(source) = messages
+            .iter()
+            .find(|m| m.input.handle == item.evidence.message)
+        else {
+            continue;
+        };
+        let candidates =
+            closure_candidates(item, messages, &source.conversation, source.input.timestamp);
+        if candidates.is_empty() {
+            continue;
+        }
+        let inputs: Vec<ConversationMessage> = candidates.iter().map(|m| m.input.clone()).collect();
+        match closure(item, source.input.timestamp, &inputs) {
+            Ok(Some((anchor, kind))) => {
+                item.resolution = Some(anchor);
+                item.resolution_kind = Some(kind);
+                item.cross_thread = true;
+                result.cross_thread_closures += 1;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                result
+                    .failures
+                    .push(format!("Cross-thread closure pass: {e}"));
+                break;
+            }
+        }
+    }
+    if result.cross_thread_closures > 0 {
+        result.conversation_notes.push(format!(
+            "Closing evidence found in another conversation for {} expectation(s).",
+            result.cross_thread_closures
+        ));
+    }
 }
 
 const WEEKDAY_OR_MONTH_NAMES: &[&str] = &[
@@ -1581,6 +1718,298 @@ mod tests {
                 ..MailItem::default()
             },
         )
+    }
+
+    fn closure_test_messages() -> (Vec<ReviewMessage>, Expectation) {
+        let evidence = request_from("sam@example.invalid", "req-1", "c1", "acct", "Fee");
+        let all = vec![prepare(&evidence, "Inbox", 0).unwrap()];
+        let item = Expectation {
+            action: "Pay the 350 fee".into(),
+            action_phrase: "pay the 350 fee".into(),
+            owner: Owner::You,
+            waiting_party: "Other <sam@example.invalid>".into(),
+            kind: "request".into(),
+            evidence: Anchor {
+                message: all[0].input.handle.clone(),
+                block: 0,
+                quote: "Can we meet?".into(),
+                context: "Can we meet?".into(),
+            },
+            deadline: None,
+            resolution: None,
+            resolution_kind: None,
+            uncertainty: String::new(),
+            unverified_deadline: false,
+            unverified_resolution: false,
+            cross_thread: false,
+        };
+        (all, item)
+    }
+
+    #[test]
+    fn waiting_party_address_table() {
+        let cases: &[(&str, Option<&str>)] = &[
+            ("Alex <alex@example.invalid>", Some("alex@example.invalid")),
+            ("Alex <ALEX@Example.Invalid>", Some("alex@example.invalid")),
+            ("alex@example.invalid", Some("alex@example.invalid")),
+            (
+                "Alex Rivera alex@example.invalid",
+                Some("alex@example.invalid"),
+            ),
+            ("Not established", None),
+            ("Alex Rivera", None),
+            ("<>", None),
+            ("", None),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                waiting_party_address(input),
+                expected.map(str::to_string),
+                "input: {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn closure_candidates_filters_by_account_sender_conversation_timestamp_and_address() {
+        let (mut all, item) = closure_test_messages();
+        let evidence_conversation = "c1";
+        let evidence_timestamp = all[0].input.timestamp;
+
+        let valid = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
+        all.push(prepare(&valid, "Sent", all.len()).unwrap());
+
+        let wrong_account = reply_to("sam@example.invalid", "w-1", "c2", "acct-two", "Fee");
+        all.push(prepare(&wrong_account, "Sent", all.len()).unwrap());
+
+        let same_conversation = reply_to("sam@example.invalid", "s-1", "c1", "acct", "Fee");
+        all.push(prepare(&same_conversation, "Sent", all.len()).unwrap());
+
+        let not_from_user = request_from("sam@example.invalid", "n-1", "c3", "acct", "Fee");
+        all.push(prepare(&not_from_user, "Inbox", all.len()).unwrap());
+
+        let mut earlier = reply_to("sam@example.invalid", "e-1", "c4", "acct", "Fee");
+        earlier.received = "2026-08-01T12:00:00Z".into();
+        all.push(prepare(&earlier, "Sent", all.len()).unwrap());
+
+        let wrong_address = reply_to("dana@example.invalid", "d-1", "c5", "acct", "Fee");
+        all.push(prepare(&wrong_address, "Sent", all.len()).unwrap());
+
+        let candidates = closure_candidates(&item, &all, evidence_conversation, evidence_timestamp);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, "v-1");
+    }
+
+    #[test]
+    fn closure_candidates_sorted_ascending_and_capped_at_eight() {
+        let (mut all, item) = closure_test_messages();
+        let evidence_conversation = "c1";
+        let evidence_timestamp = all[0].input.timestamp;
+        let mut expected_ids = vec![];
+        for day in 2..=11u32 {
+            let mut m = reply_to(
+                "sam@example.invalid",
+                &format!("c-{day}"),
+                &format!("c{day}"),
+                "acct",
+                "Fee",
+            );
+            m.received = format!("2026-09-{day:02}T12:00:00Z");
+            all.push(prepare(&m, "Sent", all.len()).unwrap());
+            if day <= 9 {
+                expected_ids.push(format!("c-{day}"));
+            }
+        }
+        let candidates = closure_candidates(&item, &all, evidence_conversation, evidence_timestamp);
+        assert_eq!(candidates.len(), 8);
+        let ids: Vec<&str> = candidates.iter().map(|m| m.id.as_str()).collect();
+        let expected: Vec<&str> = expected_ids.iter().map(String::as_str).collect();
+        assert_eq!(ids, expected);
+        assert!(
+            candidates
+                .windows(2)
+                .all(|w| w[0].input.timestamp <= w[1].input.timestamp)
+        );
+    }
+
+    #[test]
+    fn scan_closures_resolves_open_request_and_counts_it() {
+        let (mut all, item) = closure_test_messages();
+        let valid = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
+        all.push(prepare(&valid, "Sent", all.len()).unwrap());
+
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+        };
+        let resolved_anchor = Anchor {
+            message: all.last().unwrap().input.handle.clone(),
+            block: 0,
+            quote: "Sure, let's do it.".into(),
+            context: "Sure, let's do it.".into(),
+        };
+        let mut calls = 0;
+        scan_closures(&all, &ScanProgress::default(), &mut result, |_, _, _| {
+            calls += 1;
+            Ok(Some((resolved_anchor.clone(), ResolutionKind::Completed)))
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(result.cross_thread_closures, 1);
+        assert!(result.analysis.items[0].resolution.is_some());
+        assert!(result.analysis.items[0].cross_thread);
+        assert_eq!(
+            result.analysis.items[0].resolution_kind,
+            Some(ResolutionKind::Completed)
+        );
+        assert!(result.conversation_notes.iter().any(|n| {
+            n.contains("Closing evidence found in another conversation for 1 expectation")
+        }));
+    }
+
+    #[test]
+    fn scan_closures_stops_when_cancelled_between_calls() {
+        let (mut all, item1) = closure_test_messages();
+        let valid1 = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
+        all.push(prepare(&valid1, "Sent", all.len()).unwrap());
+
+        let evidence2 = request_from("sam@example.invalid", "req-2", "c6", "acct", "Fee 2");
+        all.push(prepare(&evidence2, "Inbox", all.len()).unwrap());
+        let evidence2_handle = all.last().unwrap().input.handle.clone();
+        let valid2 = reply_to("sam@example.invalid", "v-2", "c7", "acct", "Fee 2");
+        all.push(prepare(&valid2, "Sent", all.len()).unwrap());
+
+        let mut item2 = item1.clone();
+        item2.evidence.message = evidence2_handle;
+
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item1, item2],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 2,
+            total: 2,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+        };
+        let progress = ScanProgress::default();
+        let mut calls = 0;
+        scan_closures(&all, &progress, &mut result, |_, _, _| {
+            calls += 1;
+            progress.cancel.store(true, Ordering::Relaxed);
+            Ok(None)
+        });
+        assert_eq!(calls, 1);
+        assert!(result.cancelled);
+    }
+
+    #[test]
+    fn scan_closures_error_is_recorded_and_stops_only_this_pass() {
+        let (mut all, item) = closure_test_messages();
+        let valid = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
+        all.push(prepare(&valid, "Sent", all.len()).unwrap());
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+        };
+        scan_closures(&all, &ScanProgress::default(), &mut result, |_, _, _| {
+            Err(ProviderError::RateLimited)
+        });
+        assert_eq!(result.failures.len(), 1);
+        assert!(result.failures[0].starts_with("Cross-thread closure pass: "));
+        assert_eq!(result.cross_thread_closures, 0);
+        assert!(!result.cancelled);
+    }
+
+    #[test]
+    fn scan_closures_skips_items_that_are_not_open_you_owned_requests() {
+        let (mut all, base_item) = closure_test_messages();
+        let valid = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
+        all.push(prepare(&valid, "Sent", all.len()).unwrap());
+
+        let mut already_resolved = base_item.clone();
+        already_resolved.resolution = Some(already_resolved.evidence.clone());
+        let mut not_a_request = base_item.clone();
+        not_a_request.kind = "promise".into();
+        let mut not_owned_by_you = base_item.clone();
+        not_owned_by_you.owner = Owner::Team;
+        let mut unresolvable_address = base_item.clone();
+        unresolvable_address.waiting_party = "Not established".into();
+
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![
+                    already_resolved,
+                    not_a_request,
+                    not_owned_by_you,
+                    unresolvable_address,
+                ],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+        };
+        let mut calls = 0;
+        scan_closures(&all, &ScanProgress::default(), &mut result, |_, _, _| {
+            calls += 1;
+            Ok(None)
+        });
+        assert_eq!(calls, 0, "none of these items should reach the provider");
+        assert_eq!(result.cross_thread_closures, 0);
+    }
+
+    #[test]
+    fn prepared_handles_are_globally_unique_across_sources_like_review_state_loaded() {
+        // Mirrors ReviewState::loaded's indexing: `index` is the running count
+        // of already-prepared messages across ALL sources, not a per-source
+        // counter, so show_anchor's handle lookup (which searches across every
+        // loaded message regardless of source) never sees a collision.
+        let mut messages: Vec<ReviewMessage> = vec![];
+        for (source, bodies) in [
+            ("Inbox", vec!["Please send the draft.", "Second message."]),
+            ("Sent", vec!["Here is the draft."]),
+            ("Group", vec!["Team update.", "Another update."]),
+        ] {
+            for (n, body) in bodies.into_iter().enumerate() {
+                let item = synthetic(body, n, source);
+                let m = prepare(&item, source, messages.len()).unwrap();
+                messages.push(m);
+            }
+        }
+        let handles: BTreeSet<&str> = messages.iter().map(|m| m.input.handle.as_str()).collect();
+        assert_eq!(handles.len(), messages.len());
+        for (i, m) in messages.iter().enumerate() {
+            assert_eq!(m.input.handle, format!("m{i}"));
+        }
     }
 
     #[test]

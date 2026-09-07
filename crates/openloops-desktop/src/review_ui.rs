@@ -294,7 +294,8 @@ impl ReviewState {
             ui.push_id(i,|ui|{
                 egui::Frame::group(ui.style()).show(ui,|ui|{
                     ui.set_width(ui.available_width());
-                    let status=if record.decision==Decision::Done {"Handled"} else if record.decision==Decision::Dismissed {"Dismissed / not mine"} else if record.decision==Decision::Moot {"No longer relevant"} else if item.resolution.is_some() {resolution_status_label(item.resolution_kind)} else if record.decision==Decision::Mine {"Tracking"} else if record.decision==Decision::Watching {"Watching team follow-up"} else {"Needs your review"};
+                    let status_base=if record.decision==Decision::Done {"Handled"} else if record.decision==Decision::Dismissed {"Dismissed / not mine"} else if record.decision==Decision::Moot {"No longer relevant"} else if item.resolution.is_some() {resolution_status_label(item.resolution_kind)} else if record.decision==Decision::Mine {"Tracking"} else if record.decision==Decision::Watching {"Watching team follow-up"} else {"Needs your review"};
+                    let status=status_label(status_base,item.cross_thread);
                     ui.label(RichText::new(status).color(Color32::from_rgb(29,87,67)));
                     ui.label(RichText::new(&item.action).size(21.0).strong());
                     let owner=if record.decision==Decision::Mine {"You (confirmed)"} else {match item.owner {Owner::You=>"You (suggested)",Owner::Team=>"Team — no individual owner established",Owner::Unclear=>"Unclear — confirm responsibility"}};
@@ -307,7 +308,7 @@ impl ReviewState {
                     ui.collapsing("Why this was suggested · evidence and replies",|ui|{
                         show_anchor(ui,"Original expectation",&item.evidence,&self.messages);
                         if let Some(deadline)=&item.deadline {show_anchor(ui,"Deadline evidence",deadline,&self.messages);}
-                        if let Some(resolution)=&item.resolution {show_anchor(ui,resolution_anchor_label(item.resolution_kind),resolution,&self.messages);} else if item.unverified_resolution {ui.label("The analysis proposed a completion but it could not be validated; treat as open.");} else {ui.label("No matching completion was identified in the scanned conversation. Work may have happened elsewhere or outside this history window.");}
+                        if let Some(resolution)=&item.resolution {show_anchor(ui,resolution_anchor_label(item.resolution_kind,item.cross_thread),resolution,&self.messages);} else if item.unverified_resolution {ui.label("The analysis proposed a completion but it could not be validated; treat as open.");} else {ui.label("No matching completion was identified in the scanned conversation. Work may have happened elsewhere or outside this history window.");}
                         ui.collapsing("Full scanned conversation",|ui| {for m in self.messages.iter().filter(|m|m.account==source.account && m.conversation==source.conversation) {ui.label(format!("{} · {}",m.date_label,if m.input.from_user {"You"} else {"Other participant"}));for b in &m.input.message.body_blocks {ui.label(b.as_string());}}});
                     });
                     let (button_change, button_draft) = card_action_buttons(ui, item, source, record, terminal, closed);
@@ -384,7 +385,21 @@ fn resolution_status_label(kind: Option<ResolutionKind>) -> &'static str {
         Some(ResolutionKind::Agreed) => "Resolved: you agreed",
     }
 }
-fn resolution_anchor_label(kind: Option<ResolutionKind>) -> &'static str {
+/// Appends " (evidence in another conversation)" to `base` when the
+/// expectation's resolution came from the cross-thread closure pass
+/// (`scanning::scan_closures`) rather than the same conversation.
+fn status_label(base: &str, cross_thread: bool) -> String {
+    if cross_thread {
+        format!("{base} (evidence in another conversation)")
+    } else {
+        base.to_string()
+    }
+}
+
+fn resolution_anchor_label(kind: Option<ResolutionKind>, cross_thread: bool) -> &'static str {
+    if cross_thread {
+        return "Later evidence in another conversation";
+    }
     match kind {
         Some(ResolutionKind::Completed) | None => "Later completion evidence",
         Some(ResolutionKind::Declined) => "Later decline evidence",
@@ -590,6 +605,7 @@ pub fn layout_fixture() -> ReviewState {
             },
             unverified_deadline: false,
             unverified_resolution: false,
+            cross_thread: false,
         })
         .collect();
     state.set_scan(
@@ -605,6 +621,7 @@ pub fn layout_fixture() -> ReviewState {
             total: 2,
             cancelled: false,
             conversation_notes: vec![],
+            cross_thread_closures: 0,
         },
         "Synthetic layout check".into(),
     );
@@ -650,6 +667,7 @@ mod tests {
             uncertainty: String::new(),
             unverified_deadline: false,
             unverified_resolution: false,
+            cross_thread: false,
         };
         (state, item)
     }
@@ -902,25 +920,51 @@ mod tests {
     }
 
     #[test]
+    fn resolution_anchor_label_reports_cross_thread_regardless_of_kind() {
+        for kind in [
+            Some(ResolutionKind::Completed),
+            Some(ResolutionKind::Declined),
+            Some(ResolutionKind::Withdrawn),
+            Some(ResolutionKind::Superseded),
+            Some(ResolutionKind::Agreed),
+            None,
+        ] {
+            assert_eq!(
+                resolution_anchor_label(kind, true),
+                "Later evidence in another conversation"
+            );
+        }
+    }
+
+    #[test]
+    fn status_label_appends_cross_thread_suffix_only_when_set() {
+        assert_eq!(status_label("Tracking", false), "Tracking");
+        assert_eq!(
+            status_label("Tracking", true),
+            "Tracking (evidence in another conversation)"
+        );
+    }
+
+    #[test]
     fn resolution_anchor_label_matches_each_kind() {
         assert_eq!(
-            resolution_anchor_label(Some(ResolutionKind::Completed)),
+            resolution_anchor_label(Some(ResolutionKind::Completed), false),
             "Later completion evidence"
         );
         assert_eq!(
-            resolution_anchor_label(Some(ResolutionKind::Declined)),
+            resolution_anchor_label(Some(ResolutionKind::Declined), false),
             "Later decline evidence"
         );
         assert_eq!(
-            resolution_anchor_label(Some(ResolutionKind::Withdrawn)),
+            resolution_anchor_label(Some(ResolutionKind::Withdrawn), false),
             "Later withdrawal by the requester"
         );
         assert_eq!(
-            resolution_anchor_label(Some(ResolutionKind::Superseded)),
+            resolution_anchor_label(Some(ResolutionKind::Superseded), false),
             "Later replacement by the requester"
         );
         assert_eq!(
-            resolution_anchor_label(Some(ResolutionKind::Agreed)),
+            resolution_anchor_label(Some(ResolutionKind::Agreed), false),
             "Your later agreement"
         );
     }
