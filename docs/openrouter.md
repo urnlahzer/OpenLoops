@@ -27,7 +27,8 @@ Create a key at <https://openrouter.ai/settings/keys>.
 
 The listing names every ZDR endpoint of every model, so many rows share a
 model. OpenLoops keeps the first healthy row per `model_id`, drops every
-endpoint whose `status` is non-zero, and never persists the raw response. Only
+endpoint whose `status` is non-zero (an absent or null `status` counts as
+healthy), and never persists the raw response. Only
 models with a working ZDR endpoint are selectable. A row OpenLoops cannot read
 is skipped rather than failing the whole menu, since one new or malformed row
 among hundreds must not make every model unselectable; a listing that is not a

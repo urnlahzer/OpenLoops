@@ -73,7 +73,7 @@ pub struct Expectation {
     /// the expectation was kept anyway with `resolution: None`.
     pub unverified_resolution: bool,
     /// True when `resolution` was found by the cross-thread closure pass
-    /// ([`expectations::closure`](crate::ollama::expectations::closure)) rather
+    /// ([`expectations::closure`](crate::expectations::closure)) rather
     /// than within this same conversation.
     pub cross_thread: bool,
     pub event_passed: Option<EventPassed>,
