@@ -270,11 +270,9 @@ fn parse_iso_date(word: &str) -> Option<(u32, u32, Option<i32>)> {
 }
 
 /// `n/m/yyyy`, as one token (`/` is a word character to `prose_tokens`).
-/// Ambiguous between month/day and day/month order when BOTH fields are
-/// `<= 12` -- refused outright rather than guessing (see
-/// [`prose_event_time`]'s doc comment for the policy). Accepted only when
-/// exactly one field is `> 12`, which resolves the order unambiguously:
-/// that field must be the day, the other the month.
+/// Read month-first (US convention, the owner's mail): "9/3/2026" is
+/// September 3. Only when the first field exceeds 12 is the token read
+/// day-first ("15/9/2026" is September 15). See [`prose_event_time`].
 fn parse_numeric_date(word: &str) -> Option<(u32, u32, Option<i32>)> {
     let word = strip_trailing_period(word);
     let parts: Vec<&str> = word.split('/').collect();
@@ -284,12 +282,13 @@ fn parse_numeric_date(word: &str) -> Option<(u32, u32, Option<i32>)> {
     let first: u32 = parts[0].parse().ok()?;
     let second: u32 = parts[1].parse().ok()?;
     let year: i32 = parts[2].parse().ok()?;
+    // Month-first (US) by default, which is the owner's mail convention:
+    // "9/3/2026" is September 3. Only a first field above 12 is read
+    // day-first ("15/9/2026" is September 15).
     let (month, day) = if first > 12 && second <= 12 {
         (second, first)
-    } else if second > 12 && first <= 12 {
-        (first, second)
     } else {
-        return None;
+        (first, second)
     };
     ((1..=12).contains(&month) && (1..=31).contains(&day)).then_some((month, day, Some(year)))
 }
@@ -402,12 +401,9 @@ fn local_year(message_timestamp: i64, offset: i32) -> i32 {
 /// "September 3" said in November means next year's September 3rd, not one
 /// already long past. A stated year is always taken as given, never rolled.
 ///
-/// A numeric `n/m/yyyy` date is refused outright when BOTH `n` and `m` are
-/// `<= 12` -- month-first and day-first readings would disagree and
-/// neither is more likely than the other, so it is never guessed. It is
-/// accepted only when exactly one field is `> 12`, which resolves the
-/// order unambiguously (that field is the day, the other the month): see
-/// [`parse_numeric_date`].
+/// A numeric `n/m/yyyy` date is read month-first (US convention):
+/// "9/3/2026" is September 3. A first field above 12 is read day-first
+/// ("15/9/2026" is September 15): see [`parse_numeric_date`].
 ///
 /// `end` is `start` plus one hour when a time was found; otherwise the
 /// matched date's whole civil day, closed at its local end-of-day per the
@@ -2786,10 +2782,7 @@ mod tests {
             ("Let's meet Sept 3 to review.", "Sept 3"),
             ("Let's meet Sep. 3, 2026 to review.", "Sep. 3"),
             ("Let's meet 3 September 2026 to review.", "3 September"),
-            // No numeric-date case here: writing "September 3" as
-            // `n/m/yyyy` would need both fields <= 12 (9 and 3), which
-            // `parse_numeric_date`'s ambiguity policy refuses outright --
-            // see `numeric_date_ambiguity_policy` below.
+            ("Let's meet 9/3/2026 to review.", "9/3/2026"),
             ("Let's meet 2026-09-03 to review.", "2026-09-03"),
         ];
         for (text, needle) in cases {
@@ -2805,12 +2798,12 @@ mod tests {
         }
     }
 
-    /// `n/m/yyyy` is refused when both fields are `<= 12` (ambiguous month
-    /// vs. day order), accepted when exactly one field is `> 12` (that
-    /// field is unambiguously the day).
+    /// `n/m/yyyy` is month-first; only a first field above 12 flips to
+    /// day-first.
     #[test]
-    fn numeric_date_ambiguity_policy() {
-        assert_eq!(parse_numeric_date("3/9/2026"), None);
+    fn numeric_dates_are_month_first_unless_the_first_field_exceeds_twelve() {
+        assert_eq!(parse_numeric_date("3/9/2026"), Some((3, 9, Some(2026))));
+        assert_eq!(parse_numeric_date("9/3/2026"), Some((9, 3, Some(2026))));
         assert_eq!(
             parse_numeric_date("9/15/2026"),
             Some((9, 15, Some(2026))),
@@ -2826,9 +2819,10 @@ mod tests {
     /// Same policy exercised through `prose_event_time`, matching the
     /// review's exact probes.
     #[test]
-    fn prose_event_time_refuses_ambiguous_numeric_dates_but_accepts_unambiguous_ones() {
+    fn prose_event_time_reads_numeric_dates_month_first() {
         let message = timestamp("2026-08-01T00:00:00Z");
-        assert!(prose_event_time("Meet on 3/9/2026.", message, 0).is_none());
+        let (start, _, _) = prose_event_time("Meet on 9/3/2026.", message, 0).unwrap();
+        assert_eq!(start, timestamp("2026-09-03T00:00:00Z"));
         let (start, _, _) = prose_event_time("Meet on 9/15/2026.", message, 0).unwrap();
         assert_eq!(start, timestamp("2026-09-15T00:00:00Z"));
         let (start, _, _) = prose_event_time("Meet on 15/9/2026.", message, 0).unwrap();
