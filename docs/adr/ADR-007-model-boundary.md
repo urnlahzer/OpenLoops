@@ -55,6 +55,21 @@ The future profiles are fixed as follows and remain disabled and unadvertised:
   and wire/authentication schema. It supports only one OS-protected write-only
   credential with a fixed authentication mapping, never an arbitrary header
   bag. It cannot substitute for the required tested `ollama_cloud` hosted path.
+  Its one filled adapter is `openrouter`, with the non-editable exact authority
+  `https://openrouter.ai`, the adapter-owned chat path
+  `/api/v1/chat/completions`, and the adapter-owned model-listing path
+  `/api/v1/endpoints/zdr`. Its credential handling is identical to
+  `ollama_cloud` in every respect. Every chat request carries
+  `provider.zdr=true`, so OpenRouter routes only to zero-data-retention
+  endpoints; that request flag ORs with the account setting and is never
+  relaxed per request, and the selected model is revalidated against the
+  zero-data-retention listing before any content is sent. The listing request
+  is content-free, carries no credential, and its raw response is never
+  persisted. No `response_format` or `structured_outputs` member is sent, so
+  application validation remains authoritative here exactly as it is for
+  `ollama_cloud`. Zero data retention is OpenRouter's routing property, not an
+  OpenLoops guarantee: OpenRouter's own retention and administrative policy
+  still governs what it does with a request.
 
 Provider preflight is content-free. Ollama model discovery uses only the fixed
 `GET /api/tags` path after authority validation and strictly bounds/parses the

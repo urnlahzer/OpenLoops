@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+#[path = "../deadline_view.rs"]
+mod deadline_view;
 #[path = "../loop_state.rs"]
 mod loop_state;
 #[path = "../review_ui.rs"]
@@ -20,8 +22,12 @@ fn main() {
                 .load()
                 .map_err(|_| "Saved settings could not be loaded".to_string())?
                 .ok_or("No saved settings".to_string())?;
-            review_ui::probe(settings.key.to_string(), &settings.selected)
-                .map_err(|error| error.to_string())
+            review_ui::probe(
+                settings.provider,
+                settings.active_key().to_string(),
+                settings.active_model(),
+            )
+            .map_err(|error| error.to_string())
         })();
         match result {
             Ok(count) => {

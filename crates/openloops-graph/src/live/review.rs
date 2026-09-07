@@ -23,6 +23,14 @@ pub struct MailItem {
     pub sent: bool,
     pub team: bool,
     pub web_link: String,
+    pub event: Option<MailEvent>,
+}
+
+#[derive(Clone)]
+pub struct MailEvent {
+    pub start: String,
+    pub end: String,
+    pub out_of_date: bool,
 }
 
 pub struct SourceReview {
@@ -71,10 +79,31 @@ pub fn load_recent(config: &ConnectionConfig) -> Result<Vec<SourceReview>, Conne
 }
 
 pub(super) fn fetch(http: &Client, token: &str, url: Url) -> Result<Vec<u8>, ConnectionError> {
-    if url.scheme() != "https"
-        || url.host_str() != Some("graph.microsoft.com")
-        || url.port().is_some()
-    {
+    fetch_from_origin(http, token, url, GRAPH_ORIGIN)
+}
+
+/// Fixed production origin every real request is checked against; the only
+/// caller that ever passes anything else is the `#[cfg(test)]` mock-HTTP
+/// harness below, which points a real loopback listener's own origin at
+/// `fetch_from_origin` directly -- production code always goes through
+/// [`fetch`], which hardcodes this constant.
+const GRAPH_ORIGIN: &str = "https://graph.microsoft.com/";
+
+/// Read-only bounded fetch, checked against `expected_origin` (scheme, host,
+/// and port together, via [`Url::origin`]) rather than an inline literal, so
+/// the exact same request/response handling this function performs -- status
+/// classification and the response-size bound -- is exercisable end to end
+/// against a real, local mock server in tests without weakening the fixed
+/// production check: [`fetch`] always supplies [`GRAPH_ORIGIN`].
+fn fetch_from_origin(
+    http: &Client,
+    token: &str,
+    url: Url,
+    expected_origin: &str,
+) -> Result<Vec<u8>, ConnectionError> {
+    let expected =
+        Url::parse(expected_origin).map_err(|_| ConnectionError::InvalidConfiguration)?;
+    if url.origin() != expected.origin() {
         return Err(ConnectionError::InvalidConfiguration);
     }
     let response = http
@@ -167,7 +196,7 @@ fn next_page(value: &Value, original: &Url) -> Result<Option<Url>, ConnectionErr
         || url.password().is_some()
         || url.fragment().is_some()
     {
-        return Err(ConnectionError::ResourceUnavailable);
+        return Err(ConnectionError::NextPageRejected);
     }
     Ok(Some(url))
 }
@@ -185,10 +214,23 @@ pub(super) fn pages(
         let value: Value =
             serde_json::from_slice(&bytes).map_err(|_| ConnectionError::ResourceUnavailable)?;
         let (rows, _) = page(&bytes)?;
-        let next = next_page(&value, original)?;
         let overflow = rows.len() > cap - all.len();
         all.extend(rows.into_iter().take(cap - all.len()));
-        if overflow || (all.len() == cap && next.is_some()) {
+        if overflow {
+            return Ok((all, true));
+        }
+        // `all` already holds every row fetched so far, including this page's,
+        // so a rejected next-link below only truncates pagination -- it cannot
+        // lose rows. We deliberately fold a next_page rejection into
+        // `partial: true` here instead of propagating ConnectionError::NextPageRejected
+        // through `?`: surfacing it would require widening this function's
+        // return type and touching `load_group`'s call site for no real benefit,
+        // since the caller already treats "stopped early" the same way
+        // regardless of cause.
+        let Ok(next) = next_page(&value, original) else {
+            return Ok((all, true));
+        };
+        if all.len() == cap && next.is_some() {
             return Ok((all, true));
         }
         let Some(next) = next else {
@@ -245,7 +287,10 @@ fn item(value: &Value, topic: Option<&str>) -> Result<MailItem, ConnectionError>
             Some(topic) => topic.into(),
             None => text(value, "subject", 8192)?,
         },
-        body: text(body, "content", 131_072)?,
+        body: text(body, "content", 131_072).map_err(|error| match error {
+            ConnectionError::ResponseTooLarge => ConnectionError::MessageTooLarge,
+            other => other,
+        })?,
         body_is_html: kind.eq_ignore_ascii_case("html"),
         sender,
         received: text(value, "receivedDateTime", 64)?,
@@ -269,7 +314,7 @@ fn mailbox_url(address: Option<&str>, sent: bool) -> Result<Url, ConnectionError
     }
     url.set_query(None);
     url.query_pairs_mut()
-        .append_pair("$select", "id,conversationId,subject,body,sender,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,webLink")
+        .append_pair("$select", "id,conversationId,subject,sender,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,webLink")
         .append_pair(
             "$orderby",
             if sent { "sentDateTime desc" } else { "receivedDateTime desc" },
@@ -278,12 +323,272 @@ fn mailbox_url(address: Option<&str>, sent: bool) -> Result<Url, ConnectionError
     Ok(url)
 }
 
+/// Bounded, read-only body fetch for a single message already discovered via
+/// `mailbox_url`. Never follows a server-provided URL; always the fixed Graph
+/// origin. `cast` optionally appends an `OData` cast segment (e.g.
+/// `microsoft.graph.eventMessage`) after the message ID, the documented way
+/// to reach type-specific properties on a `message` resource.
+fn message_url_with_select(
+    address: Option<&str>,
+    id: &str,
+    cast: Option<&str>,
+    select: &str,
+) -> Result<Url, ConnectionError> {
+    if id.is_empty() || id == "." || id == ".." {
+        return Err(ConnectionError::InvalidConfiguration);
+    }
+    let mut url = Url::parse("https://graph.microsoft.com/v1.0/")
+        .map_err(|_| ConnectionError::InvalidConfiguration)?;
+    {
+        let mut path = url
+            .path_segments_mut()
+            .map_err(|()| ConnectionError::InvalidConfiguration)?;
+        path.pop_if_empty();
+        match address {
+            None => {
+                path.push("me");
+            }
+            Some(value) => {
+                path.push("users").push(value);
+            }
+        }
+        path.push("messages").push(id);
+        if let Some(cast) = cast {
+            path.push(cast);
+        }
+    }
+    url.query_pairs_mut().append_pair("$select", select);
+    Ok(url)
+}
+
+fn message_url(address: Option<&str>, id: &str) -> Result<Url, ConnectionError> {
+    message_url_with_select(address, id, None, "body")
+}
+
+/// The `OData` cast path for the bounded meeting-metadata extra fetch:
+/// `/messages/{id}/microsoft.graph.eventMessage?$select=...` (personal), or,
+/// for a shared mailbox like `shared@example.invalid`,
+/// `/users/shared@example.invalid/messages/{id}/microsoft.graph.eventMessage?$select=...`.
+fn event_url(address: Option<&str>, id: &str) -> Result<Url, ConnectionError> {
+    message_url_with_select(
+        address,
+        id,
+        Some("microsoft.graph.eventMessage"),
+        "meetingMessageType,startDateTime,endDateTime,isOutOfDate",
+    )
+}
+
+fn is_event_message(value: &Value) -> bool {
+    matches!(
+        value.get("@odata.type").and_then(Value::as_str),
+        Some("#microsoft.graph.eventMessageRequest" | "#microsoft.graph.eventMessage")
+    )
+}
+
+fn utc_event_time(value: &Value, field: &str) -> Option<String> {
+    let value = value.get(field)?;
+    if value.get("timeZone")?.as_str()? != "UTC" {
+        return None;
+    }
+    // Graph's own dateTime strings never carry a trailing zone designator
+    // (that is what the separate timeZone field is for), but guard the
+    // append anyway rather than assume the server never sends one.
+    let raw = value.get("dateTime")?.as_str()?.trim_end_matches('Z');
+    let parsed = chrono::DateTime::parse_from_rfc3339(&format!("{raw}Z")).ok()?;
+    Some(
+        parsed
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    )
+}
+
+/// `meetingMessageType` is used only to confirm the extra fetch actually
+/// returned meeting metadata (rather than, say, a truncated or unexpected
+/// payload); the value itself is not needed downstream, so it is not stored.
+fn mail_event(value: &Value) -> Option<MailEvent> {
+    value.get("meetingMessageType")?.as_str()?;
+    Some(MailEvent {
+        start: utc_event_time(value, "startDateTime")?,
+        end: utc_event_time(value, "endDateTime")?,
+        out_of_date: value.get("isOutOfDate")?.as_bool()?,
+    })
+}
+
+/// Splits newest-first `rows` into the in-window prefix (timestamp >= `cutoff`,
+/// capped at `cap`) and reports whether the walk reached a row older than the
+/// cutoff. Rows with a missing or unparseable date are skipped (not counted as
+/// in-window); the caller is told how many were skipped so it can record errors.
+fn window(
+    rows: Vec<Value>,
+    date_field: &str,
+    cutoff: i64,
+    cap: usize,
+) -> (Vec<Value>, bool, usize) {
+    let mut kept = Vec::new();
+    let mut reached_cutoff = false;
+    let mut skipped = 0usize;
+    for row in rows {
+        if kept.len() >= cap {
+            break;
+        }
+        match text(&row, date_field, 64)
+            .ok()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
+        {
+            Some(parsed) => {
+                if parsed.timestamp() < cutoff {
+                    reached_cutoff = true;
+                    break;
+                }
+                kept.push(row);
+            }
+            None => skipped += 1,
+        }
+    }
+    (kept, reached_cutoff, skipped)
+}
+
+/// Fetches the body for one listing row and folds it into `row`, then projects
+/// the result through `item`. The body request is independently bounded by
+/// `bounded_body` and by the content-length limit inside `item`.
+fn hydrate(
+    http: &Client,
+    token: &str,
+    address: Option<&str>,
+    mut row: Value,
+) -> Result<MailItem, ConnectionError> {
+    let id = text(&row, "id", 2048)?;
+    let bytes = fetch(http, token, message_url(address, &id)?).map_err(|error| match error {
+        ConnectionError::ResponseTooLarge => ConnectionError::MessageTooLarge,
+        other => other,
+    })?;
+    let body_value: Value =
+        serde_json::from_slice(&bytes).map_err(|_| ConnectionError::ResourceUnavailable)?;
+    let body = body_value
+        .get("body")
+        .cloned()
+        .ok_or(ConnectionError::ResourceUnavailable)?;
+    row.as_object_mut()
+        .ok_or(ConnectionError::ResourceUnavailable)?
+        .insert("body".to_string(), body);
+    let mut result = item(&row, None)?;
+    if is_event_message(&body_value)
+        && let Ok(url) = event_url(address, &id)
+    {
+        result.event = fetch_event(http, token, url, GRAPH_ORIGIN);
+    }
+    Ok(result)
+}
+
+/// The bounded, best-effort meeting-metadata extra fetch: any failure --
+/// transport, a non-200 status (a message that is no longer a meeting
+/// request, or one Graph otherwise rejects the cast on), malformed JSON, or
+/// a payload missing one of the four selected fields -- yields `None`
+/// rather than failing the whole message. `expected_origin` is threaded
+/// through to [`fetch_from_origin`] purely for testability; every real
+/// caller passes [`GRAPH_ORIGIN`].
+fn fetch_event(http: &Client, token: &str, url: Url, expected_origin: &str) -> Option<MailEvent> {
+    let bytes = fetch_from_origin(http, token, url, expected_origin).ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    mail_event(&value)
+}
+
 fn load_mailbox(http: &Client, token: &str, address: Option<&str>) -> SourceReview {
     load_folder(http, token, address, false)
 }
 
 fn load_sent(http: &Client, token: &str, address: Option<&str>) -> SourceReview {
     load_folder(http, token, address, true)
+}
+
+// Walks the newest-first listing page by page, stopping as soon as a row older
+// than `cutoff` is seen (or the cap / the 10-page hard limit is hit). Keeps
+// every listing response small: no message bodies are ever requested in bulk.
+// `source.partial` semantics: false once the walk reaches the cutoff or the
+// collection ends with fewer than `cap` in-window rows taken; true once `cap`
+// in-window rows were taken (more could exist), the 10-page limit was hit
+// before reaching the cutoff, or a fetched page's next-page link was rejected
+// (that page's rows are kept; more mail may exist beyond the rejected link).
+fn windowed_rows(
+    http: &Client,
+    token: &str,
+    original: &Url,
+    date_field: &str,
+    cutoff: i64,
+    cap: usize,
+    errors: &mut Vec<ConnectionError>,
+) -> (Vec<Value>, bool) {
+    let mut current = original.clone();
+    let mut collected: Vec<Value> = Vec::new();
+    let mut reached_cutoff = false;
+    let mut page_limit_hit = true;
+    let mut next_page_rejected = false;
+    for _ in 0..10 {
+        let bytes = match fetch(http, token, current.clone()) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                errors.push(error);
+                page_limit_hit = false;
+                break;
+            }
+        };
+        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+            errors.push(ConnectionError::ResourceUnavailable);
+            page_limit_hit = false;
+            break;
+        };
+        let rows = match page(&bytes) {
+            Ok((rows, _)) => rows,
+            Err(error) => {
+                errors.push(error);
+                page_limit_hit = false;
+                break;
+            }
+        };
+        // Fold this page's rows into `collected` before asking for the next
+        // link: a rejected/malformed next-link must not throw away a page
+        // that was already fetched and parsed successfully.
+        let remaining = cap - collected.len();
+        let (in_window, page_reached_cutoff, skipped) = window(rows, date_field, cutoff, remaining);
+        for _ in 0..skipped {
+            errors.push(ConnectionError::ResourceUnavailable);
+        }
+        collected.extend(in_window);
+        if page_reached_cutoff {
+            reached_cutoff = true;
+            page_limit_hit = false;
+            break;
+        }
+        if collected.len() >= cap {
+            page_limit_hit = false;
+            break;
+        }
+        let next = match next_page(&value, original) {
+            Ok(next) => next,
+            Err(error) => {
+                // This page's rows are already in `collected`. Only
+                // pagination stops here; more mail may exist beyond the
+                // rejected link, so `partial` must stay true.
+                errors.push(error);
+                page_limit_hit = false;
+                next_page_rejected = true;
+                break;
+            }
+        };
+        let Some(next_url) = next else {
+            page_limit_hit = false;
+            break;
+        };
+        current = next_url;
+    }
+    let partial = if collected.len() >= cap {
+        true
+    } else if reached_cutoff {
+        false
+    } else {
+        page_limit_hit || next_page_rejected
+    };
+    (collected, partial)
 }
 
 fn load_folder(http: &Client, token: &str, address: Option<&str>, sent: bool) -> SourceReview {
@@ -297,41 +602,48 @@ fn load_folder(http: &Client, token: &str, address: Option<&str>, sent: bool) ->
         errors: vec![],
         partial: false,
     };
-    let result = mailbox_url(address, sent).and_then(|url| pages(http, token, &url, 100));
-    match result {
-        Err(error) => source.errors.push(error),
-        Ok((rows, partial)) => {
-            source.partial = partial;
-            for row in &rows {
-                let date_field = if sent {
-                    "sentDateTime"
-                } else {
-                    "receivedDateTime"
-                };
-                let in_window = text(row, date_field, 64)
-                    .ok()
-                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
-                    .is_some_and(|value| value.timestamp() >= cutoff_timestamp());
-                if !in_window {
-                    continue;
+    let date_field = if sent {
+        "sentDateTime"
+    } else {
+        "receivedDateTime"
+    };
+    let original = match mailbox_url(address, sent) {
+        Ok(url) => url,
+        Err(error) => {
+            source.errors.push(error);
+            return source;
+        }
+    };
+    let (collected, partial) = windowed_rows(
+        http,
+        token,
+        &original,
+        date_field,
+        cutoff_timestamp(),
+        100,
+        &mut source.errors,
+    );
+    source.partial = partial;
+    for row in collected {
+        let sent_time = if sent {
+            text(&row, "sentDateTime", 64).ok()
+        } else {
+            None
+        };
+        match hydrate(http, token, address, row) {
+            Ok(mut message) => {
+                message.sent = sent;
+                message.team = address.is_some();
+                if let Some(sent_time) = sent_time {
+                    message.received = sent_time;
                 }
-                match item(row, None) {
-                    Ok(mut message) => {
-                        message.sent = sent;
-                        message.team = address.is_some();
-                        if sent {
-                            message.received =
-                                text(row, "sentDateTime", 64).unwrap_or(message.received);
-                        }
-                        if message.id.is_empty() || message.conversation.is_empty() {
-                            source.errors.push(ConnectionError::ResourceUnavailable);
-                        } else {
-                            source.messages.push(message);
-                        }
-                    }
-                    Err(error) => source.errors.push(error),
+                if message.id.is_empty() || message.conversation.is_empty() {
+                    source.errors.push(ConnectionError::ResourceUnavailable);
+                } else {
+                    source.messages.push(message);
                 }
             }
+            Err(error) => source.errors.push(error),
         }
     }
     source
@@ -439,9 +751,28 @@ mod tests {
             "https://example.invalid/v1.0/me/mailFolders/inbox/messages",
             "https://graph.microsoft.com/v1.0/me/contacts",
             "https://user@graph.microsoft.com/v1.0/me/mailFolders/inbox/messages",
+            "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages#frag",
         ] {
-            assert!(next_page(&serde_json::json!({"@odata.nextLink":next}), &original).is_err());
+            assert!(matches!(
+                next_page(&serde_json::json!({"@odata.nextLink":next}), &original),
+                Err(ConnectionError::NextPageRejected)
+            ));
         }
+        // A non-string nextLink is a different failure mode (malformed payload,
+        // not an out-of-collection redirect) and keeps the generic diagnostic.
+        assert!(matches!(
+            next_page(&serde_json::json!({"@odata.nextLink": 12345}), &original),
+            Err(ConnectionError::ResourceUnavailable)
+        ));
+        // An unparsable URL string is likewise a malformed payload, not a
+        // rejected-but-well-formed link.
+        assert!(matches!(
+            next_page(
+                &serde_json::json!({"@odata.nextLink": "not a url"}),
+                &original
+            ),
+            Err(ConnectionError::ResourceUnavailable)
+        ));
         let mut next = original.clone();
         next.query_pairs_mut().append_pair("$skip", "25");
         assert!(
@@ -472,7 +803,264 @@ mod tests {
         assert_eq!(message.subject, "Synthetic topic");
         assert!(message.body_is_html);
         value["body"]["content"] = Value::String("x".repeat(131_073));
-        assert!(item(&value, Some("topic")).is_err());
+        assert!(matches!(
+            item(&value, Some("topic")),
+            Err(ConnectionError::MessageTooLarge)
+        ));
         assert!(item(&serde_json::json!({}), None).is_err());
+    }
+    #[test]
+    fn message_too_large_has_a_distinct_message() {
+        assert_eq!(
+            ConnectionError::MessageTooLarge.to_string(),
+            "A message body exceeded the review size limit and was skipped."
+        );
+    }
+    #[test]
+    fn next_page_rejected_has_a_distinct_message() {
+        assert_eq!(
+            ConnectionError::NextPageRejected.to_string(),
+            "Microsoft returned a next-page link outside the authorized collection; remaining pages were skipped."
+        );
+    }
+    #[test]
+    fn mailbox_url_excludes_body_and_orders_by_folder_date_field() {
+        let inbox = mailbox_url(None, false).unwrap();
+        let select = inbox
+            .query_pairs()
+            .find(|(k, _)| k == "$select")
+            .unwrap()
+            .1
+            .into_owned();
+        assert!(!select.split(',').any(|field| field == "body"));
+        assert!(!inbox.query_pairs().any(|(k, _)| k == "$filter"));
+        assert!(inbox.query_pairs().any(|(k, v)| k == "$top" && v == "100"));
+        assert!(
+            inbox
+                .query_pairs()
+                .any(|(k, v)| k == "$orderby" && v == "receivedDateTime desc")
+        );
+        let sent = mailbox_url(None, true).unwrap();
+        let select = sent
+            .query_pairs()
+            .find(|(k, _)| k == "$select")
+            .unwrap()
+            .1
+            .into_owned();
+        assert!(!select.split(',').any(|field| field == "body"));
+        assert!(!sent.query_pairs().any(|(k, _)| k == "$filter"));
+        assert!(sent.query_pairs().any(|(k, v)| k == "$top" && v == "100"));
+        assert!(
+            sent.query_pairs()
+                .any(|(k, v)| k == "$orderby" && v == "sentDateTime desc")
+        );
+    }
+    #[test]
+    fn message_url_scopes_and_encodes_the_identifier() {
+        let personal = message_url(None, "synthetic-id").unwrap();
+        assert_eq!(personal.path(), "/v1.0/me/messages/synthetic-id");
+        assert!(
+            personal
+                .query_pairs()
+                .any(|(k, v)| k == "$select" && v == "body")
+        );
+        let shared = message_url(Some("shared@example.invalid"), "synthetic-id").unwrap();
+        assert_eq!(
+            shared.path(),
+            "/v1.0/users/shared@example.invalid/messages/synthetic-id"
+        );
+        let encoded = message_url(None, "a/b?c").unwrap();
+        assert!(encoded.path().contains("a%2Fb%3Fc"));
+        for id in ["", ".", ".."] {
+            assert!(message_url(None, id).is_err());
+        }
+    }
+    #[test]
+    fn event_url_selects_only_meeting_metadata_via_the_odata_cast_path() {
+        let personal = event_url(None, "synthetic-id").unwrap();
+        assert_eq!(
+            personal.path(),
+            "/v1.0/me/messages/synthetic-id/microsoft.graph.eventMessage"
+        );
+        assert!(personal.query_pairs().any(|(key, value)| {
+            key == "$select" && value == "meetingMessageType,startDateTime,endDateTime,isOutOfDate"
+        }));
+        let shared = event_url(Some("shared@example.invalid"), "a/b").unwrap();
+        assert_eq!(
+            shared.path(),
+            "/v1.0/users/shared@example.invalid/messages/a%2Fb/microsoft.graph.eventMessage"
+        );
+    }
+
+    #[test]
+    fn meeting_metadata_parses_only_utc_event_times() {
+        let meeting = serde_json::json!({
+            "@odata.type": "#microsoft.graph.eventMessageRequest",
+            "meetingMessageType": "meetingRequest",
+            "startDateTime": {"dateTime": "2026-08-21T18:30:00.0000000", "timeZone": "UTC"},
+            "endDateTime": {"dateTime": "2026-08-21T19:30:00.0000000", "timeZone": "UTC"},
+            "isOutOfDate": false
+        });
+        assert!(is_event_message(&meeting));
+        let event = mail_event(&meeting).unwrap();
+        assert_eq!(event.start, "2026-08-21T18:30:00Z");
+        assert_eq!(event.end, "2026-08-21T19:30:00Z");
+        assert!(!event.out_of_date);
+
+        let mut non_utc = meeting;
+        non_utc["startDateTime"]["timeZone"] = serde_json::json!("Pacific Standard Time");
+        assert!(mail_event(&non_utc).is_none());
+    }
+
+    #[test]
+    fn a_trailing_z_on_the_graph_datetime_string_is_not_doubled() {
+        let meeting = serde_json::json!({
+            "meetingMessageType": "meetingRequest",
+            "startDateTime": {"dateTime": "2026-08-21T18:30:00Z", "timeZone": "UTC"},
+            "endDateTime": {"dateTime": "2026-08-21T19:30:00.0000000", "timeZone": "UTC"},
+            "isOutOfDate": false
+        });
+        let event = mail_event(&meeting).unwrap();
+        assert_eq!(event.start, "2026-08-21T18:30:00Z");
+    }
+
+    #[test]
+    fn plain_message_has_no_event() {
+        let body = serde_json::json!({
+            "@odata.type": "#microsoft.graph.message",
+            "body": {"contentType": "text", "content": "Synthetic request"}
+        });
+        assert!(!is_event_message(&body));
+    }
+
+    /// Spins a real, one-shot loopback HTTP server (no TLS -- `fetch_event`
+    /// is exercised through [`fetch_from_origin`]'s testable seam, which
+    /// checks the request's origin against a caller-supplied one instead of
+    /// [`fetch`]'s hardcoded [`GRAPH_ORIGIN`]) that reads one request and
+    /// writes back `response` verbatim, then closes. Returns the server's
+    /// own origin (for use as both the request's base and the `expected_origin`
+    /// argument) and a handle the caller joins once the round trip is done.
+    fn one_shot_server(response: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer);
+            stream.write_all(&response).unwrap();
+            let _ = stream.flush();
+        });
+        (format!("http://127.0.0.1:{port}/"), handle)
+    }
+
+    /// The status classification a 400 actually produces, not just that
+    /// [`fetch_event`]'s best-effort `Option` collapses it to `None` --
+    /// exercised through [`fetch_from_origin`] directly so the specific
+    /// [`ConnectionError`] variant is visible to the assertion.
+    #[test]
+    fn a_400_classifies_as_bad_request() {
+        let (origin, server) = one_shot_server(
+            b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        );
+        let http = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+        let url = Url::parse(&format!(
+            "{origin}v1.0/me/messages/synthetic-id/microsoft.graph.eventMessage"
+        ))
+        .unwrap();
+        assert_eq!(
+            fetch_from_origin(&http, "synthetic-token", url, &origin),
+            Err(ConnectionError::BadRequest)
+        );
+        server.join().unwrap();
+    }
+
+    /// A response whose `Content-Length` header alone exceeds the bound is
+    /// rejected before any body is read.
+    #[test]
+    fn a_large_content_length_classifies_as_response_too_large() {
+        let (origin, server) = one_shot_server(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                super::super::MAX_RESPONSE + 1
+            )
+            .into_bytes(),
+        );
+        let http = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+        let url = Url::parse(&format!(
+            "{origin}v1.0/me/messages/synthetic-id/microsoft.graph.eventMessage"
+        ))
+        .unwrap();
+        assert_eq!(
+            fetch_from_origin(&http, "synthetic-token", url, &origin),
+            Err(ConnectionError::ResponseTooLarge)
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn extra_fetch_populates_the_event_from_a_200_with_the_four_fields() {
+        let payload = serde_json::json!({
+            "meetingMessageType": "meetingRequest",
+            "startDateTime": {"dateTime": "2026-08-21T18:30:00.0000000", "timeZone": "UTC"},
+            "endDateTime": {"dateTime": "2026-08-21T19:30:00.0000000", "timeZone": "UTC"},
+            "isOutOfDate": false
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            payload.len()
+        );
+        let (origin, server) = one_shot_server(response.into_bytes());
+        let http = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+        let url = Url::parse(&format!(
+            "{origin}v1.0/me/messages/synthetic-id/microsoft.graph.eventMessage"
+        ))
+        .unwrap();
+        let event = fetch_event(&http, "synthetic-token", url, &origin).unwrap();
+        assert_eq!(event.start, "2026-08-21T18:30:00Z");
+        assert_eq!(event.end, "2026-08-21T19:30:00Z");
+        assert!(!event.out_of_date);
+        server.join().unwrap();
+    }
+    #[test]
+    fn window_walks_newest_first_rows_until_the_cutoff() {
+        let cutoff = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        let rows = vec![
+            serde_json::json!({"receivedDateTime": "2026-01-05T00:00:00Z", "id": "a"}),
+            serde_json::json!({"id": "missing-date"}),
+            serde_json::json!({"receivedDateTime": "2026-01-01T00:00:00Z", "id": "b"}),
+            serde_json::json!({"receivedDateTime": "2025-12-31T00:00:00Z", "id": "c"}),
+            serde_json::json!({"receivedDateTime": "2025-12-01T00:00:00Z", "id": "d"}),
+        ];
+        let (kept, reached_cutoff, skipped) = window(rows.clone(), "receivedDateTime", cutoff, 100);
+        assert_eq!(
+            kept.iter()
+                .map(|row| row["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert!(reached_cutoff);
+        assert_eq!(skipped, 1);
+
+        let (kept, reached_cutoff, _) = window(rows.clone(), "receivedDateTime", cutoff, 1);
+        assert_eq!(kept.len(), 1);
+        assert!(!reached_cutoff);
+
+        let (kept, reached_cutoff, skipped) = window(vec![], "receivedDateTime", cutoff, 100);
+        assert!(kept.is_empty());
+        assert!(!reached_cutoff);
+        assert_eq!(skipped, 0);
     }
 }

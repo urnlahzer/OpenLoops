@@ -109,6 +109,13 @@ JsonCase 'local cloud rejection removed' 'P0-MODEL-PROFILES-001' 'contracts/mode
 JsonCase 'cloud authority editable' 'P0-MODEL-PROFILES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.profiles | Where-Object id -eq 'ollama_cloud').authority = 'https://synthetic.invalid' }
 JsonCase 'cloud schema trusted' 'P0-MODEL-PROFILES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.profiles | Where-Object id -eq 'ollama_cloud').structured_output = 'provider enforcement is authoritative' }
 JsonCase 'approved HTTPS substitutes hosted' 'P0-MODEL-PROFILES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.profiles | Where-Object id -eq 'approved_https').substitution = 'allowed' }
+JsonCase 'approved HTTPS adapter omitted' 'P0-MODEL-PROFILES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.profiles | Where-Object id -eq 'approved_https').PSObject.Properties.Remove('adapter') }
+JsonCase 'adapter authority widened' 'P0-MODEL-PROFILES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.profiles | Where-Object id -eq 'approved_https').adapter.authority = 'https://synthetic.invalid' }
+JsonCase 'adapter chat path edited' 'P0-MODEL-PROFILES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.profiles | Where-Object id -eq 'approved_https').adapter.chat_path = '/v1/anything' }
+JsonCase 'adapter ZDR routing relaxed' 'P0-MODEL-PROFILES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.profiles | Where-Object id -eq 'approved_https').adapter.zdr_enforcement = 'zdr routing is optional per request' }
+JsonCase 'adapter model listing retained' 'P0-MODEL-PROFILES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.profiles | Where-Object id -eq 'approved_https').adapter.model_menu = 'cache the raw response for reuse' }
+JsonCase 'adapter trusts provider schema enforcement' 'P0-MODEL-PROFILES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.profiles | Where-Object id -eq 'approved_https').adapter.structured_output = 'provider enforcement is authoritative' }
+JsonCase 'adapter accepts any choice' 'P0-MODEL-PROFILES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.profiles | Where-Object id -eq 'approved_https').adapter.response_binding = 'any choice from any model is accepted' }
 JsonCase 'preflight sends mailbox content' 'P0-MODEL-PROFILES-001' 'contracts/model/provider-boundary.json' { param($c) $c.provider_preflight.mailbox_content = 'allowed' }
 JsonCase 'preflight raw response persists' 'P0-MODEL-PROFILES-001' 'contracts/model/provider-boundary.json' { param($c) $c.provider_preflight.ollama_model_listing = 'persist complete tags response' }
 JsonCase 'local cloud-disable proof removed' 'P0-MODEL-PROFILES-001' 'contracts/model/provider-boundary.json' { param($c) $c.provider_preflight.local_only_release_proof = 'loopback reachability passes' }
@@ -172,6 +179,8 @@ JsonCase 'SDK logging enabled' 'P0-MODEL-PRIVACY-001' 'contracts/model/provider-
 JsonCase 'canary tolerated' 'P0-MODEL-PRIVACY-001' 'contracts/model/provider-boundary.json' { param($c) $c.privacy_boundary.canary_requirement = 'one occurrence allowed' }
 
 JsonCase 'source omitted' 'P0-MODEL-SOURCES-001' 'contracts/model/provider-boundary.json' { param($c) $c.sources = @($c.sources | Where-Object id -ne 'SRC-OLLAMA-TAGS') }
+JsonCase 'OpenRouter source omitted' 'P0-MODEL-SOURCES-001' 'contracts/model/provider-boundary.json' { param($c) $c.sources = @($c.sources | Where-Object id -ne 'SRC-OPENROUTER-ZDR') }
+JsonCase 'OpenRouter source verification date drift' 'P0-MODEL-SOURCES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.sources | Where-Object id -eq 'SRC-OPENROUTER-API').verified = '2000-01-01' }
 JsonCase 'source verification date drift' 'P0-MODEL-SOURCES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.sources | Where-Object id -eq 'SRC-OLLAMA-FAQ').verified = '2000-01-01' }
 JsonCase 'source claim reordered' 'P0-MODEL-SOURCES-001' 'contracts/model/provider-boundary.json' { param($c) [array]::Reverse($c.source_claims) }
 JsonCase 'cloud limitation claim weakened' 'P0-MODEL-SOURCES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.source_claims | Where-Object source -eq 'SRC-OLLAMA-STRUCTURED').claim = 'cloud enforces structured outputs' }
