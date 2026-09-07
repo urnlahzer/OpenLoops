@@ -43,7 +43,7 @@ impl std::fmt::Display for ProviderError {
             Self::Network => "Could not establish or complete a secure connection to the selected provider. Check connectivity.",
             Self::RateLimited => "The provider returned HTTP 429 (rate limit). Wait before trying again.",
             Self::Quota => "The provider returned HTTP 402. Check your plan or usage balance.",
-            Self::RequestRejected(status) => return write!(f, "The provider rejected the request (HTTP {status}). Check that the selected model supports cloud chat."),
+            Self::RequestRejected(status) => return write!(f, "The provider rejected the request (HTTP {status}). An unsupported request parameter or model capability is the usual cause; try another model."),
             Self::ServerError(status) => return write!(f, "The provider returned a server error (HTTP {status}). Try again later or choose another model."),
             Self::ModelUnavailable => "The selected model is not in the provider's selectable model list.",
             Self::InvalidResponse => "The provider returned an incomplete or unsupported response.",

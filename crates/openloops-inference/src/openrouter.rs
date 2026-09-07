@@ -11,6 +11,7 @@ use crate::provider::{
     parse_error, read_body, status_error, transport_error, valid_key, valid_model_name,
 };
 
+const AUTHORITY: &str = "https://openrouter.ai";
 const CHAT: &str = "https://openrouter.ai/api/v1/chat/completions";
 const ZDR_ENDPOINTS: &str = "https://openrouter.ai/api/v1/endpoints/zdr";
 /// The catalog listing is content-free and much larger than a completion:
@@ -78,6 +79,9 @@ impl OpenRouter {
     }
 
     fn chat_at(&self, url: &str, body: Vec<u8>) -> Result<Zeroizing<String>, ProviderError> {
+        // Only the adapter-fixed CHAT constant reaches here in a real build;
+        // the loopback tests substitute their own origin.
+        debug_assert!(cfg!(test) || url.starts_with(AUTHORITY));
         let response = self
             .client
             .post(url)
@@ -109,8 +113,12 @@ pub fn available_zdr_models() -> Result<Vec<ModelChoice>, ProviderError> {
 }
 
 fn fetch_zdr(client: &Client, url: &str) -> Result<Vec<ModelChoice>, ProviderError> {
+    // Only the adapter-fixed ZDR_ENDPOINTS constant reaches here in a real
+    // build; the loopback tests substitute their own origin.
+    debug_assert!(cfg!(test) || url.starts_with(AUTHORITY));
     let response = client
         .get(url)
+        .header(reqwest::header::ACCEPT, "application/json")
         .send()
         .map_err(|error| transport_error(&error))?;
     match response.status().as_u16() {
@@ -136,6 +144,11 @@ fn valid_label(label: &str) -> bool {
 /// is a menu the user chooses from and never an authority: the chosen id is
 /// revalidated as a label and every completion carries `provider.zdr` so
 /// `OpenRouter` enforces the routing regardless of what the listing said.
+///
+/// A listing that is not an object with a `data` array, or that exceeds a
+/// bound, fails. Individual rows do not: a row this adapter cannot read is
+/// dropped, because hundreds of independent endpoints share one response and
+/// one unreadable row must not make every model unselectable.
 fn zdr_models(bytes: &[u8]) -> Result<Vec<ModelChoice>, ProviderError> {
     if bytes.len() > MAX_LISTING {
         return Err(ProviderError::ResponseTooLarge);
@@ -151,33 +164,41 @@ fn zdr_models(bytes: &[u8]) -> Result<Vec<ModelChoice>, ProviderError> {
     }
     let mut choices: Vec<ModelChoice> = Vec::new();
     for endpoint in data {
-        if !endpoint.is_object() {
-            return Err(ProviderError::InvalidResponse);
-        }
-        let status = endpoint
-            .get("status")
-            .and_then(Value::as_i64)
-            .ok_or(ProviderError::InvalidResponse)?;
-        let id = endpoint
-            .get("model_id")
-            .and_then(Value::as_str)
-            .filter(|id| valid_model_name(id))
-            .ok_or(ProviderError::InvalidResponse)?;
-        let label = endpoint
-            .get("model_name")
-            .and_then(Value::as_str)
-            .filter(|label| valid_label(label))
-            .ok_or(ProviderError::InvalidResponse)?;
-        if status != 0 || choices.iter().any(|choice| choice.id == id) {
+        let Some(choice) = healthy_choice(endpoint) else {
             continue;
+        };
+        if !choices.iter().any(|existing| existing.id == choice.id) {
+            choices.push(choice);
         }
-        choices.push(ModelChoice {
-            id: id.to_owned(),
-            label: label.to_owned(),
-        });
     }
     choices.sort_by(|a, b| a.label.cmp(&b.label).then_with(|| a.id.cmp(&b.id)));
     Ok(choices)
+}
+
+/// One selectable model, or `None` when the row is not a readable healthy
+/// endpoint. An absent or null `status` is the healthy case; a present
+/// `status` must be an integer, and only zero is healthy.
+fn healthy_choice(endpoint: &Value) -> Option<ModelChoice> {
+    let endpoint = endpoint.as_object()?;
+    let status = match endpoint.get("status") {
+        None | Some(Value::Null) => 0,
+        Some(status) => status.as_i64()?,
+    };
+    if status != 0 {
+        return None;
+    }
+    let id = endpoint
+        .get("model_id")
+        .and_then(Value::as_str)
+        .filter(|id| valid_model_name(id))?;
+    let label = endpoint
+        .get("model_name")
+        .and_then(Value::as_str)
+        .filter(|label| valid_label(label))?;
+    Some(ModelChoice {
+        id: id.to_owned(),
+        label: label.to_owned(),
+    })
 }
 
 fn read_response(response: Response) -> Result<Zeroizing<Vec<u8>>, ProviderError> {
@@ -208,11 +229,25 @@ fn request(model: &str, system: &str, user: &str) -> Result<Vec<u8>, ProviderErr
     Ok(body)
 }
 
+/// Accepts the exact selected label, or that label followed by a provider
+/// variant suffix such as `:free`. A different model whose id merely starts
+/// with the same characters, such as `vendor/model-10` for `vendor/model-1`,
+/// never matches.
+fn model_matches(reported: &str, selected: &str) -> bool {
+    reported
+        .strip_prefix(selected)
+        .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(':'))
+}
+
 /// Accepts exactly one completed assistant choice from the selected model.
 fn parse_chat(bytes: &[u8], selected: &str) -> Result<Zeroizing<String>, ProviderError> {
     let value = openloops_contracts::parse_strict_json(bytes)
         .map_err(|_| ProviderError::InvalidResponse)?;
-    if value.get("error").is_some() || value.get("model").and_then(Value::as_str) != Some(selected)
+    if value.get("error").is_some()
+        || !value
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(|reported| model_matches(reported, selected))
     {
         return Err(ProviderError::InvalidResponse);
     }
@@ -381,24 +416,12 @@ mod tests {
     }
 
     #[test]
-    fn malformed_listings_and_terminal_injection_are_rejected() {
+    fn a_listing_that_is_not_a_bounded_data_array_is_rejected() {
         for bytes in [
             br#"{"models":[]}"#.to_vec(),
             br#"{"data":{}}"#.to_vec(),
+            br#"["vendor/alpha"]"#.to_vec(),
             b"synthetic-private-canary".to_vec(),
-            listing(&json!(["vendor/alpha"])),
-            listing(&json!([endpoint(
-                "vendor/alpha",
-                "Vendor: \u{1b}[2JAlpha",
-                0
-            )])),
-            listing(&json!([endpoint("vendor/ alpha", "Vendor: Alpha", 0)])),
-            listing(&json!([endpoint("vendor/alpha", "", 0)])),
-            listing(&json!([{"model_id": "vendor/alpha", "model_name": "Vendor: Alpha"}])),
-            listing(
-                &json!([{"model_id": "vendor/alpha", "model_name": "Vendor: Alpha", "status": "0"}]),
-            ),
-            listing(&json!([{"model_name": "Vendor: Alpha", "status": 0}])),
         ] {
             assert_eq!(zdr_models(&bytes), Err(ProviderError::InvalidResponse));
         }
@@ -411,6 +434,63 @@ mod tests {
             zdr_models(&vec![b'x'; MAX_LISTING + 1]),
             Err(ProviderError::ResponseTooLarge)
         );
+    }
+
+    #[test]
+    fn unreadable_rows_are_skipped_without_losing_the_healthy_models() {
+        let bytes = listing(&json!([
+            "vendor/not-an-object",
+            endpoint("vendor/ alpha", "Vendor: Space", 0),
+            endpoint("vendor/escape", "Vendor: \u{1b}[2JEscape", 0),
+            endpoint("vendor/blank", "", 0),
+            {"model_id": "vendor/no-name", "status": 0},
+            {"model_name": "Vendor: No Id", "status": 0},
+            {"model_id": "vendor/text-status", "model_name": "Vendor: Text", "status": "0"},
+            endpoint("vendor/good", "Vendor: Good", 0),
+            {"model_id": "vendor/absent", "model_name": "Vendor: Absent Status"},
+            {"model_id": "vendor/null", "model_name": "Vendor: Null Status", "status": null},
+            endpoint("vendor/degraded", "Vendor: Degraded", -2),
+        ]));
+        assert_eq!(
+            zdr_models(&bytes).unwrap(),
+            [
+                ModelChoice {
+                    id: "vendor/absent".into(),
+                    label: "Vendor: Absent Status".into()
+                },
+                ModelChoice {
+                    id: "vendor/good".into(),
+                    label: "Vendor: Good".into()
+                },
+                ModelChoice {
+                    id: "vendor/null".into(),
+                    label: "Vendor: Null Status".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_variant_suffix_matches_the_selected_model_but_a_longer_id_does_not() {
+        assert!(CHAT.starts_with(AUTHORITY) && ZDR_ENDPOINTS.starts_with(AUTHORITY));
+        for (reported, matches) in [
+            ("vendor/model-1", true),
+            ("vendor/model-1:free", true),
+            ("vendor/model-1:extended", true),
+            ("vendor/model-10", false),
+            ("vendor/model-1x", false),
+            ("vendor/other", false),
+            ("", false),
+        ] {
+            assert_eq!(model_matches(reported, MODEL), matches, "{reported}");
+            let mut value: Value = serde_json::from_slice(&answer("{}")).unwrap();
+            value["model"] = json!(reported);
+            assert_eq!(
+                parse_chat(&serde_json::to_vec(&value).unwrap(), MODEL).is_ok(),
+                matches,
+                "{reported}"
+            );
+        }
     }
 
     #[test]
