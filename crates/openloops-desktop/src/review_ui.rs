@@ -81,6 +81,23 @@ pub struct ReviewState {
     pub decisions: Decisions,
     pub action_status: String,
     pub pending_reminder: Option<([u8; 32], ReminderRequest)>,
+    /// An open reminder draft's implied-tracking change is reverted (see
+    /// [`ReviewState::revert_draft_decision`]) whenever this field is
+    /// cleared from *inside* `ReviewState` -- an explicit Cancel click or
+    /// [`ReviewState::set_scan`] discarding a stale draft on rescan. The
+    /// setup screen's "Scan inboxes" and "Clear results and mail" actions
+    /// (`setup_ui.rs`) instead replace the whole `ReviewState` with
+    /// `ReviewState::default()`, dropping any open `draft` without going
+    /// through that revert. This is left as is deliberately, not an
+    /// oversight: unlike a rescan, which redraws the very same cards in
+    /// place, so a stale implied `Mine` would sit right there on screen
+    /// contradicting a decision the user never actually confirmed, a full
+    /// "Scan inboxes"/"Clear results" reset clears the visible cards too --
+    /// the stale decision only resurfaces on a later scan, where it reads
+    /// like any other saved decision and the normal "Still open"/dismiss
+    /// controls can correct it same as they would for one the user set on
+    /// purpose. Treating "I was mid-draft when I started over" as "still
+    /// tracking" is also the safer default of the two silent outcomes.
     draft: Option<ReminderDraft>,
     /// Whether the open `draft`'s card has already been scrolled into view
     /// this time it opened. Reset to `false` whenever a new draft opens or
@@ -175,9 +192,33 @@ impl ReviewState {
         // A rescan rebuilds `analysis`/`messages` from scratch; an open
         // draft refers to a card from the previous scan and would otherwise
         // be orphaned -- neither closeable (its card may no longer exist)
-        // nor visibly tied to anything on screen.
-        self.draft = None;
+        // nor visibly tied to anything on screen. Revert the implied-tracking
+        // change opening it made (see `decision_after_setting_reminder`),
+        // same as an explicit Cancel click would (`revert_draft_decision`),
+        // so a rescan can never silently leave a stray `Mine`/`Watching` the
+        // user never actually confirmed sitting on a now-invisible draft.
+        if let Some(draft) = self.draft.take() {
+            self.revert_draft_decision(draft.prior_decision, draft.key);
+        }
         self.draft_scrolled = false;
+    }
+    /// Reverts the implied-tracking change from opening a reminder draft
+    /// (see [`decision_after_setting_reminder`]) for `key`, given `prior` --
+    /// the decision in force just before that draft opened. Applies through
+    /// `self.decisions.update` (recording `self.action_status`) only when
+    /// [`decision_after_cancel`] says a revert applies; a no-op otherwise.
+    /// Shared by an explicit Cancel click (`show_draft`) and `set_scan`
+    /// discarding the draft out from under it on a rescan.
+    fn revert_draft_decision(&mut self, prior: Decision, key: [u8; 32]) {
+        if let Some(decision) = decision_after_cancel(prior, self.decisions.get(&key).decision) {
+            let mut r = self.decisions.get(&key);
+            r.decision = decision;
+            r.updated = now();
+            self.action_status = match self.decisions.update(r) {
+                Ok(()) => "Decision saved on this Windows account.".into(),
+                Err(e) => e,
+            };
+        }
     }
     pub fn show(&mut self, ui: &mut egui::Ui) {
         if let Some(error) = &self.decisions.error {
@@ -358,19 +399,26 @@ impl ReviewState {
             r.decision = decision;
             r.reminder = reminder;
             r.updated = now();
-            self.action_status = match self.decisions.update(r) {
+            let saved = self.decisions.update(r);
+            self.action_status = match &saved {
                 Ok(()) => "Decision saved on this Windows account.".into(),
-                Err(e) => e,
+                Err(e) => e.clone(),
             };
             // A terminal decision (reached from an action button while a
             // reminder draft was open on this same card, e.g. "Handled")
             // closes the card outright; an open draft on it no longer has
             // anywhere sensible to render, so close the draft along with it
-            // rather than leaving it attached to a now-terminal card.
-            if matches!(
-                decision,
-                Decision::Done | Decision::Dismissed | Decision::Moot
-            ) && self.draft.as_ref().is_some_and(|d| d.key == key)
+            // rather than leaving it attached to a now-terminal card. Only
+            // when `saved` is `Ok`, though: if the update was rejected (e.g.
+            // the saved-decision limit), the recorded decision never actually
+            // became terminal, so the draft must stay open and attached to
+            // its still-open card rather than vanishing out from under it.
+            if saved.is_ok()
+                && matches!(
+                    decision,
+                    Decision::Done | Decision::Dismissed | Decision::Moot
+                )
+                && self.draft.as_ref().is_some_and(|d| d.key == key)
             {
                 self.draft = None;
                 self.draft_scrolled = false;
@@ -430,17 +478,7 @@ impl ReviewState {
             // else moved the decision on in the meantime -- a successful
             // create (handled above) never reaches here, so it always keeps
             // `Mine`/`Watching`.
-            if let Some(decision) =
-                decision_after_cancel(prior_decision, self.decisions.get(&key).decision)
-            {
-                let mut r = self.decisions.get(&key);
-                r.decision = decision;
-                r.updated = now();
-                self.action_status = match self.decisions.update(r) {
-                    Ok(()) => "Decision saved on this Windows account.".into(),
-                    Err(e) => e,
-                };
-            }
+            self.revert_draft_decision(prior_decision, key);
             close_draft = true;
         }
         if close_draft {
@@ -603,8 +641,9 @@ fn expectations_summary(
 /// borrow of `self.analysis`/`self.messages` (see
 /// [`ReviewState::show_analysis`]). `draft_open_here` is whether a reminder
 /// draft is already open for this card's key -- passed through to
-/// `card_action_buttons` so the "Set To Do reminder…" button disables itself
-/// rather than silently replacing an already-open, possibly-edited draft.
+/// `card_action_buttons` so the "Set To Do reminder…" button greys itself
+/// out (stays visible, disabled) rather than silently replacing an
+/// already-open, possibly-edited draft.
 fn render_card_body(
     ui: &mut egui::Ui,
     messages: &[ReviewMessage],
@@ -756,9 +795,10 @@ fn render_reminder_status(ui: &mut egui::Ui, record: &Record) -> Option<(Decisio
 /// A terminal card only offers reopening; a card closed by resolution
 /// evidence (but not explicitly overridden to `Mine`/`Watching`) only offers
 /// reopening it as still-open tracking; every other card gets the full set
-/// of open-card actions. `draft_open_here` disables "Set To Do reminder…"
-/// while a draft is already open for this card, so it never silently
-/// replaces one the user may have already started editing.
+/// of open-card actions. `draft_open_here` greys out "Set To Do reminder…"
+/// (via `egui::Ui::add_enabled`, not removing the button) while a draft is
+/// already open for this card, so it never silently replaces one the user
+/// may have already started editing.
 fn card_action_buttons(
     ui: &mut egui::Ui,
     item: &Expectation,
@@ -798,8 +838,10 @@ fn card_action_buttons(
             if ui.button("No longer relevant").clicked() {
                 change = Some((Decision::Moot, record.reminder));
             }
-            if reminder_button_enabled(record.reminder, draft_open_here)
-                && ui.button("Set To Do reminder…").clicked()
+            let reminder_enabled = reminder_button_enabled(record.reminder, draft_open_here);
+            if ui
+                .add_enabled(reminder_enabled, egui::Button::new("Set To Do reminder…"))
+                .clicked()
             {
                 change = Some((
                     decision_after_setting_reminder(record.decision),
@@ -1338,6 +1380,57 @@ mod tests {
                 "prior={prior:?} current={current:?}"
             );
         }
+    }
+
+    /// A rescan (`set_scan`) discards any open reminder draft outright (see
+    /// the doc comment on `set_scan`), but must not silently strand the
+    /// implied `Mine` that opening the draft applied to a `Review` card --
+    /// same as an explicit Cancel click would revert it (see
+    /// `decision_after_cancel`), via the shared `revert_draft_decision`.
+    #[test]
+    fn set_scan_reverts_an_open_drafts_implied_mine_back_to_review() {
+        let (mut state, item) = aging_fixture();
+        let source = state.messages[0].clone();
+        let key = state
+            .decisions
+            .fingerprint(&source.account, &source.id, &item.action_phrase);
+        // Simulate "Set To Do reminder..." having been clicked on this
+        // `Review` card: `decision_after_setting_reminder` implied `Mine`.
+        let mut record = state.decisions.get(&key);
+        record.decision = Decision::Mine;
+        state.decisions.records = vec![record];
+        state.draft = Some(ReminderDraft {
+            key,
+            account: source.account.clone(),
+            title: item.action.clone(),
+            when: default_reminder(),
+            error: String::new(),
+            prior_decision: Decision::Review,
+        });
+
+        state.set_scan(
+            ScanResult {
+                analysis: Expectations {
+                    items: vec![item],
+                    rejected: 0,
+                    rejection_reasons: vec![],
+                    degraded: 0,
+                },
+                failures: vec![],
+                analyzed: 1,
+                total: 1,
+                cancelled: false,
+                conversation_notes: vec![],
+                cross_thread_closures: 0,
+                event_closures: 0,
+                primary_scan_transport_error: false,
+                closure_pass_failure: None,
+            },
+            "model".into(),
+        );
+
+        assert!(state.draft.is_none());
+        assert_eq!(state.decisions.get(&key).decision, Decision::Review);
     }
 
     #[test]

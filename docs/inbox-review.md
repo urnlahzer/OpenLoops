@@ -30,7 +30,10 @@ in the normal application.
    review** save abstract decisions. Opening a reminder draft on a card still
    under review implies the same tracking as **Track — this is mine**;
    cancelling that draft restores the decision to what it was before the
-   draft opened. The checkbox **Show resolved, handled, dismissed, and
+   draft opened, unless you have changed the decision since (an action
+   button, or a rescan closing the card by later evidence), in which case
+   the draft simply closes and the changed decision stands. The checkbox
+   **Show resolved, handled, dismissed, and
    no-longer-relevant items** reveals closed cards. Model summaries and
    source text are not saved locally.
 4. **Set To Do reminder** is available on any open card and does not require
