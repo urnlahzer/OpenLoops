@@ -6,17 +6,41 @@ in the normal application.
 
 1. **Scan inboxes** opens Microsoft sign-in, reads the visible 30-day history,
    and automatically analyzes conversations with the selected Ollama model.
-   There is no individual message selection. Inbox and Sent Items are joined
-   by conversation identity. Groups retain their own thread identity.
+   There is no individual message selection. Personal Inbox and Sent Items
+   are joined by conversation identity, and a split identity is merged back
+   in when the subject, an outside participant, and the timing all match.
+   Groups keep their own thread identity and never merge.
 2. Review each complete action, suggested owner, waiting party, and stated
-   deadline. Expand evidence to inspect original quotations and later replies.
-   A possible completion remains open until the user confirms it.
+   deadline. Under the stated deadline the card shows how it ages (due, past
+   due, a date range, tied to an event, or soft urgency); past-due open items
+   sort first. Expand evidence to inspect original quotations and later
+   replies. Resolved requests are closed and hidden by default; the show
+   toggle reveals them with the closing evidence. Closing evidence can also
+   come from a reply you sent the same person in a different conversation;
+   the card marks these "evidence in another conversation." Expectations tied
+   to a passed event also close automatically; event times come from Graph
+   meeting messages, calendar-invite subject lines, or a date or time stated
+   in an email body. Corrections that
+   leave the action owed keep the card open with updated terms. If a quoted deadline or
+   completion could not be validated against the mail, the card says so and
+   keeps the item open.
 3. **Track — this is mine** confirms personal responsibility. **Keep an eye on
    this** watches an unassigned team expectation without claiming ownership.
-   **Handled**, **Not mine / dismiss**, and **Reopen for review** save abstract
-   decisions. Model summaries and source text are not saved locally.
-4. After choosing to track or watch, **Set To Do reminder** previews an editable
-   title and future local reminder time. The explicit create button authorizes
+   **Handled**, **Not mine / dismiss**, **No longer relevant**, and **Reopen for
+   review** save abstract decisions. Opening a reminder draft on a card still
+   under review implies the same tracking as **Track — this is mine**;
+   cancelling that draft restores the decision to what it was before the
+   draft opened, unless you have changed the decision since (an action
+   button, or a rescan closing the card by later evidence), in which case
+   the draft simply closes and the changed decision stands. The checkbox
+   **Show resolved, handled, dismissed, and
+   no-longer-relevant items** reveals closed cards. Model summaries and
+   source text are not saved locally.
+4. **Set To Do reminder** is available on any open card and does not require
+   tracking or watching it first; setting a reminder on a card still under
+   review implies tracking it (a card already being watched stays watched).
+   It previews an editable title and future local reminder time directly
+   under the card that opened it. The explicit create button authorizes
    one task in the same Microsoft account's default personal Tasks list.
    Microsoft To Do owns notification delivery, including when OpenLoops closes.
    This requires delegated Tasks.ReadWrite and a separate browser sign-in.
@@ -27,7 +51,10 @@ in the normal application.
 ## Coverage and interpretation
 
 Personal/shared Inbox and Sent Items each load up to 100 messages from the last
-30 days in pages of 25. Groups load up to 20 recent threads, each with up to 40
+30 days: message headers are listed newest-first in pages of 100 and each body
+is fetched separately, so one oversized message cannot fail the folder. Quoted
+Outlook reply history inside a message is treated as context, not current text.
+Groups load up to 20 recent threads, each with up to 40
 posts; threads active within 30 days can include earlier posts as context.
 There are at most 10 configured sources. Pagination is confined to the same
 Graph origin and collection path. A capped, inaccessible, or oversized source
@@ -49,6 +76,12 @@ work is unfinished. No reminders are created by scanning or inference alone.
 Authentication, quota, throttling, and provider transport failures stop later
 requests. Other conversation failures remain visible while the scan continues.
 There are no automatic request retries or silent model substitutions.
+
+After the per-conversation pass, a bounded cross-thread closure pass sends
+each remaining open request, together with the user's later messages to the
+same person from other conversations (up to 8, newest first, at most 40
+requests per scan), to the model to check for completion evidence; this is
+the only place two conversations share one model request.
 
 ## Saved decisions and reminders
 

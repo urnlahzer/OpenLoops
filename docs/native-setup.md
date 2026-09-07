@@ -15,17 +15,25 @@ unattended background service remain on the implementation roadmap.
 2. Click **Sign in & check inboxes** and complete Microsoft sign-in in the system
    browser. The window reports personal, Group, and shared-mailbox access
    separately. These read-only checks do not load message subjects or bodies.
-3. Paste an Ollama API key. It is hidden by default; **Show key** reveals it.
-   Click **Load cloud models**, choose a model, then **Test selected model**.
-   The list comes from Ollama Cloud, with its exact model labels preserved.
-   DeepSeek Flash is suggested when listed, including dated versions.
+3. Choose a provider: **Ollama Cloud** or **OpenRouter**. Each keeps its own
+   key and model choice, so switching between them loses neither.
+   - Ollama Cloud: paste an Ollama API key, hidden by default (**Show key**
+     reveals it). Click **Load cloud models**, choose a model, then **Test
+     selected model**. The list comes from Ollama Cloud, with its exact model
+     labels preserved. DeepSeek Flash is suggested when listed, including dated
+     versions.
+   - OpenRouter: paste an OpenRouter API key, then click **Load ZDR models**.
+     That listing is public, so it is fetched without sending the key. Only
+     models with a zero-data-retention endpoint appear, and every request pins
+     ZDR-only routing. See [OpenRouter](openrouter.md).
 4. To switch, select another model and test it. No automatic fallback occurs.
    A failed test distinguishes authentication, rate limiting, account balance,
    HTTP server/request errors, timeouts, and invalid analysis output. Upstream
    response text is never shown or logged.
 
-The client ID, Group and shared-mailbox addresses, Ollama API key, and selected
-model save automatically when changed and restore on launch. They are stored
+The client ID, Group and shared-mailbox addresses, the provider selection, each
+provider's API key, and each provider's selected model save automatically when
+changed and restore on launch. They are stored
 together as one versioned record in the current user's Windows Credential Manager,
 with **Local** persistence (this computer, across logins). No settings file or
 plaintext key is written to the checkout. The key is hidden again on every launch.
@@ -51,8 +59,8 @@ request's validity, not a model's extraction quality.
 The app registration is still a developer setup prerequisite. Ordinary user
 onboarding will need a publisher-owned multitenant registration configured in
 the distributed application; users should not each need to register an app.
-See [Microsoft connection](live-connection.md) and [Ollama Cloud](ollama-cloud.md)
-for permission and data-flow details.
+See [Microsoft connection](live-connection.md), [Ollama Cloud](ollama-cloud.md),
+and [OpenRouter](openrouter.md) for permission and data-flow details.
 
 ## Development
 

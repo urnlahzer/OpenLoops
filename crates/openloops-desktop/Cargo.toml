@@ -33,7 +33,8 @@ workspace = true
 default = []
 live-connection = ["openloops-graph/live-connection"]
 ollama-cloud = ["openloops-inference/ollama-cloud"]
-native-ui = ["live-connection", "ollama-cloud", "dep:eframe", "dep:zeroize", "dep:keyring-core", "dep:windows-native-keyring-store", "dep:chrono", "dep:hmac", "dep:sha2", "dep:getrandom"]
+openrouter = ["openloops-inference/openrouter"]
+native-ui = ["live-connection", "ollama-cloud", "openrouter", "dep:eframe", "dep:zeroize", "dep:keyring-core", "dep:windows-native-keyring-store", "dep:chrono", "dep:hmac", "dep:sha2", "dep:getrandom"]
 ui-screenshot = ["native-ui", "dep:image"]
 
 [[bin]]

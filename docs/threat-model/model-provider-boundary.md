@@ -7,7 +7,8 @@ projection to an explicitly selected provider and back to a validated hypothesis
 P0-WI-10 is contract-only. No provider adapter, origin, credential, request,
 response, persistent record, or model-dependent capability exists yet.
 `disabled` is the sole default and produces zero provider network requests.
-Ollama local, Ollama Cloud, and an optional approved-HTTPS adapter remain disabled
+Ollama local, Ollama Cloud, and an optional approved-HTTPS adapter (filled by
+OpenRouter, restricted to zero-data-retention endpoints) remain disabled
 and unadvertised behind G-MODEL, G-PRIV, G-SEC-AUDIT, and G-RELEASE.
 All four gates remain unrun.
 
@@ -51,6 +52,9 @@ state.
 | A content-free preflight silently becomes content-bearing or trusts unstable provider identity | Permit only the fixed bounded `/api/tags` model-list request with no mailbox projection. Strictly parse model label/digest, retain no raw response, and disable on API shape, capability, digest, or documented-behavior drift because the Ollama API is not strictly versioned. |
 | Ollama Cloud structured-output limitation is mistaken for validated output | Make no server-side schema-enforcement claim. Always reject duplicate JSON members and unknown fields and run the complete application schema, handle, Unicode range, evidence correspondence, participant, deterministic date, consistency, and semantic validation sequence. |
 | Approved-HTTPS adapter becomes an arbitrary HTTP client | Require a separately reviewed fixed wire schema, fixed authentication mapping, adapter-owned path, one canonical public HTTPS origin, and no arbitrary header bag. It cannot substitute for the required tested Ollama Cloud path. |
+| An OpenRouter request is routed to an endpoint that retains it | Send `provider.zdr=true` on every chat request so OpenRouter routes only to zero-data-retention endpoints, independently of the account setting, and revalidate the selected model against `/api/v1/endpoints/zdr` before any content is sent. A model with no zero-data-retention endpoint is unselectable and the profile fails closed rather than routing elsewhere. |
+| The zero-data-retention model listing is treated as an authority | The listing only populates a menu the user chooses from. Fetch it content-free with no credential, bound and strictly parse `model_id`, `model_name`, and `status`, drop every non-zero status, revalidate the chosen label before it reaches a request, retain no raw response, and never let a listing answer relax `provider.zdr=true` or any other request bound. |
+| A second provider widens the credential or disclosure boundary | Each provider keeps its own bounded write-only key in the same OS-protected record; one provider's key is never sent to the other authority. Every scan-scope and transmission disclosure names the selected provider and its routing restriction, and switching providers is a consent-invalidating change like any other endpoint change. |
 | Credential escapes the OS-protected boundary | Accept one bounded write-only credential only after ADR-005/G-STATE support exists; hold it only in process memory or `provider-credential.dpapi`; construct authorization after final authority validation. Never expose it to the add-in, CLI, logs, errors, diagnostics, browser state, repository, or package. Secure-store failure disables provider use with no plaintext fallback. |
 | Content-free credential check accidentally sends mailbox data | Use a content-free request only where supported. Any unavailable or failed check leaves the profile disabled and sends no mailbox content. |
 | Excess mailbox context is disclosed | Deterministic code selects one changed message and at most four context projections. Enforce closed field categories and exact per-message/block/participant/attachment/link and total-byte caps before transport. Prohibit whole-mailbox/thread defaults, attachments, linked contents, hrefs/URLs, credentials, unrelated recipients, and Graph locators. |
