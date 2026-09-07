@@ -5,7 +5,7 @@ use chrono::TimeZone;
 use eframe::egui::{self, Color32, RichText};
 use openloops_graph::live::{reminders::ReminderRequest, review::SourceReview};
 use openloops_inference::ollama::expectations::{
-    Anchor, Expectation, Expectations, Owner, ResolutionKind,
+    Anchor, EventPassed, Expectation, Expectations, Owner, ResolutionKind,
 };
 #[path = "review_scan.rs"]
 mod scanning;
@@ -236,7 +236,7 @@ impl ReviewState {
             Decision::Done | Decision::Dismissed | Decision::Moot
         );
         let closed = terminal
-            || (item.resolution.is_some()
+            || ((item.resolution.is_some() || item.event_passed.is_some())
                 && !matches!(record.decision, Decision::Mine | Decision::Watching));
         let deadline = item.deadline.as_ref().map(|anchor| {
             let message = self
@@ -310,8 +310,8 @@ impl ReviewState {
             ui.push_id(i,|ui|{
                 egui::Frame::group(ui.style()).show(ui,|ui|{
                     ui.set_width(ui.available_width());
-                    let status_base=status_base_label(record.decision,item);
-                    let status=status_label(status_base,status_shows_cross_thread(record.decision,item.resolution.is_some(),item.cross_thread));
+                     let status_base=status_base_label(record.decision,item);
+                     let status=status_label(&status_base,status_shows_cross_thread(record.decision,item.resolution.is_some(),item.cross_thread));
                     ui.label(RichText::new(status).color(Color32::from_rgb(29,87,67)));
                     ui.label(RichText::new(&item.action).size(21.0).strong());
                     let owner=if record.decision==Decision::Mine {"You (confirmed)"} else {match item.owner {Owner::You=>"You (suggested)",Owner::Team=>"Team — no individual owner established",Owner::Unclear=>"Unclear — confirm responsibility"}};
@@ -324,6 +324,7 @@ impl ReviewState {
                     ui.collapsing("Why this was suggested · evidence and replies",|ui|{
                         show_anchor(ui,"Original expectation",&item.evidence,&self.messages);
                         if let Some(deadline)=&item.deadline {show_anchor(ui,"Deadline evidence",deadline,&self.messages);}
+                        if let Some(event)=&item.event {show_anchor(ui,"Event evidence",event,&self.messages);}
                         if let Some(resolution)=&item.resolution {show_anchor(ui,resolution_anchor_label(item.resolution_kind,item.cross_thread),resolution,&self.messages);} else if item.unverified_resolution {ui.label("The analysis proposed a completion but it could not be validated; treat as open.");} else {ui.label("No matching completion was identified in the scanned conversation. Work may have happened elsewhere or outside this history window.");}
                         ui.collapsing("Full scanned conversation",|ui| {for m in self.messages.iter().filter(|m|m.account==source.account && m.conversation==source.conversation) {ui.label(format!("{} · {}",m.date_label,if m.input.from_user {"You"} else {"Other participant"}));for b in &m.input.message.body_blocks {ui.label(b.as_string());}}});
                     });
@@ -400,18 +401,33 @@ impl ReviewState {
 /// `item.resolution` is `Some` -- it must not flip back to resolved wording
 /// just because closure evidence exists. Only when there is no override at
 /// all does a resolution get to speak for itself.
-fn status_base_label(decision: Decision, item: &Expectation) -> &'static str {
+fn status_base_label(decision: Decision, item: &Expectation) -> String {
     match decision {
-        Decision::Done => "Handled",
-        Decision::Dismissed => "Dismissed / not mine",
-        Decision::Moot => "No longer relevant",
-        Decision::Mine => "Tracking",
-        Decision::Watching => "Watching team follow-up",
+        Decision::Done => "Handled".into(),
+        Decision::Dismissed => "Dismissed / not mine".into(),
+        Decision::Moot => "No longer relevant".into(),
+        Decision::Mine => "Tracking".into(),
+        Decision::Watching => "Watching team follow-up".into(),
         Decision::Review if item.resolution.is_some() => {
-            resolution_status_label(item.resolution_kind)
+            resolution_status_label(item.resolution_kind).into()
         }
-        Decision::Review => "Needs your review",
+        Decision::Review if item.event_passed.is_some() => {
+            event_passed_status_label(item.event_passed.as_ref().expect("checked above"))
+        }
+        Decision::Review => "Needs your review".into(),
     }
+}
+
+fn event_passed_status_label(event: &EventPassed) -> String {
+    let date = chrono::DateTime::from_timestamp(event.end, 0).map_or_else(
+        || "unknown date".to_string(),
+        |time| {
+            time.with_timezone(&chrono::Local)
+                .format("%b %d, %Y %H:%M %:z")
+                .to_string()
+        },
+    );
+    format!("Closed: event passed ({}, ended {date})", event.name)
 }
 fn resolution_status_label(kind: Option<ResolutionKind>) -> &'static str {
     match kind {
@@ -490,7 +506,17 @@ fn expectations_summary(
         .zip(&resolved_flags)
         .filter(|&(item, &r)| r && item.cross_thread)
         .count();
-    let open = analysis.items.len() - resolved;
+    let event_closed = analysis
+        .items
+        .iter()
+        .zip(cards)
+        .filter(|&(item, card)| {
+            item.resolution.is_none()
+                && item.event_passed.is_some()
+                && card.as_ref().is_some_and(|card| card.closed)
+        })
+        .count();
+    let open = analysis.items.len() - resolved - event_closed;
     let degraded_note = if analysis.degraded > 0 {
         format!(" · {} kept with unverified evidence", analysis.degraded)
     } else {
@@ -501,8 +527,13 @@ fn expectations_summary(
     } else {
         String::new()
     };
+    let event_note = if event_closed > 0 {
+        format!(" · {event_closed} closed because the event passed")
+    } else {
+        String::new()
+    };
     format!(
-        "{open} expectations · {resolved} resolved by later evidence · {} rejected for invalid evidence{degraded_note}{cross_thread_note} · {model}",
+        "{open} expectations · {resolved} resolved by later evidence · {} rejected for invalid evidence{degraded_note}{cross_thread_note}{event_note} · {model}",
         analysis.rejected
     )
 }
@@ -674,6 +705,7 @@ pub fn layout_fixture() -> ReviewState {
                 quote: "Friday".into(),
                 context: body.into(),
             }),
+            event: None,
             resolution: None,
             resolution_kind: None,
             uncertainty: if index == 0 {
@@ -684,6 +716,7 @@ pub fn layout_fixture() -> ReviewState {
             unverified_deadline: false,
             unverified_resolution: false,
             cross_thread: false,
+            event_passed: None,
         })
         .collect();
     state.set_scan(
@@ -742,12 +775,14 @@ mod tests {
             kind: "request".into(),
             evidence: anchor.clone(),
             deadline: Some(anchor),
+            event: None,
             resolution: None,
             resolution_kind: None,
             uncertainty: String::new(),
             unverified_deadline: false,
             unverified_resolution: false,
             cross_thread: false,
+            event_passed: None,
         };
         (state, item)
     }
@@ -948,6 +983,47 @@ mod tests {
             let hidden = closed && !show_handled;
             assert_eq!(hidden, !show_handled, "show_handled={show_handled}");
         }
+    }
+
+    #[test]
+    fn event_passed_closure_hides_sorts_labels_and_can_be_overridden() {
+        let (mut state, mut item) = aging_fixture();
+        let end = chrono::DateTime::parse_from_rfc3339("2026-08-21T19:30:00Z")
+            .unwrap()
+            .timestamp();
+        item.event_passed = Some(EventPassed {
+            name: "design workshop".into(),
+            end,
+        });
+        let card = state.card_context(&item, 0, 0).unwrap();
+        assert!(card.closed);
+        assert_eq!(card_rank(Some(&card)), 2);
+        assert_eq!(
+            status_base_label(Decision::Review, &item),
+            event_passed_status_label(item.event_passed.as_ref().unwrap())
+        );
+
+        let key = card.record.key;
+        let mut record = state.decisions.get(&key);
+        record.decision = Decision::Mine;
+        state.decisions.records = vec![record];
+        let overridden = state.card_context(&item, 0, 0).unwrap();
+        assert!(!overridden.closed);
+        assert_eq!(status_base_label(Decision::Mine, &item), "Tracking");
+
+        let analysis = Expectations {
+            items: vec![item],
+            rejected: 0,
+            rejection_reasons: vec![],
+            degraded: 0,
+        };
+        let (plain_state, _) = aging_fixture();
+        let cards = plain_state.card_contexts(&analysis.items);
+        let summary = expectations_summary(&analysis, &cards, "model");
+        assert!(
+            summary.contains("· 1 closed because the event passed"),
+            "summary: {summary}"
+        );
     }
 
     #[test]
@@ -1191,6 +1267,7 @@ mod tests {
                 cancelled: false,
                 conversation_notes: vec![],
                 cross_thread_closures: 0,
+                event_closures: 0,
                 primary_scan_transport_error: false,
                 closure_pass_failure: Some(
                     "Cross-thread closure pass stopped: rate limited".into(),

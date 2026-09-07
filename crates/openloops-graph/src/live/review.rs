@@ -23,6 +23,15 @@ pub struct MailItem {
     pub sent: bool,
     pub team: bool,
     pub web_link: String,
+    pub event: Option<MailEvent>,
+}
+
+#[derive(Clone)]
+pub struct MailEvent {
+    pub start: String,
+    pub end: String,
+    pub kind: String,
+    pub out_of_date: bool,
 }
 
 pub struct SourceReview {
@@ -296,7 +305,11 @@ fn mailbox_url(address: Option<&str>, sent: bool) -> Result<Url, ConnectionError
 
 /// Bounded, read-only body fetch for a single message already discovered via
 /// `mailbox_url`. Never follows a server-provided URL; always the fixed Graph origin.
-fn message_url(address: Option<&str>, id: &str) -> Result<Url, ConnectionError> {
+fn message_url_with_select(
+    address: Option<&str>,
+    id: &str,
+    select: &str,
+) -> Result<Url, ConnectionError> {
     if id.is_empty() || id == "." || id == ".." {
         return Err(ConnectionError::InvalidConfiguration);
     }
@@ -317,8 +330,50 @@ fn message_url(address: Option<&str>, id: &str) -> Result<Url, ConnectionError> 
         }
         path.push("messages").push(id);
     }
-    url.query_pairs_mut().append_pair("$select", "body");
+    url.query_pairs_mut().append_pair("$select", select);
     Ok(url)
+}
+
+fn message_url(address: Option<&str>, id: &str) -> Result<Url, ConnectionError> {
+    message_url_with_select(address, id, "body")
+}
+
+fn event_url(address: Option<&str>, id: &str) -> Result<Url, ConnectionError> {
+    message_url_with_select(
+        address,
+        id,
+        "meetingMessageType,startDateTime,endDateTime,isOutOfDate",
+    )
+}
+
+fn is_event_message(value: &Value) -> bool {
+    matches!(
+        value.get("@odata.type").and_then(Value::as_str),
+        Some("#microsoft.graph.eventMessageRequest" | "#microsoft.graph.eventMessage")
+    )
+}
+
+fn utc_event_time(value: &Value, field: &str) -> Option<String> {
+    let value = value.get(field)?;
+    if value.get("timeZone")?.as_str()? != "UTC" {
+        return None;
+    }
+    let raw = value.get("dateTime")?.as_str()?;
+    let parsed = chrono::DateTime::parse_from_rfc3339(&format!("{raw}Z")).ok()?;
+    Some(
+        parsed
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    )
+}
+
+fn mail_event(value: &Value) -> Option<MailEvent> {
+    Some(MailEvent {
+        start: utc_event_time(value, "startDateTime")?,
+        end: utc_event_time(value, "endDateTime")?,
+        kind: value.get("meetingMessageType")?.as_str()?.to_string(),
+        out_of_date: value.get("isOutOfDate")?.as_bool()?,
+    })
 }
 
 /// Splits newest-first `rows` into the in-window prefix (timestamp >= `cutoff`,
@@ -378,7 +433,15 @@ fn hydrate(
     row.as_object_mut()
         .ok_or(ConnectionError::ResourceUnavailable)?
         .insert("body".to_string(), body);
-    item(&row, None)
+    let mut result = item(&row, None)?;
+    if is_event_message(&body_value)
+        && let Ok(url) = event_url(address, &id)
+        && let Ok(bytes) = fetch(http, token, url)
+        && let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+    {
+        result.event = mail_event(&value);
+    }
+    Ok(result)
 }
 
 fn load_mailbox(http: &Client, token: &str, address: Option<&str>) -> SourceReview {
@@ -762,6 +825,49 @@ mod tests {
         for id in ["", ".", ".."] {
             assert!(message_url(None, id).is_err());
         }
+    }
+    #[test]
+    fn event_url_selects_only_meeting_metadata() {
+        let personal = event_url(None, "synthetic-id").unwrap();
+        assert_eq!(personal.path(), "/v1.0/me/messages/synthetic-id");
+        assert!(personal.query_pairs().any(|(key, value)| {
+            key == "$select" && value == "meetingMessageType,startDateTime,endDateTime,isOutOfDate"
+        }));
+        let shared = event_url(Some("shared@example.invalid"), "a/b").unwrap();
+        assert_eq!(
+            shared.path(),
+            "/v1.0/users/shared@example.invalid/messages/a%2Fb"
+        );
+    }
+
+    #[test]
+    fn meeting_metadata_parses_only_utc_event_times() {
+        let meeting = serde_json::json!({
+            "@odata.type": "#microsoft.graph.eventMessageRequest",
+            "meetingMessageType": "meetingRequest",
+            "startDateTime": {"dateTime": "2026-08-21T18:30:00.0000000", "timeZone": "UTC"},
+            "endDateTime": {"dateTime": "2026-08-21T19:30:00.0000000", "timeZone": "UTC"},
+            "isOutOfDate": false
+        });
+        assert!(is_event_message(&meeting));
+        let event = mail_event(&meeting).unwrap();
+        assert_eq!(event.start, "2026-08-21T18:30:00Z");
+        assert_eq!(event.end, "2026-08-21T19:30:00Z");
+        assert_eq!(event.kind, "meetingRequest");
+        assert!(!event.out_of_date);
+
+        let mut non_utc = meeting;
+        non_utc["startDateTime"]["timeZone"] = serde_json::json!("Pacific Standard Time");
+        assert!(mail_event(&non_utc).is_none());
+    }
+
+    #[test]
+    fn plain_message_has_no_event() {
+        let body = serde_json::json!({
+            "@odata.type": "#microsoft.graph.message",
+            "body": {"contentType": "text", "content": "Synthetic request"}
+        });
+        assert!(!is_event_message(&body));
     }
     #[test]
     fn window_walks_newest_first_rows_until_the_cutoff() {
