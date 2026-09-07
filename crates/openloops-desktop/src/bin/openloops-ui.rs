@@ -22,8 +22,12 @@ fn main() {
                 .load()
                 .map_err(|_| "Saved settings could not be loaded".to_string())?
                 .ok_or("No saved settings".to_string())?;
-            review_ui::probe(settings.key.to_string(), &settings.selected)
-                .map_err(|error| error.to_string())
+            review_ui::probe(
+                settings.provider,
+                settings.active_key().to_string(),
+                settings.active_model(),
+            )
+            .map_err(|error| error.to_string())
         })();
         match result {
             Ok(count) => {
