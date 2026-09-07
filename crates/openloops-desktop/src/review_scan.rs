@@ -409,22 +409,27 @@ pub fn scan(
 /// - the conversation returned zero items and zero rejections, but is a
 ///   genuinely two-party thread (at least one message from the signed-in
 ///   user and at least one not, every message personal mail rather than a
-///   group source, and no message with more than one `to` recipient or any
-///   `cc`), so a card silently vanishing from that thread can be told apart
-///   from a newsletter, group source, or other multi-party mail that never
-///   had a single owed action to find.
+///   group source, no message with more than one `to` recipient or any
+///   `cc`, and the union of every message's `other_addresses` across the
+///   whole conversation has exactly one member), so a card silently
+///   vanishing from that thread can be told apart from a newsletter, group
+///   source, or other multi-party mail that never had a single owed action
+///   to find. The address-union check catches what the per-message `to`/
+///   `cc` checks alone cannot: a "two-party" conversation stitched together
+///   from messages to or from different counterparties is not actually
+///   two-party.
 ///
 /// Text only, built from in-memory subjects: never call this from `probe`,
 /// and never persist or log its output.
 fn conversation_note(
     index: usize,
-    conversation: &[ConversationMessage],
+    conversation: &[ReviewMessage],
     analysis: &Expectations,
 ) -> Option<String> {
     let len = conversation.len();
     let subject = conversation
         .first()
-        .map(|m| m.message.subject.as_string())
+        .map(|m| m.input.message.subject.as_string())
         .unwrap_or_default();
     let snippet: String = subject.chars().take(60).collect();
     if analysis.rejected > 0 || analysis.degraded > 0 || !analysis.rejection_reasons.is_empty() {
@@ -443,13 +448,17 @@ fn conversation_note(
             seen.join(" / "),
         ));
     }
+    let mut counterparties: BTreeSet<&str> = BTreeSet::new();
+    for m in conversation {
+        counterparties.extend(m.other_addresses.iter().map(String::as_str));
+    }
     if analysis.items.is_empty()
-        && analysis.rejected == 0
-        && conversation.iter().any(|m| !m.from_user)
-        && conversation.iter().any(|m| m.from_user)
-        && conversation
-            .iter()
-            .all(|m| !m.team && m.message.to.len() <= 1 && m.message.cc.is_empty())
+        && counterparties.len() == 1
+        && conversation.iter().any(|m| !m.input.from_user)
+        && conversation.iter().any(|m| m.input.from_user)
+        && conversation.iter().all(|m| {
+            !m.input.team && m.input.message.to.len() <= 1 && m.input.message.cc.is_empty()
+        })
     {
         return Some(format!(
             "Conversation {} ({len} messages; subject: {snippet}): no expectations returned.",
@@ -478,20 +487,22 @@ fn scan_conversations(
         conversation_notes: vec![],
         cross_thread_closures: 0,
     };
-    let mut conversations: BTreeMap<(&str, &str), Vec<ConversationMessage>> = BTreeMap::new();
+    let mut conversations: BTreeMap<(&str, &str), Vec<ReviewMessage>> = BTreeMap::new();
     for m in messages {
         conversations
             .entry((&m.account, &m.conversation))
             .or_default()
-            .push(m.input.clone());
+            .push(m.clone());
     }
     for (index, mut conversation) in conversations.into_values().enumerate() {
         if progress.cancel.load(Ordering::Relaxed) {
             result.cancelled = true;
             break;
         }
-        conversation.sort_by_key(|m| m.timestamp);
-        match analyze(&conversation) {
+        conversation.sort_by_key(|m| m.input.timestamp);
+        let inputs: Vec<ConversationMessage> =
+            conversation.iter().map(|m| m.input.clone()).collect();
+        match analyze(&inputs) {
             Ok(analysis) => {
                 result.analyzed += conversation.len();
                 if let Some(note) = conversation_note(index, &conversation, &analysis) {
@@ -649,34 +660,36 @@ fn strip_weekday_or_month_prefix(text: &str) -> Option<usize> {
 
 /// True when `after` (the lowercased text following " @ ") looks like a
 /// calendar date/time rather than ordinary subject text: it must start with
-/// a weekday or month name, and what follows that name must itself look
-/// date-shaped -- a comma (e.g. "Mon Sep 7, 2026 ..."), a space directly
-/// followed by a digit (e.g. "Sep 7 2026"), or a digit within the next 4
-/// characters (e.g. "Dec25"). A bare place or product name that happens to
-/// start with a weekday/month abbreviation ("Sun Valley Lodge", "May's
-/// Diner") satisfies the prefix check but none of these follow-on shapes,
-/// so it is correctly left alone.
+/// a weekday or month name, and -- bounded to the first 8 characters that
+/// follow that name -- what comes next must itself look date-shaped: a
+/// comma immediately preceded by a digit (e.g. "Mon Sep 7, 2026 ..."), a
+/// space directly followed by a digit (e.g. "Sep 7 2026"), or a digit
+/// within the first 4 of those characters (e.g. "Dec25"). Bounding the
+/// window, and requiring a digit right before any comma, keeps a bare place
+/// or product name that happens to start with a weekday/month abbreviation
+/// ("Sun Valley Lodge", "May's Diner") -- including one whose own trailing
+/// punctuation is a comma further along ("March House, London") -- from
+/// satisfying any of these follow-on shapes.
 fn looks_like_calendar_date(after: &str) -> bool {
     let Some(name_len) = strip_weekday_or_month_prefix(after) else {
         return false;
     };
     let rest = &after[name_len..];
-    if rest.contains(',') {
-        return true;
-    }
-    if rest
-        .char_indices()
-        .filter(|&(_, c)| c == ' ')
-        .any(|(i, _)| {
-            rest[i + 1..]
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_digit())
-        })
+    let window: Vec<char> = rest.chars().take(8).collect();
+    if window
+        .windows(2)
+        .any(|pair| pair[0].is_ascii_digit() && pair[1] == ',')
     {
         return true;
     }
-    rest.chars().take(4).any(|c| c.is_ascii_digit())
+    if window
+        .iter()
+        .enumerate()
+        .any(|(i, &c)| c == ' ' && window.get(i + 1).is_some_and(char::is_ascii_digit))
+    {
+        return true;
+    }
+    window.iter().take(4).any(char::is_ascii_digit)
 }
 
 /// True when `content` (the text between a trailing pair of parentheses, in
@@ -818,18 +831,34 @@ const CALENDAR_PREFIXES: &[&str] = &[
     "new time proposed",
 ];
 
-/// True when `subject`'s leading `word:` (or fullwidth `：`) prefix, before
-/// any normalization, is one of [`CALENDAR_PREFIXES`]. Used by
-/// [`merge_threads`] to keep a group carrying such a subject from ever
-/// merging with another, since the calendar prefix means the normalized
-/// subject alone does not identify the thread.
+/// True when ANY prefix in the same chain [`normalize_subject`] strips --
+/// reply/forward wrappers included, so "Re: Invitation: ..." and "Fwd:
+/// Updated invitation: ..." are caught, not just a bare leading
+/// "Invitation:" -- is one of [`CALENDAR_PREFIXES`]. Walks the chain the
+/// same way `normalize_subject` does (numbered reply-count suffixes and the
+/// fullwidth `：` separator included), stopping at the first segment that is
+/// not a thread prefix at all, exactly where `normalize_subject` would stop
+/// stripping. Used by [`merge_threads`] to keep a group carrying such a
+/// subject from ever merging with another, since the calendar prefix means
+/// the normalized subject alone does not identify the thread.
 fn raw_subject_has_calendar_prefix(subject: &str) -> bool {
-    let trimmed = subject.trim_start();
-    let Some(sep_idx) = trimmed.find([':', '\u{FF1A}']) else {
-        return false;
-    };
-    let prefix = trimmed[..sep_idx].trim().to_lowercase();
-    CALENDAR_PREFIXES.contains(&prefix.as_str())
+    let mut rest = subject;
+    loop {
+        let trimmed = rest.trim_start();
+        let Some(sep_idx) = trimmed.find([':', '\u{FF1A}']) else {
+            return false;
+        };
+        let raw_prefix = trimmed[..sep_idx].trim();
+        let prefix = strip_reply_count_suffix(&raw_prefix.to_lowercase()).to_string();
+        if !is_thread_prefix(&prefix) {
+            return false;
+        }
+        if CALENDAR_PREFIXES.contains(&prefix.as_str()) {
+            return true;
+        }
+        let sep_len = trimmed[sep_idx..].chars().next().map_or(1, char::len_utf8);
+        rest = &trimmed[sep_idx + sep_len..];
+    }
 }
 
 fn union_find_root(parent: &mut [usize], mut x: usize) -> usize {
@@ -873,26 +902,31 @@ fn subject_strong_enough(subject: &str) -> bool {
 
 /// True when an address that appears in the intersection of two groups'
 /// `other_addresses` is a shared-mailbox or distribution-list address --
-/// one that appears in every group belonging to `account` -- rather than a
-/// genuine outside participant linking the two threads. Requires at least
-/// 3 groups for the account: with only 2 groups, "every group" and "the
-/// other group" are the same set, so the check would otherwise disqualify
-/// the ordinary case of two threads linked by one real correspondent.
+/// one that appears in at least 3 of `account`'s groups AND in at least
+/// half of them -- rather than a genuine outside participant linking the
+/// two threads. Requiring "every group" (as an earlier version of this
+/// check did) never fires on a real mailbox: a distribution list rarely
+/// appears on literally every conversation an account has, so the earlier
+/// rule failed to recognize it as a shared address in practice. Requires at
+/// least 3 groups for the account: with only 2 groups, appearing in "at
+/// least half" is satisfied by appearing in just 1, which would
+/// disqualify the ordinary case of two threads linked by one real
+/// correspondent.
 fn is_shared_mailbox_address(
     account: &str,
     address: &str,
-    groups_per_account: &BTreeMap<String, usize>,
-    address_group_counts: &BTreeMap<(String, String), usize>,
+    groups_per_account: &BTreeMap<&str, usize>,
+    address_group_counts: &BTreeMap<(&str, &str), usize>,
 ) -> bool {
     let total = groups_per_account.get(account).copied().unwrap_or(0);
     if total <= 2 {
         return false;
     }
-    address_group_counts
-        .get(&(account.to_string(), address.to_string()))
+    let count = address_group_counts
+        .get(&(account, address))
         .copied()
-        .unwrap_or(0)
-        == total
+        .unwrap_or(0);
+    count >= 3 && count * 2 >= total
 }
 
 /// True when the nearest pair of messages across the two groups (by
@@ -911,10 +945,48 @@ fn groups_within(
     })
 }
 
+/// The pair predicate [`merge_threads`] applies to every candidate pair of
+/// groups already known to share an account: every bullet on its doc
+/// comment except "same account", which the caller has already checked.
+fn should_merge(
+    account: &str,
+    a: &ThreadGroup,
+    b: &ThreadGroup,
+    messages: &[ReviewMessage],
+    groups_per_account: &BTreeMap<&str, usize>,
+    address_group_counts: &BTreeMap<(&str, &str), usize>,
+    max_gap_seconds: i64,
+) -> bool {
+    // Neither group's raw subjects carried a calendar-response prefix, and
+    // neither is a group source -- both keep their own thread identity.
+    if a.has_team || b.has_team || a.has_calendar_prefix || b.has_calendar_prefix {
+        return false;
+    }
+    // A shared normalized subject that is non-empty and substantial.
+    let subjects_match = a
+        .subjects
+        .intersection(&b.subjects)
+        .any(|s| subject_strong_enough(s));
+    if !subjects_match {
+        return false;
+    }
+    // A shared `other_addresses` entry that is not a shared-mailbox or
+    // distribution-list address.
+    let addresses_match = a.addresses.intersection(&b.addresses).any(|addr| {
+        !is_shared_mailbox_address(account, addr, groups_per_account, address_group_counts)
+    });
+    if !addresses_match {
+        return false;
+    }
+    // The nearest pair of messages across the two groups is within
+    // `max_gap_seconds` of each other.
+    groups_within(a, b, messages, max_gap_seconds)
+}
+
 /// Merges conversation groups (keyed by account + Graph `conversationId`)
 /// that are really the same thread, split by Exchange into different
 /// `conversationId`s. All of the following must hold for a pair of groups
-/// to merge:
+/// to merge (see [`should_merge`]):
 /// - same account;
 /// - a shared normalized subject that is non-empty and substantial (see
 ///   [`subject_strong_enough`]);
@@ -923,7 +995,7 @@ fn groups_within(
 ///   normalization strips was the meeting's real identity, so the bare
 ///   subject cannot distinguish one instance from another;
 /// - a shared `other_addresses` entry that is not a shared-mailbox or
-///   distribution-list address common to every group of the account (see
+///   distribution-list address common to the account (see
 ///   [`is_shared_mailbox_address`]);
 /// - the nearest pair of messages across the two groups is within 3 days
 ///   (259,200 seconds) of each other;
@@ -955,58 +1027,46 @@ pub fn merge_threads(messages: &mut [ReviewMessage]) -> usize {
         entry.addresses.extend(m.other_addresses.iter().cloned());
         entry.indices.push(i);
     }
-    let mut groups_per_account: BTreeMap<String, usize> = BTreeMap::new();
-    for (account, _) in groups.keys() {
-        *groups_per_account.entry(account.clone()).or_insert(0) += 1;
-    }
-    let mut address_group_counts: BTreeMap<(String, String), usize> = BTreeMap::new();
-    for ((account, _), group) in &groups {
-        for address in &group.addresses {
-            *address_group_counts
-                .entry((account.clone(), address.clone()))
-                .or_insert(0) += 1;
-        }
-    }
     let keys: Vec<(String, String)> = groups.keys().cloned().collect();
     let group_count = keys.len();
     // Collected once into a Vec (index-aligned with `keys`) so the O(n^2)
     // pair loop below indexes a Vec instead of repeating a BTreeMap lookup
     // per pair.
     let group_values: Vec<ThreadGroup> = groups.into_values().collect();
+    // Borrowed from `keys`/`group_values` (which outlive the pair loop)
+    // rather than built from owned `String` keys, so the O(n^2) pair loop
+    // below (and `is_shared_mailbox_address`, which it calls once per
+    // shared address per pair) never allocates a `String` just to perform a
+    // map lookup.
+    let mut groups_per_account: BTreeMap<&str, usize> = BTreeMap::new();
+    for (account, _) in &keys {
+        *groups_per_account.entry(account.as_str()).or_insert(0) += 1;
+    }
+    let mut address_group_counts: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    for ((account, _), group) in keys.iter().zip(&group_values) {
+        for address in &group.addresses {
+            *address_group_counts
+                .entry((account.as_str(), address.as_str()))
+                .or_insert(0) += 1;
+        }
+    }
     let mut parent: Vec<usize> = (0..group_count).collect();
     for a in 0..group_count {
         for b in (a + 1)..group_count {
             if keys[a].0 != keys[b].0 {
                 continue;
             }
-            let ga = &group_values[a];
-            let gb = &group_values[b];
-            if ga.has_team || gb.has_team || ga.has_calendar_prefix || gb.has_calendar_prefix {
-                continue;
+            if should_merge(
+                &keys[a].0,
+                &group_values[a],
+                &group_values[b],
+                messages,
+                &groups_per_account,
+                &address_group_counts,
+                MAX_GAP_SECONDS,
+            ) {
+                union_find_union(&mut parent, a, b);
             }
-            let subjects_match = ga
-                .subjects
-                .intersection(&gb.subjects)
-                .any(|s| subject_strong_enough(s));
-            if !subjects_match {
-                continue;
-            }
-            let account = &keys[a].0;
-            let addresses_match = ga.addresses.intersection(&gb.addresses).any(|addr| {
-                !is_shared_mailbox_address(
-                    account,
-                    addr,
-                    &groups_per_account,
-                    &address_group_counts,
-                )
-            });
-            if !addresses_match {
-                continue;
-            }
-            if !groups_within(ga, gb, messages, MAX_GAP_SECONDS) {
-                continue;
-            }
-            union_find_union(&mut parent, a, b);
         }
     }
     let mut clusters: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -1095,7 +1155,7 @@ const SEMANTIC_CASES: [(&str, bool, bool, bool, usize); 7] = [
 // example text.
 const AGREEMENT_CASE: (&str, &str) = (
     "Can we move our meeting to a different time?",
-    "Could we push it back by an hour instead?",
+    "Yes, happy to push it back an hour.",
 );
 // A correction that leaves the underlying action owed -- only the amount
 // changed -- must NOT resolve the request: it must stay open, with the
@@ -1645,6 +1705,20 @@ mod tests {
             ("Team sync (CDT)", "team sync"),
             ("Offsite @ Sun Valley Lodge", "offsite @ sun valley lodge"),
             ("Lunch @ May's Diner", "lunch @ may's diner"),
+            (
+                // The comma here sits well past the bounded window checked
+                // by `looks_like_calendar_date`, and even within it is not
+                // preceded by a digit, so it is not mistaken for a date.
+                "Offsite @ Sun Valley Lodge, Idaho",
+                "offsite @ sun valley lodge, idaho",
+            ),
+            (
+                // The comma here falls within the bounded window but is
+                // preceded by a letter, not a digit, so it must not be
+                // mistaken for "Mon Sep 7, 2026 ...".
+                "Kickoff @ March House, London",
+                "kickoff @ march house, london",
+            ),
             ("", ""),
         ];
         for (input, expected) in cases {
@@ -2183,6 +2257,65 @@ mod tests {
     }
 
     #[test]
+    fn raw_subject_has_calendar_prefix_walks_reply_and_forward_chain() {
+        // Regression: the old implementation inspected only the very first
+        // prefix ("re"/"fwd"), so a calendar prefix hiding one layer deeper
+        // in the reply/forward chain went undetected.
+        assert!(raw_subject_has_calendar_prefix(
+            "Re: Invitation: Weekly sync @ Mon Sep 7, 2026 9am - 10am (PDT)"
+        ));
+        assert!(raw_subject_has_calendar_prefix(
+            "Fwd: Updated invitation: Standup @ Tue Sep 8, 2026 9am (PDT)"
+        ));
+    }
+
+    #[test]
+    fn calendar_prefix_behind_a_reply_prefix_still_blocks_merge_across_instances() {
+        // Same shape as `calendar_invitation_subjects_never_merge_across_recurring_instances`,
+        // but with the calendar prefix hidden behind a leading "Re:" on the
+        // first instance -- the exact case the old first-prefix-only check
+        // missed. The two instances are only a day apart (well inside the
+        // 3-day merge window), so only the calendar-prefix guard, not the
+        // time gap, can be responsible for keeping them apart.
+        let first = mail(
+            "cal-1",
+            "c1",
+            "acct",
+            "Re: Invitation: Weekly sync @ Mon Sep 7, 2026 9am - 10am (PDT)",
+            MailItem {
+                body: "You have been invited.".into(),
+                sender: "Alex <alex@example.invalid>".into(),
+                sender_address: "alex@example.invalid".into(),
+                received: "2026-09-07T09:00:00Z".into(),
+                to: vec!["user@example.invalid".into()],
+                ..MailItem::default()
+            },
+        );
+        let second = mail(
+            "cal-2",
+            "c2",
+            "acct",
+            "Invitation: Weekly sync @ Tue Sep 8, 2026 9am - 10am (PDT)",
+            MailItem {
+                body: "You have been invited.".into(),
+                sender: "Alex <alex@example.invalid>".into(),
+                sender_address: "alex@example.invalid".into(),
+                received: "2026-09-08T09:00:00Z".into(),
+                to: vec!["user@example.invalid".into()],
+                ..MailItem::default()
+            },
+        );
+        let mut messages = vec![
+            prepare(&first, "Inbox", 0).unwrap(),
+            prepare(&second, "Inbox", 1).unwrap(),
+        ];
+        let merged = merge_threads(&mut messages);
+        assert_eq!(merged, 0);
+        assert_eq!(messages[0].conversation, "c1");
+        assert_eq!(messages[1].conversation, "c2");
+    }
+
+    #[test]
     fn contract_review_draft_and_final_are_not_merged() {
         let request = request_from(
             "sam@example.invalid",
@@ -2326,6 +2459,102 @@ mod tests {
     }
 
     #[test]
+    fn address_in_four_of_six_groups_is_excluded_and_does_not_bridge() {
+        // Regression: the old rule only excluded an address that appeared
+        // in EVERY group of the account, which a real shared mailbox or
+        // distribution list essentially never does. Here "list@example.invalid"
+        // appears in 4 of 6 groups (>=3 and at least half of 6), so it must
+        // now be excluded from the intersection check -- none of these
+        // groups share any other address, so nothing should merge.
+        let subject = "Alex and Sam discuss quarterly planning";
+        let list = "list@example.invalid";
+        let with_list = |id: &str, conv: &str, unique: &str| {
+            mail(
+                id,
+                conv,
+                "acct",
+                subject,
+                MailItem {
+                    body: "Can we meet?".into(),
+                    sender: "User <user@example.invalid>".into(),
+                    sender_address: "user@example.invalid".into(),
+                    received: "2026-09-01T12:00:00Z".into(),
+                    to: vec![list.into(), unique.into()],
+                    ..MailItem::default()
+                },
+            )
+        };
+        let without_list = |id: &str, conv: &str, unique: &str| {
+            mail(
+                id,
+                conv,
+                "acct",
+                subject,
+                MailItem {
+                    body: "Can we meet?".into(),
+                    sender: "User <user@example.invalid>".into(),
+                    sender_address: "user@example.invalid".into(),
+                    received: "2026-09-01T12:00:00Z".into(),
+                    to: vec![unique.into()],
+                    ..MailItem::default()
+                },
+            )
+        };
+        let items = [
+            with_list("g1", "c1", "u1@example.invalid"),
+            with_list("g2", "c2", "u2@example.invalid"),
+            with_list("g3", "c3", "u3@example.invalid"),
+            with_list("g4", "c4", "u4@example.invalid"),
+            without_list("g5", "c5", "v1@example.invalid"),
+            without_list("g6", "c6", "v2@example.invalid"),
+        ];
+        let mut messages: Vec<ReviewMessage> = items
+            .iter()
+            .enumerate()
+            .map(|(i, m)| prepare(m, "Inbox", i).unwrap())
+            .collect();
+        let merged = merge_threads(&mut messages);
+        assert_eq!(
+            merged, 0,
+            "the shared list address must not bridge any pair"
+        );
+    }
+
+    #[test]
+    fn address_in_two_of_six_groups_still_bridges_merge() {
+        // A correspondent that appears in only 2 of 6 groups (below the
+        // "at least 3" floor) is never treated as a shared mailbox, so it
+        // must still bridge the two groups it links -- exactly the ordinary
+        // two-thread case, now proven to still work once the account has
+        // more than 2 groups total.
+        let subject = "Alex and Sam discuss quarterly planning";
+        let request = request_from("sam@example.invalid", "req-1", "c1", "acct", subject);
+        let reply = reply_to(
+            "sam@example.invalid",
+            "reply-1",
+            "c2",
+            "acct",
+            &format!("Re: {subject}"),
+        );
+        let padding = [
+            request_from("v1@example.invalid", "p-1", "c3", "acct", subject),
+            request_from("v2@example.invalid", "p-2", "c4", "acct", subject),
+            request_from("v3@example.invalid", "p-3", "c5", "acct", subject),
+            request_from("v4@example.invalid", "p-4", "c6", "acct", subject),
+        ];
+        let mut messages = vec![
+            prepare(&request, "Inbox", 0).unwrap(),
+            prepare(&reply, "Sent", 1).unwrap(),
+        ];
+        for (i, m) in padding.iter().enumerate() {
+            messages.push(prepare(m, "Inbox", 2 + i).unwrap());
+        }
+        let merged = merge_threads(&mut messages);
+        assert_eq!(merged, 1);
+        assert_eq!(messages[0].conversation, messages[1].conversation);
+    }
+
+    #[test]
     fn merge_winner_is_lexicographically_smallest_id_regardless_of_message_order() {
         // Chain-merges "cZ" -> "cA" -> "cM" through a bridging message that
         // addresses both outside participants, the same shape as
@@ -2451,6 +2680,33 @@ mod tests {
             "note: {}",
             result.conversation_notes[0]
         );
+    }
+
+    #[test]
+    fn conversation_with_more_than_one_counterparty_address_gets_no_note() {
+        // Regression: per-message `to`/`cc` checks alone cannot catch a
+        // conversation stitched together from messages addressed to
+        // different counterparties -- each individual message still looks
+        // two-party, but the conversation as a whole is not. Alex and Dana
+        // each send one message (satisfying the from_user/!from_user and
+        // single-recipient/no-cc checks per message), so only the added
+        // union-of-addresses check keeps this from being mistaken for a
+        // genuine two-party thread.
+        let from_alex = request_from("alex@example.invalid", "req-1", "a", "acct", "Budget");
+        let from_dana = request_from("dana@example.invalid", "req-2", "a", "acct", "Budget");
+        let reply = reply_to("alex@example.invalid", "reply-1", "a", "acct", "Re: Budget");
+        let a = prepare(&from_alex, "Inbox", 0).unwrap();
+        let d = prepare(&from_dana, "Inbox", 1).unwrap();
+        let b = prepare(&reply, "Sent", 2).unwrap();
+        let result = scan_conversations(&[a, d, b], &ScanProgress::default(), |_| {
+            Ok(Expectations {
+                items: vec![],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            })
+        });
+        assert!(result.conversation_notes.is_empty());
     }
 
     #[test]

@@ -337,7 +337,7 @@ fn participant(handle: &str, messages: &[ConversationMessage]) -> Option<String>
 }
 
 /// Parses `resolution_kind` when a resolution anchor is present: it must be
-/// exactly one of the four supported strings, or the row is rejected (which
+/// exactly one of the five supported strings, or the row is rejected (which
 /// lets the salvage path in `parse()` drop the resolution and keep the
 /// request open). Ignored and stored as `None` when `resolution` is `None`.
 fn resolution_kind(

@@ -178,29 +178,37 @@ impl ReviewState {
         ui.collapsing(
             format!("Scanned messages ({})", self.messages.len()),
             |ui| {
-                for m in &self.messages {
-                    ui.collapsing(
-                        format!(
-                            "{} · {} · {}",
-                            m.source,
-                            m.date_label,
-                            m.input.message.subject.as_string()
-                        ),
-                        |ui| {
-                            if let Some(sender) = &m.input.message.sender {
-                                ui.label(sender.as_string());
-                            }
-                            for b in &m.input.message.body_blocks {
-                                ui.label(b.as_string());
-                            }
-                            ui.collapsing("Quoted history", |ui| {
-                                for b in &m.input.message.quote_blocks {
+                for (index, m) in self.messages.iter().enumerate() {
+                    // Two messages with the same source, date, and subject
+                    // otherwise share this collapsible's default widget ID
+                    // (derived from its label text alone); `push_id` scopes
+                    // every widget in this row -- the row's own collapsible
+                    // and its nested "Quoted history" one -- by the
+                    // message's position instead.
+                    ui.push_id(index, |ui| {
+                        ui.collapsing(
+                            format!(
+                                "{} · {} · {}",
+                                m.source,
+                                m.date_label,
+                                m.input.message.subject.as_string()
+                            ),
+                            |ui| {
+                                if let Some(sender) = &m.input.message.sender {
+                                    ui.label(sender.as_string());
+                                }
+                                for b in &m.input.message.body_blocks {
                                     ui.label(b.as_string());
                                 }
-                            });
-                            open_link(ui, &m.web_link);
-                        },
-                    );
+                                ui.collapsing("Quoted history", |ui| {
+                                    for b in &m.input.message.quote_blocks {
+                                        ui.label(b.as_string());
+                                    }
+                                });
+                                open_link(ui, &m.web_link);
+                            },
+                        );
+                    });
                 }
             },
         );
@@ -263,15 +271,19 @@ impl ReviewState {
         };
         ui.separator();
         ui.heading("What may need your attention");
-        ui.label(expectations_summary(analysis, &self.analysis_model));
         ui.label("Review the action and evidence. A missing reply in this scan does not prove the work is unfinished.");
+        // `cards` borrows `self.messages` through `card_contexts`, so it
+        // must be computed after the last mutable borrow of `self` in this
+        // function (the checkbox) -- it stays alive through the card loop
+        // below.
         ui.checkbox(&mut self.show_handled, SHOW_HANDLED_LABEL);
-        if analysis.items.is_empty() {
-            ui.label(if analysis.rejected>0 {"No usable expectations were returned. Evidence validation rejected suggestions; this is not a clean bill of health."} else {"No actionable expectations were identified in the successfully reviewed conversations."});
-        }
         let mut change = None;
         let mut draft = None;
         let cards = self.card_contexts(&analysis.items);
+        ui.label(expectations_summary(analysis, &cards, &self.analysis_model));
+        if analysis.items.is_empty() {
+            ui.label(if analysis.rejected>0 {"No usable expectations were returned. Evidence validation rejected suggestions; this is not a clean bill of health."} else {"No actionable expectations were identified in the successfully reviewed conversations."});
+        }
         let order = card_order(&cards);
         for &i in &order {
             let item = &analysis.items[i];
@@ -294,7 +306,7 @@ impl ReviewState {
             ui.push_id(i,|ui|{
                 egui::Frame::group(ui.style()).show(ui,|ui|{
                     ui.set_width(ui.available_width());
-                    let status_base=if record.decision==Decision::Done {"Handled"} else if record.decision==Decision::Dismissed {"Dismissed / not mine"} else if record.decision==Decision::Moot {"No longer relevant"} else if item.resolution.is_some() {resolution_status_label(item.resolution_kind)} else if record.decision==Decision::Mine {"Tracking"} else if record.decision==Decision::Watching {"Watching team follow-up"} else {"Needs your review"};
+                    let status_base=status_base_label(record.decision,item);
                     let status=status_label(status_base,item.cross_thread);
                     ui.label(RichText::new(status).color(Color32::from_rgb(29,87,67)));
                     ui.label(RichText::new(&item.action).size(21.0).strong());
@@ -376,9 +388,31 @@ impl ReviewState {
     }
 }
 
+/// The card's status label before the cross-thread suffix (see
+/// [`status_label`]) is appended. A terminal decision (`Done`/`Dismissed`/
+/// `Moot`) always wins. Otherwise, an explicit `Mine`/`Watching` override
+/// wins over resolution-by-evidence: the user has said this is still open
+/// (or being watched), so the label must keep saying that even when
+/// `item.resolution` is `Some` -- it must not flip back to resolved wording
+/// just because closure evidence exists. Only when there is no override at
+/// all does a resolution get to speak for itself.
+fn status_base_label(decision: Decision, item: &Expectation) -> &'static str {
+    match decision {
+        Decision::Done => "Handled",
+        Decision::Dismissed => "Dismissed / not mine",
+        Decision::Moot => "No longer relevant",
+        Decision::Mine => "Tracking",
+        Decision::Watching => "Watching team follow-up",
+        Decision::Review if item.resolution.is_some() => {
+            resolution_status_label(item.resolution_kind)
+        }
+        Decision::Review => "Needs your review",
+    }
+}
 fn resolution_status_label(kind: Option<ResolutionKind>) -> &'static str {
     match kind {
-        Some(ResolutionKind::Completed) | None => "Resolved: completed",
+        None => "Resolved",
+        Some(ResolutionKind::Completed) => "Resolved: completed",
         Some(ResolutionKind::Declined) => "Resolved: declined",
         Some(ResolutionKind::Withdrawn) => "Resolved: withdrawn by the requester",
         Some(ResolutionKind::Superseded) => "Resolved: request replaced by the requester",
@@ -401,7 +435,8 @@ fn resolution_anchor_label(kind: Option<ResolutionKind>, cross_thread: bool) -> 
         return "Later evidence in another conversation";
     }
     match kind {
-        Some(ResolutionKind::Completed) | None => "Later completion evidence",
+        None => "Later resolution evidence",
+        Some(ResolutionKind::Completed) => "Later completion evidence",
         Some(ResolutionKind::Declined) => "Later decline evidence",
         Some(ResolutionKind::Withdrawn) => "Later withdrawal by the requester",
         Some(ResolutionKind::Superseded) => "Later replacement by the requester",
@@ -410,12 +445,24 @@ fn resolution_anchor_label(kind: Option<ResolutionKind>, cross_thread: bool) -> 
 }
 /// Builds the "What may need your attention" summary line. `analysis.items`
 /// includes resolved-by-evidence items, so the open count excludes them and
-/// they get their own segment instead.
-fn expectations_summary(analysis: &Expectations, model: &str) -> String {
+/// they get their own segment instead. `resolved` is computed from the same
+/// `closed` predicate the card uses (see [`ReviewState::card_context`]), by
+/// way of the already-computed `cards`, not from `item.resolution.is_some()`
+/// alone -- an item whose closure was explicitly overridden to `Mine` or
+/// `Watching` counts as open here too, matching the card it corresponds to.
+fn expectations_summary(
+    analysis: &Expectations,
+    cards: &[Option<CardContext<'_>>],
+    model: &str,
+) -> String {
     let resolved = analysis
         .items
         .iter()
-        .filter(|item| item.resolution.is_some())
+        .zip(cards)
+        .filter(|(item, card)| {
+            card.as_ref()
+                .map_or_else(|| item.resolution.is_some(), |c| c.closed)
+        })
         .count();
     let open = analysis.items.len() - resolved;
     let degraded_note = if analysis.degraded > 0 {
@@ -887,6 +934,26 @@ mod tests {
     }
 
     #[test]
+    fn status_base_label_prefers_mine_or_watching_override_over_resolution() {
+        let (_, mut item) = aging_fixture();
+        item.resolution = Some(item.evidence.clone());
+        item.resolution_kind = Some(ResolutionKind::Completed);
+        assert_eq!(status_base_label(Decision::Mine, &item), "Tracking");
+        assert_eq!(
+            status_base_label(Decision::Watching, &item),
+            "Watching team follow-up"
+        );
+        // Without an override, the resolution still gets to speak for
+        // itself.
+        assert_eq!(
+            status_base_label(Decision::Review, &item),
+            "Resolved: completed"
+        );
+        // Terminal decisions win outright, same as before.
+        assert_eq!(status_base_label(Decision::Done, &item), "Handled");
+    }
+
+    #[test]
     fn resolution_status_label_matches_each_kind() {
         assert_eq!(
             resolution_status_label(Some(ResolutionKind::Completed)),
@@ -966,6 +1033,51 @@ mod tests {
         assert_eq!(
             resolution_anchor_label(Some(ResolutionKind::Agreed), false),
             "Your later agreement"
+        );
+    }
+
+    #[test]
+    fn resolution_status_label_none_is_neutral() {
+        assert_eq!(resolution_status_label(None), "Resolved");
+    }
+
+    #[test]
+    fn resolution_anchor_label_none_is_neutral() {
+        assert_eq!(
+            resolution_anchor_label(None, false),
+            "Later resolution evidence"
+        );
+    }
+
+    #[test]
+    fn expectations_summary_counts_an_overridden_resolution_as_open() {
+        let (mut state, mut item) = aging_fixture();
+        item.resolution = Some(item.evidence.clone());
+        item.resolution_kind = Some(ResolutionKind::Completed);
+        let analysis = Expectations {
+            items: vec![item.clone()],
+            rejected: 0,
+            rejection_reasons: vec![],
+            degraded: 0,
+        };
+        let cards = state.card_contexts(&analysis.items);
+        assert!(cards[0].as_ref().unwrap().closed);
+        let summary = expectations_summary(&analysis, &cards, "model");
+        assert!(
+            summary.starts_with("0 expectations · 1 resolved"),
+            "summary: {summary}"
+        );
+
+        let key = state.card_context(&item, 0, 0).unwrap().record.key;
+        let mut record = state.decisions.get(&key);
+        record.decision = Decision::Mine;
+        state.decisions.records = vec![record];
+        let cards = state.card_contexts(&analysis.items);
+        assert!(!cards[0].as_ref().unwrap().closed);
+        let summary = expectations_summary(&analysis, &cards, "model");
+        assert!(
+            summary.starts_with("1 expectations · 0 resolved"),
+            "summary: {summary}"
         );
     }
 }
