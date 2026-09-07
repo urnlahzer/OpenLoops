@@ -701,16 +701,24 @@ const SEMANTIC_CASES: [(&str, bool, bool, bool, usize); 7] = [
         0,
     ),
 ];
-// Live semantic probe: a request that is renegotiated (a counter-proposal,
-// not a plain completion) one message later must still be recognized as
-// closure evidence, with resolution_kind reflecting the renegotiation or
-// supersession rather than a plain completion. The reply is a paraphrase of
-// the resolution_kind renegotiated example quoted in INSTRUCTIONS, not a
-// literal copy, so this exercises genuine semantic recognition rather than
-// an echo of the prompt's own example text.
-const RENEGOTIATION_CASE: (&str, &str) = (
+// Live semantic probe: a request that asked for the user's agreement or
+// decision, and got it, one message later must still be recognized as
+// closure evidence, with resolution_kind Agreed rather than a plain
+// completion. The reply is a paraphrase of the resolution_kind agreed
+// example quoted in INSTRUCTIONS, not a literal copy, so this exercises
+// genuine semantic recognition rather than an echo of the prompt's own
+// example text.
+const AGREEMENT_CASE: (&str, &str) = (
     "Can we move our meeting to a different time?",
     "Could we push it back by an hour instead?",
+);
+// A correction that leaves the underlying action owed -- only the amount
+// changed -- must NOT resolve the request: it must stay open, with the
+// corrected amount reflected in `action`, citing the original request as
+// evidence.
+const AMENDMENT_CASE: (&str, &str) = (
+    "My fee for the call is 359 USD, to be paid any time before our call.",
+    "Apologies, the fee for the call is 350, not 359.",
 );
 // A plain completion must still resolve to resolution_kind Completed now
 // that resolution_kind distinguishes several closure kinds.
@@ -725,7 +733,7 @@ fn resolution_kind_name(kind: Option<ResolutionKind>) -> &'static str {
         Some(ResolutionKind::Declined) => "declined",
         Some(ResolutionKind::Withdrawn) => "withdrawn",
         Some(ResolutionKind::Superseded) => "superseded",
-        Some(ResolutionKind::Renegotiated) => "renegotiated",
+        Some(ResolutionKind::Agreed) => "agreed",
     }
 }
 pub fn probe(key: String, model: &str) -> Result<usize, ProviderError> {
@@ -819,25 +827,22 @@ pub fn probe(key: String, model: &str) -> Result<usize, ProviderError> {
         "Semantic case {}: acknowledgement did not close the request.",
         passed + 2
     );
-    probe_renegotiation_case(&provider, passed + 3)?;
-    probe_completed_resolution_case(&provider, passed + 4)?;
-    Ok(passed + 4)
+    probe_agreement_case(&provider, passed + 3)?;
+    probe_amendment_case(&provider, passed + 4)?;
+    probe_completed_resolution_case(&provider, passed + 5)?;
+    Ok(passed + 5)
 }
 
-/// Runs `RENEGOTIATION_CASE` against `provider`: a request renegotiated (a
-/// counter-proposal, not a plain completion) one message later must still
-/// be recognized as closure evidence, with `resolution_kind` reflecting the
-/// renegotiation or supersession rather than a plain completion. The reply
-/// may itself read as a new request, so 1 or 2 items are both acceptable;
-/// what matters is that the item anchored on the original request (`m0`)
-/// carries the expected resolution kind. `case_number` is only for print
-/// numbering. Prints counts and the observed kind name (both fixed
-/// strings) only; never returned content.
-fn probe_renegotiation_case(
-    provider: &OllamaCloud,
-    case_number: usize,
-) -> Result<(), ProviderError> {
-    let (request, reply) = RENEGOTIATION_CASE;
+/// Runs `AGREEMENT_CASE` against `provider`: a request that asked for the
+/// user's agreement or decision, and got it, one message later must still
+/// be recognized as closure evidence, with `resolution_kind` Agreed. The
+/// reply may itself read as a new request, so 1 or 2 items are both
+/// acceptable; what matters is that the item anchored on the original
+/// request (`m0`) carries the expected resolution kind. `case_number` is
+/// only for print numbering. Prints counts and the observed kind name (both
+/// fixed strings) only; never returned content.
+fn probe_agreement_case(provider: &OllamaCloud, case_number: usize) -> Result<(), ProviderError> {
+    let (request, reply) = AGREEMENT_CASE;
     let request_item = synthetic(request, 0, "c");
     let mut request_message = prepare(&request_item, "Synthetic", 0)
         .map_err(|_| ProviderError::InvalidAnalysis)?
@@ -875,12 +880,47 @@ fn probe_renegotiation_case(
     let Some(item) = anchored else {
         return Err(ProviderError::InvalidAnalysis);
     };
-    if item.resolution.is_none()
-        || !matches!(
-            item.resolution_kind,
-            Some(ResolutionKind::Renegotiated | ResolutionKind::Superseded)
-        )
-    {
+    if item.resolution.is_none() || !matches!(item.resolution_kind, Some(ResolutionKind::Agreed)) {
+        return Err(ProviderError::InvalidAnalysis);
+    }
+    Ok(())
+}
+
+/// Runs `AMENDMENT_CASE` against `provider`: a correction that leaves the
+/// underlying action owed (only the amount changed) must NOT resolve the
+/// request -- it must stay open, with the corrected amount reflected in
+/// `action`, citing the original request as evidence. `case_number` is only
+/// for print numbering. Prints counts only (fixed strings); the corrected
+/// amount is asserted, never printed, since `action` is model-supplied free
+/// text derived from message content.
+fn probe_amendment_case(provider: &OllamaCloud, case_number: usize) -> Result<(), ProviderError> {
+    let (request, correction) = AMENDMENT_CASE;
+    let request_item = synthetic(request, 0, "e");
+    let mut request_message = prepare(&request_item, "Synthetic", 0)
+        .map_err(|_| ProviderError::InvalidAnalysis)?
+        .input;
+    request_message.to_user = true;
+    let correction_item = synthetic(correction, 2, "e");
+    let mut correction_message = prepare(&correction_item, "Synthetic", 1)
+        .map_err(|_| ProviderError::InvalidAnalysis)?
+        .input;
+    correction_message.to_user = true;
+    let result = provider.expectations(&[request_message, correction_message])?;
+    println!(
+        "Semantic case {}: {} accepted, {} rejected, {} degraded.",
+        case_number,
+        result.items.len(),
+        result.rejected,
+        result.degraded
+    );
+    for reason in &result.rejection_reasons {
+        println!("{reason}");
+    }
+    if result.items.len() != 1 || result.rejected != 0 || result.degraded != 0 {
+        return Err(ProviderError::InvalidAnalysis);
+    }
+    let item = &result.items[0];
+    if item.resolution.is_some() || !item.action.contains("350") {
         return Err(ProviderError::InvalidAnalysis);
     }
     Ok(())

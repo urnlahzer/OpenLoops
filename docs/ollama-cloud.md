@@ -55,13 +55,16 @@ The unit tests do not contact Ollama; live authentication and generation require
 the user's API key entered locally. Repository Phase 0 no-network checks remain
 unchanged and are not passing runtime-integration gates.
 
-For developer diagnosis, `openloops-ui.exe --probe-saved-model` runs eleven synthetic
+For developer diagnosis, `openloops-ui.exe --probe-saved-model` runs twelve synthetic
 conversation cases with the saved model/key: requests, promises, non-actionable
 recaps, third-party promises, team responsibility, independent actions, quoted
-history, completion, acknowledgement, renegotiated closure, and completed
-closure. The last two exercise `resolution_kind`: a request renegotiated with a
-counter-proposal must resolve to `Renegotiated` or `Superseded`, and a plain
-completion must still resolve to `Completed`. It reads only OpenLoops setup
+history, completion, acknowledgement, agreed closure, an amended request, and
+completed closure. The last three exercise `resolution_kind` and closure
+semantics: a request that asked for the user's agreement and got it must
+resolve to `Agreed`; a correction that leaves the action owed (only the
+amount changed) must stay open, with `resolution` null and the corrected
+amount reflected in `action`; and a plain completion must still resolve to
+`Completed`. It reads only OpenLoops setup
 credentials, never Microsoft mail, and reports fixed case/count/validation
 diagnostics. It does not start the GUI or persist provider output. This is a
 semantic smoke suite, not a held-out estimate of production accuracy.

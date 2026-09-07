@@ -12,16 +12,17 @@ in the normal application.
    deadline. Under the stated deadline the card shows how it ages (due, past
    due, a date range, tied to an event, or soft urgency); past-due open items
    sort first. Expand evidence to inspect original quotations and later
-   replies. A later reply may be labelled a possible completion, decline,
-   withdrawal, supersession, or renegotiation; each remains open until the
-   user confirms it. If a quoted deadline or completion could not be
-   validated against the mail, the card says so and keeps the item open.
+   replies. Resolved requests are closed and hidden by default; the show
+   toggle reveals them with the closing evidence. Corrections that leave the
+   action owed keep the card open with updated terms. If a quoted deadline or
+   completion could not be validated against the mail, the card says so and
+   keeps the item open.
 3. **Track — this is mine** confirms personal responsibility. **Keep an eye on
    this** watches an unassigned team expectation without claiming ownership.
    **Handled**, **Not mine / dismiss**, **No longer relevant**, and **Reopen for
-   review** save abstract decisions. The checkbox **Show handled, dismissed,
-   and no-longer-relevant items** reveals closed cards. Model summaries and
-   source text are not saved locally.
+   review** save abstract decisions. The checkbox **Show resolved, handled,
+   dismissed, and no-longer-relevant items** reveals closed cards. Model
+   summaries and source text are not saved locally.
 4. After choosing to track or watch, **Set To Do reminder** previews an editable
    title and future local reminder time. The explicit create button authorizes
    one task in the same Microsoft account's default personal Tasks list.

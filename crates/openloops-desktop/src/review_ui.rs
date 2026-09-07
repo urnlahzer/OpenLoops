@@ -11,7 +11,7 @@ use openloops_inference::ollama::expectations::{
 mod scanning;
 pub use scanning::{ReviewMessage, ScanProgress, ScanResult, probe, scan};
 
-const SHOW_HANDLED_LABEL: &str = "Show handled, dismissed, and no-longer-relevant items";
+const SHOW_HANDLED_LABEL: &str = "Show resolved, handled, dismissed, and no-longer-relevant items";
 
 struct ReminderDraft {
     key: [u8; 32],
@@ -25,6 +25,11 @@ struct CardContext<'a> {
     source: &'a ReviewMessage,
     record: Record,
     terminal: bool,
+    /// True when the card ranks and hides with the terminal group: either a
+    /// terminal decision, or the expectation is resolved by later evidence
+    /// and the saved decision has not explicitly overridden that closure
+    /// (`Decision::Mine` or `Decision::Watching`).
+    closed: bool,
     deadline: Option<DeadlineView>,
 }
 
@@ -40,7 +45,7 @@ fn is_past_due(view: &DeadlineView) -> bool {
 
 fn card_rank(card: Option<&CardContext<'_>>) -> u8 {
     match card {
-        Some(card) if card.terminal => 2,
+        Some(card) if card.closed => 2,
         Some(card) if card.deadline.as_ref().is_some_and(is_past_due) => 0,
         _ => 1,
     }
@@ -218,6 +223,9 @@ impl ReviewState {
             record.decision,
             Decision::Done | Decision::Dismissed | Decision::Moot
         );
+        let closed = terminal
+            || (item.resolution.is_some()
+                && !matches!(record.decision, Decision::Mine | Decision::Watching));
         let deadline = item.deadline.as_ref().map(|anchor| {
             let message = self
                 .messages
@@ -234,6 +242,7 @@ impl ReviewState {
             source,
             record,
             terminal,
+            closed,
             deadline,
         })
     }
@@ -254,18 +263,7 @@ impl ReviewState {
         };
         ui.separator();
         ui.heading("What may need your attention");
-        let degraded_note = if analysis.degraded > 0 {
-            format!(" · {} kept with unverified evidence", analysis.degraded)
-        } else {
-            String::new()
-        };
-        ui.label(format!(
-            "{} expectations · {} rejected for invalid evidence{} · {}",
-            analysis.items.len(),
-            analysis.rejected,
-            degraded_note,
-            self.analysis_model
-        ));
+        ui.label(expectations_summary(analysis, &self.analysis_model));
         ui.label("Review the action and evidence. A missing reply in this scan does not prove the work is unfinished.");
         ui.checkbox(&mut self.show_handled, SHOW_HANDLED_LABEL);
         if analysis.items.is_empty() {
@@ -281,6 +279,7 @@ impl ReviewState {
                 source,
                 record,
                 terminal,
+                closed,
                 deadline: deadline_view,
             }) = &cards[i]
             else {
@@ -288,7 +287,8 @@ impl ReviewState {
             };
             let key = record.key;
             let terminal = *terminal;
-            if terminal && !self.show_handled {
+            let closed = *closed;
+            if closed && !self.show_handled {
                 continue;
             }
             ui.push_id(i,|ui|{
@@ -301,7 +301,7 @@ impl ReviewState {
                     ui.label(format!("Responsible: {owner}"));
                     ui.label(format!("Waiting: {}",item.waiting_party));
                     if let Some(deadline)=&item.deadline {ui.label(format!("Deadline stated in email: {}",deadline.quote));} else if item.unverified_deadline {ui.label("A deadline was stated, but its quotation could not be verified.");} else {ui.label("Deadline stated in email: Not specified");}
-                    if let Some(view)=deadline_view {if !terminal && is_past_due(view) {ui.colored_label(Color32::DARK_RED,label(view));} else {ui.label(label(view));}}
+                    if let Some(view)=deadline_view {if !closed && is_past_due(view) {ui.colored_label(Color32::DARK_RED,label(view));} else {ui.label(label(view));}}
                     if !item.uncertainty.is_empty() {ui.label(format!("Uncertainty: {}",item.uncertainty));}
                     ui.label(RichText::new(format!("{} · {} · {}",source.source,source.date_label,item.kind)).small());
                     ui.collapsing("Why this was suggested · evidence and replies",|ui|{
@@ -310,17 +310,9 @@ impl ReviewState {
                         if let Some(resolution)=&item.resolution {show_anchor(ui,resolution_anchor_label(item.resolution_kind),resolution,&self.messages);} else if item.unverified_resolution {ui.label("The analysis proposed a completion but it could not be validated; treat as open.");} else {ui.label("No matching completion was identified in the scanned conversation. Work may have happened elsewhere or outside this history window.");}
                         ui.collapsing("Full scanned conversation",|ui| {for m in self.messages.iter().filter(|m|m.account==source.account && m.conversation==source.conversation) {ui.label(format!("{} · {}",m.date_label,if m.input.from_user {"You"} else {"Other participant"}));for b in &m.input.message.body_blocks {ui.label(b.as_string());}}});
                     });
-                    ui.horizontal_wrapped(|ui|{
-                        if terminal {if ui.button("Reopen for review").clicked() {change=Some((key,Decision::Review,record.reminder));}}
-                        else {
-                            if record.decision!=Decision::Mine&&ui.button("Track — this is mine").clicked(){change=Some((key,Decision::Mine,record.reminder));}
-                            if item.owner!=Owner::You && record.decision!=Decision::Watching && ui.button("Keep an eye on this").clicked(){change=Some((key,Decision::Watching,record.reminder));}
-                            if ui.button("Handled").clicked(){change=Some((key,Decision::Done,record.reminder));}
-                            if ui.button("Not mine / dismiss").clicked(){change=Some((key,Decision::Dismissed,record.reminder));}
-                            if ui.button("No longer relevant").clicked(){change=Some((key,Decision::Moot,record.reminder));}
-                            if record.reminder==Reminder::None && ui.add_enabled(matches!(record.decision,Decision::Mine|Decision::Watching),egui::Button::new("Set To Do reminder…")).clicked(){draft=Some(ReminderDraft {key,account:source.account.clone(),title:if record.decision==Decision::Watching {format!("Follow up: {}",item.action)} else {item.action.clone()},when:default_reminder(),error:String::new()});}
-                        }
-                    });
+                    let (button_change, button_draft) = card_action_buttons(ui, item, source, record, terminal, closed);
+                    if let Some((decision, reminder)) = button_change {change=Some((key,decision,reminder));}
+                    if button_draft.is_some() {draft=button_draft;}
                     match record.reminder {
                         Reminder::None=>{},
                         Reminder::Created=>{ui.label("Reminder created in Microsoft To Do. Manage its alerts and completion there; marking this loop handled does not modify the task.");ui.hyperlink_to("Open Microsoft To Do","https://to-do.office.com/tasks/");},
@@ -385,15 +377,11 @@ impl ReviewState {
 
 fn resolution_status_label(kind: Option<ResolutionKind>) -> &'static str {
     match kind {
-        Some(ResolutionKind::Completed) | None => "Possible completion — confirm below",
-        Some(ResolutionKind::Declined) => "Possible decline — confirm below",
-        Some(ResolutionKind::Withdrawn) => "Possibly withdrawn by the requester — confirm below",
-        Some(ResolutionKind::Superseded) => {
-            "Possibly superseded by a later message — confirm below"
-        }
-        Some(ResolutionKind::Renegotiated) => {
-            "Possibly renegotiated (new terms proposed) — confirm below"
-        }
+        Some(ResolutionKind::Completed) | None => "Resolved: completed",
+        Some(ResolutionKind::Declined) => "Resolved: declined",
+        Some(ResolutionKind::Withdrawn) => "Resolved: withdrawn by the requester",
+        Some(ResolutionKind::Superseded) => "Resolved: request replaced by the requester",
+        Some(ResolutionKind::Agreed) => "Resolved: you agreed",
     }
 }
 fn resolution_anchor_label(kind: Option<ResolutionKind>) -> &'static str {
@@ -401,9 +389,97 @@ fn resolution_anchor_label(kind: Option<ResolutionKind>) -> &'static str {
         Some(ResolutionKind::Completed) | None => "Later completion evidence",
         Some(ResolutionKind::Declined) => "Later decline evidence",
         Some(ResolutionKind::Withdrawn) => "Later withdrawal by the requester",
-        Some(ResolutionKind::Superseded) => "Later superseding message",
-        Some(ResolutionKind::Renegotiated) => "Later renegotiation (counter-proposal)",
+        Some(ResolutionKind::Superseded) => "Later replacement by the requester",
+        Some(ResolutionKind::Agreed) => "Your later agreement",
     }
+}
+/// Builds the "What may need your attention" summary line. `analysis.items`
+/// includes resolved-by-evidence items, so the open count excludes them and
+/// they get their own segment instead.
+fn expectations_summary(analysis: &Expectations, model: &str) -> String {
+    let resolved = analysis
+        .items
+        .iter()
+        .filter(|item| item.resolution.is_some())
+        .count();
+    let open = analysis.items.len() - resolved;
+    let degraded_note = if analysis.degraded > 0 {
+        format!(" · {} kept with unverified evidence", analysis.degraded)
+    } else {
+        String::new()
+    };
+    format!(
+        "{open} expectations · {resolved} resolved by later evidence · {} rejected for invalid evidence{degraded_note} · {model}",
+        analysis.rejected
+    )
+}
+/// Renders the card's action buttons and returns the requested decision
+/// change (with its unchanged reminder state) and any reminder draft opened.
+/// A terminal card only offers reopening; a card closed by resolution
+/// evidence (but not explicitly overridden to `Mine`/`Watching`) only offers
+/// reopening it as still-open tracking; every other card gets the full set
+/// of open-card actions.
+fn card_action_buttons(
+    ui: &mut egui::Ui,
+    item: &Expectation,
+    source: &ReviewMessage,
+    record: &Record,
+    terminal: bool,
+    closed: bool,
+) -> (Option<(Decision, Reminder)>, Option<ReminderDraft>) {
+    let mut change = None;
+    let mut draft = None;
+    ui.horizontal_wrapped(|ui| {
+        if terminal {
+            if ui.button("Reopen for review").clicked() {
+                change = Some((Decision::Review, record.reminder));
+            }
+        } else if closed {
+            if ui.button("Still open — track it").clicked() {
+                change = Some((Decision::Mine, record.reminder));
+            }
+        } else {
+            if record.decision != Decision::Mine && ui.button("Track — this is mine").clicked() {
+                change = Some((Decision::Mine, record.reminder));
+            }
+            if item.owner != Owner::You
+                && record.decision != Decision::Watching
+                && ui.button("Keep an eye on this").clicked()
+            {
+                change = Some((Decision::Watching, record.reminder));
+            }
+            if ui.button("Handled").clicked() {
+                change = Some((Decision::Done, record.reminder));
+            }
+            if ui.button("Not mine / dismiss").clicked() {
+                change = Some((Decision::Dismissed, record.reminder));
+            }
+            if ui.button("No longer relevant").clicked() {
+                change = Some((Decision::Moot, record.reminder));
+            }
+            if record.reminder == Reminder::None
+                && ui
+                    .add_enabled(
+                        matches!(record.decision, Decision::Mine | Decision::Watching),
+                        egui::Button::new("Set To Do reminder…"),
+                    )
+                    .clicked()
+            {
+                draft = Some(ReminderDraft {
+                    key: record.key,
+                    account: source.account.clone(),
+                    title: if record.decision == Decision::Watching {
+                        format!("Follow up: {}", item.action)
+                    } else {
+                        item.action.clone()
+                    },
+                    when: default_reminder(),
+                    error: String::new(),
+                });
+            }
+        }
+    });
+    (change, draft)
 }
 fn open_link(ui: &mut egui::Ui, url: &str) {
     if url.starts_with("https://outlook.office.com/")
@@ -428,9 +504,11 @@ fn show_anchor(ui: &mut egui::Ui, label: &str, anchor: &Anchor, messages: &[Revi
         open_link(ui, &m.web_link);
     }
     if anchor.context != anchor.quote {
-        ui.collapsing("Surrounding source text", |ui| {
-            ui.label(&anchor.context);
-        });
+        egui::CollapsingHeader::new("Surrounding source text")
+            .id_salt(label)
+            .show(ui, |ui| {
+                ui.label(&anchor.context);
+            });
     }
 }
 fn default_reminder() -> String {
@@ -719,10 +797,131 @@ mod tests {
             terminal_state.card_context(&terminal_item, CLEARLY_DUE, 0),
         ];
         assert_eq!(card_order(&cards), vec![2, 4, 1, 3, 0, 5]);
+
+        // A card resolved by later evidence, with no decision recorded (the
+        // default is `Decision::Review`), ranks with the terminal group --
+        // rank 2 -- even though `CLEARLY_DUE` is not yet past due: closure
+        // by evidence overrides deadline-based ranking, same as a terminal
+        // decision does.
+        let mut resolved_item = item.clone();
+        resolved_item.resolution = Some(resolved_item.evidence.clone());
+        resolved_item.resolution_kind = Some(ResolutionKind::Completed);
+        let (resolved_state, _) = aging_fixture();
+        let resolved = resolved_state.card_context(&resolved_item, CLEARLY_DUE, 0);
+        assert!(resolved.as_ref().unwrap().closed);
+        assert!(!resolved.as_ref().unwrap().terminal);
+        assert_eq!(card_rank(resolved.as_ref()), 2);
+
+        // The same resolved item, once the saved decision explicitly
+        // overrides closure with `Decision::Mine`, ranks and hides like any
+        // other open card again.
+        let (mut overridden_state, _) = aging_fixture();
+        let override_key = overridden_state
+            .card_context(&resolved_item, CLEARLY_DUE, 0)
+            .unwrap()
+            .record
+            .key;
+        let mut override_record = overridden_state.decisions.get(&override_key);
+        override_record.decision = Decision::Mine;
+        overridden_state.decisions.records = vec![override_record];
+        let overridden = overridden_state.card_context(&resolved_item, CLEARLY_DUE, 0);
+        assert!(!overridden.as_ref().unwrap().closed);
+        assert_eq!(card_rank(overridden.as_ref()), 1);
     }
     #[test]
     fn past_reminder_times_are_rejected() {
         assert!(reminder_time("2000-01-01 12:00").is_err());
         assert!(reminder_time("tomorrow").is_err());
+    }
+
+    /// `closed` is the single source of truth for `show_analysis`'s hide
+    /// condition (`if closed && !self.show_handled { continue; }`): the
+    /// card is skipped exactly when `closed && !show_handled`. Exercising
+    /// `closed` here covers "hidden unless the show-handled checkbox is
+    /// on" without needing to render the actual egui widgets.
+    #[test]
+    fn resolved_item_without_a_decision_is_closed_and_hides_unless_shown() {
+        let (state, mut item) = aging_fixture();
+        item.resolution = Some(item.evidence.clone());
+        item.resolution_kind = Some(ResolutionKind::Completed);
+        let closed = state.card_context(&item, 0, 0).unwrap().closed;
+        assert!(closed, "resolved item must be closed by default");
+        for show_handled in [false, true] {
+            let hidden = closed && !show_handled;
+            assert_eq!(hidden, !show_handled, "show_handled={show_handled}");
+        }
+    }
+
+    #[test]
+    fn resolved_item_with_decision_mine_or_watching_stays_open() {
+        let (mut state, mut item) = aging_fixture();
+        item.resolution = Some(item.evidence.clone());
+        item.resolution_kind = Some(ResolutionKind::Agreed);
+        for decision in [Decision::Mine, Decision::Watching] {
+            let key = state.card_context(&item, 0, 0).unwrap().record.key;
+            let mut record = state.decisions.get(&key);
+            record.decision = decision;
+            state.decisions.records = vec![record];
+            let card = state.card_context(&item, 0, 0).unwrap();
+            assert!(!card.closed, "{decision:?} should keep the card open");
+            assert!(!card.terminal);
+        }
+    }
+
+    #[test]
+    fn resolution_status_label_matches_each_kind() {
+        assert_eq!(
+            resolution_status_label(Some(ResolutionKind::Completed)),
+            "Resolved: completed"
+        );
+        assert_eq!(
+            resolution_status_label(Some(ResolutionKind::Declined)),
+            "Resolved: declined"
+        );
+        assert_eq!(
+            resolution_status_label(Some(ResolutionKind::Withdrawn)),
+            "Resolved: withdrawn by the requester"
+        );
+        assert_eq!(
+            resolution_status_label(Some(ResolutionKind::Superseded)),
+            "Resolved: request replaced by the requester"
+        );
+        assert_eq!(
+            resolution_status_label(Some(ResolutionKind::Agreed)),
+            "Resolved: you agreed"
+        );
+        for label in [
+            resolution_status_label(Some(ResolutionKind::Completed)),
+            resolution_status_label(Some(ResolutionKind::Declined)),
+            resolution_status_label(Some(ResolutionKind::Withdrawn)),
+            resolution_status_label(Some(ResolutionKind::Superseded)),
+            resolution_status_label(Some(ResolutionKind::Agreed)),
+        ] {
+            assert!(!label.contains("confirm below"));
+        }
+    }
+
+    #[test]
+    fn resolution_anchor_label_matches_each_kind() {
+        assert_eq!(
+            resolution_anchor_label(Some(ResolutionKind::Completed)),
+            "Later completion evidence"
+        );
+        assert_eq!(
+            resolution_anchor_label(Some(ResolutionKind::Declined)),
+            "Later decline evidence"
+        );
+        assert_eq!(
+            resolution_anchor_label(Some(ResolutionKind::Withdrawn)),
+            "Later withdrawal by the requester"
+        );
+        assert_eq!(
+            resolution_anchor_label(Some(ResolutionKind::Superseded)),
+            "Later replacement by the requester"
+        );
+        assert_eq!(
+            resolution_anchor_label(Some(ResolutionKind::Agreed)),
+            "Your later agreement"
+        );
     }
 }
