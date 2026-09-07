@@ -82,6 +82,8 @@ try {
     if ($LASTEXITCODE) { throw 'Rust tests failed.' }
     cargo test -p openloops-desktop --features native-ui --locked --jobs 1 -- --test-threads=1
     if ($LASTEXITCODE) { throw 'Rust desktop native-ui tests failed.' }
+    cargo test -p openloops-inference --features ollama-cloud --locked --jobs 1
+    if ($LASTEXITCODE) { throw 'Rust inference ollama-cloud tests failed.' }
     $smoke = cargo run --quiet --locked -p openloops-desktop
     if ($LASTEXITCODE -or $smoke -ne 'OPENLOOPS_SYNTHETIC_SMOKE_OK') { throw 'Synthetic desktop smoke failed.' }
     pwsh -NoProfile -File ./tools/check-package-allowlist.ps1

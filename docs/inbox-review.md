@@ -65,6 +65,12 @@ Authentication, quota, throttling, and provider transport failures stop later
 requests. Other conversation failures remain visible while the scan continues.
 There are no automatic request retries or silent model substitutions.
 
+After the per-conversation pass, a bounded cross-thread closure pass sends
+each remaining open request, together with the user's later messages to the
+same person from other conversations (up to 8, newest first, at most 40
+requests per scan), to the model to check for completion evidence; this is
+the only place two conversations share one model request.
+
 ## Saved decisions and reminders
 
 The native preview stores a bounded versioned Windows Credential Manager record

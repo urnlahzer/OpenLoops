@@ -142,7 +142,8 @@ impl ReviewState {
         self.scan_incomplete = result.analyzed < result.total
             || self.source_failures > 0
             || result.analysis.rejected > 0
-            || result.analysis.degraded > 0;
+            || result.analysis.degraded > 0
+            || result.closure_pass_failure.is_some();
         self.scan_errors = result.failures;
         for reason in &result.analysis.rejection_reasons {
             if !self.scan_errors.iter().any(|existing| existing == reason) {
@@ -150,6 +151,9 @@ impl ReviewState {
             }
         }
         self.scan_errors.extend(result.conversation_notes);
+        if let Some(failure) = result.closure_pass_failure {
+            self.scan_errors.push(failure);
+        }
         self.analysis = Some(result.analysis);
         self.analysis_model = model;
     }
@@ -307,7 +311,7 @@ impl ReviewState {
                 egui::Frame::group(ui.style()).show(ui,|ui|{
                     ui.set_width(ui.available_width());
                     let status_base=status_base_label(record.decision,item);
-                    let status=status_label(status_base,item.cross_thread);
+                    let status=status_label(status_base,status_shows_cross_thread(record.decision,item.resolution.is_some(),item.cross_thread));
                     ui.label(RichText::new(status).color(Color32::from_rgb(29,87,67)));
                     ui.label(RichText::new(&item.action).size(21.0).strong());
                     let owner=if record.decision==Decision::Mine {"You (confirmed)"} else {match item.owner {Owner::You=>"You (suggested)",Owner::Team=>"Team — no individual owner established",Owner::Unclear=>"Unclear — confirm responsibility"}};
@@ -419,15 +423,26 @@ fn resolution_status_label(kind: Option<ResolutionKind>) -> &'static str {
         Some(ResolutionKind::Agreed) => "Resolved: you agreed",
     }
 }
-/// Appends " (evidence in another conversation)" to `base` when the
-/// expectation's resolution came from the cross-thread closure pass
-/// (`scanning::scan_closures`) rather than the same conversation.
+/// Appends " (evidence in another conversation)" to `base` when
+/// [`status_shows_cross_thread`] says the suffix applies.
 fn status_label(base: &str, cross_thread: bool) -> String {
     if cross_thread {
         format!("{base} (evidence in another conversation)")
     } else {
         base.to_string()
     }
+}
+
+/// True when the " (evidence in another conversation)" suffix belongs on
+/// this card's status: only when `item.cross_thread` is set AND the status
+/// text itself came from the resolution branch of [`status_base_label`]
+/// (`Decision::Review` with a resolution present) -- never when a user
+/// decision (`Done`/`Dismissed`/`Moot`/`Mine`/`Watching`) is driving the
+/// status text instead. A manually "Handled" item, for example, must not
+/// read "Handled (evidence in another conversation)" just because some
+/// earlier cross-thread resolution happens to sit on the same item.
+fn status_shows_cross_thread(decision: Decision, resolved: bool, cross_thread: bool) -> bool {
+    cross_thread && decision == Decision::Review && resolved
 }
 
 fn resolution_anchor_label(kind: Option<ResolutionKind>, cross_thread: bool) -> &'static str {
@@ -445,24 +460,35 @@ fn resolution_anchor_label(kind: Option<ResolutionKind>, cross_thread: bool) -> 
 }
 /// Builds the "What may need your attention" summary line. `analysis.items`
 /// includes resolved-by-evidence items, so the open count excludes them and
-/// they get their own segment instead. `resolved` is computed from the same
-/// `closed` predicate the card uses (see [`ReviewState::card_context`]), by
-/// way of the already-computed `cards`, not from `item.resolution.is_some()`
-/// alone -- an item whose closure was explicitly overridden to `Mine` or
-/// `Watching` counts as open here too, matching the card it corresponds to.
+/// they get their own segment instead. `resolved` counts an item only when
+/// BOTH `item.resolution.is_some()` AND the card is closed (using the same
+/// `closed` predicate the card uses, see [`ReviewState::card_context`], by
+/// way of the already-computed `cards`) -- requiring both keeps a manually
+/// "Handled" item with no resolution evidence at all (terminal decisions
+/// close the card too, but say nothing about resolution) from inflating
+/// this count, and an item whose closure was explicitly overridden to
+/// `Mine` or `Watching` still counts as open here, matching the card it
+/// corresponds to. `cross_thread_closed` is the subset of `resolved` whose
+/// resolution came from the cross-thread closure pass (`item.cross_thread`),
+/// surfaced as its own segment alongside the "Scan coverage and errors"
+/// panel note (`scanning::scan_closures`'s own conversation note).
 fn expectations_summary(
     analysis: &Expectations,
     cards: &[Option<CardContext<'_>>],
     model: &str,
 ) -> String {
-    let resolved = analysis
+    let resolved_flags: Vec<bool> = analysis
         .items
         .iter()
         .zip(cards)
-        .filter(|(item, card)| {
-            card.as_ref()
-                .map_or_else(|| item.resolution.is_some(), |c| c.closed)
-        })
+        .map(|(item, card)| item.resolution.is_some() && card.as_ref().is_some_and(|c| c.closed))
+        .collect();
+    let resolved = resolved_flags.iter().filter(|&&r| r).count();
+    let cross_thread_closed = analysis
+        .items
+        .iter()
+        .zip(&resolved_flags)
+        .filter(|&(item, &r)| r && item.cross_thread)
         .count();
     let open = analysis.items.len() - resolved;
     let degraded_note = if analysis.degraded > 0 {
@@ -470,8 +496,13 @@ fn expectations_summary(
     } else {
         String::new()
     };
+    let cross_thread_note = if cross_thread_closed > 0 {
+        format!(" · {cross_thread_closed} closed from evidence in other conversations")
+    } else {
+        String::new()
+    };
     format!(
-        "{open} expectations · {resolved} resolved by later evidence · {} rejected for invalid evidence{degraded_note} · {model}",
+        "{open} expectations · {resolved} resolved by later evidence · {} rejected for invalid evidence{degraded_note}{cross_thread_note} · {model}",
         analysis.rejected
     )
 }
@@ -669,6 +700,8 @@ pub fn layout_fixture() -> ReviewState {
             cancelled: false,
             conversation_notes: vec![],
             cross_thread_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
         },
         "Synthetic layout check".into(),
     );
@@ -1079,5 +1112,147 @@ mod tests {
             summary.starts_with("1 expectations · 0 resolved"),
             "summary: {summary}"
         );
+    }
+
+    #[test]
+    fn expectations_summary_excludes_manually_handled_items_without_resolution() {
+        // A manually "Handled" item with no resolution evidence at all must
+        // not count as "resolved by later evidence": a terminal decision
+        // closes the card, but says nothing about resolution.
+        let (mut state, item) = aging_fixture();
+        assert!(item.resolution.is_none());
+        let analysis = Expectations {
+            items: vec![item.clone()],
+            rejected: 0,
+            rejection_reasons: vec![],
+            degraded: 0,
+        };
+        let key = state.card_context(&item, 0, 0).unwrap().record.key;
+        let mut record = state.decisions.get(&key);
+        record.decision = Decision::Done;
+        state.decisions.records = vec![record];
+        let cards = state.card_contexts(&analysis.items);
+        assert!(cards[0].as_ref().unwrap().closed);
+        assert!(cards[0].as_ref().unwrap().terminal);
+        let summary = expectations_summary(&analysis, &cards, "model");
+        assert!(
+            summary.contains("0 resolved by later evidence"),
+            "summary: {summary}"
+        );
+    }
+
+    #[test]
+    fn expectations_summary_reports_cross_thread_closed_count() {
+        let (state, mut item) = aging_fixture();
+        item.resolution = Some(item.evidence.clone());
+        item.resolution_kind = Some(ResolutionKind::Completed);
+        item.cross_thread = true;
+        let analysis = Expectations {
+            items: vec![item],
+            rejected: 0,
+            rejection_reasons: vec![],
+            degraded: 0,
+        };
+        let cards = state.card_contexts(&analysis.items);
+        assert!(cards[0].as_ref().unwrap().closed);
+        let summary = expectations_summary(&analysis, &cards, "model");
+        assert!(
+            summary.contains("1 closed from evidence in other conversations"),
+            "summary: {summary}"
+        );
+    }
+
+    #[test]
+    fn status_shows_cross_thread_only_from_the_resolution_branch() {
+        assert!(status_shows_cross_thread(Decision::Review, true, true));
+        assert!(!status_shows_cross_thread(Decision::Review, false, true));
+        assert!(!status_shows_cross_thread(Decision::Review, true, false));
+        assert!(!status_shows_cross_thread(Decision::Mine, true, true));
+        assert!(!status_shows_cross_thread(Decision::Watching, true, true));
+        assert!(!status_shows_cross_thread(Decision::Done, true, true));
+        assert!(!status_shows_cross_thread(Decision::Dismissed, true, true));
+        assert!(!status_shows_cross_thread(Decision::Moot, true, true));
+    }
+
+    #[test]
+    fn set_scan_reports_closure_pass_failure_as_incomplete() {
+        let mut state = ReviewState::default();
+        state.set_scan(
+            ScanResult {
+                analysis: Expectations {
+                    items: vec![],
+                    rejected: 0,
+                    rejection_reasons: vec![],
+                    degraded: 0,
+                },
+                failures: vec![],
+                analyzed: 1,
+                total: 1,
+                cancelled: false,
+                conversation_notes: vec![],
+                cross_thread_closures: 0,
+                primary_scan_transport_error: false,
+                closure_pass_failure: Some(
+                    "Cross-thread closure pass stopped: rate limited".into(),
+                ),
+            },
+            "model".into(),
+        );
+        assert!(state.scan_incomplete);
+        assert!(
+            state
+                .scan_errors
+                .iter()
+                .any(|e| e == "Cross-thread closure pass stopped: rate limited")
+        );
+    }
+
+    #[test]
+    fn review_state_loaded_assigns_globally_unique_handles_across_sources() {
+        // Mirrors the concern the old hand-simulated test covered, but now
+        // drives `ReviewState::loaded` directly with two `SourceReview`s:
+        // `index` is the running count of already-loaded messages across
+        // ALL sources, not a per-source counter, so show_anchor's handle
+        // lookup (which searches every loaded message regardless of source)
+        // never sees a collision.
+        use std::collections::BTreeSet;
+        let mail = |id: &str, conversation: &str, day: u32, body: &str| {
+            openloops_graph::live::review::MailItem {
+                id: id.into(),
+                account: "synthetic".into(),
+                conversation: conversation.into(),
+                received: format!("2026-09-0{day}T12:00:00Z"),
+                body: body.into(),
+                ..Default::default()
+            }
+        };
+        let sources = vec![
+            SourceReview {
+                label: "Inbox".into(),
+                messages: vec![
+                    mail("i-1", "c1", 1, "Please send the draft."),
+                    mail("i-2", "c2", 2, "Second message."),
+                ],
+                errors: vec![],
+                partial: false,
+            },
+            SourceReview {
+                label: "Sent".into(),
+                messages: vec![mail("s-1", "c3", 3, "Here is the draft.")],
+                errors: vec![],
+                partial: false,
+            },
+        ];
+        let state = ReviewState::loaded(sources);
+        assert_eq!(state.messages.len(), 3);
+        let handles: BTreeSet<&str> = state
+            .messages
+            .iter()
+            .map(|m| m.input.handle.as_str())
+            .collect();
+        assert_eq!(handles.len(), state.messages.len());
+        for (i, m) in state.messages.iter().enumerate() {
+            assert_eq!(m.input.handle, format!("m{i}"));
+        }
     }
 }

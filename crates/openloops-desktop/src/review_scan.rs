@@ -45,16 +45,33 @@ pub struct ScanResult {
     pub analyzed: usize,
     pub total: usize,
     pub cancelled: bool,
-    /// Per-conversation diagnostics: one note per conversation that had a
-    /// rejection, degraded item, or (for a two-party thread) returned no
-    /// expectations at all. In-memory UI text only -- built from message
-    /// subjects, so it must never be logged, saved, or emitted by
-    /// [`probe`].
+    /// Diagnostics for display in the "Scan coverage and errors" panel.
+    /// Most entries are per-conversation: one note per conversation that had
+    /// a rejection, degraded item, or (for a two-party thread) returned no
+    /// expectations at all. A few are aggregate, scan-wide notes pushed by
+    /// the cross-thread closure pass (`scan_closures`) rather than tied to
+    /// any single conversation -- how many expectations it closed, and
+    /// whether its per-scan call cap bound. In-memory UI text only -- built
+    /// from message subjects, so it must never be logged, saved, or emitted
+    /// by [`probe`].
     pub conversation_notes: Vec<String>,
     /// Number of open requests resolved by the cross-thread closure pass
     /// (`scan_closures`), using evidence found in a different conversation
     /// than the request itself.
     pub cross_thread_closures: usize,
+    /// Set when `scan_conversations` stopped early because a conversation's
+    /// analysis failed with a transport-class provider error (the same
+    /// `matches!` set that stops the main scan). When true, `scan_closures`
+    /// skips the cross-thread closure pass entirely instead of repeating
+    /// calls against a provider already known to be unreachable or
+    /// unauthorized.
+    pub primary_scan_transport_error: bool,
+    /// Content-free diagnostic set when the cross-thread closure pass itself
+    /// stopped early on a transport-class provider error, e.g.
+    /// `"Cross-thread closure pass stopped: rate limited"`. Kept separate
+    /// from `failures` (which counts unanalyzed conversations) since a
+    /// closure-pass failure does not mean any conversation went unanalyzed.
+    pub closure_pass_failure: Option<String>,
 }
 
 /// Extracts a lowercase email address from a participant label such as
@@ -80,23 +97,21 @@ pub fn waiting_party_address(label: &str) -> Option<String> {
 
 /// Candidate messages for the cross-thread closure pass: later messages
 /// the signed-in user sent to `item`'s waiting party, in a conversation
-/// other than `evidence_conversation`, for the same account as the
-/// evidence message. Sorted chronologically ascending and capped at 8 so
-/// the closure prompt stays small.
+/// other than `evidence_conversation`, for `account` -- the account the
+/// caller (`scan_closures`) already resolved for the evidence message,
+/// passed in directly rather than re-derived here from
+/// `item.evidence.message`. Keeps the NEWEST 8 such messages (sorted
+/// descending by timestamp, truncated, then re-sorted ascending) so the
+/// closure prompt stays small while favoring the most recent, most
+/// probative evidence over stale older messages.
 pub fn closure_candidates<'a>(
     item: &Expectation,
     all: &'a [ReviewMessage],
+    account: &str,
     evidence_conversation: &str,
     evidence_timestamp: i64,
 ) -> Vec<&'a ReviewMessage> {
     let Some(address) = waiting_party_address(&item.waiting_party) else {
-        return vec![];
-    };
-    let Some(account) = all
-        .iter()
-        .find(|m| m.input.handle == item.evidence.message)
-        .map(|m| m.account.as_str())
-    else {
         return vec![];
     };
     let mut candidates: Vec<&ReviewMessage> = all
@@ -109,8 +124,9 @@ pub fn closure_candidates<'a>(
                 && m.other_addresses.contains(&address)
         })
         .collect();
-    candidates.sort_by_key(|m| m.input.timestamp);
+    candidates.sort_by_key(|m| std::cmp::Reverse(m.input.timestamp));
     candidates.truncate(8);
+    candidates.sort_by_key(|m| m.input.timestamp);
     candidates
 }
 
@@ -423,7 +439,7 @@ pub fn scan(
 /// and never persist or log its output.
 fn conversation_note(
     index: usize,
-    conversation: &[ReviewMessage],
+    conversation: &[&ReviewMessage],
     analysis: &Expectations,
 ) -> Option<String> {
     let len = conversation.len();
@@ -486,13 +502,18 @@ fn scan_conversations(
         cancelled: false,
         conversation_notes: vec![],
         cross_thread_closures: 0,
+        primary_scan_transport_error: false,
+        closure_pass_failure: None,
     };
-    let mut conversations: BTreeMap<(&str, &str), Vec<ReviewMessage>> = BTreeMap::new();
+    // Grouped as borrows rather than owned clones: each `ReviewMessage`
+    // already lives in `messages`, and the per-conversation `inputs`
+    // (below) is the only owned copy this pass actually needs.
+    let mut conversations: BTreeMap<(&str, &str), Vec<&ReviewMessage>> = BTreeMap::new();
     for m in messages {
         conversations
             .entry((&m.account, &m.conversation))
             .or_default()
-            .push(m.clone());
+            .push(m);
     }
     for (index, mut conversation) in conversations.into_values().enumerate() {
         if progress.cancel.load(Ordering::Relaxed) {
@@ -531,6 +552,7 @@ fn scan_conversations(
                         | ProviderError::Timeout
                         | ProviderError::ServerError(_)
                 ) {
+                    result.primary_scan_transport_error = true;
                     break;
                 }
             }
@@ -542,16 +564,35 @@ fn scan_conversations(
     result
 }
 
+/// Hard cap on how many `closure()` provider calls one scan makes, however
+/// many open requests are eligible: a large mailbox could otherwise turn
+/// into dozens of extra model calls in a single scan.
+const MAX_CLOSURE_CALLS: usize = 40;
+
 /// After the primary per-conversation scan, attempts to close any
 /// remaining open "you owe someone" requests using completion evidence the
 /// signed-in user sent to the same waiting party in a DIFFERENT
 /// conversation than the request — evidence `scan_conversations`'s
 /// per-conversation analysis never sees. Mutates `result.analysis.items`
 /// in place, sets `cross_thread: true` on every item it resolves, and
-/// counts them in `result.cross_thread_closures`. A provider error stops
-/// only this pass (recorded in `result.failures`), never the whole scan;
-/// `progress.cancel` is checked between calls exactly like
-/// `scan_conversations`.
+/// counts them in `result.cross_thread_closures`.
+///
+/// Skipped entirely when `result.primary_scan_transport_error` is set: the
+/// provider is already known to be unreachable or unauthorized, so per-item
+/// closure calls would fail identically. Before running, the count of
+/// eligible items (open, `request`-kind, `You`-owned) is added to
+/// `progress.total`, and `progress.processed` is incremented once per
+/// eligible item as it is processed, including one skipped for having no
+/// candidates, a shared-mailbox/list waiting party (see
+/// [`is_shared_mailbox_address`]), the [`MAX_CLOSURE_CALLS`] cap binding, or
+/// a non-transport-class provider error -- `scan_closures` only ever
+/// `continue`s past those, exactly like `scan_conversations` does for the
+/// same error classes. Only a transport-class provider error (the same
+/// `matches!` set `scan_conversations` uses) stops the pass early, recorded
+/// content-free in `result.closure_pass_failure` rather than `failures`
+/// (which counts unanalyzed conversations -- a closure-pass failure never
+/// leaves a conversation unanalyzed). `progress.cancel` is checked between
+/// items exactly like `scan_conversations`.
 fn scan_closures(
     messages: &[ReviewMessage],
     progress: &ScanProgress,
@@ -562,6 +603,21 @@ fn scan_closures(
         &[ConversationMessage],
     ) -> Result<Option<(Anchor, ResolutionKind)>, ProviderError>,
 ) {
+    if result.primary_scan_transport_error {
+        return;
+    }
+    let eligible = result
+        .analysis
+        .items
+        .iter()
+        .filter(|item| {
+            item.resolution.is_none() && item.kind == "request" && item.owner == Owner::You
+        })
+        .count();
+    progress.total.fetch_add(eligible, Ordering::Relaxed);
+    let (groups_per_account, address_group_counts) = conversation_group_address_counts(messages);
+    let mut calls_made = 0usize;
+    let mut capped = false;
     for item in &mut result.analysis.items {
         if progress.cancel.load(Ordering::Relaxed) {
             result.cancelled = true;
@@ -570,18 +626,40 @@ fn scan_closures(
         if item.resolution.is_some() || item.kind != "request" || item.owner != Owner::You {
             continue;
         }
+        progress.processed.fetch_add(1, Ordering::Relaxed);
         let Some(source) = messages
             .iter()
             .find(|m| m.input.handle == item.evidence.message)
         else {
             continue;
         };
-        let candidates =
-            closure_candidates(item, messages, &source.conversation, source.input.timestamp);
+        let Some(address) = waiting_party_address(&item.waiting_party) else {
+            continue;
+        };
+        if is_shared_mailbox_address(
+            &source.account,
+            &address,
+            &groups_per_account,
+            &address_group_counts,
+        ) {
+            continue;
+        }
+        let candidates = closure_candidates(
+            item,
+            messages,
+            &source.account,
+            &source.conversation,
+            source.input.timestamp,
+        );
         if candidates.is_empty() {
             continue;
         }
+        if calls_made >= MAX_CLOSURE_CALLS {
+            capped = true;
+            continue;
+        }
         let inputs: Vec<ConversationMessage> = candidates.iter().map(|m| m.input.clone()).collect();
+        calls_made += 1;
         match closure(item, source.input.timestamp, &inputs) {
             Ok(Some((anchor, kind))) => {
                 item.resolution = Some(anchor);
@@ -591,10 +669,19 @@ fn scan_closures(
             }
             Ok(None) => {}
             Err(e) => {
-                result
-                    .failures
-                    .push(format!("Cross-thread closure pass: {e}"));
-                break;
+                if matches!(
+                    e,
+                    ProviderError::Unauthorized
+                        | ProviderError::RateLimited
+                        | ProviderError::Quota
+                        | ProviderError::Network
+                        | ProviderError::Timeout
+                        | ProviderError::ServerError(_)
+                ) {
+                    result.closure_pass_failure =
+                        Some(format!("Cross-thread closure pass stopped: {e}"));
+                    break;
+                }
             }
         }
     }
@@ -603,6 +690,11 @@ fn scan_closures(
             "Closing evidence found in another conversation for {} expectation(s).",
             result.cross_thread_closures
         ));
+    }
+    if capped {
+        result.conversation_notes.push(
+            "Cross-thread closure checks were capped at 40 open requests this scan.".to_string(),
+        );
     }
 }
 
@@ -660,36 +752,41 @@ fn strip_weekday_or_month_prefix(text: &str) -> Option<usize> {
 
 /// True when `after` (the lowercased text following " @ ") looks like a
 /// calendar date/time rather than ordinary subject text: it must start with
-/// a weekday or month name, and -- bounded to the first 8 characters that
-/// follow that name -- what comes next must itself look date-shaped: a
+/// a weekday or month name, and -- with the pattern's trigger character
+/// (the digit or space checked below) bounded to the first 12 characters
+/// that follow that name -- what comes next must itself look date-shaped: a
 /// comma immediately preceded by a digit (e.g. "Mon Sep 7, 2026 ..."), a
-/// space directly followed by a digit (e.g. "Sep 7 2026"), or a digit
-/// within the first 4 of those characters (e.g. "Dec25"). Bounding the
-/// window, and requiring a digit right before any comma, keeps a bare place
-/// or product name that happens to start with a weekday/month abbreviation
-/// ("Sun Valley Lodge", "May's Diner") -- including one whose own trailing
-/// punctuation is a comma further along ("March House, London") -- from
-/// satisfying any of these follow-on shapes.
+/// space directly followed by a digit (e.g. "Sep 7 2026", or "Monday,
+/// September 7, 2026 ..." where the trailing space before the day number
+/// sits right at the 12-character bound), or a digit within the first 4 of
+/// those characters (e.g. "Dec.25" -- the day number follows a punctuation
+/// boundary rather than the name itself, since
+/// [`strip_weekday_or_month_prefix`] requires a non-alphanumeric character
+/// immediately after the name; a bare "Dec25" never reaches this function at
+/// all, since the digit run right after the name fails that boundary
+/// check). The two-character patterns' confirming character (the comma or
+/// digit) is still read one past the 12-character bound when the trigger
+/// sits right at it, since the pattern would otherwise straddle the
+/// boundary and go unrecognized. Bounding the window, and requiring a digit
+/// right before any comma, keeps a bare place or product name that happens
+/// to start with a weekday/month abbreviation ("Sun Valley Lodge", "May's
+/// Diner") -- including one whose own trailing punctuation is a comma
+/// further along ("March House, London") -- from satisfying any of these
+/// follow-on shapes.
 fn looks_like_calendar_date(after: &str) -> bool {
     let Some(name_len) = strip_weekday_or_month_prefix(after) else {
         return false;
     };
     let rest = &after[name_len..];
-    let window: Vec<char> = rest.chars().take(8).collect();
-    if window
-        .windows(2)
-        .any(|pair| pair[0].is_ascii_digit() && pair[1] == ',')
-    {
+    let chars: Vec<char> = rest.chars().collect();
+    let bound = 12.min(chars.len());
+    if (0..bound).any(|i| chars[i].is_ascii_digit() && chars.get(i + 1) == Some(&',')) {
         return true;
     }
-    if window
-        .iter()
-        .enumerate()
-        .any(|(i, &c)| c == ' ' && window.get(i + 1).is_some_and(char::is_ascii_digit))
-    {
+    if (0..bound).any(|i| chars[i] == ' ' && chars.get(i + 1).is_some_and(char::is_ascii_digit)) {
         return true;
     }
-    window.iter().take(4).any(char::is_ascii_digit)
+    chars.iter().take(4).any(char::is_ascii_digit)
 }
 
 /// True when `content` (the text between a trailing pair of parentheses, in
@@ -927,6 +1024,47 @@ fn is_shared_mailbox_address(
         .copied()
         .unwrap_or(0);
     count >= 3 && count * 2 >= total
+}
+
+/// Number of distinct conversation groups per account.
+type GroupsPerAccount<'a> = BTreeMap<&'a str, usize>;
+/// Number of an account's conversation groups a given (account, address)
+/// pair's address appears in.
+type AddressGroupCounts<'a> = BTreeMap<(&'a str, &'a str), usize>;
+
+/// Builds the two per-account count maps [`is_shared_mailbox_address`]
+/// needs, straight from `messages`: how many distinct (account,
+/// conversation) groups each account has, and how many of an account's
+/// groups each address appears in (via any message's `other_addresses`).
+/// This is the same shape of counts [`merge_threads`] builds inline from its
+/// own `ThreadGroup`s for the identical purpose (spotting a distribution
+/// list or shared mailbox rather than a genuine correspondent) -- factored
+/// out here so the cross-thread closure pass (`scan_closures`, which has no
+/// `ThreadGroup`s of its own) can reuse the same `is_shared_mailbox_address`
+/// decision without re-deriving its own notion of "shared address".
+fn conversation_group_address_counts(
+    messages: &[ReviewMessage],
+) -> (GroupsPerAccount<'_>, AddressGroupCounts<'_>) {
+    let mut groups: BTreeMap<(&str, &str), BTreeSet<&str>> = BTreeMap::new();
+    for m in messages {
+        groups
+            .entry((m.account.as_str(), m.conversation.as_str()))
+            .or_default()
+            .extend(m.other_addresses.iter().map(String::as_str));
+    }
+    let mut groups_per_account: BTreeMap<&str, usize> = BTreeMap::new();
+    for (account, _) in groups.keys() {
+        *groups_per_account.entry(*account).or_insert(0) += 1;
+    }
+    let mut address_group_counts: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    for ((account, _), addresses) in &groups {
+        for address in addresses {
+            *address_group_counts
+                .entry((*account, *address))
+                .or_insert(0) += 1;
+        }
+    }
+    (groups_per_account, address_group_counts)
 }
 
 /// True when the nearest pair of messages across the two groups (by
@@ -1719,6 +1857,22 @@ mod tests {
                 "Kickoff @ March House, London",
                 "kickoff @ march house, london",
             ),
+            (
+                // The day number ("7") sits right at the 12-character
+                // bound, immediately after the space that triggers the
+                // "space directly followed by a digit" rule -- exercising
+                // the one-character lookahead past that bound.
+                "Sync @ Monday, September 7, 2026 9am",
+                "sync",
+            ),
+            (
+                // "Dec25" never reaches the date-shaped checks at all:
+                // `strip_weekday_or_month_prefix` requires a non-alphanumeric
+                // boundary immediately after the month name, and "2" fails
+                // that, so this stays ordinary subject text.
+                "Reminder @ Dec25 party",
+                "reminder @ dec25 party",
+            ),
             ("", ""),
         ];
         for (input, expected) in cases {
@@ -1869,13 +2023,19 @@ mod tests {
         let wrong_address = reply_to("dana@example.invalid", "d-1", "c5", "acct", "Fee");
         all.push(prepare(&wrong_address, "Sent", all.len()).unwrap());
 
-        let candidates = closure_candidates(&item, &all, evidence_conversation, evidence_timestamp);
+        let candidates = closure_candidates(
+            &item,
+            &all,
+            "acct",
+            evidence_conversation,
+            evidence_timestamp,
+        );
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].id, "v-1");
     }
 
     #[test]
-    fn closure_candidates_sorted_ascending_and_capped_at_eight() {
+    fn closure_candidates_keeps_newest_eight_in_ascending_order() {
         let (mut all, item) = closure_test_messages();
         let evidence_conversation = "c1";
         let evidence_timestamp = all[0].input.timestamp;
@@ -1890,11 +2050,19 @@ mod tests {
             );
             m.received = format!("2026-09-{day:02}T12:00:00Z");
             all.push(prepare(&m, "Sent", all.len()).unwrap());
-            if day <= 9 {
+            // The newest 8 of days 2..=11 are days 4..=11 -- days 2 and 3
+            // are the oldest two and must be dropped.
+            if day >= 4 {
                 expected_ids.push(format!("c-{day}"));
             }
         }
-        let candidates = closure_candidates(&item, &all, evidence_conversation, evidence_timestamp);
+        let candidates = closure_candidates(
+            &item,
+            &all,
+            "acct",
+            evidence_conversation,
+            evidence_timestamp,
+        );
         assert_eq!(candidates.len(), 8);
         let ids: Vec<&str> = candidates.iter().map(|m| m.id.as_str()).collect();
         let expected: Vec<&str> = expected_ids.iter().map(String::as_str).collect();
@@ -1925,6 +2093,8 @@ mod tests {
             cancelled: false,
             conversation_notes: vec![],
             cross_thread_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
         };
         let resolved_anchor = Anchor {
             message: all.last().unwrap().input.handle.clone(),
@@ -1933,7 +2103,8 @@ mod tests {
             context: "Sure, let's do it.".into(),
         };
         let mut calls = 0;
-        scan_closures(&all, &ScanProgress::default(), &mut result, |_, _, _| {
+        let progress = ScanProgress::default();
+        scan_closures(&all, &progress, &mut result, |_, _, _| {
             calls += 1;
             Ok(Some((resolved_anchor.clone(), ResolutionKind::Completed)))
         });
@@ -1948,22 +2119,28 @@ mod tests {
         assert!(result.conversation_notes.iter().any(|n| {
             n.contains("Closing evidence found in another conversation for 1 expectation")
         }));
+        assert_eq!(progress.total.load(Ordering::Relaxed), 1);
+        assert_eq!(progress.processed.load(Ordering::Relaxed), 1);
     }
 
     #[test]
-    fn scan_closures_stops_when_cancelled_between_calls() {
+    fn scan_closures_progress_tracks_eligible_items_including_skipped_ones() {
+        // One item resolves, one has no candidates (skipped without ever
+        // reaching the provider): `progress.total` grows by the eligible
+        // count (2) and `progress.processed` reaches that same total.
         let (mut all, item1) = closure_test_messages();
         let valid1 = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
         all.push(prepare(&valid1, "Sent", all.len()).unwrap());
 
-        let evidence2 = request_from("sam@example.invalid", "req-2", "c6", "acct", "Fee 2");
+        let evidence2 = request_from("dana@example.invalid", "req-2", "c6", "acct", "Fee 2");
         all.push(prepare(&evidence2, "Inbox", all.len()).unwrap());
         let evidence2_handle = all.last().unwrap().input.handle.clone();
-        let valid2 = reply_to("sam@example.invalid", "v-2", "c7", "acct", "Fee 2");
-        all.push(prepare(&valid2, "Sent", all.len()).unwrap());
 
         let mut item2 = item1.clone();
         item2.evidence.message = evidence2_handle;
+        item2.waiting_party = "Other <dana@example.invalid>".into();
+        // No message replies to dana@example.invalid: item2 has no
+        // candidates and is skipped without reaching the provider.
 
         let mut result = ScanResult {
             analysis: Expectations {
@@ -1978,6 +2155,60 @@ mod tests {
             cancelled: false,
             conversation_notes: vec![],
             cross_thread_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        let resolved_anchor = Anchor {
+            message: all[1].input.handle.clone(),
+            block: 0,
+            quote: "Sure, let's do it.".into(),
+            context: "Sure, let's do it.".into(),
+        };
+        let progress = ScanProgress::default();
+        progress.total.store(2, Ordering::Relaxed);
+        scan_closures(&all, &progress, &mut result, |_, _, _| {
+            Ok(Some((resolved_anchor.clone(), ResolutionKind::Completed)))
+        });
+        assert_eq!(progress.total.load(Ordering::Relaxed), 4);
+        assert_eq!(progress.processed.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn scan_closures_stops_when_cancelled_between_calls() {
+        let (mut all, item1) = closure_test_messages();
+        let valid1 = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
+        all.push(prepare(&valid1, "Sent", all.len()).unwrap());
+
+        // A different waiting-party address than item1's: reusing
+        // "sam@example.invalid" across four separate conversation groups
+        // here would make it look like a shared mailbox/list (see
+        // `is_shared_mailbox_address`) and get excluded before ever
+        // reaching the provider, which is not what this test is about.
+        let evidence2 = request_from("dana@example.invalid", "req-2", "c6", "acct", "Fee 2");
+        all.push(prepare(&evidence2, "Inbox", all.len()).unwrap());
+        let evidence2_handle = all.last().unwrap().input.handle.clone();
+        let valid2 = reply_to("dana@example.invalid", "v-2", "c7", "acct", "Fee 2");
+        all.push(prepare(&valid2, "Sent", all.len()).unwrap());
+
+        let mut item2 = item1.clone();
+        item2.evidence.message = evidence2_handle;
+        item2.waiting_party = "Other <dana@example.invalid>".into();
+
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item1, item2],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 2,
+            total: 2,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
         };
         let progress = ScanProgress::default();
         let mut calls = 0;
@@ -1991,7 +2222,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_closures_error_is_recorded_and_stops_only_this_pass() {
+    fn scan_closures_transport_error_is_recorded_separately_and_stops_only_this_pass() {
         let (mut all, item) = closure_test_messages();
         let valid = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
         all.push(prepare(&valid, "Sent", all.len()).unwrap());
@@ -2008,14 +2239,220 @@ mod tests {
             cancelled: false,
             conversation_notes: vec![],
             cross_thread_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
         };
         scan_closures(&all, &ScanProgress::default(), &mut result, |_, _, _| {
             Err(ProviderError::RateLimited)
         });
-        assert_eq!(result.failures.len(), 1);
-        assert!(result.failures[0].starts_with("Cross-thread closure pass: "));
+        // A closure-pass failure is content-free diagnostic text, kept apart
+        // from `failures` (which counts unanalyzed conversations -- no
+        // conversation went unanalyzed here).
+        assert!(result.failures.is_empty());
+        assert!(
+            result
+                .closure_pass_failure
+                .as_deref()
+                .is_some_and(|f| f.starts_with("Cross-thread closure pass stopped: ")),
+            "closure_pass_failure: {:?}",
+            result.closure_pass_failure
+        );
         assert_eq!(result.cross_thread_closures, 0);
         assert!(!result.cancelled);
+    }
+
+    #[test]
+    fn scan_closures_continues_past_a_non_transport_error_to_the_next_item() {
+        // An InputTooLarge on item 1 must not prevent item 2 from closing:
+        // only the transport-class error set stops the pass.
+        let (mut all, item1) = closure_test_messages();
+        let valid1 = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
+        all.push(prepare(&valid1, "Sent", all.len()).unwrap());
+
+        let evidence2 = request_from("dana@example.invalid", "req-2", "c6", "acct", "Fee 2");
+        all.push(prepare(&evidence2, "Inbox", all.len()).unwrap());
+        let evidence2_handle = all.last().unwrap().input.handle.clone();
+        let valid2 = reply_to("dana@example.invalid", "v-2", "c7", "acct", "Fee 2");
+        all.push(prepare(&valid2, "Sent", all.len()).unwrap());
+
+        let mut item2 = item1.clone();
+        item2.evidence.message = evidence2_handle;
+        item2.waiting_party = "Other <dana@example.invalid>".into();
+
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item1, item2],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 2,
+            total: 2,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        let resolved_anchor = Anchor {
+            message: all.last().unwrap().input.handle.clone(),
+            block: 0,
+            quote: "Sure, let's do it.".into(),
+            context: "Sure, let's do it.".into(),
+        };
+        let mut calls = 0;
+        scan_closures(&all, &ScanProgress::default(), &mut result, |_, _, _| {
+            calls += 1;
+            if calls == 1 {
+                Err(ProviderError::InputTooLarge)
+            } else {
+                Ok(Some((resolved_anchor.clone(), ResolutionKind::Completed)))
+            }
+        });
+        assert_eq!(calls, 2, "the second item must still be attempted");
+        assert!(result.closure_pass_failure.is_none());
+        assert!(result.failures.is_empty());
+        assert!(result.analysis.items[0].resolution.is_none());
+        assert!(result.analysis.items[1].resolution.is_some());
+        assert_eq!(result.cross_thread_closures, 1);
+    }
+
+    #[test]
+    fn scan_closures_caps_calls_at_forty_and_notes_it() {
+        let (mut all, base_item) = closure_test_messages();
+        let mut items = vec![];
+        for n in 0..45u32 {
+            let address = format!("party{n}@example.invalid");
+            let evidence = request_from(
+                &address,
+                &format!("req-{n}"),
+                &format!("c-req-{n}"),
+                "acct",
+                "Fee",
+            );
+            all.push(prepare(&evidence, "Inbox", all.len()).unwrap());
+            let evidence_handle = all.last().unwrap().input.handle.clone();
+            let reply = reply_to(
+                &address,
+                &format!("v-{n}"),
+                &format!("c-reply-{n}"),
+                "acct",
+                "Fee",
+            );
+            all.push(prepare(&reply, "Sent", all.len()).unwrap());
+            let mut item = base_item.clone();
+            item.evidence.message = evidence_handle;
+            item.waiting_party = format!("Other <{address}>");
+            items.push(item);
+        }
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items,
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 45,
+            total: 45,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        let mut calls = 0;
+        scan_closures(&all, &ScanProgress::default(), &mut result, |_, _, _| {
+            calls += 1;
+            Ok(None)
+        });
+        assert_eq!(calls, 40, "the cap must bind at MAX_CLOSURE_CALLS");
+        assert!(result.conversation_notes.iter().any(|n| {
+            n == "Cross-thread closure checks were capped at 40 open requests this scan."
+        }));
+    }
+
+    #[test]
+    fn scan_closures_skips_a_shared_mailbox_or_list_waiting_party() {
+        // list@example.invalid is the waiting party on the open item, but it
+        // also appears in >=3 of the account's conversation groups and in
+        // at least half of them -- a distribution list or shared mailbox,
+        // not a genuine individual correspondent -- so the item must be
+        // skipped without ever reaching the provider.
+        let (mut all, mut item) = closure_test_messages();
+        item.waiting_party = "List <list@example.invalid>".into();
+        for n in 0..3u32 {
+            let mail = request_from(
+                "list@example.invalid",
+                &format!("other-{n}"),
+                &format!("other-c{n}"),
+                "acct",
+                "Other business",
+            );
+            all.push(prepare(&mail, "Inbox", all.len()).unwrap());
+        }
+        let reply = reply_to("list@example.invalid", "v-1", "c2", "acct", "Fee");
+        all.push(prepare(&reply, "Sent", all.len()).unwrap());
+
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        let mut calls = 0;
+        scan_closures(&all, &ScanProgress::default(), &mut result, |_, _, _| {
+            calls += 1;
+            Ok(None)
+        });
+        assert_eq!(
+            calls, 0,
+            "a shared-mailbox waiting party must never reach the provider"
+        );
+        assert_eq!(result.cross_thread_closures, 0);
+    }
+
+    #[test]
+    fn scan_closures_skips_the_pass_when_the_primary_scan_broke_on_a_transport_error() {
+        let (mut all, item) = closure_test_messages();
+        let valid = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
+        all.push(prepare(&valid, "Sent", all.len()).unwrap());
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec!["Conversation 1 (1 messages): rate limited".into()],
+            analyzed: 0,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            primary_scan_transport_error: true,
+            closure_pass_failure: None,
+        };
+        let progress = ScanProgress::default();
+        let mut calls = 0;
+        scan_closures(&all, &progress, &mut result, |_, _, _| {
+            calls += 1;
+            Ok(None)
+        });
+        assert_eq!(calls, 0, "the closure pass must not run at all");
+        assert_eq!(progress.total.load(Ordering::Relaxed), 0);
+        assert_eq!(result.cross_thread_closures, 0);
     }
 
     #[test]
@@ -2051,6 +2488,8 @@ mod tests {
             cancelled: false,
             conversation_notes: vec![],
             cross_thread_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
         };
         let mut calls = 0;
         scan_closures(&all, &ScanProgress::default(), &mut result, |_, _, _| {
@@ -2059,31 +2498,6 @@ mod tests {
         });
         assert_eq!(calls, 0, "none of these items should reach the provider");
         assert_eq!(result.cross_thread_closures, 0);
-    }
-
-    #[test]
-    fn prepared_handles_are_globally_unique_across_sources_like_review_state_loaded() {
-        // Mirrors ReviewState::loaded's indexing: `index` is the running count
-        // of already-prepared messages across ALL sources, not a per-source
-        // counter, so show_anchor's handle lookup (which searches across every
-        // loaded message regardless of source) never sees a collision.
-        let mut messages: Vec<ReviewMessage> = vec![];
-        for (source, bodies) in [
-            ("Inbox", vec!["Please send the draft.", "Second message."]),
-            ("Sent", vec!["Here is the draft."]),
-            ("Group", vec!["Team update.", "Another update."]),
-        ] {
-            for (n, body) in bodies.into_iter().enumerate() {
-                let item = synthetic(body, n, source);
-                let m = prepare(&item, source, messages.len()).unwrap();
-                messages.push(m);
-            }
-        }
-        let handles: BTreeSet<&str> = messages.iter().map(|m| m.input.handle.as_str()).collect();
-        assert_eq!(handles.len(), messages.len());
-        for (i, m) in messages.iter().enumerate() {
-            assert_eq!(m.input.handle, format!("m{i}"));
-        }
     }
 
     #[test]
