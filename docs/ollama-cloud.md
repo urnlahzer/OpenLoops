@@ -1,5 +1,8 @@
 # Ollama Cloud provider
 
+[OpenRouter](openrouter.md) is the other selectable provider; this page covers
+Ollama Cloud.
+
 Use the [native setup window](native-setup.md) to enter a key, load models, and
 switch between them without a terminal. The window restores the key and selected
 model from the current user's Windows Credential Manager on subsequent launches.
