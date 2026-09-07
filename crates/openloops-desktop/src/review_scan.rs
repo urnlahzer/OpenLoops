@@ -1398,7 +1398,13 @@ fn subject_strong_enough(subject: &str) -> bool {
 /// individual correspondent who simply appears often (review found the
 /// earlier floor of 3 groups too easily satisfied by an ordinary small
 /// mailbox, wrongly excluding a real correspondent's address from the
-/// intersection check).
+/// intersection check). This is a trade-off, not a free improvement: below
+/// the 8-group floor, a genuine list address can still bridge two unrelated
+/// threads and feed the cross-thread closure pass (`scan_closures`) with a
+/// false completion. 8 was chosen as the smallest group count where "half of
+/// them" (the `count * 2 >= total` clause) is a meaningful bar at all -- any
+/// lower and "half" stops distinguishing a distribution list from a merely
+/// frequent individual correspondent.
 fn is_shared_mailbox_address(
     account: &str,
     address: &str,
@@ -3123,7 +3129,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_closures_caps_calls_at_forty_and_notes_it() {
+    fn scan_closures_caps_calls_at_the_configured_maximum_and_notes_it() {
         let (mut all, base_item) = closure_test_messages();
         let mut items = vec![];
         for n in 0..45u32 {
@@ -3811,14 +3817,16 @@ mod tests {
     }
 
     #[test]
-    fn address_in_two_of_six_groups_still_bridges_merge() {
-        // A correspondent that appears in only 2 of the account's groups
-        // (below the "at least 3" per-address floor) is never treated as a
-        // shared mailbox, so it must still bridge the two groups it links --
-        // exactly the ordinary two-thread case. Padded to 8 total groups (up
-        // from the original 6) so the account clears
+    fn address_in_two_of_eight_groups_still_bridges_merge() {
+        // A correspondent that appears in only 2 of the account's 8 groups
+        // fails `is_shared_mailbox_address`'s `count >= 3` clause (2 < 3) --
+        // not the 8-group floor, which this test's padding deliberately
+        // clears -- so it is never treated as a shared mailbox and must
+        // still bridge the two groups it links, exactly the ordinary
+        // two-thread case. Padded to 8 total groups (up from an earlier
+        // version's 6) specifically so the account clears
         // `is_shared_mailbox_address`'s 8-group floor and this test actually
-        // exercises the per-address sub-threshold, rather than passing
+        // exercises the `count >= 3` sub-threshold, rather than passing
         // merely because the account is too small for the check to apply
         // at all.
         let subject = "Alex and Sam discuss quarterly planning";

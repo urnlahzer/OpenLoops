@@ -27,9 +27,12 @@ in the normal application.
 3. **Track — this is mine** confirms personal responsibility. **Keep an eye on
    this** watches an unassigned team expectation without claiming ownership.
    **Handled**, **Not mine / dismiss**, **No longer relevant**, and **Reopen for
-   review** save abstract decisions. The checkbox **Show resolved, handled,
-   dismissed, and no-longer-relevant items** reveals closed cards. Model
-   summaries and source text are not saved locally.
+   review** save abstract decisions. Opening a reminder draft on a card still
+   under review implies the same tracking as **Track — this is mine**;
+   cancelling that draft restores the decision to what it was before the
+   draft opened. The checkbox **Show resolved, handled, dismissed, and
+   no-longer-relevant items** reveals closed cards. Model summaries and
+   source text are not saved locally.
 4. **Set To Do reminder** is available on any open card and does not require
    tracking or watching it first; setting a reminder on a card still under
    review implies tracking it (a card already being watched stays watched).
