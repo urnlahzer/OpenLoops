@@ -954,8 +954,12 @@ mod tests {
         (format!("http://127.0.0.1:{port}/"), handle)
     }
 
+    /// The status classification a 400 actually produces, not just that
+    /// [`fetch_event`]'s best-effort `Option` collapses it to `None` --
+    /// exercised through [`fetch_from_origin`] directly so the specific
+    /// [`ConnectionError`] variant is visible to the assertion.
     #[test]
-    fn extra_fetch_tolerates_a_400_and_leaves_the_event_absent() {
+    fn a_400_classifies_as_bad_request() {
         let (origin, server) = one_shot_server(
             b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
         );
@@ -967,7 +971,38 @@ mod tests {
             "{origin}v1.0/me/messages/synthetic-id/microsoft.graph.eventMessage"
         ))
         .unwrap();
+        assert_eq!(
+            fetch_from_origin(&http, "synthetic-token", url.clone(), &origin),
+            Err(ConnectionError::BadRequest)
+        );
+        server.join().unwrap();
+
         assert!(fetch_event(&http, "synthetic-token", url, &origin).is_none());
+    }
+
+    /// A response whose `Content-Length` header alone exceeds the bound is
+    /// rejected before any body is read.
+    #[test]
+    fn a_large_content_length_classifies_as_response_too_large() {
+        let (origin, server) = one_shot_server(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                super::super::MAX_RESPONSE + 1
+            )
+            .into_bytes(),
+        );
+        let http = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+        let url = Url::parse(&format!(
+            "{origin}v1.0/me/messages/synthetic-id/microsoft.graph.eventMessage"
+        ))
+        .unwrap();
+        assert_eq!(
+            fetch_from_origin(&http, "synthetic-token", url, &origin),
+            Err(ConnectionError::ResponseTooLarge)
+        );
         server.join().unwrap();
     }
 

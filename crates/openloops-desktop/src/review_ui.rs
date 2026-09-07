@@ -1121,9 +1121,20 @@ mod tests {
     #[test]
     fn date_and_business_day_urgency_tracks_past_flag() {
         for past in [false, true] {
-            assert_eq!(is_past_due(&DeadlineView::DueDate { day: 0, past }), past);
             assert_eq!(
-                is_past_due(&DeadlineView::DueBusinessDay { day: 0, past }),
+                is_past_due(&DeadlineView::DueDate {
+                    day: 0,
+                    boundary: 0,
+                    past
+                }),
+                past
+            );
+            assert_eq!(
+                is_past_due(&DeadlineView::DueBusinessDay {
+                    day: 0,
+                    boundary: 0,
+                    past
+                }),
                 past
             );
         }
