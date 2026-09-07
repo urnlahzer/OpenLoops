@@ -13,7 +13,7 @@ use openloops_inference::{
     },
     walker::canonicalize_html,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[derive(Clone)]
@@ -25,6 +25,11 @@ pub struct ReviewMessage {
     pub conversation: String,
     pub date_label: String,
     pub web_link: String,
+    /// Lowercase addresses of sender, to, and cc, minus the account's own
+    /// addresses, deduplicated and sorted. Used to link conversations that
+    /// Exchange split into different `conversationId`s but that share
+    /// participants -- see [`merge_threads`].
+    pub other_addresses: Vec<String>,
 }
 #[derive(Default)]
 pub struct ScanProgress {
@@ -38,6 +43,12 @@ pub struct ScanResult {
     pub analyzed: usize,
     pub total: usize,
     pub cancelled: bool,
+    /// Per-conversation diagnostics: one note per conversation that had a
+    /// rejection, degraded item, or (for a two-party thread) returned no
+    /// expectations at all. In-memory UI text only -- built from message
+    /// subjects, so it must never be logged, saved, or emitted by
+    /// [`probe`].
+    pub conversation_notes: Vec<String>,
 }
 
 fn block(text: &str) -> Result<CanonicalBlock, ConnectionError> {
@@ -237,6 +248,7 @@ pub fn prepare(
             .iter()
             .any(|own| a.eq_ignore_ascii_case(own))
     });
+    let other_addresses = other_addresses(item);
     Ok(ReviewMessage {
         input: ConversationMessage {
             handle: format!("m{index}"),
@@ -277,7 +289,27 @@ pub fn prepare(
             .format("%b %d, %Y %H:%M %:z")
             .to_string(),
         web_link: item.web_link.clone(),
+        other_addresses,
     })
+}
+
+/// Lowercase addresses of sender, to, and cc, minus `item.own_addresses`,
+/// deduplicated and sorted.
+fn other_addresses(item: &MailItem) -> Vec<String> {
+    let own: BTreeSet<String> = item
+        .own_addresses
+        .iter()
+        .map(|a| a.to_lowercase())
+        .collect();
+    let mut addresses: BTreeSet<String> = BTreeSet::new();
+    if !item.sender_address.is_empty() {
+        addresses.insert(item.sender_address.to_lowercase());
+    }
+    for a in item.to.iter().chain(item.cc.iter()) {
+        addresses.insert(a.to_lowercase());
+    }
+    addresses.retain(|a| !own.contains(a));
+    addresses.into_iter().collect()
 }
 
 pub fn scan(
@@ -292,6 +324,64 @@ pub fn scan(
         provider.expectations(conversation)
     }))
 }
+/// Builds the one-line diagnostic note for a successfully analyzed
+/// conversation (`index` is 0-based; the note is 1-based), or `None` when
+/// the conversation needs no attention. `conversation` must already be
+/// sorted chronologically (as `scan_conversations` sorts it before
+/// analyzing), since the subject snippet is drawn from the first message.
+///
+/// Two cases produce a note:
+/// - the conversation had a rejection, a degraded (unverified-evidence)
+///   item, or any rejection reason at all -- reporting accepted/rejected/
+///   degraded counts plus the conversation's own (deduplicated) reasons;
+/// - the conversation returned zero items and zero rejections, but is a
+///   two-party thread (at least one message from the signed-in user and at
+///   least one not), so a card silently vanishing from that thread can be
+///   told apart from a newsletter or other one-sided source that never had
+///   an expectation to find.
+///
+/// Text only, built from in-memory subjects: never call this from `probe`,
+/// and never persist or log its output.
+fn conversation_note(
+    index: usize,
+    conversation: &[ConversationMessage],
+    analysis: &Expectations,
+) -> Option<String> {
+    let len = conversation.len();
+    let subject = conversation
+        .first()
+        .map(|m| m.message.subject.as_string())
+        .unwrap_or_default();
+    let snippet: String = subject.chars().take(60).collect();
+    if analysis.rejected > 0 || analysis.degraded > 0 || !analysis.rejection_reasons.is_empty() {
+        let mut seen: Vec<&'static str> = Vec::new();
+        for reason in &analysis.rejection_reasons {
+            if !seen.contains(reason) {
+                seen.push(*reason);
+            }
+        }
+        return Some(format!(
+            "Conversation {} ({len} messages; subject: {snippet}): {} accepted, {} rejected, {} kept with unverified evidence. {}",
+            index + 1,
+            analysis.items.len(),
+            analysis.rejected,
+            analysis.degraded,
+            seen.join(" / "),
+        ));
+    }
+    if analysis.items.is_empty()
+        && analysis.rejected == 0
+        && conversation.iter().any(|m| !m.from_user)
+        && conversation.iter().any(|m| m.from_user)
+    {
+        return Some(format!(
+            "Conversation {} ({len} messages; subject: {snippet}): no expectations returned.",
+            index + 1
+        ));
+    }
+    None
+}
+
 fn scan_conversations(
     messages: &[ReviewMessage],
     progress: &ScanProgress,
@@ -308,6 +398,7 @@ fn scan_conversations(
         analyzed: 0,
         total: messages.len(),
         cancelled: false,
+        conversation_notes: vec![],
     };
     let mut conversations: BTreeMap<(&str, &str), Vec<ConversationMessage>> = BTreeMap::new();
     for m in messages {
@@ -325,6 +416,9 @@ fn scan_conversations(
         match analyze(&conversation) {
             Ok(analysis) => {
                 result.analyzed += conversation.len();
+                if let Some(note) = conversation_note(index, &conversation, &analysis) {
+                    result.conversation_notes.push(note);
+                }
                 result.analysis.items.extend(analysis.items);
                 result.analysis.rejected += analysis.rejected;
                 result.analysis.degraded += analysis.degraded;
@@ -357,6 +451,202 @@ fn scan_conversations(
             .fetch_add(conversation.len(), Ordering::Relaxed);
     }
     result
+}
+
+const WEEKDAY_OR_MONTH_NAMES: &[&str] = &[
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+    "mon",
+    "tue",
+    "wed",
+    "thu",
+    "fri",
+    "sat",
+    "sun",
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+    "jan",
+    "feb",
+    "mar",
+    "apr",
+    "jun",
+    "jul",
+    "aug",
+    "sep",
+    "oct",
+    "nov",
+    "dec",
+];
+
+/// True when `text` begins with a weekday or month name (abbreviated or
+/// full), followed by a word boundary (end of string or a non-alphanumeric
+/// character) rather than continuing into an unrelated word.
+fn starts_with_weekday_or_month(text: &str) -> bool {
+    WEEKDAY_OR_MONTH_NAMES.iter().any(|name| {
+        text.strip_prefix(name)
+            .is_some_and(|rest| rest.chars().next().is_none_or(|c| !c.is_alphanumeric()))
+    })
+}
+
+/// Normalizes a mail subject so that the same underlying thread compares
+/// equal regardless of reply/forward/meeting-response prefixes, an
+/// appended meeting date/time, or a trailing organizer name in
+/// parentheses. Pure and side-effect free.
+pub fn normalize_subject(subject: &str) -> String {
+    let mut s = subject.to_lowercase();
+    loop {
+        let trimmed = s.trim_start();
+        let Some(colon_idx) = trimmed.find(':') else {
+            break;
+        };
+        let prefix = trimmed[..colon_idx].trim();
+        if !is_thread_prefix(prefix) {
+            break;
+        }
+        s = trimmed[colon_idx + 1..].to_string();
+    }
+    if let Some(idx) = s.rfind(" @ ") {
+        let after = &s[idx + 3..];
+        if starts_with_weekday_or_month(after) {
+            s.truncate(idx);
+        }
+    }
+    let trimmed_end = s.trim_end();
+    if trimmed_end.ends_with(')')
+        && let Some(open_idx) = trimmed_end.rfind('(')
+    {
+        s.truncate(open_idx);
+    }
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Reply, forward, and calendar-response prefixes that Outlook and Google
+/// prepend to a subject. Only these are stripped: an arbitrary "word:" lead-in
+/// such as "Budget: Q3" is part of the subject and must not merge threads.
+fn is_thread_prefix(prefix: &str) -> bool {
+    matches!(
+        prefix,
+        "re" | "fw"
+            | "fwd"
+            | "aw"
+            | "wg"
+            | "sv"
+            | "vs"
+            | "tr"
+            | "accepted"
+            | "tentatively accepted"
+            | "tentative"
+            | "declined"
+            | "invitation"
+            | "updated invitation"
+            | "canceled"
+            | "cancelled"
+            | "updated"
+            | "new time proposed"
+            | "meeting forward notification"
+            | "automatic reply"
+    )
+}
+
+fn union_find_root(parent: &mut [usize], mut x: usize) -> usize {
+    while parent[x] != x {
+        parent[x] = parent[parent[x]];
+        x = parent[x];
+    }
+    x
+}
+
+fn union_find_union(parent: &mut [usize], a: usize, b: usize) {
+    let ra = union_find_root(parent, a);
+    let rb = union_find_root(parent, b);
+    if ra != rb {
+        let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
+        parent[hi] = lo;
+    }
+}
+
+#[derive(Default)]
+struct ThreadGroup {
+    subjects: BTreeSet<String>,
+    addresses: BTreeSet<String>,
+    indices: Vec<usize>,
+}
+
+/// Merges conversation groups (keyed by account + Graph `conversationId`)
+/// that are really the same thread: same account, a shared non-empty
+/// normalized subject, and at least one shared `other_addresses` entry.
+/// Merging is transitive (chain-merges through a bridging group) via
+/// union-find. Every message in a merged set is rewritten to carry the
+/// lexicographically smallest conversation id in that set, so the result
+/// is deterministic regardless of input order. Returns how many of the
+/// original groups were absorbed into another (0 when nothing merged).
+pub fn merge_threads(messages: &mut [ReviewMessage]) -> usize {
+    let mut groups: BTreeMap<(String, String), ThreadGroup> = BTreeMap::new();
+    for (i, m) in messages.iter().enumerate() {
+        let key = (m.account.clone(), m.conversation.clone());
+        let entry = groups.entry(key).or_default();
+        let subject = normalize_subject(&m.input.message.subject.as_string());
+        if !subject.is_empty() {
+            entry.subjects.insert(subject);
+        }
+        entry.addresses.extend(m.other_addresses.iter().cloned());
+        entry.indices.push(i);
+    }
+    let keys: Vec<(String, String)> = groups.keys().cloned().collect();
+    let group_count = keys.len();
+    let mut parent: Vec<usize> = (0..group_count).collect();
+    for a in 0..group_count {
+        for b in (a + 1)..group_count {
+            if keys[a].0 != keys[b].0 {
+                continue;
+            }
+            let ga = &groups[&keys[a]];
+            let gb = &groups[&keys[b]];
+            let subjects_match = ga.subjects.intersection(&gb.subjects).next().is_some();
+            let addresses_match = ga.addresses.intersection(&gb.addresses).next().is_some();
+            if subjects_match && addresses_match {
+                union_find_union(&mut parent, a, b);
+            }
+        }
+    }
+    let mut clusters: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for i in 0..group_count {
+        let root = union_find_root(&mut parent, i);
+        clusters.entry(root).or_default().push(i);
+    }
+    let mut merged = 0usize;
+    for members in clusters.into_values() {
+        if members.len() <= 1 {
+            continue;
+        }
+        merged += members.len() - 1;
+        let winner = members
+            .iter()
+            .map(|&idx| keys[idx].1.clone())
+            .min()
+            .expect("non-empty cluster");
+        for &idx in &members {
+            for &msg_idx in &groups[&keys[idx]].indices {
+                messages[msg_idx].conversation.clone_from(&winner);
+            }
+        }
+    }
+    merged
 }
 
 // Live semantic smoke suite: counts only, no returned content is logged or saved.
@@ -894,5 +1184,361 @@ mod tests {
         assert_eq!(calls, 1);
         assert_eq!(result.analyzed, 0);
         assert_eq!(result.failures.len(), 1);
+    }
+
+    #[test]
+    fn normalize_subject_table() {
+        let cases = [
+            (
+                "Re: Alex and Sam discuss quarterly planning",
+                "alex and sam discuss quarterly planning",
+            ),
+            (
+                "Alex and Sam discuss quarterly planning",
+                "alex and sam discuss quarterly planning",
+            ),
+            (
+                "Tentatively Accepted: Alex and Sam discuss quarterly planning @ Fri Aug 21, 2026 11:30am - 12:30pm (CDT) (Sam Rivera)",
+                "alex and sam discuss quarterly planning",
+            ),
+            ("RE: FW: Budget", "budget"),
+            ("Budget: Q3 numbers", "budget: q3 numbers"),
+            (
+                "Updated invitation: Sync @ Mon Sep 7, 2026 9am - 10am (PDT)",
+                "sync",
+            ),
+            ("", ""),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(normalize_subject(input), expected, "input: {input:?}");
+        }
+        assert_eq!(
+            normalize_subject("Meeting @ the office"),
+            "meeting @ the office",
+            "text after \" @ \" is not a date and must not be truncated"
+        );
+    }
+
+    fn mail(
+        id: &str,
+        conversation: &str,
+        account: &str,
+        subject: &str,
+        item: MailItem,
+    ) -> MailItem {
+        MailItem {
+            id: id.into(),
+            conversation: conversation.into(),
+            account: account.into(),
+            subject: subject.into(),
+            own_addresses: vec!["user@example.invalid".into()],
+            ..item
+        }
+    }
+
+    fn request_from(
+        address: &str,
+        id: &str,
+        conversation: &str,
+        account: &str,
+        subject: &str,
+    ) -> MailItem {
+        mail(
+            id,
+            conversation,
+            account,
+            subject,
+            MailItem {
+                body: "Can we meet?".into(),
+                sender: format!("Other <{address}>"),
+                sender_address: address.into(),
+                received: "2026-09-01T12:00:00Z".into(),
+                to: vec!["user@example.invalid".into()],
+                ..MailItem::default()
+            },
+        )
+    }
+
+    fn reply_to(
+        address: &str,
+        id: &str,
+        conversation: &str,
+        account: &str,
+        subject: &str,
+    ) -> MailItem {
+        mail(
+            id,
+            conversation,
+            account,
+            subject,
+            MailItem {
+                body: "Sure, let's do it.".into(),
+                sender: "User <user@example.invalid>".into(),
+                sender_address: "user@example.invalid".into(),
+                received: "2026-09-02T12:00:00Z".into(),
+                to: vec![address.into()],
+                ..MailItem::default()
+            },
+        )
+    }
+
+    #[test]
+    fn split_conversation_ids_with_shared_subject_and_participant_are_merged() {
+        let request = request_from(
+            "sam@example.invalid",
+            "req-1",
+            "c1",
+            "acct",
+            "Alex and Sam discuss quarterly planning",
+        );
+        let reply = reply_to(
+            "sam@example.invalid",
+            "reply-1",
+            "c2",
+            "acct",
+            "Re: Alex and Sam discuss quarterly planning",
+        );
+        let mut messages = vec![
+            prepare(&request, "Inbox", 0).unwrap(),
+            prepare(&reply, "Sent", 1).unwrap(),
+        ];
+        let merged = merge_threads(&mut messages);
+        assert_eq!(merged, 1);
+        assert!(messages.iter().all(|m| m.conversation == "c1"));
+    }
+
+    #[test]
+    fn same_subject_disjoint_participants_are_not_merged() {
+        let request = request_from(
+            "sam@example.invalid",
+            "req-1",
+            "c1",
+            "acct",
+            "Alex and Sam discuss quarterly planning",
+        );
+        let reply = reply_to(
+            "dana@example.invalid",
+            "reply-1",
+            "c2",
+            "acct",
+            "Re: Alex and Sam discuss quarterly planning",
+        );
+        let mut messages = vec![
+            prepare(&request, "Inbox", 0).unwrap(),
+            prepare(&reply, "Sent", 1).unwrap(),
+        ];
+        let merged = merge_threads(&mut messages);
+        assert_eq!(merged, 0);
+        assert_eq!(messages[0].conversation, "c1");
+        assert_eq!(messages[1].conversation, "c2");
+    }
+
+    #[test]
+    fn same_subject_and_participants_different_account_are_not_merged() {
+        let request = request_from(
+            "sam@example.invalid",
+            "req-1",
+            "c1",
+            "acct-one",
+            "Alex and Sam discuss quarterly planning",
+        );
+        let reply = reply_to(
+            "sam@example.invalid",
+            "reply-1",
+            "c2",
+            "acct-two",
+            "Re: Alex and Sam discuss quarterly planning",
+        );
+        let mut messages = vec![
+            prepare(&request, "Inbox", 0).unwrap(),
+            prepare(&reply, "Sent", 1).unwrap(),
+        ];
+        let merged = merge_threads(&mut messages);
+        assert_eq!(merged, 0);
+        assert_eq!(messages[0].conversation, "c1");
+        assert_eq!(messages[1].conversation, "c2");
+    }
+
+    #[test]
+    fn empty_normalized_subject_never_merges() {
+        let request = request_from("sam@example.invalid", "req-1", "c1", "acct", "");
+        let reply = reply_to("sam@example.invalid", "reply-1", "c2", "acct", "");
+        let mut messages = vec![
+            prepare(&request, "Inbox", 0).unwrap(),
+            prepare(&reply, "Sent", 1).unwrap(),
+        ];
+        let merged = merge_threads(&mut messages);
+        assert_eq!(merged, 0);
+        assert_eq!(messages[0].conversation, "c1");
+        assert_eq!(messages[1].conversation, "c2");
+    }
+
+    #[test]
+    fn three_groups_chain_merge_through_a_bridging_message() {
+        let a = request_from("p1@example.invalid", "a-1", "cA", "acct", "Widget Renewal");
+        let mut b = mail(
+            "b-1",
+            "cB",
+            "acct",
+            "RE: Widget Renewal",
+            MailItem {
+                body: "Looping in both of you.".into(),
+                sender: "User <user@example.invalid>".into(),
+                sender_address: "user@example.invalid".into(),
+                received: "2026-09-02T12:00:00Z".into(),
+                to: vec!["p1@example.invalid".into(), "p2@example.invalid".into()],
+                ..MailItem::default()
+            },
+        );
+        b.own_addresses = vec!["user@example.invalid".into()];
+        let c = request_from(
+            "p2@example.invalid",
+            "c-1",
+            "cC",
+            "acct",
+            "Fwd: Widget Renewal",
+        );
+        let mut messages = vec![
+            prepare(&a, "Inbox", 0).unwrap(),
+            prepare(&b, "Sent", 1).unwrap(),
+            prepare(&c, "Inbox", 2).unwrap(),
+        ];
+        let merged = merge_threads(&mut messages);
+        assert_eq!(merged, 2);
+        assert!(messages.iter().all(|m| m.conversation == "cA"));
+    }
+
+    #[test]
+    fn merged_conversation_is_analyzed_as_one_conversation() {
+        let mut messages = vec![
+            prepare(&synthetic("Please send the draft.", 0, "c1"), "Inbox", 0).unwrap(),
+            prepare(&synthetic("Here is the draft.", 1, "c2"), "Sent", 1).unwrap(),
+        ];
+        messages[0].other_addresses = vec!["alex@example.invalid".into()];
+        messages[1].other_addresses = vec!["alex@example.invalid".into()];
+        let merged = merge_threads(&mut messages);
+        assert_eq!(merged, 1);
+        let mut lengths = vec![];
+        let result = scan_conversations(&messages, &ScanProgress::default(), |batch| {
+            lengths.push(batch.len());
+            Ok(Expectations {
+                items: vec![],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            })
+        });
+        assert_eq!(lengths, [2]);
+        assert_eq!(result.analyzed, 2);
+    }
+
+    #[test]
+    fn rejected_conversation_note_includes_all_reasons() {
+        let a = prepare(&synthetic("Please send the draft.", 0, "a"), "Inbox", 0).unwrap();
+        let b = prepare(&synthetic("Following up.", 1, "a"), "Inbox", 1).unwrap();
+        let result = scan_conversations(&[a, b], &ScanProgress::default(), |_| {
+            Ok(Expectations {
+                items: vec![],
+                rejected: 1,
+                rejection_reasons: vec!["Reason A.", "Reason B."],
+                degraded: 0,
+            })
+        });
+        assert_eq!(result.conversation_notes.len(), 1);
+        let note = &result.conversation_notes[0];
+        assert!(note.contains("1 rejected"), "note: {note}");
+        assert!(note.contains("Reason A."), "note: {note}");
+        assert!(note.contains("Reason B."), "note: {note}");
+    }
+
+    #[test]
+    fn two_party_conversation_with_no_items_gets_a_no_expectations_note() {
+        let request = request_from("alex@example.invalid", "req-1", "a", "acct", "Budget");
+        let reply = reply_to("alex@example.invalid", "reply-1", "a", "acct", "Re: Budget");
+        let a = prepare(&request, "Inbox", 0).unwrap();
+        let b = prepare(&reply, "Sent", 1).unwrap();
+        let result = scan_conversations(&[a, b], &ScanProgress::default(), |_| {
+            Ok(Expectations {
+                items: vec![],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            })
+        });
+        assert_eq!(result.conversation_notes.len(), 1);
+        assert!(
+            result.conversation_notes[0].contains("no expectations returned"),
+            "note: {}",
+            result.conversation_notes[0]
+        );
+    }
+
+    #[test]
+    fn single_party_conversation_with_no_items_gets_no_note() {
+        let a = prepare(&synthetic("Please send the draft.", 0, "a"), "Inbox", 0).unwrap();
+        let b = prepare(&synthetic("Following up.", 1, "a"), "Inbox", 1).unwrap();
+        let result = scan_conversations(&[a, b], &ScanProgress::default(), |_| {
+            Ok(Expectations {
+                items: vec![],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            })
+        });
+        assert!(result.conversation_notes.is_empty());
+    }
+
+    #[test]
+    fn subject_snippet_truncates_at_60_chars_without_splitting_a_multibyte_char() {
+        // 'é' sits exactly as the 60th character: a byte-based truncation
+        // (rather than a char-based one) would either panic slicing mid
+        // encoding or silently corrupt it.
+        let long_subject = format!("{}é{}", "a".repeat(59), "b".repeat(80));
+        let request = mail(
+            "req-1",
+            "a",
+            "acct",
+            &long_subject,
+            MailItem {
+                body: "Can we meet?".into(),
+                sender: "Other <other@example.invalid>".into(),
+                sender_address: "other@example.invalid".into(),
+                received: "2026-09-01T12:00:00Z".into(),
+                to: vec!["user@example.invalid".into()],
+                ..MailItem::default()
+            },
+        );
+        let reply = mail(
+            "reply-1",
+            "a",
+            "acct",
+            &format!("Re: {long_subject}"),
+            MailItem {
+                body: "Sure.".into(),
+                sender: "User <user@example.invalid>".into(),
+                sender_address: "user@example.invalid".into(),
+                received: "2026-09-02T12:00:00Z".into(),
+                to: vec!["other@example.invalid".into()],
+                ..MailItem::default()
+            },
+        );
+        let a = prepare(&request, "Inbox", 0).unwrap();
+        let b = prepare(&reply, "Sent", 1).unwrap();
+        let result = scan_conversations(&[a, b], &ScanProgress::default(), |_| {
+            Ok(Expectations {
+                items: vec![],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            })
+        });
+        assert_eq!(result.conversation_notes.len(), 1);
+        let expected_snippet: String = long_subject.chars().take(60).collect();
+        assert_eq!(expected_snippet.chars().count(), 60);
+        assert!(
+            result.conversation_notes[0].contains(&expected_snippet),
+            "note: {}",
+            result.conversation_notes[0]
+        );
     }
 }

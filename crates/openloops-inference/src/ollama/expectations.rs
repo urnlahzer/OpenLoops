@@ -413,6 +413,66 @@ fn push_unique(items: &mut Vec<Expectation>, item: Expectation) -> bool {
     }
 }
 
+/// After every salvage attempt in `parse()` has failed for `row`, determines
+/// every independently checkable reason the row was dropped and pushes each
+/// into `reasons`. Unlike a single `candidate()` call -- which returns only
+/// the first failing check because of its early-return `?` chain -- each
+/// reason here is derived from its own standalone predicate, so more than
+/// one can legitimately apply to the same row: for example a genuinely
+/// broken resolution quote together with a `kind: "request"` row whose
+/// evidence message the signed-in user actually sent.
+///
+/// Evidence and waiting-party failures make a further probe uninformative
+/// (both fail `candidate()` regardless of resolution or deadline content),
+/// so the ownership/chronology/schema probe below only runs when both are
+/// sound: a fresh `candidate()` attempt with resolution and deadline fully
+/// cleared then isolates whether some other, unlisted validation --
+/// ownership, chronology, or schema -- is the (possibly additional)
+/// problem. Guarantees at least one reason is pushed.
+fn push_rejection_reasons(
+    reasons: &mut Vec<&'static str>,
+    row: &Value,
+    messages: &[ConversationMessage],
+) {
+    let evidence_bad = anchor(&row["evidence"], messages, 12).is_err();
+    if evidence_bad {
+        reasons
+            .push("Original evidence was not a unique exact quotation in a current message block.");
+    }
+    if optional_anchor(&row["deadline"], messages, 2).is_err() {
+        reasons.push("Deadline evidence was invalid.");
+    }
+    let resolution_present = !row["resolution"].is_null();
+    if optional_anchor(&row["resolution"], messages, 12).is_err() {
+        reasons.push("Completion evidence was invalid.");
+    }
+    if resolution_present
+        && !matches!(
+            row.get("resolution_kind").and_then(Value::as_str),
+            Some("completed" | "declined" | "withdrawn" | "superseded" | "renegotiated")
+        )
+    {
+        reasons.push("Completion kind was missing or not one of the supported values.");
+    }
+    let waiting_party_bad = row["waiting_party"]
+        .as_str()
+        .is_some_and(|h| participant(h, messages).is_none());
+    if waiting_party_bad {
+        reasons.push("Waiting-party reference was not a supplied participant.");
+    }
+    if !evidence_bad && !waiting_party_bad {
+        let mut cleared = row.clone();
+        if let Some(object) = cleared.as_object_mut() {
+            object.insert("resolution".into(), Value::Null);
+            object.insert("resolution_kind".into(), Value::Null);
+            object.insert("deadline".into(), Value::Null);
+        }
+        if candidate(&cleared, messages).is_err() {
+            reasons.push("Ownership, chronology, or output schema was invalid.");
+        }
+    }
+}
+
 fn parse(bytes: &[u8], messages: &[ConversationMessage]) -> Result<Expectations, ProviderError> {
     let v = openloops_contracts::parse_strict_json(json_document(bytes)?)
         .map_err(super::parse_error)?;
@@ -508,22 +568,7 @@ fn parse(bytes: &[u8], messages: &[ConversationMessage]) -> Result<Expectations,
             }
         } else {
             result.rejected += 1;
-            result
-                .rejection_reasons
-                .push(if anchor(&row["evidence"], messages, 12).is_err() {
-                    "Original evidence was not a unique exact quotation in a current message block."
-                } else if optional_anchor(&row["deadline"], messages, 2).is_err() {
-                    "Deadline evidence was invalid."
-                } else if optional_anchor(&row["resolution"], messages, 12).is_err() {
-                    "Completion evidence was invalid."
-                } else if row["waiting_party"]
-                    .as_str()
-                    .is_some_and(|h| participant(h, messages).is_none())
-                {
-                    "Waiting-party reference was not a supplied participant."
-                } else {
-                    "Ownership, chronology, or output schema was invalid."
-                });
+            push_rejection_reasons(&mut result.rejection_reasons, row, messages);
         }
     }
     Ok(result)
@@ -833,6 +878,81 @@ mod tests {
             result.rejection_reasons.contains(
                 &"Deadline evidence was invalid; the request was kept without a deadline."
             )
+        );
+    }
+    /// `messages()` but with `m0` sent BY the signed-in user (`from_user:
+    /// true`), plus a later `m1` reply, for exercising an ownership
+    /// conflict (`kind: "request"` from a message the user sent) alongside
+    /// an independently broken resolution quote.
+    fn ownership_conflict_messages() -> Vec<ConversationMessage> {
+        vec![
+            ConversationMessage {
+                handle: "m0".into(),
+                timestamp: 1,
+                from_user: true,
+                to_user: false,
+                team: false,
+                message: CanonicalMessage {
+                    subject: CanonicalBlock::new("Budget").unwrap(),
+                    body_blocks: vec![
+                        CanonicalBlock::new("Please send the résumé by Friday.").unwrap(),
+                    ],
+                    quote_blocks: vec![],
+                    sender: None,
+                    to: vec![],
+                    cc: vec![],
+                    attachment_names: vec![],
+                    link_labels: vec![],
+                },
+            },
+            ConversationMessage {
+                handle: "m1".into(),
+                timestamp: 2,
+                from_user: false,
+                to_user: true,
+                team: false,
+                message: CanonicalMessage {
+                    subject: CanonicalBlock::new("Re: Budget").unwrap(),
+                    body_blocks: vec![
+                        CanonicalBlock::new("I sent the résumé as requested.").unwrap(),
+                    ],
+                    quote_blocks: vec![],
+                    sender: Some(CanonicalBlock::new("Alex").unwrap()),
+                    to: vec![],
+                    cc: vec![],
+                    attachment_names: vec![],
+                    link_labels: vec![],
+                },
+            },
+        ]
+    }
+    #[test]
+    fn bad_resolution_and_ownership_conflict_both_report_reasons() {
+        // The evidence message (m0) was sent BY the signed-in user, so
+        // kind: "request" is an ownership conflict no salvage attempt can
+        // fix; the resolution quote is also independently misquoted. Both
+        // must be reported, not just whichever candidate() happens to hit
+        // first.
+        let m = ownership_conflict_messages();
+        let mut row = claim();
+        row["waiting_party"] = Value::Null;
+        row["deadline"] = Value::Null;
+        row["resolution"] =
+            json!({"message":"m1","block":"b0","quote":"I sent the resume as requested"});
+        row["resolution_kind"] = json!("completed");
+        let result = parse_row(&row, &m);
+        assert_eq!(result.items.len(), 0);
+        assert_eq!(result.rejected, 1);
+        assert_eq!(result.degraded, 0);
+        assert!(
+            result
+                .rejection_reasons
+                .contains(&"Completion evidence was invalid.")
+        );
+        assert!(
+            result
+                .rejection_reasons
+                .contains(&"Ownership, chronology, or output schema was invalid.")
         );
     }
     #[test]

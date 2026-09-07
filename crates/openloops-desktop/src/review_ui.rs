@@ -113,6 +113,12 @@ impl ReviewState {
                     .map(|e| format!("{}: {e}", source.label)),
             );
         }
+        let merged = scanning::merge_threads(&mut state.messages);
+        if merged > 0 {
+            state.notices.push(format!(
+                "{merged} conversation identities were merged by subject and participants."
+            ));
+        }
         state.messages.sort_by_key(|m| m.input.timestamp);
         state
     }
@@ -138,6 +144,7 @@ impl ReviewState {
                 self.scan_errors.push((*reason).into());
             }
         }
+        self.scan_errors.extend(result.conversation_notes);
         self.analysis = Some(result.analysis);
         self.analysis_model = model;
     }
@@ -519,6 +526,7 @@ pub fn layout_fixture() -> ReviewState {
             analyzed: 2,
             total: 2,
             cancelled: false,
+            conversation_notes: vec![],
         },
         "Synthetic layout check".into(),
     );
