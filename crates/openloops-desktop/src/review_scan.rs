@@ -676,14 +676,24 @@ fn capitalized_event_phrases(text: &str) -> Vec<(String, usize, usize)> {
                 break;
             }
         }
-        if j - i >= 2 && PROSE_EVENT_NOUNS.contains(&tokens[j - 1].0.to_lowercase().as_str()) {
+        if j - i >= 2
+            && PROSE_EVENT_NOUNS.contains(
+                &tokens[j - 1]
+                    .0
+                    .trim_end_matches('.')
+                    .to_lowercase()
+                    .as_str(),
+            )
+        {
             let phrase_start = tokens[i].1;
             let phrase_end = tokens[j - 1].1 + tokens[j - 1].0.len();
             let phrase = tokens[i..j]
                 .iter()
                 .map(|t| t.0.as_str())
                 .collect::<Vec<_>>()
-                .join(" ");
+                .join(" ")
+                .trim_end_matches('.')
+                .to_string();
             phrases.push((phrase, phrase_start, phrase_end));
         }
         i = j;
@@ -3164,6 +3174,20 @@ at the downtown courthouse. Let me know if that works.",
         let index = build_event_index(&[message]);
         assert_eq!(index.len(), 1);
         assert_eq!(index[0].name, "onboarding training");
+    }
+
+    #[test]
+    fn capitalized_event_phrase_keeps_a_sentence_final_event_noun() {
+        let mut mail = synthetic(
+            "Please prepare for the Johnson Hearing. It is on 2026-10-12.",
+            0,
+            "a",
+        );
+        mail.subject = "Re: prep".into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        let index = build_event_index(&[message]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].name, "johnson hearing");
     }
 
     #[test]
