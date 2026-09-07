@@ -29,8 +29,11 @@ in the normal application.
    review** save abstract decisions. The checkbox **Show resolved, handled,
    dismissed, and no-longer-relevant items** reveals closed cards. Model
    summaries and source text are not saved locally.
-4. After choosing to track or watch, **Set To Do reminder** previews an editable
-   title and future local reminder time. The explicit create button authorizes
+4. **Set To Do reminder** is available on any open card and does not require
+   tracking or watching it first; setting a reminder on a card still under
+   review implies tracking it (a card already being watched stays watched).
+   It previews an editable title and future local reminder time directly
+   under the card that opened it. The explicit create button authorizes
    one task in the same Microsoft account's default personal Tasks list.
    Microsoft To Do owns notification delivery, including when OpenLoops closes.
    This requires delegated Tasks.ReadWrite and a separate browser sign-in.

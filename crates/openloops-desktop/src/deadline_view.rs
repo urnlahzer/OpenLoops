@@ -5,7 +5,7 @@ use openloops_domain::deadline_parse::{
     TimezoneContext, Weekday, policy_boundary, reparse,
 };
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeadlineView {
     PastDue {
         boundary: i64,

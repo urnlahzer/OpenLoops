@@ -901,9 +901,9 @@ fn scan_closures(
         ));
     }
     if capped {
-        result.conversation_notes.push(
-            "Cross-thread closure checks were capped at 40 open requests this scan.".to_string(),
-        );
+        result.conversation_notes.push(format!(
+            "Cross-thread closure checks were capped at {MAX_CLOSURE_CALLS} open requests this scan."
+        ));
     }
 }
 
@@ -1214,10 +1214,13 @@ fn subject_strong_enough(subject: &str) -> bool {
 /// check did) never fires on a real mailbox: a distribution list rarely
 /// appears on literally every conversation an account has, so the earlier
 /// rule failed to recognize it as a shared address in practice. Requires at
-/// least 3 groups for the account: with only 2 groups, appearing in "at
-/// least half" is satisfied by appearing in just 1, which would
-/// disqualify the ordinary case of two threads linked by one real
-/// correspondent.
+/// least 8 conversation groups for the account before this check ever
+/// applies: below that floor, a small mailbox does not yet have enough
+/// conversation groups to tell a genuinely shared address apart from an
+/// individual correspondent who simply appears often (review found the
+/// earlier floor of 3 groups too easily satisfied by an ordinary small
+/// mailbox, wrongly excluding a real correspondent's address from the
+/// intersection check).
 fn is_shared_mailbox_address(
     account: &str,
     address: &str,
@@ -1225,7 +1228,7 @@ fn is_shared_mailbox_address(
     address_group_counts: &BTreeMap<(&str, &str), usize>,
 ) -> bool {
     let total = groups_per_account.get(account).copied().unwrap_or(0);
-    if total <= 2 {
+    if total < 8 {
         return false;
     }
     let count = address_group_counts
@@ -2738,10 +2741,14 @@ mod tests {
             calls += 1;
             Ok(None)
         });
-        assert_eq!(calls, 40, "the cap must bind at MAX_CLOSURE_CALLS");
-        assert!(result.conversation_notes.iter().any(|n| {
-            n == "Cross-thread closure checks were capped at 40 open requests this scan."
-        }));
+        assert_eq!(
+            calls, MAX_CLOSURE_CALLS,
+            "the cap must bind at MAX_CLOSURE_CALLS"
+        );
+        let expected_note = format!(
+            "Cross-thread closure checks were capped at {MAX_CLOSURE_CALLS} open requests this scan."
+        );
+        assert!(result.conversation_notes.contains(&expected_note));
     }
 
     #[test]
@@ -2750,10 +2757,13 @@ mod tests {
         // also appears in >=3 of the account's conversation groups and in
         // at least half of them -- a distribution list or shared mailbox,
         // not a genuine individual correspondent -- so the item must be
-        // skipped without ever reaching the provider.
+        // skipped without ever reaching the provider. Six (not three) other
+        // conversations, plus the evidence conversation and the reply, give
+        // the account 8 total conversation groups, clearing
+        // `is_shared_mailbox_address`'s 8-group floor.
         let (mut all, mut item) = closure_test_messages();
         item.waiting_party = "List <list@example.invalid>".into();
-        for n in 0..3u32 {
+        for n in 0..6u32 {
             let mail = request_from(
                 "list@example.invalid",
                 &format!("other-{n}"),
@@ -2793,6 +2803,41 @@ mod tests {
             "a shared-mailbox waiting party must never reach the provider"
         );
         assert_eq!(result.cross_thread_closures, 0);
+    }
+
+    #[test]
+    fn is_shared_mailbox_address_requires_at_least_eight_groups() {
+        // Pure-function table test for the 8-group floor: an address that
+        // would otherwise clear the per-address threshold (appears in every
+        // group, so `count * 2 >= total` trivially holds) must still read as
+        // NOT shared until the account has at least 8 conversation groups
+        // total.
+        for (total, count, expected) in [
+            (1, 1, false),
+            (2, 2, false),
+            (3, 3, false),
+            (7, 7, false),
+            (8, 3, false), // count*2 (6) < total (8): below the per-address threshold
+            (8, 4, true),  // count*2 (8) >= total (8), and count >= 3
+            (8, 8, true),
+            (9, 3, false), // count*2 (6) < total (9)
+            (9, 5, true),  // count*2 (10) >= total (9), and count >= 3
+        ] {
+            let mut groups_per_account = BTreeMap::new();
+            groups_per_account.insert("acct", total);
+            let mut address_group_counts = BTreeMap::new();
+            address_group_counts.insert(("acct", "list@example.invalid"), count);
+            assert_eq!(
+                is_shared_mailbox_address(
+                    "acct",
+                    "list@example.invalid",
+                    &groups_per_account,
+                    &address_group_counts,
+                ),
+                expected,
+                "total={total} count={count}"
+            );
+        }
     }
 
     #[test]
@@ -3192,7 +3237,12 @@ mod tests {
         // Three groups all carbon-copy a distribution list
         // ("list@example.invalid"). That address alone must not bridge
         // group C to groups A/B: only A and B additionally share a real
-        // outside participant ("sam@example.invalid").
+        // outside participant ("sam@example.invalid"). Five unrelated
+        // filler groups (also carbon-copying the list, under a distinct
+        // subject that never matches A/B/C's) pad the account to 8 total
+        // conversation groups -- `is_shared_mailbox_address`'s floor -- so
+        // "list" is still recognized as shared (8 of 8 groups) rather than
+        // being let through just because the account is small.
         let a = mail(
             "a-1",
             "cA",
@@ -3240,6 +3290,23 @@ mod tests {
             prepare(&b, "Sent", 1).unwrap(),
             prepare(&c, "Inbox", 2).unwrap(),
         ];
+        for n in 0..5u32 {
+            let filler = mail(
+                &format!("filler-{n}"),
+                &format!("cF{n}"),
+                "acct",
+                "Unrelated administrative note",
+                MailItem {
+                    body: "FYI only.".into(),
+                    sender: "List <list@example.invalid>".into(),
+                    sender_address: "list@example.invalid".into(),
+                    received: "2026-09-03T12:00:00Z".into(),
+                    to: vec!["user@example.invalid".into()],
+                    ..MailItem::default()
+                },
+            );
+            messages.push(prepare(&filler, "Inbox", messages.len()).unwrap());
+        }
         let merged = merge_threads(&mut messages);
         assert_eq!(merged, 1);
         assert_eq!(messages[0].conversation, messages[1].conversation);
@@ -3251,9 +3318,11 @@ mod tests {
         // Regression: the old rule only excluded an address that appeared
         // in EVERY group of the account, which a real shared mailbox or
         // distribution list essentially never does. Here "list@example.invalid"
-        // appears in 4 of 6 groups (>=3 and at least half of 6), so it must
-        // now be excluded from the intersection check -- none of these
-        // groups share any other address, so nothing should merge.
+        // appears in 4 of 8 groups (>=3 and at least half of 8 -- padded
+        // from the original 6 to clear `is_shared_mailbox_address`'s
+        // 8-group floor), so it must still be excluded from the
+        // intersection check -- none of these groups share any other
+        // address, so nothing should merge.
         let subject = "Alex and Sam discuss quarterly planning";
         let list = "list@example.invalid";
         let with_list = |id: &str, conv: &str, unique: &str| {
@@ -3295,6 +3364,8 @@ mod tests {
             with_list("g4", "c4", "u4@example.invalid"),
             without_list("g5", "c5", "v1@example.invalid"),
             without_list("g6", "c6", "v2@example.invalid"),
+            without_list("g7", "c7", "v3@example.invalid"),
+            without_list("g8", "c8", "v4@example.invalid"),
         ];
         let mut messages: Vec<ReviewMessage> = items
             .iter()
@@ -3310,11 +3381,15 @@ mod tests {
 
     #[test]
     fn address_in_two_of_six_groups_still_bridges_merge() {
-        // A correspondent that appears in only 2 of 6 groups (below the
-        // "at least 3" floor) is never treated as a shared mailbox, so it
-        // must still bridge the two groups it links -- exactly the ordinary
-        // two-thread case, now proven to still work once the account has
-        // more than 2 groups total.
+        // A correspondent that appears in only 2 of the account's groups
+        // (below the "at least 3" per-address floor) is never treated as a
+        // shared mailbox, so it must still bridge the two groups it links --
+        // exactly the ordinary two-thread case. Padded to 8 total groups (up
+        // from the original 6) so the account clears
+        // `is_shared_mailbox_address`'s 8-group floor and this test actually
+        // exercises the per-address sub-threshold, rather than passing
+        // merely because the account is too small for the check to apply
+        // at all.
         let subject = "Alex and Sam discuss quarterly planning";
         let request = request_from("sam@example.invalid", "req-1", "c1", "acct", subject);
         let reply = reply_to(
@@ -3329,6 +3404,8 @@ mod tests {
             request_from("v2@example.invalid", "p-2", "c4", "acct", subject),
             request_from("v3@example.invalid", "p-3", "c5", "acct", subject),
             request_from("v4@example.invalid", "p-4", "c6", "acct", subject),
+            request_from("v5@example.invalid", "p-5", "c7", "acct", subject),
+            request_from("v6@example.invalid", "p-6", "c8", "acct", subject),
         ];
         let mut messages = vec![
             prepare(&request, "Inbox", 0).unwrap(),
