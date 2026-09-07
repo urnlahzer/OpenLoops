@@ -1,11 +1,10 @@
 //! Conversation review and explicit decisions. Readable mail stays in memory.
 use crate::deadline_view::{DeadlineView, classify, label};
 use crate::loop_state::{Decision, Decisions, Record, Reminder, marker, now};
-use chrono::TimeZone;
 use eframe::egui::{self, Color32, RichText};
 use openloops_graph::live::{reminders::ReminderRequest, review::SourceReview};
 use openloops_inference::ollama::expectations::{
-    Anchor, Expectation, Expectations, Owner, ResolutionKind,
+    Anchor, EventPassed, Expectation, Expectations, Owner, ResolutionKind,
 };
 #[path = "review_scan.rs"]
 mod scanning;
@@ -19,10 +18,22 @@ struct ReminderDraft {
     title: String,
     when: String,
     error: String,
+    /// The decision in force on this card immediately before the draft
+    /// opened -- i.e. before [`decision_after_setting_reminder`] applied its
+    /// implied-tracking change. Cancelling the draft without creating the
+    /// reminder consults this against the current decision (see
+    /// [`decision_after_cancel`]) to undo that implied change, but only when
+    /// nothing else has since moved the decision on.
+    prior_decision: Decision,
 }
 
-struct CardContext<'a> {
-    source: &'a ReviewMessage,
+/// Per-card decision/urgency facts, independent of the source mail or the
+/// expectation item -- entirely owned/`Copy`, so a `Vec<Option<CardContext>>`
+/// never borrows `self` and stays usable in `show_analysis`'s render loop
+/// alongside `&mut self.draft`/`self.decisions` for whichever card owns an
+/// open reminder draft.
+#[derive(Clone, Copy)]
+struct CardContext {
     record: Record,
     terminal: bool,
     /// True when the card ranks and hides with the terminal group: either a
@@ -43,7 +54,7 @@ fn is_past_due(view: &DeadlineView) -> bool {
     )
 }
 
-fn card_rank(card: Option<&CardContext<'_>>) -> u8 {
+fn card_rank(card: Option<&CardContext>) -> u8 {
     match card {
         Some(card) if card.closed => 2,
         Some(card) if card.deadline.as_ref().is_some_and(is_past_due) => 0,
@@ -51,7 +62,7 @@ fn card_rank(card: Option<&CardContext<'_>>) -> u8 {
     }
 }
 
-fn card_order(cards: &[Option<CardContext<'_>>]) -> Vec<usize> {
+fn card_order(cards: &[Option<CardContext>]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..cards.len()).collect();
     order.sort_by_key(|&i| (card_rank(cards[i].as_ref()), i));
     order
@@ -70,7 +81,29 @@ pub struct ReviewState {
     pub decisions: Decisions,
     pub action_status: String,
     pub pending_reminder: Option<([u8; 32], ReminderRequest)>,
+    /// An open reminder draft's implied-tracking change is reverted (see
+    /// [`ReviewState::revert_draft_decision`]) whenever this field is
+    /// cleared from *inside* `ReviewState` -- an explicit Cancel click or
+    /// [`ReviewState::set_scan`] discarding a stale draft on rescan. The
+    /// setup screen's "Scan inboxes" and "Clear results and mail" actions
+    /// (`setup_ui.rs`) instead replace the whole `ReviewState` with
+    /// `ReviewState::default()`, dropping any open `draft` without going
+    /// through that revert. This is left as is deliberately, not an
+    /// oversight: unlike a rescan, which redraws the very same cards in
+    /// place, so a stale implied `Mine` would sit right there on screen
+    /// contradicting a decision the user never actually confirmed, a full
+    /// "Scan inboxes"/"Clear results" reset clears the visible cards too --
+    /// the stale decision only resurfaces on a later scan, where it reads
+    /// like any other saved decision and the normal "Still open"/dismiss
+    /// controls can correct it same as they would for one the user set on
+    /// purpose. Treating "I was mid-draft when I started over" as "still
+    /// tracking" is also the safer default of the two silent outcomes.
     draft: Option<ReminderDraft>,
+    /// Whether the open `draft`'s card has already been scrolled into view
+    /// this time it opened. Reset to `false` whenever a new draft opens or
+    /// the open draft closes (see [`ReviewState::show_draft`]), so the
+    /// scroll-into-view happens exactly once per draft.
+    draft_scrolled: bool,
     show_handled: bool,
 }
 
@@ -156,6 +189,36 @@ impl ReviewState {
         }
         self.analysis = Some(result.analysis);
         self.analysis_model = model;
+        // A rescan rebuilds `analysis`/`messages` from scratch; an open
+        // draft refers to a card from the previous scan and would otherwise
+        // be orphaned -- neither closeable (its card may no longer exist)
+        // nor visibly tied to anything on screen. Revert the implied-tracking
+        // change opening it made (see `decision_after_setting_reminder`),
+        // same as an explicit Cancel click would (`revert_draft_decision`),
+        // so a rescan can never silently leave a stray `Mine`/`Watching` the
+        // user never actually confirmed sitting on a now-invisible draft.
+        if let Some(draft) = self.draft.take() {
+            self.revert_draft_decision(draft.prior_decision, draft.key);
+        }
+        self.draft_scrolled = false;
+    }
+    /// Reverts the implied-tracking change from opening a reminder draft
+    /// (see [`decision_after_setting_reminder`]) for `key`, given `prior` --
+    /// the decision in force just before that draft opened. Applies through
+    /// `self.decisions.update` (recording `self.action_status`) only when
+    /// [`decision_after_cancel`] says a revert applies; a no-op otherwise.
+    /// Shared by an explicit Cancel click (`show_draft`) and `set_scan`
+    /// discarding the draft out from under it on a rescan.
+    fn revert_draft_decision(&mut self, prior: Decision, key: [u8; 32]) {
+        if let Some(decision) = decision_after_cancel(prior, self.decisions.get(&key).decision) {
+            let mut r = self.decisions.get(&key);
+            r.decision = decision;
+            r.updated = now();
+            self.action_status = match self.decisions.update(r) {
+                Ok(()) => "Decision saved on this Windows account.".into(),
+                Err(e) => e,
+            };
+        }
     }
     pub fn show(&mut self, ui: &mut egui::Ui) {
         if let Some(error) = &self.decisions.error {
@@ -175,7 +238,6 @@ impl ReviewState {
             }
         });
         self.show_analysis(ui);
-        self.show_draft(ui);
         if !self.action_status.is_empty() {
             ui.label(&self.action_status);
         }
@@ -217,12 +279,7 @@ impl ReviewState {
             },
         );
     }
-    fn card_context(
-        &self,
-        item: &Expectation,
-        now: i64,
-        now_offset: i32,
-    ) -> Option<CardContext<'_>> {
+    fn card_context(&self, item: &Expectation, now: i64, now_offset: i32) -> Option<CardContext> {
         let source = self
             .messages
             .iter()
@@ -236,7 +293,7 @@ impl ReviewState {
             Decision::Done | Decision::Dismissed | Decision::Moot
         );
         let closed = terminal
-            || (item.resolution.is_some()
+            || ((item.resolution.is_some() || item.event_passed.is_some())
                 && !matches!(record.decision, Decision::Mine | Decision::Watching));
         let deadline = item.deadline.as_ref().map(|anchor| {
             let message = self
@@ -244,14 +301,10 @@ impl ReviewState {
                 .iter()
                 .find(|m| m.input.handle == anchor.message)
                 .unwrap_or(source);
-            let offset = chrono::Local
-                .timestamp_opt(message.input.timestamp, 0)
-                .single()
-                .map_or(now_offset, |t| t.offset().local_minus_utc());
+            let offset = scanning::local_offset_seconds(message.input.timestamp, now_offset);
             classify(&anchor.quote, message.input.timestamp, now, offset)
         });
         Some(CardContext {
-            source,
             record,
             terminal,
             closed,
@@ -259,7 +312,7 @@ impl ReviewState {
         })
     }
 
-    fn card_contexts(&self, items: &[Expectation]) -> Vec<Option<CardContext<'_>>> {
+    fn card_contexts(&self, items: &[Expectation]) -> Vec<Option<CardContext>> {
         let clock = chrono::Local::now();
         items
             .iter()
@@ -276,118 +329,161 @@ impl ReviewState {
         ui.separator();
         ui.heading("What may need your attention");
         ui.label("Review the action and evidence. A missing reply in this scan does not prove the work is unfinished.");
-        // `cards` borrows `self.messages` through `card_contexts`, so it
-        // must be computed after the last mutable borrow of `self` in this
-        // function (the checkbox) -- it stays alive through the card loop
-        // below.
         ui.checkbox(&mut self.show_handled, SHOW_HANDLED_LABEL);
-        let mut change = None;
-        let mut draft = None;
         let cards = self.card_contexts(&analysis.items);
         ui.label(expectations_summary(analysis, &cards, &self.analysis_model));
         if analysis.items.is_empty() {
             ui.label(if analysis.rejected>0 {"No usable expectations were returned. Evidence validation rejected suggestions; this is not a clean bill of health."} else {"No actionable expectations were identified in the successfully reviewed conversations."});
         }
         let order = card_order(&cards);
+        // `cards` is entirely owned data (see `CardContext`'s doc comment)
+        // and does not borrow `self`, so it stays usable through the whole
+        // loop below alongside `&mut self.draft`/`self.decisions` for
+        // whichever card owns an open reminder draft.
+        let mut change = None;
         for &i in &order {
-            let item = &analysis.items[i];
-            let Some(CardContext {
-                source,
-                record,
-                terminal,
-                closed,
-                deadline: deadline_view,
-            }) = &cards[i]
-            else {
-                continue;
-            };
-            let key = record.key;
-            let terminal = *terminal;
-            let closed = *closed;
-            if closed && !self.show_handled {
+            let Some(card) = cards[i] else { continue };
+            let key = card.record.key;
+            let show_draft_here = self.draft.as_ref().is_some_and(|d| d.key == key);
+            if card_hidden(card.closed, self.show_handled, show_draft_here) {
                 continue;
             }
-            ui.push_id(i,|ui|{
-                egui::Frame::group(ui.style()).show(ui,|ui|{
-                    ui.set_width(ui.available_width());
-                    let status_base=status_base_label(record.decision,item);
-                    let status=status_label(status_base,status_shows_cross_thread(record.decision,item.resolution.is_some(),item.cross_thread));
-                    ui.label(RichText::new(status).color(Color32::from_rgb(29,87,67)));
-                    ui.label(RichText::new(&item.action).size(21.0).strong());
-                    let owner=if record.decision==Decision::Mine {"You (confirmed)"} else {match item.owner {Owner::You=>"You (suggested)",Owner::Team=>"Team — no individual owner established",Owner::Unclear=>"Unclear — confirm responsibility"}};
-                    ui.label(format!("Responsible: {owner}"));
-                    ui.label(format!("Waiting: {}",item.waiting_party));
-                    if let Some(deadline)=&item.deadline {ui.label(format!("Deadline stated in email: {}",deadline.quote));} else if item.unverified_deadline {ui.label("A deadline was stated, but its quotation could not be verified.");} else {ui.label("Deadline stated in email: Not specified");}
-                    if let Some(view)=deadline_view {if !closed && is_past_due(view) {ui.colored_label(Color32::DARK_RED,label(view));} else {ui.label(label(view));}}
-                    if !item.uncertainty.is_empty() {ui.label(format!("Uncertainty: {}",item.uncertainty));}
-                    ui.label(RichText::new(format!("{} · {} · {}",source.source,source.date_label,item.kind)).small());
-                    ui.collapsing("Why this was suggested · evidence and replies",|ui|{
-                        show_anchor(ui,"Original expectation",&item.evidence,&self.messages);
-                        if let Some(deadline)=&item.deadline {show_anchor(ui,"Deadline evidence",deadline,&self.messages);}
-                        if let Some(resolution)=&item.resolution {show_anchor(ui,resolution_anchor_label(item.resolution_kind,item.cross_thread),resolution,&self.messages);} else if item.unverified_resolution {ui.label("The analysis proposed a completion but it could not be validated; treat as open.");} else {ui.label("No matching completion was identified in the scanned conversation. Work may have happened elsewhere or outside this history window.");}
-                        ui.collapsing("Full scanned conversation",|ui| {for m in self.messages.iter().filter(|m|m.account==source.account && m.conversation==source.conversation) {ui.label(format!("{} · {}",m.date_label,if m.input.from_user {"You"} else {"Other participant"}));for b in &m.input.message.body_blocks {ui.label(b.as_string());}}});
+            let mut card_change = None;
+            let mut card_draft = None;
+            {
+                // `item`/`source` are scoped to this block, which ends
+                // before `self.show_draft` below needs `&mut self.draft` for
+                // the same card: they borrow `self.analysis`/`self.messages`,
+                // which must not still be borrowed at that point.
+                let item = &self.analysis.as_ref().expect("checked above").items[i];
+                // `cards[i]` is `Some(card)` (checked above), which
+                // `card_context` only returns after this exact lookup
+                // already succeeded once for `item.evidence.message` -- the
+                // same `self.messages`, unchanged since -- so it cannot fail
+                // here.
+                let source = self
+                    .messages
+                    .iter()
+                    .find(|m| m.input.handle == item.evidence.message)
+                    .expect(
+                        "card_context returned Some for this item, so its source message exists",
+                    );
+                ui.push_id(i, |ui| {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        let (c, d) = render_card_body(
+                            ui,
+                            &self.messages,
+                            item,
+                            source,
+                            &card,
+                            show_draft_here,
+                        );
+                        card_change = c;
+                        card_draft = d;
                     });
-                    let (button_change, button_draft) = card_action_buttons(ui, item, source, record, terminal, closed);
-                    if let Some((decision, reminder)) = button_change {change=Some((key,decision,reminder));}
-                    if button_draft.is_some() {draft=button_draft;}
-                    match record.reminder {
-                        Reminder::None=>{},
-                        Reminder::Created=>{ui.label("Reminder created in Microsoft To Do. Manage its alerts and completion there; marking this loop handled does not modify the task.");ui.hyperlink_to("Open Microsoft To Do","https://to-do.office.com/tasks/");},
-                        Reminder::Attempted=>{
-                            ui.colored_label(Color32::DARK_RED,"A reminder attempt has no confirmed outcome. Inspect Microsoft To Do before allowing another attempt.");
-                            ui.hyperlink_to("Inspect Microsoft To Do","https://to-do.office.com/tasks/");
-                            ui.label(format!("Reference: {}",marker(&key)));
-                            if ui.button("I checked: the task exists").clicked(){change=Some((key,record.decision,Reminder::Created));}
-                            if ui.button("I checked: no task was created").clicked(){change=Some((key,record.decision,Reminder::None));}
-                        }
-                    }
                 });
-            });
+            }
+            if let Some((decision, reminder)) = card_change {
+                change = Some((key, decision, reminder));
+            }
+            if card_draft.is_some() {
+                self.draft = card_draft;
+                self.draft_scrolled = false;
+            }
+            if show_draft_here {
+                self.show_draft(ui, key);
+            }
         }
         if let Some((key, decision, reminder)) = change {
             let mut r = self.decisions.get(&key);
             r.decision = decision;
             r.reminder = reminder;
             r.updated = now();
-            self.action_status = match self.decisions.update(r) {
+            let saved = self.decisions.update(r);
+            self.action_status = match &saved {
                 Ok(()) => "Decision saved on this Windows account.".into(),
-                Err(e) => e,
+                Err(e) => e.clone(),
             };
-        }
-        if draft.is_some() {
-            self.draft = draft;
+            // A terminal decision (reached from an action button while a
+            // reminder draft was open on this same card, e.g. "Handled")
+            // closes the card outright; an open draft on it no longer has
+            // anywhere sensible to render, so close the draft along with it
+            // rather than leaving it attached to a now-terminal card. Only
+            // when `saved` is `Ok`, though: if the update was rejected (e.g.
+            // the saved-decision limit), the recorded decision never actually
+            // became terminal, so the draft must stay open and attached to
+            // its still-open card rather than vanishing out from under it.
+            if saved.is_ok()
+                && matches!(
+                    decision,
+                    Decision::Done | Decision::Dismissed | Decision::Moot
+                )
+                && self.draft.as_ref().is_some_and(|d| d.key == key)
+            {
+                self.draft = None;
+                self.draft_scrolled = false;
+            }
         }
     }
-    fn show_draft(&mut self, ui: &mut egui::Ui) {
-        let Some(draft) = &mut self.draft else {
+    /// Renders the open reminder draft's panel when it belongs to `key`
+    /// (the card currently being rendered); a no-op otherwise. Scrolls the
+    /// panel into view once, the first time it renders after opening (see
+    /// `draft_scrolled`).
+    fn show_draft(&mut self, ui: &mut egui::Ui, key: [u8; 32]) {
+        if self.draft.as_ref().is_none_or(|d| d.key != key) {
             return;
-        };
-        let mut cancel = false;
-        let mut create = false;
-        egui::Frame::group(ui.style()).show(ui,|ui|{
-            ui.heading("Review your Microsoft To Do reminder");
-            ui.label("Creates one task in your personal default Tasks list. Only the title, reminder time, and an opaque OpenLoops reference are sent to Microsoft.");
-            ui.label("Task title (editable)");ui.text_edit_singleline(&mut draft.title);
-            ui.label("Remind me at — this computer's local time (YYYY-MM-DD HH:MM)");ui.text_edit_singleline(&mut draft.when);
-            ui.horizontal(|ui|{
-                if ui.button("In one hour").clicked(){draft.when=default_reminder();}
-                if ui.button("Tomorrow at 9 am").clicked(){draft.when=format!("{} 09:00",(chrono::Local::now()+chrono::Duration::days(1)).format("%Y-%m-%d"));}
-            });
-            ui.label("This time is your choice, separate from the email deadline. Microsoft To Do controls alert delivery, including when OpenLoops is closed.");
-            if let Ok(at)=reminder_time(&draft.when) && let Some(time)=chrono::DateTime::from_timestamp(at,0){ui.label(format!("Scheduled instant: {}",time.with_timezone(&chrono::Local).format("%a %b %d, %Y at %H:%M %:z")));}
-            ui.horizontal(|ui|{create=ui.button("Create this reminder in Microsoft To Do").clicked();cancel=ui.button("Cancel").clicked();});
-            if !draft.error.is_empty(){ui.colored_label(Color32::DARK_RED,&draft.error);}
-        });
-        if create {
+        }
+        let mut cancel_clicked = false;
+        let mut create_clicked = false;
+        let draft = self.draft.as_mut().expect("checked above");
+        let prior_decision = draft.prior_decision;
+        let response = ui
+            .push_id(("reminder-draft", key), |ui| {
+                egui::Frame::group(ui.style()).show(ui,|ui|{
+                    ui.heading("Review your Microsoft To Do reminder");
+                    ui.label("Creates one task in your personal default Tasks list. Only the title, reminder time, and an opaque OpenLoops reference are sent to Microsoft.");
+                    ui.label("Task title (editable)");ui.text_edit_singleline(&mut draft.title);
+                    ui.label("Remind me at — this computer's local time (YYYY-MM-DD HH:MM)");ui.text_edit_singleline(&mut draft.when);
+                    ui.horizontal(|ui|{
+                        if ui.button("In one hour").clicked(){draft.when=default_reminder();}
+                        if ui.button("Tomorrow at 9 am").clicked(){draft.when=format!("{} 09:00",(chrono::Local::now()+chrono::Duration::days(1)).format("%Y-%m-%d"));}
+                    });
+                    ui.label("This time is your choice, separate from the email deadline. Microsoft To Do controls alert delivery, including when OpenLoops is closed.");
+                    if let Ok(at)=reminder_time(&draft.when) && let Some(time)=chrono::DateTime::from_timestamp(at,0){ui.label(format!("Scheduled instant: {}",time.with_timezone(&chrono::Local).format("%a %b %d, %Y at %H:%M %:z")));}
+                    ui.horizontal(|ui|{create_clicked=ui.button("Create this reminder in Microsoft To Do").clicked();cancel_clicked=ui.button("Cancel").clicked();});
+                    if !draft.error.is_empty(){ui.colored_label(Color32::DARK_RED,&draft.error);}
+                });
+            })
+            .response;
+        // Scrolled once, the first render after opening -- via the id-scoped
+        // group's own response, so the whole (possibly tall) panel is
+        // brought into view rather than whatever egui's cursor happens to
+        // sit at afterward.
+        if !self.draft_scrolled {
+            response.scroll_to_me(Some(egui::Align::Center));
+            self.draft_scrolled = true;
+        }
+        let mut close_draft = false;
+        if create_clicked {
             match reminder_time(&draft.when) {
                 Ok(at) if draft.title.trim().len()>=3 && draft.title.len()<=320 => {
-                    match self.decisions.begin_reminder(draft.key){Ok(())=>{self.pending_reminder=Some((draft.key,ReminderRequest {account:draft.account.clone(),title:draft.title.trim().into(),at_utc:at,marker:marker(&draft.key)}));cancel=true;},Err(e)=>draft.error=e}
+                    match self.decisions.begin_reminder(draft.key){Ok(())=>{self.pending_reminder=Some((draft.key,ReminderRequest {account:draft.account.clone(),title:draft.title.trim().into(),at_utc:at,marker:marker(&draft.key)}));close_draft=true;},Err(e)=>draft.error=e}
                 }
                 _=>draft.error="Enter a future local date/time and a title of 3–320 bytes. Ambiguous daylight-saving times need a different time.".into(),
             }
         }
-        if cancel {
+        if cancel_clicked {
+            // Cancel undoes the implied-tracking change from opening the
+            // draft (see `decision_after_cancel`), but only when nothing
+            // else moved the decision on in the meantime -- a successful
+            // create (handled above) never reaches here, so it always keeps
+            // `Mine`/`Watching`.
+            self.revert_draft_decision(prior_decision, key);
+            close_draft = true;
+        }
+        if close_draft {
             self.draft = None;
+            self.draft_scrolled = false;
         }
     }
 }
@@ -400,18 +496,33 @@ impl ReviewState {
 /// `item.resolution` is `Some` -- it must not flip back to resolved wording
 /// just because closure evidence exists. Only when there is no override at
 /// all does a resolution get to speak for itself.
-fn status_base_label(decision: Decision, item: &Expectation) -> &'static str {
+fn status_base_label(decision: Decision, item: &Expectation) -> String {
     match decision {
-        Decision::Done => "Handled",
-        Decision::Dismissed => "Dismissed / not mine",
-        Decision::Moot => "No longer relevant",
-        Decision::Mine => "Tracking",
-        Decision::Watching => "Watching team follow-up",
+        Decision::Done => "Handled".into(),
+        Decision::Dismissed => "Dismissed / not mine".into(),
+        Decision::Moot => "No longer relevant".into(),
+        Decision::Mine => "Tracking".into(),
+        Decision::Watching => "Watching team follow-up".into(),
         Decision::Review if item.resolution.is_some() => {
-            resolution_status_label(item.resolution_kind)
+            resolution_status_label(item.resolution_kind).into()
         }
-        Decision::Review => "Needs your review",
+        Decision::Review if item.event_passed.is_some() => {
+            event_passed_status_label(item.event_passed.as_ref().expect("checked above"))
+        }
+        Decision::Review => "Needs your review".into(),
     }
+}
+
+fn event_passed_status_label(event: &EventPassed) -> String {
+    let date = chrono::DateTime::from_timestamp(event.end, 0).map_or_else(
+        || "unknown date".to_string(),
+        |time| {
+            time.with_timezone(&chrono::Local)
+                .format("%b %d, %Y %H:%M %:z")
+                .to_string()
+        },
+    );
+    format!("Closed: event passed ({}, ended {date})", event.name)
 }
 fn resolution_status_label(kind: Option<ResolutionKind>) -> &'static str {
     match kind {
@@ -474,7 +585,7 @@ fn resolution_anchor_label(kind: Option<ResolutionKind>, cross_thread: bool) -> 
 /// panel note (`scanning::scan_closures`'s own conversation note).
 fn expectations_summary(
     analysis: &Expectations,
-    cards: &[Option<CardContext<'_>>],
+    cards: &[Option<CardContext>],
     model: &str,
 ) -> String {
     let resolved_flags: Vec<bool> = analysis
@@ -490,7 +601,17 @@ fn expectations_summary(
         .zip(&resolved_flags)
         .filter(|&(item, &r)| r && item.cross_thread)
         .count();
-    let open = analysis.items.len() - resolved;
+    let event_closed = analysis
+        .items
+        .iter()
+        .zip(cards)
+        .filter(|&(item, card)| {
+            item.resolution.is_none()
+                && item.event_passed.is_some()
+                && card.as_ref().is_some_and(|card| card.closed)
+        })
+        .count();
+    let open = analysis.items.len() - resolved - event_closed;
     let degraded_note = if analysis.degraded > 0 {
         format!(" · {} kept with unverified evidence", analysis.degraded)
     } else {
@@ -501,17 +622,183 @@ fn expectations_summary(
     } else {
         String::new()
     };
+    let event_note = if event_closed > 0 {
+        format!(" · {event_closed} closed because the event passed")
+    } else {
+        String::new()
+    };
     format!(
-        "{open} expectations · {resolved} resolved by later evidence · {} rejected for invalid evidence{degraded_note}{cross_thread_note} · {model}",
+        "{open} expectations · {resolved} resolved by later evidence · {} rejected for invalid evidence{degraded_note}{cross_thread_note}{event_note} · {model}",
         analysis.rejected
     )
+}
+/// Renders one card's whole body -- status, action/owner/waiting/deadline
+/// summary, evidence collapsing, action buttons, and reminder status --
+/// inside the caller's `egui::Frame::group`. Returns the decision change and
+/// any reminder draft the action buttons produced, so the caller (which owns
+/// `self.decisions`/`self.draft`) can apply them; this function itself never
+/// touches `self`, so it can run while the caller still holds an immutable
+/// borrow of `self.analysis`/`self.messages` (see
+/// [`ReviewState::show_analysis`]). `draft_open_here` is whether a reminder
+/// draft is already open for this card's key -- passed through to
+/// `card_action_buttons` so the "Set To Do reminder…" button greys itself
+/// out (stays visible, disabled) rather than silently replacing an
+/// already-open, possibly-edited draft.
+fn render_card_body(
+    ui: &mut egui::Ui,
+    messages: &[ReviewMessage],
+    item: &Expectation,
+    source: &ReviewMessage,
+    card: &CardContext,
+    draft_open_here: bool,
+) -> (Option<(Decision, Reminder)>, Option<ReminderDraft>) {
+    let record = &card.record;
+    let (terminal, closed) = (card.terminal, card.closed);
+    ui.set_width(ui.available_width());
+    let status_base = status_base_label(record.decision, item);
+    let status = status_label(
+        &status_base,
+        status_shows_cross_thread(
+            record.decision,
+            item.resolution.is_some(),
+            item.cross_thread,
+        ),
+    );
+    ui.label(RichText::new(status).color(Color32::from_rgb(29, 87, 67)));
+    ui.label(RichText::new(&item.action).size(21.0).strong());
+    let owner = if record.decision == Decision::Mine {
+        "You (confirmed)"
+    } else {
+        match item.owner {
+            Owner::You => "You (suggested)",
+            Owner::Team => "Team — no individual owner established",
+            Owner::Unclear => "Unclear — confirm responsibility",
+        }
+    };
+    ui.label(format!("Responsible: {owner}"));
+    ui.label(format!("Waiting: {}", item.waiting_party));
+    if let Some(deadline) = &item.deadline {
+        ui.label(format!("Deadline stated in email: {}", deadline.quote));
+    } else if item.unverified_deadline {
+        ui.label("A deadline was stated, but its quotation could not be verified.");
+    } else {
+        ui.label("Deadline stated in email: Not specified");
+    }
+    if let Some(view) = &card.deadline {
+        if !closed && is_past_due(view) {
+            ui.colored_label(Color32::DARK_RED, label(view));
+        } else {
+            ui.label(label(view));
+        }
+    }
+    if !item.uncertainty.is_empty() {
+        ui.label(format!("Uncertainty: {}", item.uncertainty));
+    }
+    ui.label(
+        RichText::new(format!(
+            "{} · {} · {}",
+            source.source, source.date_label, item.kind
+        ))
+        .small(),
+    );
+    ui.collapsing("Why this was suggested · evidence and replies", |ui| {
+        render_evidence_section(ui, messages, item, source);
+    });
+    let (mut change, draft) =
+        card_action_buttons(ui, item, source, record, terminal, closed, draft_open_here);
+    if let Some(reminder_change) = render_reminder_status(ui, record) {
+        change = Some(reminder_change);
+    }
+    (change, draft)
+}
+/// The "Why this was suggested · evidence and replies" collapsing section's
+/// body: the original evidence, the deadline/event evidence (if any), the
+/// resolution evidence or its absence, and the full scanned conversation.
+fn render_evidence_section(
+    ui: &mut egui::Ui,
+    messages: &[ReviewMessage],
+    item: &Expectation,
+    source: &ReviewMessage,
+) {
+    show_anchor(ui, "Original expectation", &item.evidence, messages);
+    if let Some(deadline) = &item.deadline {
+        show_anchor(ui, "Deadline evidence", deadline, messages);
+    }
+    if let Some(event) = &item.event {
+        show_anchor(ui, "Event evidence", event, messages);
+    }
+    if let Some(passed) = &item.event_passed {
+        show_event_time_evidence(ui, "Event time evidence", &passed.message_handle, messages);
+    }
+    if let Some(resolution) = &item.resolution {
+        show_anchor(
+            ui,
+            resolution_anchor_label(item.resolution_kind, item.cross_thread),
+            resolution,
+            messages,
+        );
+    } else if item.unverified_resolution {
+        ui.label(
+            "The analysis proposed a completion but it could not be validated; treat as open.",
+        );
+    } else {
+        ui.label("No matching completion was identified in the scanned conversation. Work may have happened elsewhere or outside this history window.");
+    }
+    ui.collapsing("Full scanned conversation", |ui| {
+        for m in messages
+            .iter()
+            .filter(|m| m.account == source.account && m.conversation == source.conversation)
+        {
+            ui.label(format!(
+                "{} · {}",
+                m.date_label,
+                if m.input.from_user {
+                    "You"
+                } else {
+                    "Other participant"
+                }
+            ));
+            for b in &m.input.message.body_blocks {
+                ui.label(b.as_string());
+            }
+        }
+    });
+}
+/// Renders the reminder-status line(s) beneath the action buttons -- none
+/// for `Reminder::None`, a link to the created Microsoft To Do task, or the
+/// unresolved-attempt warning with its two reconciliation buttons -- and
+/// returns the decision change a reconciliation button requested, if any.
+fn render_reminder_status(ui: &mut egui::Ui, record: &Record) -> Option<(Decision, Reminder)> {
+    match record.reminder {
+        Reminder::None => None,
+        Reminder::Created => {
+            ui.label("Reminder created in Microsoft To Do. Manage its alerts and completion there; marking this loop handled does not modify the task.");
+            ui.hyperlink_to("Open Microsoft To Do", "https://to-do.office.com/tasks/");
+            None
+        }
+        Reminder::Attempted => {
+            ui.colored_label(Color32::DARK_RED, "A reminder attempt has no confirmed outcome. Inspect Microsoft To Do before allowing another attempt.");
+            ui.hyperlink_to("Inspect Microsoft To Do", "https://to-do.office.com/tasks/");
+            ui.label(format!("Reference: {}", marker(&record.key)));
+            if ui.button("I checked: the task exists").clicked() {
+                return Some((record.decision, Reminder::Created));
+            }
+            if ui.button("I checked: no task was created").clicked() {
+                return Some((record.decision, Reminder::None));
+            }
+            None
+        }
+    }
 }
 /// Renders the card's action buttons and returns the requested decision
 /// change (with its unchanged reminder state) and any reminder draft opened.
 /// A terminal card only offers reopening; a card closed by resolution
 /// evidence (but not explicitly overridden to `Mine`/`Watching`) only offers
 /// reopening it as still-open tracking; every other card gets the full set
-/// of open-card actions.
+/// of open-card actions. `draft_open_here` greys out "Set To Do reminder…"
+/// (via `egui::Ui::add_enabled`, not removing the button) while a draft is
+/// already open for this card, so it never silently replaces one the user
+/// may have already started editing.
 fn card_action_buttons(
     ui: &mut egui::Ui,
     item: &Expectation,
@@ -519,6 +806,7 @@ fn card_action_buttons(
     record: &Record,
     terminal: bool,
     closed: bool,
+    draft_open_here: bool,
 ) -> (Option<(Decision, Reminder)>, Option<ReminderDraft>) {
     let mut change = None;
     let mut draft = None;
@@ -550,14 +838,15 @@ fn card_action_buttons(
             if ui.button("No longer relevant").clicked() {
                 change = Some((Decision::Moot, record.reminder));
             }
-            if record.reminder == Reminder::None
-                && ui
-                    .add_enabled(
-                        matches!(record.decision, Decision::Mine | Decision::Watching),
-                        egui::Button::new("Set To Do reminder…"),
-                    )
-                    .clicked()
+            let reminder_enabled = reminder_button_enabled(record.reminder, draft_open_here);
+            if ui
+                .add_enabled(reminder_enabled, egui::Button::new("Set To Do reminder…"))
+                .clicked()
             {
+                change = Some((
+                    decision_after_setting_reminder(record.decision),
+                    record.reminder,
+                ));
                 draft = Some(ReminderDraft {
                     key: record.key,
                     account: source.account.clone(),
@@ -568,11 +857,68 @@ fn card_action_buttons(
                     },
                     when: default_reminder(),
                     error: String::new(),
+                    prior_decision: record.decision,
                 });
             }
         }
     });
     (change, draft)
+}
+/// Whether "Set To Do reminder…" should be enabled: a card without a
+/// reminder already attempted or created for it, and without a draft already
+/// open for it. Setting a reminder no longer requires first tracking or
+/// watching the card -- opening the draft implies tracking on its own (see
+/// [`decision_after_setting_reminder`]). `card_action_buttons` only ever
+/// calls this from its open-card branch, where `closed` is always `false`,
+/// so `closed` is not (and must not be) a parameter here: `draft_open_here`
+/// is the only thing that can additionally disable the button, guarding
+/// against silently replacing a draft the user may have already edited.
+fn reminder_button_enabled(reminder: Reminder, draft_open_here: bool) -> bool {
+    reminder == Reminder::None && !draft_open_here
+}
+/// Decision implied by opening a reminder draft on a card whose current
+/// decision is `current`. Setting a reminder implies personal tracking, so
+/// `Decision::Review` becomes `Decision::Mine`; `Decision::Watching` is left
+/// as is (an explicit team follow-up, not personal ownership); `Decision::
+/// Mine` is unaffected (it is already `Mine`). The reminder button only ever
+/// renders for a card whose decision is one of these three -- `closed`
+/// (which rules out a terminal decision or an un-overridden resolution)
+/// guards `card_action_buttons`'s open-card branch -- so no other input is
+/// meaningful here.
+fn decision_after_setting_reminder(current: Decision) -> Decision {
+    match current {
+        Decision::Watching => Decision::Watching,
+        _ => Decision::Mine,
+    }
+}
+/// Decision to revert to when a reminder draft is cancelled without creating
+/// the reminder, given the decision that was in force just before the draft
+/// opened (`prior`) and the decision recorded now (`current`). Only reverses
+/// exactly the implied change [`decision_after_setting_reminder`] makes from
+/// `Decision::Review`: when `prior` was `Review` and `current` is still the
+/// implied `Mine`, cancel restores `Review`. Any other combination leaves the
+/// decision alone -- `prior` was already `Mine`/`Watching` (nothing was
+/// implied, so there is nothing to undo), or `current` has since moved to
+/// something else (an action button changed it, or a successful create was
+/// made, while the draft was open) and undoing that would discard a decision
+/// the user made deliberately. A successful create never reaches this
+/// function at all (see [`ReviewState::show_draft`]), so it always keeps
+/// `Mine`/`Watching` regardless.
+fn decision_after_cancel(prior: Decision, current: Decision) -> Option<Decision> {
+    if prior == Decision::Review && current == Decision::Mine {
+        Some(Decision::Review)
+    } else {
+        None
+    }
+}
+/// Whether a card should be hidden from the "What may need your attention"
+/// list: `closed` and not revealed by the show-handled checkbox -- UNLESS a
+/// reminder draft is currently open for this card's key, in which case the
+/// card (and its draft) must stay visible so a rescan-independent decision
+/// change (e.g. closure by later evidence) can never strand an open draft
+/// behind a hidden card. See [`ReviewState::show_analysis`].
+fn card_hidden(closed: bool, show_handled: bool, draft_open_here: bool) -> bool {
+    closed && !show_handled && !draft_open_here
 }
 fn open_link(ui: &mut egui::Ui, url: &str) {
     if url.starts_with("https://outlook.office.com/")
@@ -602,6 +948,30 @@ fn show_anchor(ui: &mut egui::Ui, label: &str, anchor: &Anchor, messages: &[Revi
             .show(ui, |ui| {
                 ui.label(&anchor.context);
             });
+    }
+}
+/// Like [`show_anchor`] but for an `EventPassed`'s `message_handle`, which
+/// names the invitation, calendar-subject, or event-time-phrase message the
+/// closure evidence came from -- not a quoted anchor, so there is no quote
+/// or "Surrounding source text" to show, only the link to that message.
+fn show_event_time_evidence(
+    ui: &mut egui::Ui,
+    label: &str,
+    message_handle: &str,
+    messages: &[ReviewMessage],
+) {
+    ui.label(RichText::new(label).strong());
+    if let Some(m) = messages.iter().find(|m| m.input.handle == message_handle) {
+        ui.label(
+            RichText::new(format!(
+                "{} · {} · {}",
+                m.date_label,
+                m.source,
+                m.input.message.subject.as_string()
+            ))
+            .small(),
+        );
+        open_link(ui, &m.web_link);
     }
 }
 fn default_reminder() -> String {
@@ -674,6 +1044,8 @@ pub fn layout_fixture() -> ReviewState {
                 quote: "Friday".into(),
                 context: body.into(),
             }),
+            event: None,
+            event_time: None,
             resolution: None,
             resolution_kind: None,
             uncertainty: if index == 0 {
@@ -684,6 +1056,7 @@ pub fn layout_fixture() -> ReviewState {
             unverified_deadline: false,
             unverified_resolution: false,
             cross_thread: false,
+            event_passed: None,
         })
         .collect();
     state.set_scan(
@@ -700,6 +1073,7 @@ pub fn layout_fixture() -> ReviewState {
             cancelled: false,
             conversation_notes: vec![],
             cross_thread_closures: 0,
+            event_closures: 0,
             primary_scan_transport_error: false,
             closure_pass_failure: None,
         },
@@ -742,12 +1116,15 @@ mod tests {
             kind: "request".into(),
             evidence: anchor.clone(),
             deadline: Some(anchor),
+            event: None,
+            event_time: None,
             resolution: None,
             resolution_kind: None,
             uncertainty: String::new(),
             unverified_deadline: false,
             unverified_resolution: false,
             cross_thread: false,
+            event_passed: None,
         };
         (state, item)
     }
@@ -786,9 +1163,20 @@ mod tests {
     #[test]
     fn date_and_business_day_urgency_tracks_past_flag() {
         for past in [false, true] {
-            assert_eq!(is_past_due(&DeadlineView::DueDate { day: 0, past }), past);
             assert_eq!(
-                is_past_due(&DeadlineView::DueBusinessDay { day: 0, past }),
+                is_past_due(&DeadlineView::DueDate {
+                    day: 0,
+                    boundary: 0,
+                    past
+                }),
+                past
+            );
+            assert_eq!(
+                is_past_due(&DeadlineView::DueBusinessDay {
+                    day: 0,
+                    boundary: 0,
+                    past
+                }),
                 past
             );
         }
@@ -932,11 +1320,147 @@ mod tests {
         assert!(reminder_time("tomorrow").is_err());
     }
 
-    /// `closed` is the single source of truth for `show_analysis`'s hide
-    /// condition (`if closed && !self.show_handled { continue; }`): the
-    /// card is skipped exactly when `closed && !show_handled`. Exercising
-    /// `closed` here covers "hidden unless the show-handled checkbox is
-    /// on" without needing to render the actual egui widgets.
+    #[test]
+    fn reminder_button_enabled_without_a_reminder_or_an_open_draft() {
+        for (reminder, draft_open_here, expected) in [
+            (Reminder::None, false, true),
+            (Reminder::Attempted, false, false),
+            (Reminder::Created, false, false),
+            (Reminder::None, true, false),
+            (Reminder::Attempted, true, false),
+            (Reminder::Created, true, false),
+        ] {
+            assert_eq!(
+                reminder_button_enabled(reminder, draft_open_here),
+                expected,
+                "reminder={reminder:?} draft_open_here={draft_open_here}"
+            );
+        }
+    }
+
+    #[test]
+    fn decision_after_setting_reminder_implies_tracking_except_when_watching() {
+        for (current, expected) in [
+            (Decision::Review, Decision::Mine),
+            (Decision::Mine, Decision::Mine),
+            (Decision::Watching, Decision::Watching),
+        ] {
+            assert_eq!(
+                decision_after_setting_reminder(current),
+                expected,
+                "current={current:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decision_after_cancel_reverts_only_the_implied_mine_from_review() {
+        for (prior, current, expected) in [
+            // The exact case `decision_after_setting_reminder` produces from
+            // `Review`: cancel undoes it.
+            (Decision::Review, Decision::Mine, Some(Decision::Review)),
+            // Nothing implied changed (already `Mine`/`Watching` before the
+            // draft opened): nothing to undo.
+            (Decision::Mine, Decision::Mine, None),
+            (Decision::Watching, Decision::Watching, None),
+            // The decision has since moved on to something other than the
+            // implied `Mine` (another action button, while the draft stayed
+            // open): a stale `Review` prior must not clobber it.
+            (Decision::Review, Decision::Watching, None),
+            (Decision::Review, Decision::Done, None),
+            (Decision::Review, Decision::Review, None),
+            // Defensive: `prior` was never `Review`, so no revert fires even
+            // if `current` happens to be `Mine`.
+            (Decision::Watching, Decision::Mine, None),
+            (Decision::Done, Decision::Mine, None),
+        ] {
+            assert_eq!(
+                decision_after_cancel(prior, current),
+                expected,
+                "prior={prior:?} current={current:?}"
+            );
+        }
+    }
+
+    /// A rescan (`set_scan`) discards any open reminder draft outright (see
+    /// the doc comment on `set_scan`), but must not silently strand the
+    /// implied `Mine` that opening the draft applied to a `Review` card --
+    /// same as an explicit Cancel click would revert it (see
+    /// `decision_after_cancel`), via the shared `revert_draft_decision`.
+    #[test]
+    fn set_scan_reverts_an_open_drafts_implied_mine_back_to_review() {
+        let (mut state, item) = aging_fixture();
+        let source = state.messages[0].clone();
+        let key = state
+            .decisions
+            .fingerprint(&source.account, &source.id, &item.action_phrase);
+        // Simulate "Set To Do reminder..." having been clicked on this
+        // `Review` card: `decision_after_setting_reminder` implied `Mine`.
+        let mut record = state.decisions.get(&key);
+        record.decision = Decision::Mine;
+        state.decisions.records = vec![record];
+        state.draft = Some(ReminderDraft {
+            key,
+            account: source.account.clone(),
+            title: item.action.clone(),
+            when: default_reminder(),
+            error: String::new(),
+            prior_decision: Decision::Review,
+        });
+
+        state.set_scan(
+            ScanResult {
+                analysis: Expectations {
+                    items: vec![item],
+                    rejected: 0,
+                    rejection_reasons: vec![],
+                    degraded: 0,
+                },
+                failures: vec![],
+                analyzed: 1,
+                total: 1,
+                cancelled: false,
+                conversation_notes: vec![],
+                cross_thread_closures: 0,
+                event_closures: 0,
+                primary_scan_transport_error: false,
+                closure_pass_failure: None,
+            },
+            "model".into(),
+        );
+
+        assert!(state.draft.is_none());
+        assert_eq!(state.decisions.get(&key).decision, Decision::Review);
+    }
+
+    #[test]
+    fn card_hidden_stays_visible_while_its_draft_is_open() {
+        for (closed, show_handled, draft_open_here, expected) in [
+            (false, false, false, false),
+            (false, true, false, false),
+            (true, false, false, true),
+            (true, true, false, false),
+            (true, false, true, false),
+            (true, true, true, false),
+            (false, false, true, false),
+            (false, true, true, false),
+        ] {
+            assert_eq!(
+                card_hidden(closed, show_handled, draft_open_here),
+                expected,
+                "closed={closed} show_handled={show_handled} draft_open_here={draft_open_here}"
+            );
+        }
+    }
+
+    /// `closed` (together with whether a draft is open for the card) is
+    /// what `card_hidden` decides on, which is `show_analysis`'s hide
+    /// condition (`if card_hidden(card.closed, self.show_handled,
+    /// show_draft_here) { continue; }`). Exercising `closed` here, with no
+    /// draft open, covers "hidden unless the show-handled checkbox is on"
+    /// without needing to render the actual egui widgets; `card_hidden`
+    /// itself (including the open-draft override) is covered separately by
+    /// its own table test above.
     #[test]
     fn resolved_item_without_a_decision_is_closed_and_hides_unless_shown() {
         let (state, mut item) = aging_fixture();
@@ -945,9 +1469,51 @@ mod tests {
         let closed = state.card_context(&item, 0, 0).unwrap().closed;
         assert!(closed, "resolved item must be closed by default");
         for show_handled in [false, true] {
-            let hidden = closed && !show_handled;
+            let hidden = card_hidden(closed, show_handled, false);
             assert_eq!(hidden, !show_handled, "show_handled={show_handled}");
         }
+    }
+
+    #[test]
+    fn event_passed_closure_hides_sorts_labels_and_can_be_overridden() {
+        let (mut state, mut item) = aging_fixture();
+        let end = chrono::DateTime::parse_from_rfc3339("2026-08-21T19:30:00Z")
+            .unwrap()
+            .timestamp();
+        item.event_passed = Some(EventPassed {
+            name: "design workshop".into(),
+            end,
+            message_handle: "m0".into(),
+        });
+        let card = state.card_context(&item, 0, 0).unwrap();
+        assert!(card.closed);
+        assert_eq!(card_rank(Some(&card)), 2);
+        assert_eq!(
+            status_base_label(Decision::Review, &item),
+            event_passed_status_label(item.event_passed.as_ref().unwrap())
+        );
+
+        let key = card.record.key;
+        let mut record = state.decisions.get(&key);
+        record.decision = Decision::Mine;
+        state.decisions.records = vec![record];
+        let overridden = state.card_context(&item, 0, 0).unwrap();
+        assert!(!overridden.closed);
+        assert_eq!(status_base_label(Decision::Mine, &item), "Tracking");
+
+        let analysis = Expectations {
+            items: vec![item],
+            rejected: 0,
+            rejection_reasons: vec![],
+            degraded: 0,
+        };
+        let (plain_state, _) = aging_fixture();
+        let cards = plain_state.card_contexts(&analysis.items);
+        let summary = expectations_summary(&analysis, &cards, "model");
+        assert!(
+            summary.contains("· 1 closed because the event passed"),
+            "summary: {summary}"
+        );
     }
 
     #[test]
@@ -1174,6 +1740,48 @@ mod tests {
         assert!(!status_shows_cross_thread(Decision::Moot, true, true));
     }
 
+    fn empty_scan_result() -> ScanResult {
+        ScanResult {
+            analysis: Expectations {
+                items: vec![],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 0,
+            total: 0,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        }
+    }
+
+    #[test]
+    fn set_scan_clears_an_open_draft_and_its_scroll_flag() {
+        // A rescan rebuilds `analysis`/`messages` from scratch; an open
+        // draft refers to a card that may no longer exist, so it must not
+        // survive the rescan orphaned.
+        let mut state = ReviewState {
+            draft: Some(ReminderDraft {
+                key: [7; 32],
+                account: "acct".into(),
+                title: "Send the draft".into(),
+                when: "2026-09-08 09:00".into(),
+                error: String::new(),
+                prior_decision: Decision::Review,
+            }),
+            draft_scrolled: true,
+            ..ReviewState::default()
+        };
+        state.set_scan(empty_scan_result(), "model".into());
+        assert!(state.draft.is_none());
+        assert!(!state.draft_scrolled);
+    }
+
     #[test]
     fn set_scan_reports_closure_pass_failure_as_incomplete() {
         let mut state = ReviewState::default();
@@ -1191,6 +1799,7 @@ mod tests {
                 cancelled: false,
                 conversation_notes: vec![],
                 cross_thread_closures: 0,
+                event_closures: 0,
                 primary_scan_transport_error: false,
                 closure_pass_failure: Some(
                     "Cross-thread closure pass stopped: rate limited".into(),

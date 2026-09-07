@@ -5,7 +5,7 @@ use openloops_domain::deadline_parse::{
     TimezoneContext, Weekday, policy_boundary, reparse,
 };
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeadlineView {
     PastDue {
         boundary: i64,
@@ -17,21 +17,56 @@ pub enum DeadlineView {
     },
     DueDate {
         day: i64,
+        /// The instant [`classify`] itself resolved as the deadline's
+        /// boundary (the day's local end-of-day, converted to UTC) -- kept
+        /// alongside `day` so a caller aging a stated event time (see
+        /// `review_scan::past_due_boundary`) uses the SAME boundary the
+        /// `past` flag above was decided against, rather than recomputing a
+        /// UTC-midnight approximation that ignores both the end-of-day
+        /// policy and the local offset.
+        boundary: i64,
         past: bool,
     },
     DueBusinessDay {
         day: i64,
+        boundary: i64,
         past: bool,
     },
     DueRange {
         start_day: i64,
         end_day: i64,
+        boundary: i64,
         past: bool,
     },
     EventTied,
     Soft,
     Unknown,
 }
+
+/// Generic event nouns naming the KIND of gathering rather than which one --
+/// shared with [`crate::review_scan`]'s event-name matching (one list, so
+/// the words that make [`classify`] fall back to [`DeadlineView::EventTied`]
+/// are exactly the words `match_event` strips as too common to distinguish
+/// one event from another).
+pub const EVENT_GENERIC_NOUNS: &[&str] = &[
+    "call",
+    "closing",
+    "conference",
+    "deposition",
+    "event",
+    "hearing",
+    "meeting",
+    "retreat",
+    "review",
+    "seminar",
+    "session",
+    "summit",
+    "sync",
+    "training",
+    "trial",
+    "webinar",
+    "workshop",
+];
 
 pub fn classify(
     quote: &str,
@@ -68,8 +103,16 @@ pub fn classify(
             };
             let past = now > boundary;
             match value {
-                ParsedValue::Date(_) => DeadlineView::DueDate { day: day.0, past },
-                _ => DeadlineView::DueBusinessDay { day: day.0, past },
+                ParsedValue::Date(_) => DeadlineView::DueDate {
+                    day: day.0,
+                    boundary,
+                    past,
+                },
+                _ => DeadlineView::DueBusinessDay {
+                    day: day.0,
+                    boundary,
+                    past,
+                },
             }
         }
         Some(value @ ParsedValue::Week { start, end }) => {
@@ -80,6 +123,7 @@ pub fn classify(
             DeadlineView::DueRange {
                 start_day: start.0,
                 end_day: end.0,
+                boundary,
                 past: now > boundary,
             }
         }
@@ -89,10 +133,8 @@ pub fn classify(
         None => {
             let lower = quote.to_ascii_lowercase();
             if lower.split_ascii_whitespace().any(|token| {
-                matches!(
-                    token.trim_matches(|c: char| c.is_ascii_punctuation()),
-                    "meeting" | "call" | "event" | "session" | "hearing" | "closing" | "deposition"
-                )
+                EVENT_GENERIC_NOUNS
+                    .contains(&token.trim_matches(|c: char| c.is_ascii_punctuation()))
             }) {
                 DeadlineView::EventTied
             } else {
@@ -157,20 +199,29 @@ pub fn label(view: &DeadlineView) -> String {
             boundary,
             offset_seconds,
         } => format!("Due {}", format_instant(*boundary, *offset_seconds)),
-        DeadlineView::DueDate { day, past: false } => format!("Due by end of {}", format_day(*day)),
-        DeadlineView::DueDate { day, past: true } => {
+        DeadlineView::DueDate {
+            day, past: false, ..
+        } => format!("Due by end of {}", format_day(*day)),
+        DeadlineView::DueDate {
+            day, past: true, ..
+        } => {
             format!("Past due: {} has ended", format_day(*day))
         }
-        DeadlineView::DueBusinessDay { day, past: false } => {
+        DeadlineView::DueBusinessDay {
+            day, past: false, ..
+        } => {
             format!("Due by end of business {}", format_day(*day))
         }
-        DeadlineView::DueBusinessDay { day, past: true } => {
+        DeadlineView::DueBusinessDay {
+            day, past: true, ..
+        } => {
             format!("Past due: business day {} has ended", format_day(*day))
         }
         DeadlineView::DueRange {
             start_day,
             end_day,
             past,
+            ..
         } => {
             if *past {
                 format!(
@@ -291,6 +342,7 @@ mod tests {
                 classify("Friday", MESSAGE, now, 0),
                 DeadlineView::DueDate {
                     day: FRIDAY_EOD / 86400,
+                    boundary: FRIDAY_EOD,
                     past: false
                 }
             );
@@ -299,6 +351,7 @@ mod tests {
             classify("Friday", MESSAGE, FRIDAY_EOD + 1, 0),
             DeadlineView::DueDate {
                 day: FRIDAY_EOD / 86400,
+                boundary: FRIDAY_EOD,
                 past: true
             }
         );
@@ -352,6 +405,7 @@ mod tests {
                 DeadlineView::DueRange {
                     start_day: 20_696,
                     end_day: 20_702,
+                    boundary: SUNDAY_EOD,
                     past
                 }
             );
@@ -400,6 +454,7 @@ mod tests {
             label(&DeadlineView::DueRange {
                 start_day: 20_696,
                 end_day: 20_702,
+                boundary: SUNDAY_EOD,
                 past: false
             }),
             "Due by end of Sun Sep 06, 2026 (range started Mon Aug 31, 2026)"
@@ -408,6 +463,7 @@ mod tests {
             label(&DeadlineView::DueRange {
                 start_day: 20_696,
                 end_day: 20_702,
+                boundary: SUNDAY_EOD,
                 past: true
             }),
             "Past due: range Mon Aug 31, 2026 to Sun Sep 06, 2026 has ended"

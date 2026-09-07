@@ -23,6 +23,14 @@ pub struct MailItem {
     pub sent: bool,
     pub team: bool,
     pub web_link: String,
+    pub event: Option<MailEvent>,
+}
+
+#[derive(Clone)]
+pub struct MailEvent {
+    pub start: String,
+    pub end: String,
+    pub out_of_date: bool,
 }
 
 pub struct SourceReview {
@@ -71,10 +79,31 @@ pub fn load_recent(config: &ConnectionConfig) -> Result<Vec<SourceReview>, Conne
 }
 
 pub(super) fn fetch(http: &Client, token: &str, url: Url) -> Result<Vec<u8>, ConnectionError> {
-    if url.scheme() != "https"
-        || url.host_str() != Some("graph.microsoft.com")
-        || url.port().is_some()
-    {
+    fetch_from_origin(http, token, url, GRAPH_ORIGIN)
+}
+
+/// Fixed production origin every real request is checked against; the only
+/// caller that ever passes anything else is the `#[cfg(test)]` mock-HTTP
+/// harness below, which points a real loopback listener's own origin at
+/// `fetch_from_origin` directly -- production code always goes through
+/// [`fetch`], which hardcodes this constant.
+const GRAPH_ORIGIN: &str = "https://graph.microsoft.com/";
+
+/// Read-only bounded fetch, checked against `expected_origin` (scheme, host,
+/// and port together, via [`Url::origin`]) rather than an inline literal, so
+/// the exact same request/response handling this function performs -- status
+/// classification and the response-size bound -- is exercisable end to end
+/// against a real, local mock server in tests without weakening the fixed
+/// production check: [`fetch`] always supplies [`GRAPH_ORIGIN`].
+fn fetch_from_origin(
+    http: &Client,
+    token: &str,
+    url: Url,
+    expected_origin: &str,
+) -> Result<Vec<u8>, ConnectionError> {
+    let expected =
+        Url::parse(expected_origin).map_err(|_| ConnectionError::InvalidConfiguration)?;
+    if url.origin() != expected.origin() {
         return Err(ConnectionError::InvalidConfiguration);
     }
     let response = http
@@ -295,8 +324,16 @@ fn mailbox_url(address: Option<&str>, sent: bool) -> Result<Url, ConnectionError
 }
 
 /// Bounded, read-only body fetch for a single message already discovered via
-/// `mailbox_url`. Never follows a server-provided URL; always the fixed Graph origin.
-fn message_url(address: Option<&str>, id: &str) -> Result<Url, ConnectionError> {
+/// `mailbox_url`. Never follows a server-provided URL; always the fixed Graph
+/// origin. `cast` optionally appends an `OData` cast segment (e.g.
+/// `microsoft.graph.eventMessage`) after the message ID, the documented way
+/// to reach type-specific properties on a `message` resource.
+fn message_url_with_select(
+    address: Option<&str>,
+    id: &str,
+    cast: Option<&str>,
+    select: &str,
+) -> Result<Url, ConnectionError> {
     if id.is_empty() || id == "." || id == ".." {
         return Err(ConnectionError::InvalidConfiguration);
     }
@@ -316,9 +353,65 @@ fn message_url(address: Option<&str>, id: &str) -> Result<Url, ConnectionError> 
             }
         }
         path.push("messages").push(id);
+        if let Some(cast) = cast {
+            path.push(cast);
+        }
     }
-    url.query_pairs_mut().append_pair("$select", "body");
+    url.query_pairs_mut().append_pair("$select", select);
     Ok(url)
+}
+
+fn message_url(address: Option<&str>, id: &str) -> Result<Url, ConnectionError> {
+    message_url_with_select(address, id, None, "body")
+}
+
+/// The `OData` cast path for the bounded meeting-metadata extra fetch:
+/// `/messages/{id}/microsoft.graph.eventMessage?$select=...` (personal), or,
+/// for a shared mailbox like `shared@example.invalid`,
+/// `/users/shared@example.invalid/messages/{id}/microsoft.graph.eventMessage?$select=...`.
+fn event_url(address: Option<&str>, id: &str) -> Result<Url, ConnectionError> {
+    message_url_with_select(
+        address,
+        id,
+        Some("microsoft.graph.eventMessage"),
+        "meetingMessageType,startDateTime,endDateTime,isOutOfDate",
+    )
+}
+
+fn is_event_message(value: &Value) -> bool {
+    matches!(
+        value.get("@odata.type").and_then(Value::as_str),
+        Some("#microsoft.graph.eventMessageRequest" | "#microsoft.graph.eventMessage")
+    )
+}
+
+fn utc_event_time(value: &Value, field: &str) -> Option<String> {
+    let value = value.get(field)?;
+    if value.get("timeZone")?.as_str()? != "UTC" {
+        return None;
+    }
+    // Graph's own dateTime strings never carry a trailing zone designator
+    // (that is what the separate timeZone field is for), but guard the
+    // append anyway rather than assume the server never sends one.
+    let raw = value.get("dateTime")?.as_str()?.trim_end_matches('Z');
+    let parsed = chrono::DateTime::parse_from_rfc3339(&format!("{raw}Z")).ok()?;
+    Some(
+        parsed
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    )
+}
+
+/// `meetingMessageType` is used only to confirm the extra fetch actually
+/// returned meeting metadata (rather than, say, a truncated or unexpected
+/// payload); the value itself is not needed downstream, so it is not stored.
+fn mail_event(value: &Value) -> Option<MailEvent> {
+    value.get("meetingMessageType")?.as_str()?;
+    Some(MailEvent {
+        start: utc_event_time(value, "startDateTime")?,
+        end: utc_event_time(value, "endDateTime")?,
+        out_of_date: value.get("isOutOfDate")?.as_bool()?,
+    })
 }
 
 /// Splits newest-first `rows` into the in-window prefix (timestamp >= `cutoff`,
@@ -378,7 +471,26 @@ fn hydrate(
     row.as_object_mut()
         .ok_or(ConnectionError::ResourceUnavailable)?
         .insert("body".to_string(), body);
-    item(&row, None)
+    let mut result = item(&row, None)?;
+    if is_event_message(&body_value)
+        && let Ok(url) = event_url(address, &id)
+    {
+        result.event = fetch_event(http, token, url, GRAPH_ORIGIN);
+    }
+    Ok(result)
+}
+
+/// The bounded, best-effort meeting-metadata extra fetch: any failure --
+/// transport, a non-200 status (a message that is no longer a meeting
+/// request, or one Graph otherwise rejects the cast on), malformed JSON, or
+/// a payload missing one of the four selected fields -- yields `None`
+/// rather than failing the whole message. `expected_origin` is threaded
+/// through to [`fetch_from_origin`] purely for testability; every real
+/// caller passes [`GRAPH_ORIGIN`].
+fn fetch_event(http: &Client, token: &str, url: Url, expected_origin: &str) -> Option<MailEvent> {
+    let bytes = fetch_from_origin(http, token, url, expected_origin).ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    mail_event(&value)
 }
 
 fn load_mailbox(http: &Client, token: &str, address: Option<&str>) -> SourceReview {
@@ -762,6 +874,163 @@ mod tests {
         for id in ["", ".", ".."] {
             assert!(message_url(None, id).is_err());
         }
+    }
+    #[test]
+    fn event_url_selects_only_meeting_metadata_via_the_odata_cast_path() {
+        let personal = event_url(None, "synthetic-id").unwrap();
+        assert_eq!(
+            personal.path(),
+            "/v1.0/me/messages/synthetic-id/microsoft.graph.eventMessage"
+        );
+        assert!(personal.query_pairs().any(|(key, value)| {
+            key == "$select" && value == "meetingMessageType,startDateTime,endDateTime,isOutOfDate"
+        }));
+        let shared = event_url(Some("shared@example.invalid"), "a/b").unwrap();
+        assert_eq!(
+            shared.path(),
+            "/v1.0/users/shared@example.invalid/messages/a%2Fb/microsoft.graph.eventMessage"
+        );
+    }
+
+    #[test]
+    fn meeting_metadata_parses_only_utc_event_times() {
+        let meeting = serde_json::json!({
+            "@odata.type": "#microsoft.graph.eventMessageRequest",
+            "meetingMessageType": "meetingRequest",
+            "startDateTime": {"dateTime": "2026-08-21T18:30:00.0000000", "timeZone": "UTC"},
+            "endDateTime": {"dateTime": "2026-08-21T19:30:00.0000000", "timeZone": "UTC"},
+            "isOutOfDate": false
+        });
+        assert!(is_event_message(&meeting));
+        let event = mail_event(&meeting).unwrap();
+        assert_eq!(event.start, "2026-08-21T18:30:00Z");
+        assert_eq!(event.end, "2026-08-21T19:30:00Z");
+        assert!(!event.out_of_date);
+
+        let mut non_utc = meeting;
+        non_utc["startDateTime"]["timeZone"] = serde_json::json!("Pacific Standard Time");
+        assert!(mail_event(&non_utc).is_none());
+    }
+
+    #[test]
+    fn a_trailing_z_on_the_graph_datetime_string_is_not_doubled() {
+        let meeting = serde_json::json!({
+            "meetingMessageType": "meetingRequest",
+            "startDateTime": {"dateTime": "2026-08-21T18:30:00Z", "timeZone": "UTC"},
+            "endDateTime": {"dateTime": "2026-08-21T19:30:00.0000000", "timeZone": "UTC"},
+            "isOutOfDate": false
+        });
+        let event = mail_event(&meeting).unwrap();
+        assert_eq!(event.start, "2026-08-21T18:30:00Z");
+    }
+
+    #[test]
+    fn plain_message_has_no_event() {
+        let body = serde_json::json!({
+            "@odata.type": "#microsoft.graph.message",
+            "body": {"contentType": "text", "content": "Synthetic request"}
+        });
+        assert!(!is_event_message(&body));
+    }
+
+    /// Spins a real, one-shot loopback HTTP server (no TLS -- `fetch_event`
+    /// is exercised through [`fetch_from_origin`]'s testable seam, which
+    /// checks the request's origin against a caller-supplied one instead of
+    /// [`fetch`]'s hardcoded [`GRAPH_ORIGIN`]) that reads one request and
+    /// writes back `response` verbatim, then closes. Returns the server's
+    /// own origin (for use as both the request's base and the `expected_origin`
+    /// argument) and a handle the caller joins once the round trip is done.
+    fn one_shot_server(response: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer);
+            stream.write_all(&response).unwrap();
+            let _ = stream.flush();
+        });
+        (format!("http://127.0.0.1:{port}/"), handle)
+    }
+
+    /// The status classification a 400 actually produces, not just that
+    /// [`fetch_event`]'s best-effort `Option` collapses it to `None` --
+    /// exercised through [`fetch_from_origin`] directly so the specific
+    /// [`ConnectionError`] variant is visible to the assertion.
+    #[test]
+    fn a_400_classifies_as_bad_request() {
+        let (origin, server) = one_shot_server(
+            b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        );
+        let http = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+        let url = Url::parse(&format!(
+            "{origin}v1.0/me/messages/synthetic-id/microsoft.graph.eventMessage"
+        ))
+        .unwrap();
+        assert_eq!(
+            fetch_from_origin(&http, "synthetic-token", url, &origin),
+            Err(ConnectionError::BadRequest)
+        );
+        server.join().unwrap();
+    }
+
+    /// A response whose `Content-Length` header alone exceeds the bound is
+    /// rejected before any body is read.
+    #[test]
+    fn a_large_content_length_classifies_as_response_too_large() {
+        let (origin, server) = one_shot_server(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                super::super::MAX_RESPONSE + 1
+            )
+            .into_bytes(),
+        );
+        let http = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+        let url = Url::parse(&format!(
+            "{origin}v1.0/me/messages/synthetic-id/microsoft.graph.eventMessage"
+        ))
+        .unwrap();
+        assert_eq!(
+            fetch_from_origin(&http, "synthetic-token", url, &origin),
+            Err(ConnectionError::ResponseTooLarge)
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn extra_fetch_populates_the_event_from_a_200_with_the_four_fields() {
+        let payload = serde_json::json!({
+            "meetingMessageType": "meetingRequest",
+            "startDateTime": {"dateTime": "2026-08-21T18:30:00.0000000", "timeZone": "UTC"},
+            "endDateTime": {"dateTime": "2026-08-21T19:30:00.0000000", "timeZone": "UTC"},
+            "isOutOfDate": false
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            payload.len()
+        );
+        let (origin, server) = one_shot_server(response.into_bytes());
+        let http = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+        let url = Url::parse(&format!(
+            "{origin}v1.0/me/messages/synthetic-id/microsoft.graph.eventMessage"
+        ))
+        .unwrap();
+        let event = fetch_event(&http, "synthetic-token", url, &origin).unwrap();
+        assert_eq!(event.start, "2026-08-21T18:30:00Z");
+        assert_eq!(event.end, "2026-08-21T19:30:00Z");
+        assert!(!event.out_of_date);
+        server.join().unwrap();
     }
     #[test]
     fn window_walks_newest_first_rows_until_the_cutoff() {

@@ -17,18 +17,30 @@ in the normal application.
    replies. Resolved requests are closed and hidden by default; the show
    toggle reveals them with the closing evidence. Closing evidence can also
    come from a reply you sent the same person in a different conversation;
-   the card marks these "evidence in another conversation." Corrections that
+   the card marks these "evidence in another conversation." Expectations tied
+   to a passed event also close automatically; event times come from Graph
+   meeting messages, calendar-invite subject lines, or a date or time stated
+   in an email body. Corrections that
    leave the action owed keep the card open with updated terms. If a quoted deadline or
    completion could not be validated against the mail, the card says so and
    keeps the item open.
 3. **Track — this is mine** confirms personal responsibility. **Keep an eye on
    this** watches an unassigned team expectation without claiming ownership.
    **Handled**, **Not mine / dismiss**, **No longer relevant**, and **Reopen for
-   review** save abstract decisions. The checkbox **Show resolved, handled,
-   dismissed, and no-longer-relevant items** reveals closed cards. Model
-   summaries and source text are not saved locally.
-4. After choosing to track or watch, **Set To Do reminder** previews an editable
-   title and future local reminder time. The explicit create button authorizes
+   review** save abstract decisions. Opening a reminder draft on a card still
+   under review implies the same tracking as **Track — this is mine**;
+   cancelling that draft restores the decision to what it was before the
+   draft opened, unless you have changed the decision since (an action
+   button, or a rescan closing the card by later evidence), in which case
+   the draft simply closes and the changed decision stands. The checkbox
+   **Show resolved, handled, dismissed, and
+   no-longer-relevant items** reveals closed cards. Model summaries and
+   source text are not saved locally.
+4. **Set To Do reminder** is available on any open card and does not require
+   tracking or watching it first; setting a reminder on a card still under
+   review implies tracking it (a card already being watched stays watched).
+   It previews an editable title and future local reminder time directly
+   under the card that opened it. The explicit create button authorizes
    one task in the same Microsoft account's default personal Tasks list.
    Microsoft To Do owns notification delivery, including when OpenLoops closes.
    This requires delegated Tasks.ReadWrite and a separate browser sign-in.

@@ -1,3 +1,6 @@
+use crate::deadline_view::{DeadlineView, EVENT_GENERIC_NOUNS, classify};
+use chrono::{Datelike, TimeZone};
+use openloops_domain::deadline_parse::DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT;
 use openloops_graph::live::{ConnectionError, review::MailItem};
 use openloops_inference::{
     blocks::CanonicalBlock,
@@ -6,7 +9,8 @@ use openloops_inference::{
     ollama::{
         OllamaCloud, ProviderError,
         expectations::{
-            Anchor, ConversationMessage, Expectation, Expectations, Owner, ResolutionKind,
+            Anchor, ConversationMessage, EventPassed, Expectation, Expectations, Owner,
+            ResolutionKind,
         },
     },
     reply_history::{
@@ -32,6 +36,880 @@ pub struct ReviewMessage {
     /// Exchange split into different `conversationId`s but that share
     /// participants -- see [`merge_threads`].
     pub other_addresses: Vec<String>,
+    /// `(start, end, out_of_date)`, in UTC seconds, from either Graph
+    /// meeting-message metadata or a calendar-invite subject line.
+    pub event: Option<(i64, i64, bool)>,
+}
+
+pub struct EventRef {
+    pub name: String,
+    pub start: i64,
+    pub end: i64,
+    pub message_handle: String,
+    /// Which of the three ways [`build_event_index`] learns an event this
+    /// entry came from -- used only for the coverage diagnostic in
+    /// [`close_passed_events`].
+    pub source: EventSource,
+}
+
+/// How [`build_event_index`] learned one [`EventRef`], in descending order
+/// of confidence: Graph meeting-message metadata, a calendar-invite subject
+/// line, an event noun and date found in the subject's own prose (never
+/// structured as an invite), or an event phrase and date found in a
+/// message body's prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventSource {
+    Meeting,
+    Subject,
+    SubjectProse,
+    Prose,
+}
+
+/// Parses a calendar time embedded in a subject. Unknown or absent timezone
+/// abbreviations use UTC because a UTC message timestamp does not imply a
+/// reliable local offset without a timezone database.
+///
+/// An all-day (no stated time) subject ends at [`prose_event_time`]'s own
+/// all-day policy -- local end-of-day
+/// ([`DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT`], 17:00), not literal midnight --
+/// so the two sources agree on what "all day" means rather than one ending
+/// at 17:00 and the other at the next literal midnight.
+pub fn subject_event_time(subject: &str, _message_timestamp: i64) -> Option<(i64, i64)> {
+    let calendar = subject.rsplit_once(" @ ")?.1.trim();
+    let (calendar, offset) = strip_organizer_and_timezone_suffix(calendar);
+    let parts = join_spaced_am_pm(calendar.split_whitespace());
+    if parts.len() < 4 {
+        return None;
+    }
+    let date_text = parts[..4].join(" ");
+    let date = chrono::NaiveDate::parse_from_str(&date_text, "%a %b %d, %Y").ok()?;
+    let local_midnight = date.and_hms_opt(0, 0, 0)?.and_utc().timestamp();
+    if parts.len() == 4 {
+        return Some((
+            local_midnight - i64::from(offset),
+            local_midnight + i64::from(DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT) - i64::from(offset),
+        ));
+    }
+    if parts.len() != 7 || parts[5] != "-" {
+        return None;
+    }
+    let start = parse_subject_clock(&parts[4])?;
+    let mut end = parse_subject_clock(&parts[6])?;
+    if end <= start {
+        end += 86_400;
+    }
+    Some((
+        local_midnight + i64::from(start - offset),
+        local_midnight + i64::from(end - offset),
+    ))
+}
+
+/// Repeatedly peels a trailing `(...)` group off `calendar` (e.g. an
+/// organizer name appended after the timezone abbreviation, "... (CDT) (Sam
+/// Rivera)"), using the LAST peeled group [`timezone_offset`] recognizes as
+/// the zone and stopping there; a group it does not recognize is discarded
+/// as decoration and peeling continues. Bounded to a handful of groups so a
+/// pathological subject cannot loop. Returns the calendar text with every
+/// peeled group removed and the resolved offset (0/UTC when none is found).
+fn strip_organizer_and_timezone_suffix(calendar: &str) -> (String, i32) {
+    let mut calendar = calendar.trim_end().to_string();
+    let mut offset = 0i32;
+    for _ in 0..5 {
+        if !calendar.ends_with(')') {
+            break;
+        }
+        let Some(open) = calendar.rfind('(') else {
+            break;
+        };
+        let content = calendar[open + 1..calendar.len() - 1].trim().to_string();
+        calendar.truncate(open);
+        calendar = calendar.trim_end().to_string();
+        if let Some(found) = timezone_offset(&content) {
+            offset = found;
+            break;
+        }
+    }
+    (calendar, offset)
+}
+
+/// Joins a bare "am"/"pm" token to its predecessor (e.g. "11:30", "am" ->
+/// "11:30am"), so a subject with a space before the meridiem still parses
+/// like the more common unspaced form.
+fn join_spaced_am_pm<'a>(tokens: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut joined: Vec<String> = Vec::new();
+    for token in tokens {
+        let lower = token.to_ascii_lowercase();
+        if (lower == "am" || lower == "pm") && !joined.is_empty() {
+            joined.last_mut().expect("checked above").push_str(token);
+        } else {
+            joined.push(token.to_string());
+        }
+    }
+    joined
+}
+
+fn timezone_offset(abbreviation: &str) -> Option<i32> {
+    Some(match abbreviation {
+        "PDT" | "MST" => -7 * 3600,
+        "PST" => -8 * 3600,
+        "MDT" | "CST" => -6 * 3600,
+        "CDT" | "EST" => -5 * 3600,
+        "EDT" => -4 * 3600,
+        "UTC" | "GMT" => 0,
+        "BST" | "CET" => 3600,
+        "CEST" => 2 * 3600,
+        _ => return None,
+    })
+}
+
+fn parse_subject_clock(value: &str) -> Option<i32> {
+    let lower = value.to_ascii_lowercase();
+    let (clock, pm) = if let Some(clock) = lower.strip_suffix("am") {
+        (clock, false)
+    } else {
+        (lower.strip_suffix("pm")?, true)
+    };
+    let mut parts = clock.split(':');
+    let hour: i32 = parts.next()?.parse().ok()?;
+    let minute: i32 = parts.next().map_or(Some(0), |v| v.parse().ok())?;
+    if parts.next().is_some() || !(1..=12).contains(&hour) || !(0..60).contains(&minute) {
+        return None;
+    }
+    Some(((hour % 12) + if pm { 12 } else { 0 }) * 3600 + minute * 60)
+}
+
+/// One word-like run (alphanumerics plus the internal punctuation `.`, `-`,
+/// `/`, and `:` that dates and times use, e.g. "Sep.", "9/3/2026",
+/// "2026-09-03", "2:30") together with its byte offset into the original
+/// text. All other punctuation (spaces, commas, parentheses) is a
+/// separator and never appears in a token, which is what lets
+/// `match_date_at` treat "Sep. 3, 2026" and "Sep. 3 2026" identically.
+fn prose_tokens(text: &str) -> Vec<(String, usize)> {
+    let is_word_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '/' | ':');
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let (start, c) = chars[i];
+        if !is_word_char(c) {
+            i += 1;
+            continue;
+        }
+        let mut end = start + c.len_utf8();
+        let mut j = i + 1;
+        while j < chars.len() && is_word_char(chars[j].1) {
+            end = chars[j].0 + chars[j].1.len_utf8();
+            j += 1;
+        }
+        tokens.push((text[start..end].to_string(), start));
+        i = j;
+    }
+    tokens
+}
+
+/// The 1-based calendar month a written month name or its common
+/// abbreviation refers to, case-insensitively and ignoring a trailing
+/// period ("Sept 3", "Sep. 3", "September 3" are all September).
+fn month_number(word: &str) -> Option<u32> {
+    Some(
+        match word.trim_end_matches('.').to_ascii_lowercase().as_str() {
+            "january" | "jan" => 1,
+            "february" | "feb" => 2,
+            "march" | "mar" => 3,
+            "april" | "apr" => 4,
+            "may" => 5,
+            "june" | "jun" => 6,
+            "july" | "jul" => 7,
+            "august" | "aug" => 8,
+            "september" | "sep" | "sept" => 9,
+            "october" | "oct" => 10,
+            "november" | "nov" => 11,
+            "december" | "dec" => 12,
+            _ => return None,
+        },
+    )
+}
+
+/// A trailing sentence period glues onto the last token of a date at the
+/// end of a sentence ("...on Sept 3." or "...on 2026-09-03."), since `.` is
+/// itself a word character to `prose_tokens` (needed for "Sept."). Every
+/// numeric field below strips it first so that period is never mistaken
+/// for part of the digits.
+fn strip_trailing_period(token: &str) -> &str {
+    token.strip_suffix('.').unwrap_or(token)
+}
+
+fn parse_day_of_month(token: &str) -> Option<u32> {
+    let token = strip_trailing_period(token);
+    if token.is_empty() || token.len() > 2 || !token.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let day: u32 = token.parse().ok()?;
+    (1..=31).contains(&day).then_some(day)
+}
+
+fn parse_four_digit_year(token: &str) -> Option<i32> {
+    let token = strip_trailing_period(token);
+    if token.len() != 4 || !token.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    token.parse().ok()
+}
+
+/// `2026-09-03`, as one token (`-` is a word character to `prose_tokens`).
+fn parse_iso_date(word: &str) -> Option<(u32, u32, Option<i32>)> {
+    let word = strip_trailing_period(word);
+    let parts: Vec<&str> = word.split('-').collect();
+    if parts.len() != 3 || parts[0].len() != 4 || parts[1].len() != 2 || parts[2].len() != 2 {
+        return None;
+    }
+    let year: i32 = parts[0].parse().ok()?;
+    let month: u32 = parts[1].parse().ok()?;
+    let day: u32 = parts[2].parse().ok()?;
+    ((1..=12).contains(&month) && (1..=31).contains(&day)).then_some((month, day, Some(year)))
+}
+
+/// `n/m/yyyy`, as one token (`/` is a word character to `prose_tokens`).
+/// Ambiguous between month/day and day/month order when BOTH fields are
+/// `<= 12` -- refused outright rather than guessing (see
+/// [`prose_event_time`]'s doc comment for the policy). Accepted only when
+/// exactly one field is `> 12`, which resolves the order unambiguously:
+/// that field must be the day, the other the month.
+fn parse_numeric_date(word: &str) -> Option<(u32, u32, Option<i32>)> {
+    let word = strip_trailing_period(word);
+    let parts: Vec<&str> = word.split('/').collect();
+    if parts.len() != 3 || parts[2].len() != 4 {
+        return None;
+    }
+    let first: u32 = parts[0].parse().ok()?;
+    let second: u32 = parts[1].parse().ok()?;
+    let year: i32 = parts[2].parse().ok()?;
+    let (month, day) = if first > 12 && second <= 12 {
+        (second, first)
+    } else if second > 12 && first <= 12 {
+        (first, second)
+    } else {
+        return None;
+    };
+    ((1..=12).contains(&month) && (1..=31).contains(&day)).then_some((month, day, Some(year)))
+}
+
+/// One matched calendar date: `(month, day, year)`, where `year` is `None`
+/// when the matched text did not state one (e.g. "September 3").
+type MatchedDate = (u32, u32, Option<i32>);
+
+/// Words that precede a bare number without making it a day of month --
+/// "Room 12", "ext 12", "suite 12", "unit 12", "no 12", "#12" -- so a "day
+/// month" match ([`match_date_at`]'s `day_then_month` case) starting at a
+/// number immediately preceded by one of these is rejected outright: the
+/// number far more likely names a room, extension, or other identifier
+/// than a calendar day. Case-insensitive.
+const DAY_FALSE_POSITIVE_PRECEDERS: &[&str] = &["room", "ext", "suite", "unit", "no", "#"];
+
+/// Whether `tokens[i]` (a candidate day-of-month number) sits directly
+/// after one of [`DAY_FALSE_POSITIVE_PRECEDERS`], and so must not be read
+/// as a day-then-month date.
+fn day_then_month_excluded(tokens: &[(String, usize)], i: usize) -> bool {
+    i > 0 && DAY_FALSE_POSITIVE_PRECEDERS.contains(&tokens[i - 1].0.to_ascii_lowercase().as_str())
+}
+
+/// Tries every recognized date form starting exactly at `tokens[i]`,
+/// returning the date it found and how many tokens it consumed.
+fn match_date_at(tokens: &[(String, usize)], i: usize) -> Option<(MatchedDate, usize)> {
+    let word = &tokens[i].0;
+    if let Some(parsed) = parse_iso_date(word).or_else(|| parse_numeric_date(word)) {
+        return Some((parsed, 1));
+    }
+    let month_then_day =
+        month_number(word).zip(tokens.get(i + 1).and_then(|t| parse_day_of_month(&t.0)));
+    let day_then_month = (!day_then_month_excluded(tokens, i))
+        .then(|| parse_day_of_month(word).zip(tokens.get(i + 1).and_then(|t| month_number(&t.0))))
+        .flatten()
+        .map(|(day, month)| (month, day));
+    let (month, day) = month_then_day.or(day_then_month)?;
+    if let Some(year) = tokens.get(i + 2).and_then(|t| parse_four_digit_year(&t.0)) {
+        return Some(((month, day, Some(year)), 3));
+    }
+    Some(((month, day, None), 2))
+}
+
+/// One optional token that may sit between a date and its trailing time
+/// without blocking [`parse_prose_time`] from finding that time ("on
+/// September 3 at 2 pm", "September 3, 2 pm", "September 3 @ 2pm",
+/// "September 3 from 2pm", "September 3 starting 2pm"). `,` and `@` never
+/// actually appear here as their own token -- [`prose_tokens`] treats both
+/// as plain separators -- but are listed anyway so the intent reads
+/// completely against the token stream that could exist.
+const TIME_PREPOSITIONS: &[&str] = &["at", "@", ",", "from", "starting"];
+
+/// A clock time starting at `tokens[idx]`, as seconds since local midnight,
+/// and how many tokens it consumed: a 12-hour time with the meridiem
+/// attached ("2pm", "2:30pm") or spaced ("2:30 pm"), or a bare 24-hour time
+/// ("14:00"). Skips one leading [`TIME_PREPOSITIONS`] token first, so a
+/// time stated after one still parses.
+fn parse_prose_time(tokens: &[(String, usize)], idx: usize) -> Option<(i32, usize)> {
+    if let Some(result) = parse_prose_time_literal(tokens, idx) {
+        return Some(result);
+    }
+    let lower = tokens.get(idx)?.0.to_ascii_lowercase();
+    if !TIME_PREPOSITIONS.contains(&lower.as_str()) {
+        return None;
+    }
+    let (seconds, consumed) = parse_prose_time_literal(tokens, idx + 1)?;
+    Some((seconds, consumed + 1))
+}
+
+/// The literal clock-time parse [`parse_prose_time`] wraps, with no
+/// preposition handling of its own.
+fn parse_prose_time_literal(tokens: &[(String, usize)], idx: usize) -> Option<(i32, usize)> {
+    let token = &tokens.get(idx)?.0;
+    if let Some(seconds) = parse_subject_clock(token) {
+        return Some((seconds, 1));
+    }
+    if let Some(next) = tokens.get(idx + 1) {
+        let lower = next.0.to_ascii_lowercase();
+        if (lower == "am" || lower == "pm")
+            && let Some(seconds) = parse_subject_clock(&format!("{token}{lower}"))
+        {
+            return Some((seconds, 2));
+        }
+    }
+    let mut parts = token.split(':');
+    let hour: i32 = parts.next()?.parse().ok()?;
+    let minute: i32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !(0..24).contains(&hour) || !(0..60).contains(&minute) {
+        return None;
+    }
+    Some((hour * 3600 + minute * 60, 1))
+}
+
+/// `message_timestamp`'s calendar year in the local time `offset` implies.
+fn local_year(message_timestamp: i64, offset: i32) -> i32 {
+    chrono::DateTime::from_timestamp(message_timestamp + i64::from(offset), 0)
+        .map_or(1970, |t| t.year())
+}
+
+/// Finds the first explicit date in `text` -- "September 3", "Sept 3",
+/// "Sep. 3, 2026", "3 September 2026", "9/3/2026", or "2026-09-03" --
+/// optionally followed by a time ("2pm", "2:30 pm", "14:00", or any of
+/// those after one leading preposition token -- see [`TIME_PREPOSITIONS`]),
+/// and resolves it to `(start, end, byte_offset)` in UTC seconds, where
+/// `byte_offset` is where the date text begins in `text`.
+///
+/// A date with no stated year defaults to `message_timestamp`'s own year in
+/// the given `offset`, rolling forward one year when that default would
+/// land the date more than 60 days before `message_timestamp` -- so
+/// "September 3" said in November means next year's September 3rd, not one
+/// already long past. A stated year is always taken as given, never rolled.
+///
+/// A numeric `n/m/yyyy` date is refused outright when BOTH `n` and `m` are
+/// `<= 12` -- month-first and day-first readings would disagree and
+/// neither is more likely than the other, so it is never guessed. It is
+/// accepted only when exactly one field is `> 12`, which resolves the
+/// order unambiguously (that field is the day, the other the month): see
+/// [`parse_numeric_date`].
+///
+/// `end` is `start` plus one hour when a time was found; otherwise the
+/// matched date's whole civil day, closed at its local end-of-day per the
+/// same policy `deadline_view::classify` uses for a bare date deadline
+/// (`DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT`) -- the same all-day policy
+/// [`subject_event_time`] uses -- not literal midnight-to-midnight.
+pub fn prose_event_time(
+    text: &str,
+    message_timestamp: i64,
+    offset: i32,
+) -> Option<(i64, i64, usize)> {
+    prose_event_time_candidates(text, message_timestamp, offset)
+        .into_iter()
+        .next()
+}
+
+/// Every explicit date [`prose_event_time`] could find in `text`, resolved
+/// the same way and in the same left-to-right order -- [`prose_event_time`]
+/// itself is just this list's first element. Shared with the body-prose
+/// event learner ([`nearest_body_event_pairing`]), which must weigh EVERY
+/// date in a block against every candidate event phrase to pair each
+/// phrase with the date nearest to it, rather than always the block's
+/// first date.
+fn prose_event_time_candidates(
+    text: &str,
+    message_timestamp: i64,
+    offset: i32,
+) -> Vec<(i64, i64, usize)> {
+    let tokens = prose_tokens(text);
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let Some(((month, day, year), consumed)) = match_date_at(&tokens, i) else {
+            i += 1;
+            continue;
+        };
+        let year_given = year.is_some();
+        let mut year = year.unwrap_or_else(|| local_year(message_timestamp, offset));
+        let Some(mut date) = chrono::NaiveDate::from_ymd_opt(year, month, day) else {
+            i += 1;
+            continue;
+        };
+        let Some(mut local_midnight) = date.and_hms_opt(0, 0, 0).map(|d| d.and_utc().timestamp())
+        else {
+            i += 1;
+            continue;
+        };
+        let mut day_start = local_midnight - i64::from(offset);
+        if !year_given && day_start < message_timestamp - 60 * 86_400 {
+            year += 1;
+            let Some(rolled) = chrono::NaiveDate::from_ymd_opt(year, month, day) else {
+                i += 1;
+                continue;
+            };
+            date = rolled;
+            let Some(rolled_midnight) = date.and_hms_opt(0, 0, 0).map(|d| d.and_utc().timestamp())
+            else {
+                i += 1;
+                continue;
+            };
+            local_midnight = rolled_midnight;
+            day_start = local_midnight - i64::from(offset);
+        }
+        let byte_offset = tokens[i].1;
+        if let Some((time_seconds, _)) = parse_prose_time(&tokens, i + consumed) {
+            let start = local_midnight + i64::from(time_seconds) - i64::from(offset);
+            found.push((start, start + 3600, byte_offset));
+        } else {
+            let day_end =
+                local_midnight + i64::from(DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT) - i64::from(offset);
+            found.push((day_start, day_end, byte_offset));
+        }
+        i += consumed;
+    }
+    found
+}
+
+/// Event nouns recognized in ordinary prose (as opposed to
+/// [`EVENT_GENERIC_NOUNS`], which are stripped as too common to distinguish
+/// one event from another): a capitalized multi-word phrase ending in one of
+/// these, found near a date in a message body, is learned as that event's
+/// name by [`body_event_name`], and a subject's own prose is only ever
+/// learned as an event when the subject (minus its date) contains one of
+/// these too, gating the subject-prose learner in [`learn_one_event`]
+/// against turning any ordinary "<words> <date>" subject into a phantom
+/// event. Deliberately excludes "deadline": a stated deadline is evidence
+/// about an OBLIGATION, not proof that a gathering by that name exists.
+const PROSE_EVENT_NOUNS: &[&str] = &[
+    "ceremony",
+    "call",
+    "closing",
+    "conference",
+    "deposition",
+    "hearing",
+    "launch",
+    "meeting",
+    "retreat",
+    "seminar",
+    "session",
+    "summit",
+    "training",
+    "trial",
+    "webinar",
+    "workshop",
+];
+
+/// True when at least one whitespace-separated word of `name` (already
+/// lowercased, as [`normalize_subject`] produces) is a [`PROSE_EVENT_NOUNS`]
+/// entry.
+fn contains_prose_event_noun(name: &str) -> bool {
+    name.split_whitespace()
+        .any(|word| PROSE_EVENT_NOUNS.contains(&word))
+}
+
+/// How close (in bytes) a candidate event-name phrase must sit to the date
+/// text in a message body for [`body_event_name`] to credit them as
+/// belonging to the same event.
+const PROSE_EVENT_NAME_WINDOW: usize = 120;
+
+/// Builds the event index from every loaded message, learning each one from
+/// the first source that applies, in descending order of confidence: Graph
+/// meeting-message metadata, a calendar-invite subject line, an explicit
+/// date found in the subject's own prose (a name never structured as an
+/// invite, e.g. "Spring Estate Planning Workshop - Sept 3", gated by
+/// [`contains_prose_event_noun`] so an ordinary "<words> <date>" subject
+/// with no event-shaped noun in it never counts), or an explicit date found
+/// in a message body near a phrase naming the event. An out-of-date entry
+/// (a superseded meeting-message revision) is dropped outright, never
+/// learned; a name of fewer than 2 words is also dropped -- too generic to
+/// identify one event ("hi", "fyi", a bare "Hearing") -- [`learn_one_event`]
+/// itself already enforces this per candidate so a short-name rejection
+/// falls through to the next source or block rather than losing the whole
+/// message, and this is a redundant final check. When multiple messages
+/// name the same normalized event (a reschedule, or the same invite echoed
+/// by more than one message), only the entry with the LATEST start
+/// survives -- a stale "Aug 21" instance of "design workshop" must not
+/// shadow a later "Sep 15" reschedule of the same meeting.
+pub fn build_event_index(messages: &[ReviewMessage]) -> Vec<EventRef> {
+    let mut best: BTreeMap<String, EventRef> = BTreeMap::new();
+    for message in messages {
+        let Some((name, start, end, source)) = learn_one_event(message) else {
+            continue;
+        };
+        if name.split_whitespace().count() < 2 {
+            continue;
+        }
+        let entry = best.entry(name.clone()).or_insert(EventRef {
+            name,
+            start: i64::MIN,
+            end: 0,
+            message_handle: String::new(),
+            source,
+        });
+        if start > entry.start {
+            entry.start = start;
+            entry.end = end;
+            entry.message_handle.clone_from(&message.input.handle);
+            entry.source = source;
+        }
+    }
+    best.into_values().collect()
+}
+
+/// Whether `name` is specific enough to identify one event: 2 or more
+/// words. A candidate that fails this check is rejected and
+/// [`learn_one_event`] falls through to its next candidate (a later body
+/// block, or the block-level phrase search) instead of aborting the whole
+/// message -- a message can carry more than one date/name candidate, and a
+/// too-generic early one must not shadow a good later one.
+fn is_specific_event_name(name: &str) -> bool {
+    name.split_whitespace().count() >= 2
+}
+
+/// One message's contribution to the event index, per the priority order
+/// documented on [`build_event_index`]. `None` when none of the sources
+/// found a sufficiently specific ([`is_specific_event_name`]) candidate (or
+/// the Graph/subject entry was out of date).
+fn learn_one_event(message: &ReviewMessage) -> Option<(String, i64, i64, EventSource)> {
+    let subject = message.input.message.subject.as_string();
+    if let Some((start, end, out_of_date)) = message.event {
+        if out_of_date {
+            return None;
+        }
+        let name = normalize_subject(&subject);
+        return is_specific_event_name(&name).then_some((name, start, end, EventSource::Meeting));
+    }
+    if let Some((start, end)) = subject_event_time(&subject, message.input.timestamp) {
+        let name = normalize_subject(&subject);
+        return is_specific_event_name(&name).then_some((name, start, end, EventSource::Subject));
+    }
+    let offset = local_offset_seconds(message.input.timestamp, 0);
+    if let Some((start, end, byte_offset)) =
+        prose_event_time(&subject, message.input.timestamp, offset)
+    {
+        let name =
+            normalize_subject(subject[..byte_offset].trim_end_matches(|c: char| {
+                c.is_whitespace() || matches!(c, '-' | '@' | ':' | ',')
+            }));
+        if is_specific_event_name(&name) && contains_prose_event_noun(&name) {
+            return Some((name, start, end, EventSource::SubjectProse));
+        }
+    }
+    let subject_name = normalize_subject(&subject);
+    for block in &message.input.message.body_blocks {
+        let text = block.as_string();
+        let dates = prose_event_time_candidates(&text, message.input.timestamp, offset);
+        if dates.is_empty() {
+            continue;
+        }
+        if let Some((name, start, end)) = body_event_name(&text, &dates, &subject_name)
+            && is_specific_event_name(&name)
+        {
+            return Some((name, start, end, EventSource::Prose));
+        }
+    }
+    None
+}
+
+/// The event name and date for a body-block prose match: the message's own
+/// normalized subject, paired with the block's first date, when that
+/// subject is itself specific ([`is_specific_event_name`]) AND the block's
+/// text contains it; otherwise (including when the subject is present but
+/// too generic to trust on its own, e.g. a one-word subject like "Prep"
+/// that happens to sit inside an unrelated word like "prepare") falls
+/// through to the (phrase, date) pairing [`nearest_body_event_pairing`]
+/// finds among every capitalized multi-word phrase ending in a
+/// [`PROSE_EVENT_NOUN`] and every date in `dates`. Requiring specificity
+/// FIRST matters: a short subject is exactly the case most likely to
+/// appear as a coincidental substring of ordinary prose (as opposed to
+/// actually naming the event), and matching on it there would silently
+/// mask a real, specific phrase later in the same text. `None` when
+/// nothing is found -- an unnamed date is not learned.
+///
+/// [`PROSE_EVENT_NOUN`]: PROSE_EVENT_NOUNS
+fn body_event_name(
+    text: &str,
+    dates: &[(i64, i64, usize)],
+    subject_name: &str,
+) -> Option<(String, i64, i64)> {
+    if is_specific_event_name(subject_name)
+        && text.to_lowercase().contains(subject_name)
+        && let Some(&(start, end, _)) = dates.first()
+    {
+        return Some((subject_name.to_string(), start, end));
+    }
+    nearest_body_event_pairing(text, dates)
+}
+
+/// True when `word` starts with an ASCII uppercase letter (a cheap proxy for
+/// "looks like part of a proper name" in ordinary prose).
+fn starts_uppercase(word: &str) -> bool {
+    word.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+}
+
+/// Every capitalized multi-word run (2 or more consecutive capitalized
+/// words) ending in a [`PROSE_EVENT_NOUNS`] entry, each with its start/end
+/// byte offsets, in left-to-right order. A run never crosses a sentence
+/// boundary: it stops growing immediately after including a token that
+/// ends in `.` (so "Notes. Onboarding Training" yields only "Onboarding
+/// Training", never a run that swallows the unrelated preceding sentence).
+fn capitalized_event_phrases(text: &str) -> Vec<(String, usize, usize)> {
+    let tokens = prose_tokens(text);
+    let mut phrases = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if !starts_uppercase(&tokens[i].0) {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        loop {
+            let ends_sentence = tokens[j].0.ends_with('.');
+            j += 1;
+            if ends_sentence || j >= tokens.len() || !starts_uppercase(&tokens[j].0) {
+                break;
+            }
+        }
+        if j - i >= 2
+            && PROSE_EVENT_NOUNS.contains(
+                &tokens[j - 1]
+                    .0
+                    .trim_end_matches('.')
+                    .to_lowercase()
+                    .as_str(),
+            )
+        {
+            let phrase_start = tokens[i].1;
+            let phrase_end = tokens[j - 1].1 + tokens[j - 1].0.len();
+            let phrase = tokens[i..j]
+                .iter()
+                .map(|t| t.0.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+                .trim_end_matches('.')
+                .to_string();
+            phrases.push((phrase, phrase_start, phrase_end));
+        }
+        i = j;
+    }
+    phrases
+}
+
+/// Among `phrases` (as returned by [`capitalized_event_phrases`]), the one
+/// whose nearer edge sits closest to `date_byte_offset` and within
+/// [`PROSE_EVENT_NAME_WINDOW`] bytes of it: the phrase lowercased, its
+/// distance, and whether the date follows the phrase (`date_byte_offset` is
+/// at or after the phrase's end) -- callers pairing one phrase against
+/// MULTIPLE dates ([`nearest_body_event_pairing`]) use that bit to break a
+/// distance tie in favor of the natural "<Event Name> on <date>" order.
+fn nearest_phrase_for_date(
+    phrases: &[(String, usize, usize)],
+    date_byte_offset: usize,
+) -> Option<(String, usize, bool)> {
+    let mut best: Option<(String, usize, bool)> = None;
+    for (phrase, phrase_start, phrase_end) in phrases {
+        let (distance, date_follows) = if *phrase_start > date_byte_offset {
+            (phrase_start - date_byte_offset, false)
+        } else {
+            (date_byte_offset.saturating_sub(*phrase_end), true)
+        };
+        if distance > PROSE_EVENT_NAME_WINDOW {
+            continue;
+        }
+        let better = best
+            .as_ref()
+            .is_none_or(|(_, best_distance, _)| distance < *best_distance);
+        if better {
+            best = Some((phrase.to_lowercase(), distance, date_follows));
+        }
+    }
+    best
+}
+
+/// Pairs a message body's dates against its capitalized event-noun phrases:
+/// evaluates every phrase against every date in `dates` and returns the
+/// (phrase, date) pairing with the smallest byte distance between them --
+/// never just the block's first date -- so "please RSVP by September 1 for
+/// the Spring Workshop on September 15" pairs "Spring Workshop" with
+/// September 15, not the earlier, unrelated September 1. A tie is broken in
+/// favor of a date that follows its phrase within
+/// [`PROSE_EVENT_NAME_WINDOW`] bytes.
+fn nearest_body_event_pairing(
+    text: &str,
+    dates: &[(i64, i64, usize)],
+) -> Option<(String, i64, i64)> {
+    let phrases = capitalized_event_phrases(text);
+    let mut best: Option<(String, i64, i64, usize, bool)> = None;
+    for &(start, end, date_offset) in dates {
+        let Some((phrase, distance, date_follows)) = nearest_phrase_for_date(&phrases, date_offset)
+        else {
+            continue;
+        };
+        let better = match &best {
+            None => true,
+            Some((_, _, _, best_distance, best_follows)) => {
+                distance < *best_distance
+                    || (distance == *best_distance && date_follows && !*best_follows)
+            }
+        };
+        if better {
+            best = Some((phrase, start, end, distance, date_follows));
+        }
+    }
+    best.map(|(phrase, start, end, ..)| (phrase, start, end))
+}
+
+/// Stop words dropped from both the phrase and the event name before
+/// computing token overlap: too common to distinguish one event from
+/// another, including prepositions and fillers that often precede an event
+/// name ("before the design workshop", "ahead of my closing").
+const EVENT_MATCH_STOP_WORDS: &[&str] = &[
+    "the", "our", "a", "an", "this", "that", "with", "for", "of", "on", "at", "and", "before",
+    "prior", "ahead", "after", "to", "by", "in", "during", "next", "upcoming", "my", "your",
+    "coming",
+];
+
+/// Lowercased, alphanumeric-tokenized `text` with no filtering at all --
+/// the fallback [`meaningful_event_tokens`] uses when stripping stop words
+/// and generic nouns would otherwise leave nothing to match against.
+fn raw_event_tokens(text: &str) -> BTreeSet<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Lowercased, alphanumeric-tokenized `text` with stop words and generic
+/// event nouns removed. When that leaves nothing (a name that is entirely
+/// filler and its own kind-of-gathering word, e.g. "the call"), falls back
+/// to the unfiltered tokens instead of an empty set, so such a name can
+/// still be matched on its raw words rather than becoming permanently
+/// unmatchable.
+fn meaningful_event_tokens(text: &str) -> BTreeSet<String> {
+    let raw = raw_event_tokens(text);
+    let filtered: BTreeSet<String> = raw
+        .iter()
+        .filter(|token| {
+            !EVENT_MATCH_STOP_WORDS.contains(&token.as_str())
+                && !EVENT_GENERIC_NOUNS.contains(&token.as_str())
+        })
+        .cloned()
+        .collect();
+    if filtered.is_empty() { raw } else { filtered }
+}
+
+/// Matches a phrase naming an event (e.g. an expectation's `event` anchor
+/// quote) against the learned event index. Never substring matching: both
+/// sides are tokenized and reduced to their meaningful (non-stop-word,
+/// non-generic-noun) tokens first. A phrase with no meaningful tokens at all
+/// (e.g. "the call") matches nothing -- this requirement applies to the
+/// PHRASE side only; an event NAME reducing to zero meaningful tokens keeps
+/// its raw tokens instead (see [`meaningful_event_tokens`]), so an index
+/// entry named only after its kind of gathering can still be matched.
+/// Otherwise at least one meaningful token must be shared; when the event
+/// name itself has 2 or more meaningful tokens, that alone is not enough --
+/// either 2 tokens must be shared, or every one of the phrase's meaningful
+/// tokens must appear in the name (so a short, specific phrase like "our
+/// quarterly workshop" can still identify a longer name it is a strict
+/// subset of).
+pub fn match_event<'a>(
+    phrase: &str,
+    evidence_timestamp: i64,
+    index: &'a [EventRef],
+) -> Option<&'a EventRef> {
+    let phrase_tokens = meaningful_event_tokens(phrase);
+    if phrase_tokens.is_empty() {
+        return None;
+    }
+    index
+        .iter()
+        .filter(|event| {
+            event.start >= evidence_timestamp && event.start - evidence_timestamp <= 60 * 86_400
+        })
+        .filter(|event| {
+            let name_tokens = meaningful_event_tokens(&event.name);
+            let shared = phrase_tokens.intersection(&name_tokens).count();
+            if shared == 0 {
+                return false;
+            }
+            name_tokens.len() < 2 || shared >= 2 || phrase_tokens.is_subset(&name_tokens)
+        })
+        .min_by_key(|event| (event.start - evidence_timestamp, &event.message_handle))
+}
+
+/// Like [`match_event`] but requires proper-name-strength evidence: at
+/// least 2 shared meaningful tokens against a name that itself carries 2 or
+/// more meaningful tokens. Used only when the model named no event at all
+/// (see [`text_matched_event`]), where an ordinary single-token overlap
+/// would match on a generic phrase far too easily. Also never matches an
+/// event learned from prose ([`EventSource::SubjectProse`] or
+/// [`EventSource::Prose`]): text matching against those is a second,
+/// unverified guess stacked on top of an already-inferred name, and would
+/// otherwise let a subject like "Draft Agreement - September 3" (learned,
+/// if at all, only because it names a real event) silently close an
+/// unrelated action whose text happens to share those same words, e.g.
+/// "Send the draft agreement to Alex". Restricted to
+/// [`EventSource::Meeting`] and [`EventSource::Subject`] -- structured
+/// calendar evidence, not an inference from ordinary prose.
+fn match_event_by_text<'a>(
+    phrase: &str,
+    evidence_timestamp: i64,
+    index: &'a [EventRef],
+) -> Option<&'a EventRef> {
+    let phrase_tokens = meaningful_event_tokens(phrase);
+    if phrase_tokens.is_empty() {
+        return None;
+    }
+    index
+        .iter()
+        .filter(|event| matches!(event.source, EventSource::Meeting | EventSource::Subject))
+        .filter(|event| {
+            event.start >= evidence_timestamp && event.start - evidence_timestamp <= 60 * 86_400
+        })
+        .filter(|event| {
+            let name_tokens = meaningful_event_tokens(&event.name);
+            name_tokens.len() >= 2 && phrase_tokens.intersection(&name_tokens).count() >= 2
+        })
+        .min_by_key(|event| (event.start - evidence_timestamp, &event.message_handle))
+}
+
+fn mail_event_time(item: &MailItem) -> Option<(i64, i64, bool)> {
+    let event = item.event.as_ref()?;
+    let start = chrono::DateTime::parse_from_rfc3339(&event.start)
+        .ok()?
+        .timestamp();
+    let end = chrono::DateTime::parse_from_rfc3339(&event.end)
+        .ok()?
+        .timestamp();
+    Some((start, end, event.out_of_date))
+}
+
+/// The message's own local UTC offset at its timestamp, falling back to
+/// `fallback` when that instant cannot be resolved to a local time (the
+/// same rule `ReviewState::card_context` uses to age a deadline against the
+/// message that stated it, shared here so `close_passed_events` ages event
+/// times the same way).
+pub fn local_offset_seconds(timestamp: i64, fallback: i32) -> i32 {
+    chrono::Local
+        .timestamp_opt(timestamp, 0)
+        .single()
+        .map_or(fallback, |t| t.offset().local_minus_utc())
 }
 #[derive(Default)]
 pub struct ScanProgress {
@@ -59,6 +937,7 @@ pub struct ScanResult {
     /// (`scan_closures`), using evidence found in a different conversation
     /// than the request itself.
     pub cross_thread_closures: usize,
+    pub event_closures: usize,
     /// Set when `scan_conversations` stopped early because a conversation's
     /// analysis failed with a transport-class provider error (the same
     /// `matches!` set that stops the main scan). When true, `scan_closures`
@@ -369,6 +1248,7 @@ pub fn prepare(
             .to_string(),
         web_link: item.web_link.clone(),
         other_addresses,
+        event: mail_event_time(item),
     })
 }
 
@@ -402,6 +1282,7 @@ pub fn scan(
     let mut result = scan_conversations(messages, progress, |conversation| {
         provider.expectations(conversation)
     });
+    close_passed_events(&mut result, messages, chrono::Utc::now().timestamp());
     scan_closures(
         messages,
         progress,
@@ -502,6 +1383,7 @@ fn scan_conversations(
         cancelled: false,
         conversation_notes: vec![],
         cross_thread_closures: 0,
+        event_closures: 0,
         primary_scan_transport_error: false,
         closure_pass_failure: None,
     };
@@ -564,6 +1446,212 @@ fn scan_conversations(
     result
 }
 
+/// The instant a [`DeadlineView`] says has already passed, or `None` when it
+/// is not a past-due variant (or its boundary could not be resolved). Shared
+/// by [`close_passed_events`]'s `event_time` path, which needs the same
+/// boundary a deadline card would age against, not just the past/future bit.
+fn past_due_boundary(view: &DeadlineView) -> Option<i64> {
+    match *view {
+        DeadlineView::PastDue { boundary, .. }
+        | DeadlineView::DueDate {
+            boundary,
+            past: true,
+            ..
+        }
+        | DeadlineView::DueBusinessDay {
+            boundary,
+            past: true,
+            ..
+        }
+        | DeadlineView::DueRange {
+            boundary,
+            past: true,
+            ..
+        } => Some(boundary),
+        _ => None,
+    }
+}
+
+/// The expectation's own explicit naming of an event: its `event` anchor
+/// when present, otherwise its deadline quote when the deadline phrase
+/// itself classifies as [`DeadlineView::EventTied`]. `None` means the item
+/// never named an event at all -- per the review fix, that gates BOTH the
+/// index match and the stated-`event_time` path below: a plain overdue
+/// deadline must never be closed as "event passed" just because the model
+/// separately filled in an `event_time` anchor.
+fn named_event_phrase(
+    item: &Expectation,
+    message_timestamp: i64,
+    now: i64,
+    offset: i32,
+) -> Option<&str> {
+    if let Some(event) = &item.event {
+        return Some(event.quote.as_str());
+    }
+    let deadline = item.deadline.as_ref()?;
+    matches!(
+        classify(&deadline.quote, message_timestamp, now, offset),
+        DeadlineView::EventTied
+    )
+    .then_some(deadline.quote.as_str())
+}
+
+/// The text-based fallback used only when the model named no event at all
+/// (`named_event_phrase` returned `None`): matches the item's `action`,
+/// then its `evidence.quote`, against the index with
+/// [`match_event_by_text`]'s proper-name-strength bar.
+fn text_matched_event<'a>(
+    item: &Expectation,
+    source: &ReviewMessage,
+    index: &'a [EventRef],
+) -> Option<&'a EventRef> {
+    match_event_by_text(&item.action, source.input.timestamp, index)
+        .or_else(|| match_event_by_text(&item.evidence.quote, source.input.timestamp, index))
+}
+
+/// Closes `item` against `event` when `event` has already ended. Returns
+/// whether it closed.
+fn close_from_index(item: &mut Expectation, event: &EventRef, now: i64) -> bool {
+    if event.end >= now {
+        return false;
+    }
+    item.event_passed = Some(EventPassed {
+        name: event.name.clone(),
+        end: event.end,
+        message_handle: event.message_handle.clone(),
+    });
+    true
+}
+
+/// Closes `item` from its own `event_time` anchor, classified directly with
+/// [`classify`] against the message that stated it -- the only way to close
+/// a loop whose event date is stated only in an email body rather than a
+/// meeting invite or calendar subject, so it has no index entry at all.
+/// `name` is the event's own name when known (from [`named_event_phrase`]),
+/// used as-is since an item reaching this path always named an event.
+/// Returns whether it closed.
+fn close_from_stated_time(
+    item: &mut Expectation,
+    messages: &[ReviewMessage],
+    now: i64,
+    name: &str,
+) -> bool {
+    let Some(event_time) = &item.event_time else {
+        return false;
+    };
+    let Some(time_message) = messages
+        .iter()
+        .find(|m| m.input.handle == event_time.message)
+    else {
+        return false;
+    };
+    let offset = local_offset_seconds(time_message.input.timestamp, 0);
+    let view = classify(&event_time.quote, time_message.input.timestamp, now, offset);
+    let Some(end) = past_due_boundary(&view) else {
+        return false;
+    };
+    item.event_passed = Some(EventPassed {
+        name: name.to_string(),
+        end,
+        message_handle: event_time.message.clone(),
+    });
+    true
+}
+
+/// Closes any open, unresolved expectation whose event has already ended,
+/// via three independent sources of evidence, tried in order for each item:
+///
+/// - the learned event index, matched against the expectation's own named
+///   event ([`named_event_phrase`]) with [`match_event`] -- when the index
+///   has a match, it alone decides this item, whether or not it closes;
+/// - failing that, a model-supplied `event_time` phrase -- a verbatim
+///   date/time anchor stating when the NAMED event occurs, found anywhere
+///   in the conversation -- classified directly ([`close_from_stated_time`]);
+///   only ever consulted for an item that named an event in the first
+///   place;
+/// - for an item that named no event at all, the index again, but matched
+///   against the item's own `action`/`evidence.quote` text instead
+///   ([`text_matched_event`]), at a much stronger bar so an unrelated
+///   generic phrase never matches by accident.
+///
+/// Always pushes one content-free coverage note (even when every count is
+/// zero, so the chain from "events learned" to "expectations closed" stays
+/// visible), unless `result.cancelled` -- a cancelled scan's counts would be
+/// partial and therefore misleading.
+pub fn close_passed_events(result: &mut ScanResult, messages: &[ReviewMessage], now: i64) {
+    let index = build_event_index(messages);
+    let mut named = 0usize;
+    let mut timed = 0usize;
+    let mut matched = 0usize;
+    let mut matched_by_text = 0usize;
+    let mut closed_from_index = 0usize;
+    let mut closed_from_stated_time = 0usize;
+    for item in &mut result.analysis.items {
+        if item.resolution.is_some() || item.event_passed.is_some() {
+            continue;
+        }
+        let Some(source) = messages
+            .iter()
+            .find(|message| message.input.handle == item.evidence.message)
+        else {
+            continue;
+        };
+        let offset = local_offset_seconds(source.input.timestamp, 0);
+        timed += usize::from(item.event_time.is_some());
+
+        if let Some(phrase) = named_event_phrase(item, source.input.timestamp, now, offset) {
+            named += 1;
+            let phrase = phrase.to_string();
+            let event_match = match_event(&phrase, source.input.timestamp, &index);
+            matched += usize::from(event_match.is_some());
+            if let Some(event) = event_match {
+                if close_from_index(item, event, now) {
+                    closed_from_index += 1;
+                    result.event_closures += 1;
+                }
+                continue;
+            }
+            if close_from_stated_time(item, messages, now, &phrase) {
+                closed_from_stated_time += 1;
+                result.event_closures += 1;
+            }
+            continue;
+        }
+
+        if let Some(event) = text_matched_event(item, source, &index) {
+            matched_by_text += 1;
+            if close_from_index(item, event, now) {
+                closed_from_index += 1;
+                result.event_closures += 1;
+            }
+        }
+    }
+    if result.cancelled {
+        return;
+    }
+    let meetings = index
+        .iter()
+        .filter(|event| event.source == EventSource::Meeting)
+        .count();
+    let subjects = index
+        .iter()
+        .filter(|event| event.source == EventSource::Subject)
+        .count();
+    let subject_prose = index
+        .iter()
+        .filter(|event| event.source == EventSource::SubjectProse)
+        .count();
+    let prose = index
+        .iter()
+        .filter(|event| event.source == EventSource::Prose)
+        .count();
+    let event_word = if index.len() == 1 { "event" } else { "events" };
+    result.conversation_notes.push(format!(
+        "Event index: {} {event_word} learned ({meetings} meetings, {subjects} calendar subjects, {subject_prose} subject prose, {prose} body prose); {named} named an event, {timed} carried a time, {matched} matched by name, {matched_by_text} matched by request text, {closed_from_index} closed from the index, {closed_from_stated_time} closed from a stated time.",
+        index.len(),
+    ));
+}
+
 /// Hard cap on how many `closure()` provider calls one scan makes, however
 /// many open requests are eligible: a large mailbox could otherwise turn
 /// into dozens of extra model calls in a single scan.
@@ -611,7 +1699,10 @@ fn scan_closures(
         .items
         .iter()
         .filter(|item| {
-            item.resolution.is_none() && item.kind == "request" && item.owner == Owner::You
+            item.resolution.is_none()
+                && item.event_passed.is_none()
+                && item.kind == "request"
+                && item.owner == Owner::You
         })
         .count();
     progress.total.fetch_add(eligible, Ordering::Relaxed);
@@ -623,7 +1714,11 @@ fn scan_closures(
             result.cancelled = true;
             break;
         }
-        if item.resolution.is_some() || item.kind != "request" || item.owner != Owner::You {
+        if item.resolution.is_some()
+            || item.event_passed.is_some()
+            || item.kind != "request"
+            || item.owner != Owner::You
+        {
             continue;
         }
         progress.processed.fetch_add(1, Ordering::Relaxed);
@@ -692,9 +1787,9 @@ fn scan_closures(
         ));
     }
     if capped {
-        result.conversation_notes.push(
-            "Cross-thread closure checks were capped at 40 open requests this scan.".to_string(),
-        );
+        result.conversation_notes.push(format!(
+            "Cross-thread closure checks were capped at {MAX_CLOSURE_CALLS} open requests this scan."
+        ));
     }
 }
 
@@ -1005,10 +2100,19 @@ fn subject_strong_enough(subject: &str) -> bool {
 /// check did) never fires on a real mailbox: a distribution list rarely
 /// appears on literally every conversation an account has, so the earlier
 /// rule failed to recognize it as a shared address in practice. Requires at
-/// least 3 groups for the account: with only 2 groups, appearing in "at
-/// least half" is satisfied by appearing in just 1, which would
-/// disqualify the ordinary case of two threads linked by one real
-/// correspondent.
+/// least 8 conversation groups for the account before this check ever
+/// applies: below that floor, a small mailbox does not yet have enough
+/// conversation groups to tell a genuinely shared address apart from an
+/// individual correspondent who simply appears often (review found the
+/// earlier floor of 3 groups too easily satisfied by an ordinary small
+/// mailbox, wrongly excluding a real correspondent's address from the
+/// intersection check). This is a trade-off, not a free improvement: below
+/// the 8-group floor, a genuine list address can still bridge two unrelated
+/// threads and feed the cross-thread closure pass (`scan_closures`) with a
+/// false completion. 8 was chosen as the smallest group count where "half of
+/// them" (the `count * 2 >= total` clause) is a meaningful bar at all -- any
+/// lower and "half" stops distinguishing a distribution list from a merely
+/// frequent individual correspondent.
 fn is_shared_mailbox_address(
     account: &str,
     address: &str,
@@ -1016,7 +2120,7 @@ fn is_shared_mailbox_address(
     address_group_counts: &BTreeMap<(&str, &str), usize>,
 ) -> bool {
     let total = groups_per_account.get(account).copied().unwrap_or(0);
-    if total <= 2 {
+    if total < 8 {
         return false;
     }
     let count = address_group_counts
@@ -1582,6 +2686,636 @@ fn synthetic(body: &str, index: usize, conversation: &str) -> MailItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn timestamp(value: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .timestamp()
+    }
+
+    #[test]
+    fn subject_event_time_parses_timed_and_all_day_calendar_subjects() {
+        let cases = [
+            (
+                "Accepted: Design workshop @ Fri Aug 21, 2026 11:30am - 12:30pm (CDT)",
+                "2026-08-21T16:30:00Z",
+                "2026-08-21T17:30:00Z",
+            ),
+            (
+                "Invitation: Design workshop @ Fri Aug 21, 2026 11:30am - 12:30pm (PDT)",
+                "2026-08-21T18:30:00Z",
+                "2026-08-21T19:30:00Z",
+            ),
+            (
+                "Updated invitation: Planning call @ Mon Sep 7, 2026 9am - 10am (PDT)",
+                "2026-09-07T16:00:00Z",
+                "2026-09-07T17:00:00Z",
+            ),
+            (
+                // All-day: ends at local end-of-day (17:00), consistent
+                // with `prose_event_time`'s own all-day policy -- not
+                // literal midnight-to-midnight.
+                "Invitation: Design workshop @ Fri Aug 21, 2026",
+                "2026-08-21T00:00:00Z",
+                "2026-08-21T17:00:00Z",
+            ),
+            (
+                "Invitation: Design workshop @ Fri Aug 21, 2026 11am - 12pm (XYZ)",
+                "2026-08-21T11:00:00Z",
+                "2026-08-21T12:00:00Z",
+            ),
+        ];
+        for (subject, start, end) in cases {
+            assert_eq!(
+                subject_event_time(subject, 0),
+                Some((timestamp(start), timestamp(end))),
+                "{subject}"
+            );
+        }
+        assert_eq!(subject_event_time("Design workshop notes", 0), None);
+    }
+
+    #[test]
+    fn ranges_crossing_midnight_add_a_day_to_the_end() {
+        assert_eq!(
+            subject_event_time(
+                "Invitation: Late call @ Fri Aug 21, 2026 11pm - 1am (UTC)",
+                0
+            ),
+            Some((
+                timestamp("2026-08-21T23:00:00Z"),
+                timestamp("2026-08-22T01:00:00Z")
+            ))
+        );
+    }
+
+    #[test]
+    fn organizer_suffix_after_the_timezone_is_peeled_and_ignored() {
+        assert_eq!(
+            subject_event_time(
+                "Invitation: Design workshop @ Fri Aug 21, 2026 11:30am - 12:30pm (CDT) (Sam Rivera)",
+                0
+            ),
+            Some((
+                timestamp("2026-08-21T16:30:00Z"),
+                timestamp("2026-08-21T17:30:00Z")
+            ))
+        );
+    }
+
+    #[test]
+    fn spaced_am_pm_tokens_still_parse() {
+        assert_eq!(
+            subject_event_time(
+                "Invitation: Design workshop @ Fri Aug 21, 2026 11:30 am - 12:30 pm (CDT)",
+                0
+            ),
+            Some((
+                timestamp("2026-08-21T16:30:00Z"),
+                timestamp("2026-08-21T17:30:00Z")
+            ))
+        );
+    }
+
+    #[test]
+    fn prose_event_time_parses_every_documented_date_form_to_the_same_day() {
+        let message = timestamp("2026-08-01T00:00:00Z");
+        let expected_start = timestamp("2026-09-03T00:00:00Z");
+        let expected_end = expected_start + i64::from(DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT);
+        let cases = [
+            ("Let's meet September 3 to review.", "September 3"),
+            ("Let's meet Sept 3 to review.", "Sept 3"),
+            ("Let's meet Sep. 3, 2026 to review.", "Sep. 3"),
+            ("Let's meet 3 September 2026 to review.", "3 September"),
+            // No numeric-date case here: writing "September 3" as
+            // `n/m/yyyy` would need both fields <= 12 (9 and 3), which
+            // `parse_numeric_date`'s ambiguity policy refuses outright --
+            // see `numeric_date_ambiguity_policy` below.
+            ("Let's meet 2026-09-03 to review.", "2026-09-03"),
+        ];
+        for (text, needle) in cases {
+            let (start, end, byte_offset) =
+                prose_event_time(text, message, 0).unwrap_or_else(|| panic!("{text}"));
+            assert_eq!(start, expected_start, "{text}");
+            assert_eq!(end, expected_end, "{text}");
+            assert_eq!(
+                &text[byte_offset..byte_offset + needle.len()],
+                needle,
+                "{text}"
+            );
+        }
+    }
+
+    /// `n/m/yyyy` is refused when both fields are `<= 12` (ambiguous month
+    /// vs. day order), accepted when exactly one field is `> 12` (that
+    /// field is unambiguously the day).
+    #[test]
+    fn numeric_date_ambiguity_policy() {
+        assert_eq!(parse_numeric_date("3/9/2026"), None);
+        assert_eq!(
+            parse_numeric_date("9/15/2026"),
+            Some((9, 15, Some(2026))),
+            "month/day/year: 9 <= 12, 15 > 12 -- unambiguously month=9, day=15"
+        );
+        assert_eq!(
+            parse_numeric_date("15/9/2026"),
+            Some((9, 15, Some(2026))),
+            "day/month/year: 15 > 12, 9 <= 12 -- unambiguously day=15, month=9"
+        );
+    }
+
+    /// Same policy exercised through `prose_event_time`, matching the
+    /// review's exact probes.
+    #[test]
+    fn prose_event_time_refuses_ambiguous_numeric_dates_but_accepts_unambiguous_ones() {
+        let message = timestamp("2026-08-01T00:00:00Z");
+        assert!(prose_event_time("Meet on 3/9/2026.", message, 0).is_none());
+        let (start, _, _) = prose_event_time("Meet on 9/15/2026.", message, 0).unwrap();
+        assert_eq!(start, timestamp("2026-09-15T00:00:00Z"));
+        let (start, _, _) = prose_event_time("Meet on 15/9/2026.", message, 0).unwrap();
+        assert_eq!(start, timestamp("2026-09-15T00:00:00Z"));
+    }
+
+    #[test]
+    fn prose_event_time_reads_an_optional_trailing_time() {
+        let message = timestamp("2026-08-01T00:00:00Z");
+        let day_start = timestamp("2026-09-03T00:00:00Z");
+        for (text, seconds_since_midnight) in [
+            ("Meet September 3 2pm sharp.", 14 * 3600),
+            ("Meet September 3 2:30 pm sharp.", 14 * 3600 + 1800),
+            ("Meet September 3 14:00 sharp.", 14 * 3600),
+        ] {
+            let (start, end, _) = prose_event_time(text, message, 0).unwrap();
+            let expected_start = day_start + seconds_since_midnight;
+            assert_eq!(start, expected_start, "{text}");
+            assert_eq!(end, start + 3600, "{text}");
+        }
+    }
+
+    /// A preposition ("at", "from", "starting") -- or a comma or "@", which
+    /// `prose_tokens` treats as pure separators and so never even reach
+    /// this far as their own token -- may sit between the date and its
+    /// trailing time without blocking it from being read.
+    #[test]
+    fn prose_event_time_reads_a_time_after_one_leading_preposition() {
+        let message = timestamp("2026-08-01T00:00:00Z");
+        let day_start = timestamp("2026-09-03T00:00:00Z");
+        for (text, seconds_since_midnight) in [
+            ("Let's meet on September 3 at 2 pm sharp.", 14 * 3600),
+            ("Let's meet on September 3 at 14:00 sharp.", 14 * 3600),
+            ("Let's meet on Sept 3 at 2:30 pm sharp.", 14 * 3600 + 1800),
+        ] {
+            let (start, end, _) =
+                prose_event_time(text, message, 0).unwrap_or_else(|| panic!("{text}"));
+            let expected_start = day_start + seconds_since_midnight;
+            assert_eq!(start, expected_start, "{text}");
+            assert_eq!(end, start + 3600, "{text}");
+        }
+    }
+
+    #[test]
+    fn prose_event_time_rolls_the_default_year_forward_past_the_sixty_day_window() {
+        // A message in December naming "September 3" with no year means
+        // NEXT year's September 3rd -- this year's already passed by more
+        // than 60 days.
+        let message = timestamp("2026-12-01T00:00:00Z");
+        let (start, _, _) = prose_event_time("See you September 3.", message, 0).unwrap();
+        assert_eq!(start, timestamp("2027-09-03T00:00:00Z"));
+    }
+
+    #[test]
+    fn prose_event_time_never_rolls_an_explicit_year() {
+        // Even though "September 3, 2026" is more than 60 days before this
+        // December message, a STATED year is trusted as-is, never rolled.
+        let message = timestamp("2026-12-01T00:00:00Z");
+        let (start, _, _) = prose_event_time("See you September 3, 2026.", message, 0).unwrap();
+        assert_eq!(start, timestamp("2026-09-03T00:00:00Z"));
+    }
+
+    #[test]
+    fn prose_event_time_finds_nothing_in_ordinary_prose() {
+        assert!(
+            prose_event_time(
+                "Let's catch up soon, no rush.",
+                timestamp("2026-08-01T00:00:00Z"),
+                0
+            )
+            .is_none()
+        );
+    }
+
+    /// Minor-fix regression: a bare number preceded by "Room" (or "ext",
+    /// "suite", "unit", "no", "#") is never read as a day-then-month date
+    /// -- "Room 12 August notes" must learn nothing, since "12" here names
+    /// a room, not the 12th. An ordinary day-then-month date with no such
+    /// preceder ("3 September 2026") still parses.
+    #[test]
+    fn day_then_month_excludes_room_and_similar_preceders() {
+        let message = timestamp("2026-08-01T00:00:00Z");
+        assert!(prose_event_time("Room 12 August notes", message, 0).is_none());
+        let (start, _, _) = prose_event_time("Meet 3 September 2026 to review.", message, 0)
+            .expect("day-then-month with no preceder still parses");
+        assert_eq!(start, timestamp("2026-09-03T00:00:00Z"));
+    }
+
+    #[test]
+    fn event_index_prefers_graph_metadata_and_deduplicates_name_and_start() {
+        let mut mail = synthetic("Prepare the handout.", 0, "a");
+        mail.subject = "Invitation: Design workshop @ Fri Aug 21, 2026 11am - 12pm (UTC)".into();
+        mail.event = Some(openloops_graph::live::review::MailEvent {
+            start: "2026-08-21T13:00:00Z".into(),
+            end: "2026-08-21T14:00:00Z".into(),
+            out_of_date: false,
+        });
+        let first = prepare(&mail, "Inbox", 0).unwrap();
+        let mut second = first.clone();
+        second.input.handle = "m1".into();
+        let index = build_event_index(&[first, second]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].name, "design workshop");
+        assert_eq!(index[0].start, timestamp("2026-08-21T13:00:00Z"));
+        assert_eq!(index[0].message_handle, "m0");
+        assert_eq!(index[0].source, EventSource::Meeting);
+    }
+
+    #[test]
+    fn event_index_keeps_the_latest_of_two_instances_of_the_same_named_event() {
+        let mut aug = synthetic("Save the date.", 0, "a");
+        aug.subject = "Invitation: Design workshop @ Fri Aug 21, 2026 11am - 12pm (UTC)".into();
+        let aug_message = prepare(&aug, "Inbox", 0).unwrap();
+        let mut sep = synthetic("Rescheduled, see below.", 1, "b");
+        sep.subject =
+            "Updated invitation: Design workshop @ Tue Sep 15, 2026 11am - 12pm (UTC)".into();
+        let sep_message = prepare(&sep, "Inbox", 1).unwrap();
+        let index = build_event_index(&[aug_message, sep_message]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].start, timestamp("2026-09-15T11:00:00Z"));
+        assert_eq!(index[0].source, EventSource::Subject);
+    }
+
+    #[test]
+    fn event_index_drops_an_out_of_date_meeting_entry() {
+        let mut mail = synthetic("Old invite.", 0, "a");
+        mail.subject = "Design workshop".into();
+        mail.event = Some(openloops_graph::live::review::MailEvent {
+            start: "2026-08-21T11:00:00Z".into(),
+            end: "2026-08-21T12:00:00Z".into(),
+            out_of_date: true,
+        });
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        assert!(build_event_index(&[message]).is_empty());
+    }
+
+    /// The live finding this task fixes: the event is named by a proper
+    /// name in the subject, with its date appended in prose ("- Sept 3")
+    /// rather than structured as a calendar invite or Graph meeting
+    /// message, so neither of the first two sources in
+    /// `build_event_index`'s priority order finds anything. "Workshop" is
+    /// an event noun, so the subject-prose learner's gate accepts it.
+    #[test]
+    fn event_index_learns_a_date_from_subject_prose_when_no_invite_exists() {
+        let mut mail = synthetic("Let's finalize the agenda.", 0, "a");
+        mail.subject = "Spring Estate Planning Workshop - Sept 3".into();
+        // `start`/`end` are not asserted here: `build_event_index` resolves
+        // prose against the message's own local offset
+        // (`local_offset_seconds`, machine-dependent), and the exact
+        // arithmetic is already pinned down offset-independently by
+        // `prose_event_time`'s own tests above.
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        let index = build_event_index(&[message]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].name, "spring estate planning workshop");
+        assert_eq!(index[0].source, EventSource::SubjectProse);
+    }
+
+    /// Critical review finding: the subject-prose learner previously
+    /// turned ANY "<words> <date>" subject into an event, with no
+    /// requirement that it actually name a gathering. "Draft Agreement"
+    /// contains no [`PROSE_EVENT_NOUNS`] entry, so nothing is learned --
+    /// and, with no body blocks either, the whole message contributes
+    /// nothing to the index.
+    #[test]
+    fn subject_prose_without_an_event_noun_learns_nothing() {
+        let mut mail = synthetic("", 0, "a");
+        mail.subject = "Draft Agreement - September 3".into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        assert!(build_event_index(&[message]).is_empty());
+    }
+
+    /// Companion to the above at the closure level: since the "Draft
+    /// Agreement" subject never enters the index, a real, unrelated
+    /// obligation whose action text happens to share those same words
+    /// ("Send the draft agreement to Alex") must not be closed as "event
+    /// passed".
+    #[test]
+    fn close_passed_events_does_not_close_a_request_via_a_rejected_subject_prose_candidate() {
+        let mut event_mail = synthetic("", 1, "event");
+        event_mail.subject = "Draft Agreement - September 3".into();
+        let event_message = prepare(&event_mail, "Inbox", 1).unwrap();
+        let (mut messages, mut item) = closure_test_messages();
+        messages[0].input.timestamp = timestamp("2026-08-01T00:00:00Z");
+        item.action = "Send the draft agreement to Alex".into();
+        messages.push(event_message);
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        close_passed_events(&mut result, &messages, timestamp("2026-10-01T00:00:00Z"));
+        assert!(result.analysis.items[0].event_passed.is_none());
+        assert_eq!(result.event_closures, 0);
+    }
+
+    /// A proper-named event still closes once passed via its `event`
+    /// anchor even though it was only ever learned from subject prose
+    /// (never a structured invite): the noun gate lets a genuine event
+    /// through, and `match_event` (unlike `match_event_by_text`) is not
+    /// restricted to structured sources.
+    #[test]
+    fn close_passed_events_closes_a_subject_prose_named_event_via_the_event_anchor() {
+        let mut event_mail = synthetic("", 1, "event");
+        event_mail.subject = "Spring Estate Planning Workshop - Aug 21, 2026".into();
+        let event_message = prepare(&event_mail, "Inbox", 1).unwrap();
+        let (mut messages, mut item) = closure_test_messages();
+        messages[0].input.timestamp = timestamp("2026-08-01T00:00:00Z");
+        item.event = Some(Anchor {
+            message: item.evidence.message.clone(),
+            block: 0,
+            quote: "the Spring Estate Planning Workshop".into(),
+            context: String::new(),
+        });
+        messages.push(event_message);
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        // Well clear of the machine's own local offset either way.
+        close_passed_events(&mut result, &messages, timestamp("2026-08-25T00:00:00Z"));
+        let passed = result.analysis.items[0].event_passed.as_ref().unwrap();
+        assert_eq!(passed.name, "spring estate planning workshop");
+        assert_eq!(result.event_closures, 1);
+    }
+
+    /// `match_event_by_text` must never match a prose-sourced event: text
+    /// matching is restricted to structured (Meeting/Subject) evidence, so
+    /// a subject-prose or body-prose entry can never be silently confirmed
+    /// by an unrelated request's own wording.
+    #[test]
+    fn match_event_by_text_never_matches_a_prose_sourced_event() {
+        let evidence = timestamp("2026-08-01T00:00:00Z");
+        for source in [EventSource::SubjectProse, EventSource::Prose] {
+            let index = vec![EventRef {
+                name: "draft agreement".into(),
+                start: timestamp("2026-09-03T00:00:00Z"),
+                end: timestamp("2026-09-03T17:00:00Z"),
+                message_handle: "m0".into(),
+                source,
+            }];
+            assert!(
+                match_event_by_text("Send the draft agreement to Alex", evidence, &index).is_none(),
+                "{source:?}"
+            );
+        }
+    }
+
+    /// The event's date is stated only in a body paragraph, next to a
+    /// capitalized multi-word phrase ending in a recognized event noun --
+    /// the subject itself names none of it, so the name must come from that
+    /// nearby phrase rather than the (unrelated) subject.
+    #[test]
+    fn event_index_learns_a_date_from_body_prose_near_a_capitalized_event_phrase() {
+        let mut mail = synthetic(
+            "Quick update: the Johnson Hearing is now set for October 12, 2026 \
+at the downtown courthouse. Let me know if that works.",
+            0,
+            "a",
+        );
+        mail.subject = "Re: scheduling".into();
+        // `start` is not asserted for the same reason as the subject-prose
+        // test above: it depends on the machine's own local offset.
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        let index = build_event_index(&[message]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].name, "johnson hearing");
+        assert_eq!(index[0].source, EventSource::Prose);
+    }
+
+    /// Critical review finding: a block with more than one date must pair
+    /// the event phrase with the NEAREST date, not the first one in the
+    /// block -- "please RSVP by September 1" is an unrelated, earlier
+    /// date; "the Spring Workshop on September 15" is the phrase's real
+    /// date.
+    #[test]
+    fn event_index_pairs_a_body_prose_event_phrase_with_the_nearest_date_not_the_first() {
+        let mut mail = synthetic(
+            "Hi team - please RSVP by September 1 for the Spring Workshop on September 15.",
+            0,
+            "a",
+        );
+        mail.subject = "Re: scheduling".into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        let index = build_event_index(&[message]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].name, "spring workshop");
+        let local_date = chrono::DateTime::from_timestamp(index[0].start, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        assert_eq!(local_date, "2026-09-15");
+    }
+
+    /// Important-fix regression: a rejected (too-short) candidate must fall
+    /// through to the next candidate/block rather than aborting the whole
+    /// message. The message's one-word subject ("Fee") appears verbatim in
+    /// the first body block, which would otherwise be named "fee" (1 word,
+    /// rejected); the fix must instead try the second block, which names a
+    /// real, specific event.
+    #[test]
+    fn learn_one_event_falls_through_a_rejected_one_word_subject_match_to_a_later_block() {
+        let mut mail = synthetic("placeholder", 0, "a");
+        mail.subject = "Fee".into();
+        let mut message = prepare(&mail, "Inbox", 0).unwrap();
+        message.input.message.body_blocks = vec![
+            CanonicalBlock::new("The Fee is due September 1.").unwrap(),
+            CanonicalBlock::new("Update: the Johnson Hearing is now set for September 9.").unwrap(),
+        ];
+        let index = build_event_index(&[message]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].name, "johnson hearing");
+        assert_eq!(index[0].source, EventSource::Prose);
+    }
+
+    /// Minor-fix regression: a capitalized run must never cross a sentence
+    /// boundary. Without the period-break fix, "Notes. Onboarding
+    /// Training" would be read as one continuous capitalized run (and
+    /// still match, since it also ends in "training"), silently absorbing
+    /// the unrelated preceding sentence into the learned name.
+    #[test]
+    fn capitalized_event_phrase_breaks_at_a_token_ending_in_a_period() {
+        let mut mail = synthetic("Notes. Onboarding Training on 2026-09-03", 0, "a");
+        mail.subject = "Re: scheduling".into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        let index = build_event_index(&[message]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].name, "onboarding training");
+    }
+
+    #[test]
+    fn capitalized_event_phrase_keeps_a_sentence_final_event_noun() {
+        let mut mail = synthetic(
+            "Please prepare for the Johnson Hearing. It is on 2026-10-12.",
+            0,
+            "a",
+        );
+        mail.subject = "Re: prep".into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        let index = build_event_index(&[message]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].name, "johnson hearing");
+    }
+
+    #[test]
+    fn nearest_phrase_for_date_finds_the_closest_matching_run() {
+        let text = "the Design Workshop is set for September 3, plans pending.";
+        let phrases = capitalized_event_phrases(text);
+        let date_offset = text.find("September").unwrap();
+        let (phrase, _, date_follows) = nearest_phrase_for_date(&phrases, date_offset).unwrap();
+        assert_eq!(phrase, "design workshop");
+        assert!(date_follows);
+        assert!(
+            nearest_phrase_for_date(&capitalized_event_phrases("no capitals here"), 0).is_none()
+        );
+    }
+
+    /// A body date near the message's own (multi-word) normalized subject
+    /// is named after that subject rather than hunting for a capitalized
+    /// phrase -- the strongest available evidence for what the date belongs
+    /// to.
+    #[test]
+    fn event_index_prefers_the_message_subject_as_the_body_prose_name() {
+        let mut mail = synthetic(
+            "Reminder: the Spring Budget Summit is confirmed for November 5, 2026.",
+            0,
+            "a",
+        );
+        mail.subject = "Spring Budget Summit".into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        let index = build_event_index(&[message]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].name, "spring budget summit");
+        assert_eq!(index[0].source, EventSource::Prose);
+    }
+
+    #[test]
+    fn match_event_rejects_a_phrase_with_no_meaningful_tokens() {
+        let index = vec![EventRef {
+            name: "design workshop".into(),
+            start: timestamp("2026-08-20T00:00:00Z"),
+            end: timestamp("2026-08-20T01:00:00Z"),
+            message_handle: "m0".into(),
+            source: EventSource::Subject,
+        }];
+        assert!(match_event("the call", timestamp("2026-08-01T00:00:00Z"), &index).is_none());
+    }
+
+    #[test]
+    fn match_event_requires_a_real_token_overlap_not_a_substring() {
+        let evidence = timestamp("2026-08-01T00:00:00Z");
+        let workshop_only = vec![EventRef {
+            name: "design workshop".into(),
+            start: timestamp("2026-08-20T00:00:00Z"),
+            end: timestamp("2026-08-20T01:00:00Z"),
+            message_handle: "m0".into(),
+            source: EventSource::Subject,
+        }];
+        assert_eq!(
+            match_event("before the design workshop", evidence, &workshop_only)
+                .unwrap()
+                .message_handle,
+            "m0"
+        );
+        let standup_only = vec![EventRef {
+            name: "weekly standup call".into(),
+            start: timestamp("2026-08-20T00:00:00Z"),
+            end: timestamp("2026-08-20T01:00:00Z"),
+            message_handle: "m1".into(),
+            source: EventSource::Subject,
+        }];
+        assert!(match_event("before the design workshop", evidence, &standup_only).is_none());
+    }
+
+    #[test]
+    fn match_event_drops_a_generic_event_noun_from_both_sides() {
+        let evidence = timestamp("2026-08-01T00:00:00Z");
+        let index = vec![EventRef {
+            name: "hearing motion to compel".into(),
+            start: timestamp("2026-08-20T00:00:00Z"),
+            end: timestamp("2026-08-20T01:00:00Z"),
+            message_handle: "m0".into(),
+            source: EventSource::Subject,
+        }];
+        assert_eq!(
+            match_event("our hearing on the motion", evidence, &index)
+                .unwrap()
+                .message_handle,
+            "m0"
+        );
+    }
+
+    #[test]
+    fn match_event_prefers_the_nearest_future_event_within_the_sixty_day_window() {
+        let evidence = timestamp("2026-08-01T00:00:00Z");
+        let index = vec![
+            EventRef {
+                name: "design workshop".into(),
+                start: timestamp("2026-08-20T00:00:00Z"),
+                end: timestamp("2026-08-20T01:00:00Z"),
+                message_handle: "m0".into(),
+                source: EventSource::Subject,
+            },
+            EventRef {
+                name: "design workshop follow up".into(),
+                start: timestamp("2026-08-10T00:00:00Z"),
+                end: timestamp("2026-08-10T01:00:00Z"),
+                message_handle: "m1".into(),
+                source: EventSource::Subject,
+            },
+        ];
+        assert_eq!(
+            match_event("design workshop", evidence, &index)
+                .unwrap()
+                .message_handle,
+            "m1"
+        );
+        assert!(
+            match_event("design workshop", timestamp("2026-05-01T00:00:00Z"), &index).is_none()
+        );
+    }
     #[test]
     fn inbox_and_sent_are_analyzed_as_one_ordered_conversation() {
         let a = prepare(&synthetic("Please send the draft.", 0, "a"), "Inbox", 0).unwrap();
@@ -1964,14 +3698,351 @@ mod tests {
                 context: "Can we meet?".into(),
             },
             deadline: None,
+            event: None,
+            event_time: None,
             resolution: None,
             resolution_kind: None,
             uncertainty: String::new(),
             unverified_deadline: false,
             unverified_resolution: false,
             cross_thread: false,
+            event_passed: None,
         };
         (all, item)
+    }
+
+    #[test]
+    fn close_passed_events_marks_matching_open_expectations() {
+        let mut event_mail = synthetic("Calendar invitation.", 1, "event");
+        event_mail.subject =
+            "Invitation: Design workshop @ Fri Aug 21, 2026 11am - 12pm (UTC)".into();
+        let event_message = prepare(&event_mail, "Inbox", 1).unwrap();
+        let (mut messages, mut item) = closure_test_messages();
+        messages[0].input.timestamp = timestamp("2026-08-01T00:00:00Z");
+        item.event = Some(Anchor {
+            message: item.evidence.message.clone(),
+            block: 0,
+            quote: "the design workshop".into(),
+            context: String::new(),
+        });
+        messages.push(event_message);
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        close_passed_events(&mut result, &messages, timestamp("2026-08-22T00:00:00Z"));
+        let passed = result.analysis.items[0].event_passed.as_ref().unwrap();
+        assert_eq!(passed.name, "design workshop");
+        assert_eq!(passed.end, timestamp("2026-08-21T12:00:00Z"));
+        assert_eq!(passed.message_handle, "m1");
+        assert_eq!(result.event_closures, 1);
+        assert_eq!(
+            result.conversation_notes.last().unwrap(),
+            "Event index: 1 event learned (0 meetings, 1 calendar subjects, \
+0 subject prose, 0 body prose); \
+1 named an event, 0 carried a time, 1 matched by name, 0 matched by request text, \
+1 closed from the index, 0 closed from a stated time."
+        );
+    }
+
+    /// Important-fix regression: when the item's named event has a
+    /// matching index entry that has NOT ended yet, the index alone
+    /// decides this item -- the stated-time path
+    /// (`close_from_stated_time`) must never be consulted, even though the
+    /// item's own `event_time` anchor would, evaluated in isolation,
+    /// already read as passed.
+    #[test]
+    fn close_passed_events_a_future_index_match_suppresses_the_stated_time_path() {
+        let mut event_mail = synthetic("Calendar invitation.", 1, "event");
+        event_mail.subject =
+            "Invitation: Design workshop @ Fri Sep 25, 2026 11am - 12pm (UTC)".into();
+        let event_message = prepare(&event_mail, "Inbox", 1).unwrap();
+        let (mut messages, mut item) = closure_test_messages();
+        messages[0].input.timestamp = timestamp("2026-09-02T12:00:00Z"); // Wednesday
+        item.event = Some(Anchor {
+            message: item.evidence.message.clone(),
+            block: 0,
+            quote: "the design workshop".into(),
+            context: String::new(),
+        });
+        item.event_time = Some(Anchor {
+            message: item.evidence.message.clone(),
+            block: 0,
+            quote: "Friday".into(),
+            context: String::new(),
+        });
+        messages.push(event_message);
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        // After the stated "Friday" (Sep 4) but well before the indexed
+        // workshop (Sep 25): a naive stated-time classification alone
+        // would already read this item as passed.
+        close_passed_events(&mut result, &messages, timestamp("2026-09-10T00:00:00Z"));
+        assert!(result.analysis.items[0].event_passed.is_none());
+        assert_eq!(result.event_closures, 0);
+    }
+
+    /// The coverage note's live finding: the model emitted no `event` or
+    /// `event_time` anchor at all (0 named), so closing this item depends
+    /// entirely on matching the index by the item's own request text
+    /// (`action`, here) -- at the stronger, proper-name-strength bar
+    /// ([`match_event_by_text`]), since "review" alone is a generic noun
+    /// stripped from both sides.
+    #[test]
+    fn close_passed_events_matches_and_closes_via_request_text_when_no_event_was_named() {
+        let mut event_mail = synthetic("Calendar invitation.", 1, "event");
+        event_mail.subject =
+            "Invitation: Acme Contract Review @ Fri Aug 21, 2026 11am - 12pm (UTC)".into();
+        let event_message = prepare(&event_mail, "Inbox", 1).unwrap();
+        let (mut messages, mut item) = closure_test_messages();
+        messages[0].input.timestamp = timestamp("2026-08-01T00:00:00Z");
+        item.action = "Prepare materials for the Acme Contract Review".into();
+        messages.push(event_message);
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        close_passed_events(&mut result, &messages, timestamp("2026-08-22T00:00:00Z"));
+        let passed = result.analysis.items[0].event_passed.as_ref().unwrap();
+        assert_eq!(passed.name, "acme contract review");
+        assert_eq!(result.event_closures, 1);
+        assert_eq!(
+            result.conversation_notes.last().unwrap(),
+            "Event index: 1 event learned (0 meetings, 1 calendar subjects, \
+0 subject prose, 0 body prose); \
+0 named an event, 0 carried a time, 0 matched by name, 1 matched by request text, \
+1 closed from the index, 0 closed from a stated time."
+        );
+    }
+
+    /// The text-matching fallback requires 2 shared meaningful tokens, not
+    /// 1 -- a single shared word ("Acme") must never be enough to close an
+    /// item whose model output named no event at all.
+    #[test]
+    fn close_passed_events_text_match_requires_two_shared_tokens_not_one() {
+        let mut event_mail = synthetic("Calendar invitation.", 1, "event");
+        event_mail.subject =
+            "Invitation: Acme Contract Review @ Fri Aug 21, 2026 11am - 12pm (UTC)".into();
+        let event_message = prepare(&event_mail, "Inbox", 1).unwrap();
+        let (mut messages, mut item) = closure_test_messages();
+        messages[0].input.timestamp = timestamp("2026-08-01T00:00:00Z");
+        item.action = "Prepare the Acme budget".into();
+        messages.push(event_message);
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        close_passed_events(&mut result, &messages, timestamp("2026-08-22T00:00:00Z"));
+        assert!(result.analysis.items[0].event_passed.is_none());
+        assert_eq!(result.event_closures, 0);
+    }
+
+    #[test]
+    fn close_passed_events_always_pushes_a_coverage_note_even_when_nothing_is_learned() {
+        let (messages, item) = closure_test_messages();
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        close_passed_events(&mut result, &messages, timestamp("2026-08-22T00:00:00Z"));
+        assert_eq!(
+            result.conversation_notes.last().unwrap(),
+            "Event index: 0 events learned (0 meetings, 0 calendar subjects, \
+0 subject prose, 0 body prose); \
+0 named an event, 0 carried a time, 0 matched by name, 0 matched by request text, \
+0 closed from the index, 0 closed from a stated time."
+        );
+    }
+
+    #[test]
+    fn close_passed_events_skips_the_note_when_the_scan_was_cancelled() {
+        let (messages, item) = closure_test_messages();
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: true,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        close_passed_events(&mut result, &messages, timestamp("2026-08-22T00:00:00Z"));
+        assert!(result.conversation_notes.is_empty());
+    }
+
+    /// The workshop's date is stated only in an email body -- no invitation
+    /// or calendar subject exists for it, so the event index has no entry
+    /// at all -- so closing it depends entirely on the model-supplied
+    /// `event_time` phrase, classified directly. Rather than recomputing
+    /// the boundary with the same (formerly buggy) formula the production
+    /// code used, this asserts the LOCAL calendar date the closure actually
+    /// shows: the event's own day (that Friday), not a UTC-midnight
+    /// approximation that can drift onto the wrong day once converted to a
+    /// viewer's timezone.
+    #[test]
+    fn close_passed_events_closes_from_a_stated_event_time_with_no_index_entry() {
+        let (mut messages, mut item) = closure_test_messages();
+        messages[0].input.timestamp = timestamp("2026-09-02T12:00:00Z"); // Wednesday
+        item.event = Some(Anchor {
+            message: item.evidence.message.clone(),
+            block: 0,
+            quote: "the workshop".into(),
+            context: String::new(),
+        });
+        item.event_time = Some(Anchor {
+            message: item.evidence.message.clone(),
+            block: 0,
+            quote: "Friday".into(),
+            context: String::new(),
+        });
+        let now = timestamp("2026-09-15T00:00:00Z"); // well past that Friday, any timezone
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        close_passed_events(&mut result, &messages, now);
+        let passed = result.analysis.items[0].event_passed.as_ref().unwrap();
+        assert_eq!(passed.name, "the workshop");
+        assert_eq!(passed.message_handle, messages[0].input.handle);
+        assert_eq!(result.event_closures, 1);
+        let local_date = chrono::DateTime::from_timestamp(passed.end, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        assert_eq!(local_date, "2026-09-04");
+    }
+
+    /// Gating fix: an item that never named an event at all -- no `event`
+    /// anchor, and a plain (not `EventTied`) deadline -- must never be
+    /// closed as "event passed" just because the model separately filled in
+    /// an `event_time` anchor. A plain overdue deadline is not evidence an
+    /// EVENT has ended.
+    #[test]
+    fn close_passed_events_leaves_a_plain_deadline_open_despite_a_stated_event_time() {
+        let (mut messages, mut item) = closure_test_messages();
+        messages[0].input.timestamp = timestamp("2026-09-02T12:00:00Z"); // Wednesday
+        item.deadline = Some(Anchor {
+            message: item.evidence.message.clone(),
+            block: 0,
+            quote: "Friday".into(),
+            context: String::new(),
+        });
+        item.event_time = Some(Anchor {
+            message: item.evidence.message.clone(),
+            block: 0,
+            quote: "Friday".into(),
+            context: String::new(),
+        });
+        let now = timestamp("2026-09-15T00:00:00Z");
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        close_passed_events(&mut result, &messages, now);
+        assert!(result.analysis.items[0].event_passed.is_none());
+        assert_eq!(result.event_closures, 0);
     }
 
     #[test]
@@ -2093,6 +4164,7 @@ mod tests {
             cancelled: false,
             conversation_notes: vec![],
             cross_thread_closures: 0,
+            event_closures: 0,
             primary_scan_transport_error: false,
             closure_pass_failure: None,
         };
@@ -2155,6 +4227,7 @@ mod tests {
             cancelled: false,
             conversation_notes: vec![],
             cross_thread_closures: 0,
+            event_closures: 0,
             primary_scan_transport_error: false,
             closure_pass_failure: None,
         };
@@ -2207,6 +4280,7 @@ mod tests {
             cancelled: false,
             conversation_notes: vec![],
             cross_thread_closures: 0,
+            event_closures: 0,
             primary_scan_transport_error: false,
             closure_pass_failure: None,
         };
@@ -2239,6 +4313,7 @@ mod tests {
             cancelled: false,
             conversation_notes: vec![],
             cross_thread_closures: 0,
+            event_closures: 0,
             primary_scan_transport_error: false,
             closure_pass_failure: None,
         };
@@ -2292,6 +4367,7 @@ mod tests {
             cancelled: false,
             conversation_notes: vec![],
             cross_thread_closures: 0,
+            event_closures: 0,
             primary_scan_transport_error: false,
             closure_pass_failure: None,
         };
@@ -2319,7 +4395,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_closures_caps_calls_at_forty_and_notes_it() {
+    fn scan_closures_caps_calls_at_the_configured_maximum_and_notes_it() {
         let (mut all, base_item) = closure_test_messages();
         let mut items = vec![];
         for n in 0..45u32 {
@@ -2359,6 +4435,7 @@ mod tests {
             cancelled: false,
             conversation_notes: vec![],
             cross_thread_closures: 0,
+            event_closures: 0,
             primary_scan_transport_error: false,
             closure_pass_failure: None,
         };
@@ -2367,10 +4444,14 @@ mod tests {
             calls += 1;
             Ok(None)
         });
-        assert_eq!(calls, 40, "the cap must bind at MAX_CLOSURE_CALLS");
-        assert!(result.conversation_notes.iter().any(|n| {
-            n == "Cross-thread closure checks were capped at 40 open requests this scan."
-        }));
+        assert_eq!(
+            calls, MAX_CLOSURE_CALLS,
+            "the cap must bind at MAX_CLOSURE_CALLS"
+        );
+        let expected_note = format!(
+            "Cross-thread closure checks were capped at {MAX_CLOSURE_CALLS} open requests this scan."
+        );
+        assert!(result.conversation_notes.contains(&expected_note));
     }
 
     #[test]
@@ -2379,10 +4460,13 @@ mod tests {
         // also appears in >=3 of the account's conversation groups and in
         // at least half of them -- a distribution list or shared mailbox,
         // not a genuine individual correspondent -- so the item must be
-        // skipped without ever reaching the provider.
+        // skipped without ever reaching the provider. Six (not three) other
+        // conversations, plus the evidence conversation and the reply, give
+        // the account 8 total conversation groups, clearing
+        // `is_shared_mailbox_address`'s 8-group floor.
         let (mut all, mut item) = closure_test_messages();
         item.waiting_party = "List <list@example.invalid>".into();
-        for n in 0..3u32 {
+        for n in 0..6u32 {
             let mail = request_from(
                 "list@example.invalid",
                 &format!("other-{n}"),
@@ -2408,6 +4492,7 @@ mod tests {
             cancelled: false,
             conversation_notes: vec![],
             cross_thread_closures: 0,
+            event_closures: 0,
             primary_scan_transport_error: false,
             closure_pass_failure: None,
         };
@@ -2421,6 +4506,41 @@ mod tests {
             "a shared-mailbox waiting party must never reach the provider"
         );
         assert_eq!(result.cross_thread_closures, 0);
+    }
+
+    #[test]
+    fn is_shared_mailbox_address_requires_at_least_eight_groups() {
+        // Pure-function table test for the 8-group floor: an address that
+        // would otherwise clear the per-address threshold (appears in every
+        // group, so `count * 2 >= total` trivially holds) must still read as
+        // NOT shared until the account has at least 8 conversation groups
+        // total.
+        for (total, count, expected) in [
+            (1, 1, false),
+            (2, 2, false),
+            (3, 3, false),
+            (7, 7, false),
+            (8, 3, false), // count*2 (6) < total (8): below the per-address threshold
+            (8, 4, true),  // count*2 (8) >= total (8), and count >= 3
+            (8, 8, true),
+            (9, 3, false), // count*2 (6) < total (9)
+            (9, 5, true),  // count*2 (10) >= total (9), and count >= 3
+        ] {
+            let mut groups_per_account = BTreeMap::new();
+            groups_per_account.insert("acct", total);
+            let mut address_group_counts = BTreeMap::new();
+            address_group_counts.insert(("acct", "list@example.invalid"), count);
+            assert_eq!(
+                is_shared_mailbox_address(
+                    "acct",
+                    "list@example.invalid",
+                    &groups_per_account,
+                    &address_group_counts,
+                ),
+                expected,
+                "total={total} count={count}"
+            );
+        }
     }
 
     #[test]
@@ -2441,6 +4561,7 @@ mod tests {
             cancelled: false,
             conversation_notes: vec![],
             cross_thread_closures: 0,
+            event_closures: 0,
             primary_scan_transport_error: true,
             closure_pass_failure: None,
         };
@@ -2488,6 +4609,7 @@ mod tests {
             cancelled: false,
             conversation_notes: vec![],
             cross_thread_closures: 0,
+            event_closures: 0,
             primary_scan_transport_error: false,
             closure_pass_failure: None,
         };
@@ -2818,7 +4940,12 @@ mod tests {
         // Three groups all carbon-copy a distribution list
         // ("list@example.invalid"). That address alone must not bridge
         // group C to groups A/B: only A and B additionally share a real
-        // outside participant ("sam@example.invalid").
+        // outside participant ("sam@example.invalid"). Five unrelated
+        // filler groups (also carbon-copying the list, under a distinct
+        // subject that never matches A/B/C's) pad the account to 8 total
+        // conversation groups -- `is_shared_mailbox_address`'s floor -- so
+        // "list" is still recognized as shared (8 of 8 groups) rather than
+        // being let through just because the account is small.
         let a = mail(
             "a-1",
             "cA",
@@ -2866,6 +4993,23 @@ mod tests {
             prepare(&b, "Sent", 1).unwrap(),
             prepare(&c, "Inbox", 2).unwrap(),
         ];
+        for n in 0..5u32 {
+            let filler = mail(
+                &format!("filler-{n}"),
+                &format!("cF{n}"),
+                "acct",
+                "Unrelated administrative note",
+                MailItem {
+                    body: "FYI only.".into(),
+                    sender: "List <list@example.invalid>".into(),
+                    sender_address: "list@example.invalid".into(),
+                    received: "2026-09-03T12:00:00Z".into(),
+                    to: vec!["user@example.invalid".into()],
+                    ..MailItem::default()
+                },
+            );
+            messages.push(prepare(&filler, "Inbox", messages.len()).unwrap());
+        }
         let merged = merge_threads(&mut messages);
         assert_eq!(merged, 1);
         assert_eq!(messages[0].conversation, messages[1].conversation);
@@ -2877,9 +5021,11 @@ mod tests {
         // Regression: the old rule only excluded an address that appeared
         // in EVERY group of the account, which a real shared mailbox or
         // distribution list essentially never does. Here "list@example.invalid"
-        // appears in 4 of 6 groups (>=3 and at least half of 6), so it must
-        // now be excluded from the intersection check -- none of these
-        // groups share any other address, so nothing should merge.
+        // appears in 4 of 8 groups (>=3 and at least half of 8 -- padded
+        // from the original 6 to clear `is_shared_mailbox_address`'s
+        // 8-group floor), so it must still be excluded from the
+        // intersection check -- none of these groups share any other
+        // address, so nothing should merge.
         let subject = "Alex and Sam discuss quarterly planning";
         let list = "list@example.invalid";
         let with_list = |id: &str, conv: &str, unique: &str| {
@@ -2921,6 +5067,8 @@ mod tests {
             with_list("g4", "c4", "u4@example.invalid"),
             without_list("g5", "c5", "v1@example.invalid"),
             without_list("g6", "c6", "v2@example.invalid"),
+            without_list("g7", "c7", "v3@example.invalid"),
+            without_list("g8", "c8", "v4@example.invalid"),
         ];
         let mut messages: Vec<ReviewMessage> = items
             .iter()
@@ -2935,12 +5083,18 @@ mod tests {
     }
 
     #[test]
-    fn address_in_two_of_six_groups_still_bridges_merge() {
-        // A correspondent that appears in only 2 of 6 groups (below the
-        // "at least 3" floor) is never treated as a shared mailbox, so it
-        // must still bridge the two groups it links -- exactly the ordinary
-        // two-thread case, now proven to still work once the account has
-        // more than 2 groups total.
+    fn address_in_two_of_eight_groups_still_bridges_merge() {
+        // A correspondent that appears in only 2 of the account's 8 groups
+        // fails `is_shared_mailbox_address`'s `count >= 3` clause (2 < 3) --
+        // not the 8-group floor, which this test's padding deliberately
+        // clears -- so it is never treated as a shared mailbox and must
+        // still bridge the two groups it links, exactly the ordinary
+        // two-thread case. Padded to 8 total groups (up from an earlier
+        // version's 6) specifically so the account clears
+        // `is_shared_mailbox_address`'s 8-group floor and this test actually
+        // exercises the `count >= 3` sub-threshold, rather than passing
+        // merely because the account is too small for the check to apply
+        // at all.
         let subject = "Alex and Sam discuss quarterly planning";
         let request = request_from("sam@example.invalid", "req-1", "c1", "acct", subject);
         let reply = reply_to(
@@ -2955,6 +5109,8 @@ mod tests {
             request_from("v2@example.invalid", "p-2", "c4", "acct", subject),
             request_from("v3@example.invalid", "p-3", "c5", "acct", subject),
             request_from("v4@example.invalid", "p-4", "c6", "acct", subject),
+            request_from("v5@example.invalid", "p-5", "c7", "acct", subject),
+            request_from("v6@example.invalid", "p-6", "c8", "acct", subject),
         ];
         let mut messages = vec![
             prepare(&request, "Inbox", 0).unwrap(),
