@@ -54,18 +54,26 @@ pub struct EventRef {
 
 /// How [`build_event_index`] learned one [`EventRef`], in descending order
 /// of confidence: Graph meeting-message metadata, a calendar-invite subject
-/// line, or a date/time found in ordinary prose (a subject or a message
-/// body) that was never structured as an invite at all.
+/// line, an event noun and date found in the subject's own prose (never
+/// structured as an invite), or an event phrase and date found in a
+/// message body's prose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventSource {
     Meeting,
     Subject,
+    SubjectProse,
     Prose,
 }
 
 /// Parses a calendar time embedded in a subject. Unknown or absent timezone
 /// abbreviations use UTC because a UTC message timestamp does not imply a
 /// reliable local offset without a timezone database.
+///
+/// An all-day (no stated time) subject ends at [`prose_event_time`]'s own
+/// all-day policy -- local end-of-day
+/// ([`DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT`], 17:00), not literal midnight --
+/// so the two sources agree on what "all day" means rather than one ending
+/// at 17:00 and the other at the next literal midnight.
 pub fn subject_event_time(subject: &str, _message_timestamp: i64) -> Option<(i64, i64)> {
     let calendar = subject.rsplit_once(" @ ")?.1.trim();
     let (calendar, offset) = strip_organizer_and_timezone_suffix(calendar);
@@ -79,7 +87,7 @@ pub fn subject_event_time(subject: &str, _message_timestamp: i64) -> Option<(i64
     if parts.len() == 4 {
         return Some((
             local_midnight - i64::from(offset),
-            local_midnight + 86_400 - i64::from(offset),
+            local_midnight + i64::from(DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT) - i64::from(offset),
         ));
     }
     if parts.len() != 7 || parts[5] != "-" {
@@ -261,23 +269,49 @@ fn parse_iso_date(word: &str) -> Option<(u32, u32, Option<i32>)> {
     ((1..=12).contains(&month) && (1..=31).contains(&day)).then_some((month, day, Some(year)))
 }
 
-/// `9/3/2026` (month/day/year), as one token (`/` is a word character to
-/// `prose_tokens`).
+/// `n/m/yyyy`, as one token (`/` is a word character to `prose_tokens`).
+/// Ambiguous between month/day and day/month order when BOTH fields are
+/// `<= 12` -- refused outright rather than guessing (see
+/// [`prose_event_time`]'s doc comment for the policy). Accepted only when
+/// exactly one field is `> 12`, which resolves the order unambiguously:
+/// that field must be the day, the other the month.
 fn parse_numeric_date(word: &str) -> Option<(u32, u32, Option<i32>)> {
     let word = strip_trailing_period(word);
     let parts: Vec<&str> = word.split('/').collect();
     if parts.len() != 3 || parts[2].len() != 4 {
         return None;
     }
-    let month: u32 = parts[0].parse().ok()?;
-    let day: u32 = parts[1].parse().ok()?;
+    let first: u32 = parts[0].parse().ok()?;
+    let second: u32 = parts[1].parse().ok()?;
     let year: i32 = parts[2].parse().ok()?;
+    let (month, day) = if first > 12 && second <= 12 {
+        (second, first)
+    } else if second > 12 && first <= 12 {
+        (first, second)
+    } else {
+        return None;
+    };
     ((1..=12).contains(&month) && (1..=31).contains(&day)).then_some((month, day, Some(year)))
 }
 
 /// One matched calendar date: `(month, day, year)`, where `year` is `None`
 /// when the matched text did not state one (e.g. "September 3").
 type MatchedDate = (u32, u32, Option<i32>);
+
+/// Words that precede a bare number without making it a day of month --
+/// "Room 12", "ext 12", "suite 12", "unit 12", "no 12", "#12" -- so a "day
+/// month" match ([`match_date_at`]'s `day_then_month` case) starting at a
+/// number immediately preceded by one of these is rejected outright: the
+/// number far more likely names a room, extension, or other identifier
+/// than a calendar day. Case-insensitive.
+const DAY_FALSE_POSITIVE_PRECEDERS: &[&str] = &["room", "ext", "suite", "unit", "no", "#"];
+
+/// Whether `tokens[i]` (a candidate day-of-month number) sits directly
+/// after one of [`DAY_FALSE_POSITIVE_PRECEDERS`], and so must not be read
+/// as a day-then-month date.
+fn day_then_month_excluded(tokens: &[(String, usize)], i: usize) -> bool {
+    i > 0 && DAY_FALSE_POSITIVE_PRECEDERS.contains(&tokens[i - 1].0.to_ascii_lowercase().as_str())
+}
 
 /// Tries every recognized date form starting exactly at `tokens[i]`,
 /// returning the date it found and how many tokens it consumed.
@@ -288,8 +322,9 @@ fn match_date_at(tokens: &[(String, usize)], i: usize) -> Option<(MatchedDate, u
     }
     let month_then_day =
         month_number(word).zip(tokens.get(i + 1).and_then(|t| parse_day_of_month(&t.0)));
-    let day_then_month = parse_day_of_month(word)
-        .zip(tokens.get(i + 1).and_then(|t| month_number(&t.0)))
+    let day_then_month = (!day_then_month_excluded(tokens, i))
+        .then(|| parse_day_of_month(word).zip(tokens.get(i + 1).and_then(|t| month_number(&t.0))))
+        .flatten()
         .map(|(day, month)| (month, day));
     let (month, day) = month_then_day.or(day_then_month)?;
     if let Some(year) = tokens.get(i + 2).and_then(|t| parse_four_digit_year(&t.0)) {
@@ -298,11 +333,35 @@ fn match_date_at(tokens: &[(String, usize)], i: usize) -> Option<(MatchedDate, u
     Some(((month, day, None), 2))
 }
 
+/// One optional token that may sit between a date and its trailing time
+/// without blocking [`parse_prose_time`] from finding that time ("on
+/// September 3 at 2 pm", "September 3, 2 pm", "September 3 @ 2pm",
+/// "September 3 from 2pm", "September 3 starting 2pm"). `,` and `@` never
+/// actually appear here as their own token -- [`prose_tokens`] treats both
+/// as plain separators -- but are listed anyway so the intent reads
+/// completely against the token stream that could exist.
+const TIME_PREPOSITIONS: &[&str] = &["at", "@", ",", "from", "starting"];
+
 /// A clock time starting at `tokens[idx]`, as seconds since local midnight,
 /// and how many tokens it consumed: a 12-hour time with the meridiem
 /// attached ("2pm", "2:30pm") or spaced ("2:30 pm"), or a bare 24-hour time
-/// ("14:00").
+/// ("14:00"). Skips one leading [`TIME_PREPOSITIONS`] token first, so a
+/// time stated after one still parses.
 fn parse_prose_time(tokens: &[(String, usize)], idx: usize) -> Option<(i32, usize)> {
+    if let Some(result) = parse_prose_time_literal(tokens, idx) {
+        return Some(result);
+    }
+    let lower = tokens.get(idx)?.0.to_ascii_lowercase();
+    if !TIME_PREPOSITIONS.contains(&lower.as_str()) {
+        return None;
+    }
+    let (seconds, consumed) = parse_prose_time_literal(tokens, idx + 1)?;
+    Some((seconds, consumed + 1))
+}
+
+/// The literal clock-time parse [`parse_prose_time`] wraps, with no
+/// preposition handling of its own.
+fn parse_prose_time_literal(tokens: &[(String, usize)], idx: usize) -> Option<(i32, usize)> {
     let token = &tokens.get(idx)?.0;
     if let Some(seconds) = parse_subject_clock(token) {
         return Some((seconds, 1));
@@ -332,9 +391,10 @@ fn local_year(message_timestamp: i64, offset: i32) -> i32 {
 
 /// Finds the first explicit date in `text` -- "September 3", "Sept 3",
 /// "Sep. 3, 2026", "3 September 2026", "9/3/2026", or "2026-09-03" --
-/// optionally followed by a time ("2pm", "2:30 pm", "14:00"), and resolves
-/// it to `(start, end, byte_offset)` in UTC seconds, where `byte_offset` is
-/// where the date text begins in `text`.
+/// optionally followed by a time ("2pm", "2:30 pm", "14:00", or any of
+/// those after one leading preposition token -- see [`TIME_PREPOSITIONS`]),
+/// and resolves it to `(start, end, byte_offset)` in UTC seconds, where
+/// `byte_offset` is where the date text begins in `text`.
 ///
 /// A date with no stated year defaults to `message_timestamp`'s own year in
 /// the given `offset`, rolling forward one year when that default would
@@ -342,66 +402,125 @@ fn local_year(message_timestamp: i64, offset: i32) -> i32 {
 /// "September 3" said in November means next year's September 3rd, not one
 /// already long past. A stated year is always taken as given, never rolled.
 ///
+/// A numeric `n/m/yyyy` date is refused outright when BOTH `n` and `m` are
+/// `<= 12` -- month-first and day-first readings would disagree and
+/// neither is more likely than the other, so it is never guessed. It is
+/// accepted only when exactly one field is `> 12`, which resolves the
+/// order unambiguously (that field is the day, the other the month): see
+/// [`parse_numeric_date`].
+///
 /// `end` is `start` plus one hour when a time was found; otherwise the
 /// matched date's whole civil day, closed at its local end-of-day per the
 /// same policy `deadline_view::classify` uses for a bare date deadline
-/// (`DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT`), not literal midnight-to-midnight.
+/// (`DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT`) -- the same all-day policy
+/// [`subject_event_time`] uses -- not literal midnight-to-midnight.
 pub fn prose_event_time(
     text: &str,
     message_timestamp: i64,
     offset: i32,
 ) -> Option<(i64, i64, usize)> {
+    prose_event_time_candidates(text, message_timestamp, offset)
+        .into_iter()
+        .next()
+}
+
+/// Every explicit date [`prose_event_time`] could find in `text`, resolved
+/// the same way and in the same left-to-right order -- [`prose_event_time`]
+/// itself is just this list's first element. Shared with the body-prose
+/// event learner ([`nearest_body_event_pairing`]), which must weigh EVERY
+/// date in a block against every candidate event phrase to pair each
+/// phrase with the date nearest to it, rather than always the block's
+/// first date.
+fn prose_event_time_candidates(
+    text: &str,
+    message_timestamp: i64,
+    offset: i32,
+) -> Vec<(i64, i64, usize)> {
     let tokens = prose_tokens(text);
-    for i in 0..tokens.len() {
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
         let Some(((month, day, year), consumed)) = match_date_at(&tokens, i) else {
+            i += 1;
             continue;
         };
         let year_given = year.is_some();
         let mut year = year.unwrap_or_else(|| local_year(message_timestamp, offset));
         let Some(mut date) = chrono::NaiveDate::from_ymd_opt(year, month, day) else {
+            i += 1;
             continue;
         };
-        let mut local_midnight = date.and_hms_opt(0, 0, 0)?.and_utc().timestamp();
+        let Some(mut local_midnight) = date.and_hms_opt(0, 0, 0).map(|d| d.and_utc().timestamp())
+        else {
+            i += 1;
+            continue;
+        };
         let mut day_start = local_midnight - i64::from(offset);
         if !year_given && day_start < message_timestamp - 60 * 86_400 {
             year += 1;
             let Some(rolled) = chrono::NaiveDate::from_ymd_opt(year, month, day) else {
+                i += 1;
                 continue;
             };
             date = rolled;
-            local_midnight = date.and_hms_opt(0, 0, 0)?.and_utc().timestamp();
+            let Some(rolled_midnight) = date.and_hms_opt(0, 0, 0).map(|d| d.and_utc().timestamp())
+            else {
+                i += 1;
+                continue;
+            };
+            local_midnight = rolled_midnight;
             day_start = local_midnight - i64::from(offset);
         }
         let byte_offset = tokens[i].1;
         if let Some((time_seconds, _)) = parse_prose_time(&tokens, i + consumed) {
             let start = local_midnight + i64::from(time_seconds) - i64::from(offset);
-            return Some((start, start + 3600, byte_offset));
+            found.push((start, start + 3600, byte_offset));
+        } else {
+            let day_end =
+                local_midnight + i64::from(DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT) - i64::from(offset);
+            found.push((day_start, day_end, byte_offset));
         }
-        let day_end =
-            local_midnight + i64::from(DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT) - i64::from(offset);
-        return Some((day_start, day_end, byte_offset));
+        i += consumed;
     }
-    None
+    found
 }
 
 /// Event nouns recognized in ordinary prose (as opposed to
 /// [`EVENT_GENERIC_NOUNS`], which are stripped as too common to distinguish
 /// one event from another): a capitalized multi-word phrase ending in one of
 /// these, found near a date in a message body, is learned as that event's
-/// name by [`body_event_name`].
+/// name by [`body_event_name`], and a subject's own prose is only ever
+/// learned as an event when the subject (minus its date) contains one of
+/// these too, gating the subject-prose learner in [`learn_one_event`]
+/// against turning any ordinary "<words> <date>" subject into a phantom
+/// event. Deliberately excludes "deadline": a stated deadline is evidence
+/// about an OBLIGATION, not proof that a gathering by that name exists.
 const PROSE_EVENT_NOUNS: &[&str] = &[
+    "ceremony",
+    "call",
     "closing",
     "conference",
     "deposition",
     "hearing",
+    "launch",
+    "meeting",
     "retreat",
     "seminar",
+    "session",
     "summit",
     "training",
     "trial",
     "webinar",
     "workshop",
 ];
+
+/// True when at least one whitespace-separated word of `name` (already
+/// lowercased, as [`normalize_subject`] produces) is a [`PROSE_EVENT_NOUNS`]
+/// entry.
+fn contains_prose_event_noun(name: &str) -> bool {
+    name.split_whitespace()
+        .any(|word| PROSE_EVENT_NOUNS.contains(&word))
+}
 
 /// How close (in bytes) a candidate event-name phrase must sit to the date
 /// text in a message body for [`body_event_name`] to credit them as
@@ -412,15 +531,20 @@ const PROSE_EVENT_NAME_WINDOW: usize = 120;
 /// the first source that applies, in descending order of confidence: Graph
 /// meeting-message metadata, a calendar-invite subject line, an explicit
 /// date found in the subject's own prose (a name never structured as an
-/// invite, e.g. "Spring Estate Planning Workshop - Sept 3"), or an explicit
-/// date found in a message body near a phrase naming the event. An
-/// out-of-date entry (a superseded meeting-message revision) is dropped
-/// outright, never learned; a name of fewer than 2 words is also dropped --
-/// too generic to identify one event ("hi", "fyi", a bare "Hearing"). When
-/// multiple messages name the same normalized event (a reschedule, or the
-/// same invite echoed by more than one message), only the entry with the
-/// LATEST start survives -- a stale "Aug 21" instance of "design workshop"
-/// must not shadow a later "Sep 15" reschedule of the same meeting.
+/// invite, e.g. "Spring Estate Planning Workshop - Sept 3", gated by
+/// [`contains_prose_event_noun`] so an ordinary "<words> <date>" subject
+/// with no event-shaped noun in it never counts), or an explicit date found
+/// in a message body near a phrase naming the event. An out-of-date entry
+/// (a superseded meeting-message revision) is dropped outright, never
+/// learned; a name of fewer than 2 words is also dropped -- too generic to
+/// identify one event ("hi", "fyi", a bare "Hearing") -- [`learn_one_event`]
+/// itself already enforces this per candidate so a short-name rejection
+/// falls through to the next source or block rather than losing the whole
+/// message, and this is a redundant final check. When multiple messages
+/// name the same normalized event (a reschedule, or the same invite echoed
+/// by more than one message), only the entry with the LATEST start
+/// survives -- a stale "Aug 21" instance of "design workshop" must not
+/// shadow a later "Sep 15" reschedule of the same meeting.
 pub fn build_event_index(messages: &[ReviewMessage]) -> Vec<EventRef> {
     let mut best: BTreeMap<String, EventRef> = BTreeMap::new();
     for message in messages {
@@ -447,9 +571,20 @@ pub fn build_event_index(messages: &[ReviewMessage]) -> Vec<EventRef> {
     best.into_values().collect()
 }
 
+/// Whether `name` is specific enough to identify one event: 2 or more
+/// words. A candidate that fails this check is rejected and
+/// [`learn_one_event`] falls through to its next candidate (a later body
+/// block, or the block-level phrase search) instead of aborting the whole
+/// message -- a message can carry more than one date/name candidate, and a
+/// too-generic early one must not shadow a good later one.
+fn is_specific_event_name(name: &str) -> bool {
+    name.split_whitespace().count() >= 2
+}
+
 /// One message's contribution to the event index, per the priority order
-/// documented on [`build_event_index`]. `None` when none of the four
-/// sources found anything (or the Graph/subject entry was out of date).
+/// documented on [`build_event_index`]. `None` when none of the sources
+/// found a sufficiently specific ([`is_specific_event_name`]) candidate (or
+/// the Graph/subject entry was out of date).
 fn learn_one_event(message: &ReviewMessage) -> Option<(String, i64, i64, EventSource)> {
     let subject = message.input.message.subject.as_string();
     if let Some((start, end, out_of_date)) = message.event {
@@ -457,11 +592,11 @@ fn learn_one_event(message: &ReviewMessage) -> Option<(String, i64, i64, EventSo
             return None;
         }
         let name = normalize_subject(&subject);
-        return (!name.is_empty()).then_some((name, start, end, EventSource::Meeting));
+        return is_specific_event_name(&name).then_some((name, start, end, EventSource::Meeting));
     }
     if let Some((start, end)) = subject_event_time(&subject, message.input.timestamp) {
         let name = normalize_subject(&subject);
-        return (!name.is_empty()).then_some((name, start, end, EventSource::Subject));
+        return is_specific_event_name(&name).then_some((name, start, end, EventSource::Subject));
     }
     let offset = local_offset_seconds(message.input.timestamp, 0);
     if let Some((start, end, byte_offset)) =
@@ -471,37 +606,45 @@ fn learn_one_event(message: &ReviewMessage) -> Option<(String, i64, i64, EventSo
             normalize_subject(subject[..byte_offset].trim_end_matches(|c: char| {
                 c.is_whitespace() || matches!(c, '-' | '@' | ':' | ',')
             }));
-        if !name.is_empty() {
-            return Some((name, start, end, EventSource::Subject));
+        if is_specific_event_name(&name) && contains_prose_event_noun(&name) {
+            return Some((name, start, end, EventSource::SubjectProse));
         }
     }
     let subject_name = normalize_subject(&subject);
     for block in &message.input.message.body_blocks {
         let text = block.as_string();
-        let Some((start, end, byte_offset)) =
-            prose_event_time(&text, message.input.timestamp, offset)
-        else {
+        let dates = prose_event_time_candidates(&text, message.input.timestamp, offset);
+        if dates.is_empty() {
             continue;
-        };
-        if let Some(name) = body_event_name(&text, byte_offset, &subject_name) {
+        }
+        if let Some((name, start, end)) = body_event_name(&text, &dates, &subject_name)
+            && is_specific_event_name(&name)
+        {
             return Some((name, start, end, EventSource::Prose));
         }
     }
     None
 }
 
-/// The event name for a body-block prose match: the message's own
-/// normalized subject when the block's text contains it verbatim, otherwise
-/// the nearest capitalized multi-word phrase ending in a [`PROSE_EVENT_NOUN`]
-/// within [`PROSE_EVENT_NAME_WINDOW`] bytes of the matched date, lowercased.
-/// `None` when neither is found -- an unnamed date is not learned.
+/// The event name and date for a body-block prose match: the message's own
+/// normalized subject, paired with the block's first date, when the
+/// block's text contains that subject verbatim; otherwise the (phrase,
+/// date) pairing [`nearest_body_event_pairing`] finds among every
+/// capitalized multi-word phrase ending in a [`PROSE_EVENT_NOUN`] and every
+/// date in `dates`. `None` when neither is found -- an unnamed date is not
+/// learned.
 ///
 /// [`PROSE_EVENT_NOUN`]: PROSE_EVENT_NOUNS
-fn body_event_name(text: &str, date_byte_offset: usize, subject_name: &str) -> Option<String> {
+fn body_event_name(
+    text: &str,
+    dates: &[(i64, i64, usize)],
+    subject_name: &str,
+) -> Option<(String, i64, i64)> {
     if !subject_name.is_empty() && text.to_lowercase().contains(subject_name) {
-        return Some(subject_name.to_string());
+        let &(start, end, _) = dates.first()?;
+        return Some((subject_name.to_string(), start, end));
     }
-    nearest_capitalized_event_phrase(text, date_byte_offset)
+    nearest_body_event_pairing(text, dates)
 }
 
 /// True when `word` starts with an ASCII uppercase letter (a cheap proxy for
@@ -510,49 +653,106 @@ fn starts_uppercase(word: &str) -> bool {
     word.chars().next().is_some_and(|c| c.is_ascii_uppercase())
 }
 
-/// Finds the capitalized multi-word run (2 or more consecutive capitalized
-/// words) ending in a [`PROSE_EVENT_NOUNS`] entry that sits closest to
-/// `date_byte_offset` and within [`PROSE_EVENT_NAME_WINDOW`] bytes of it,
-/// returned lowercased. Distance is measured between the run's nearer edge
-/// and the date offset, so a phrase before or after the date is treated the
-/// same way.
-fn nearest_capitalized_event_phrase(text: &str, date_byte_offset: usize) -> Option<String> {
+/// Every capitalized multi-word run (2 or more consecutive capitalized
+/// words) ending in a [`PROSE_EVENT_NOUNS`] entry, each with its start/end
+/// byte offsets, in left-to-right order. A run never crosses a sentence
+/// boundary: it stops growing immediately after including a token that
+/// ends in `.` (so "Notes. Onboarding Training" yields only "Onboarding
+/// Training", never a run that swallows the unrelated preceding sentence).
+fn capitalized_event_phrases(text: &str) -> Vec<(String, usize, usize)> {
     let tokens = prose_tokens(text);
-    let mut best: Option<(String, usize)> = None;
+    let mut phrases = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
         if !starts_uppercase(&tokens[i].0) {
             i += 1;
             continue;
         }
-        let mut j = i + 1;
-        while j < tokens.len() && starts_uppercase(&tokens[j].0) {
+        let mut j = i;
+        loop {
+            let ends_sentence = tokens[j].0.ends_with('.');
             j += 1;
+            if ends_sentence || j >= tokens.len() || !starts_uppercase(&tokens[j].0) {
+                break;
+            }
         }
         if j - i >= 2 && PROSE_EVENT_NOUNS.contains(&tokens[j - 1].0.to_lowercase().as_str()) {
             let phrase_start = tokens[i].1;
             let phrase_end = tokens[j - 1].1 + tokens[j - 1].0.len();
-            let distance = if phrase_start > date_byte_offset {
-                phrase_start - date_byte_offset
-            } else {
-                date_byte_offset.saturating_sub(phrase_end)
-            };
-            if distance <= PROSE_EVENT_NAME_WINDOW
-                && best
-                    .as_ref()
-                    .is_none_or(|(_, best_distance)| distance < *best_distance)
-            {
-                let phrase = tokens[i..j]
-                    .iter()
-                    .map(|t| t.0.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                best = Some((phrase, distance));
-            }
+            let phrase = tokens[i..j]
+                .iter()
+                .map(|t| t.0.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            phrases.push((phrase, phrase_start, phrase_end));
         }
         i = j;
     }
-    best.map(|(phrase, _)| phrase.to_lowercase())
+    phrases
+}
+
+/// Among `phrases` (as returned by [`capitalized_event_phrases`]), the one
+/// whose nearer edge sits closest to `date_byte_offset` and within
+/// [`PROSE_EVENT_NAME_WINDOW`] bytes of it: the phrase lowercased, its
+/// distance, and whether the date follows the phrase (`date_byte_offset` is
+/// at or after the phrase's end) -- callers pairing one phrase against
+/// MULTIPLE dates ([`nearest_body_event_pairing`]) use that bit to break a
+/// distance tie in favor of the natural "<Event Name> on <date>" order.
+fn nearest_phrase_for_date(
+    phrases: &[(String, usize, usize)],
+    date_byte_offset: usize,
+) -> Option<(String, usize, bool)> {
+    let mut best: Option<(String, usize, bool)> = None;
+    for (phrase, phrase_start, phrase_end) in phrases {
+        let (distance, date_follows) = if *phrase_start > date_byte_offset {
+            (phrase_start - date_byte_offset, false)
+        } else {
+            (date_byte_offset.saturating_sub(*phrase_end), true)
+        };
+        if distance > PROSE_EVENT_NAME_WINDOW {
+            continue;
+        }
+        let better = best
+            .as_ref()
+            .is_none_or(|(_, best_distance, _)| distance < *best_distance);
+        if better {
+            best = Some((phrase.to_lowercase(), distance, date_follows));
+        }
+    }
+    best
+}
+
+/// Pairs a message body's dates against its capitalized event-noun phrases:
+/// evaluates every phrase against every date in `dates` and returns the
+/// (phrase, date) pairing with the smallest byte distance between them --
+/// never just the block's first date -- so "please RSVP by September 1 for
+/// the Spring Workshop on September 15" pairs "Spring Workshop" with
+/// September 15, not the earlier, unrelated September 1. A tie is broken in
+/// favor of a date that follows its phrase within
+/// [`PROSE_EVENT_NAME_WINDOW`] bytes.
+fn nearest_body_event_pairing(
+    text: &str,
+    dates: &[(i64, i64, usize)],
+) -> Option<(String, i64, i64)> {
+    let phrases = capitalized_event_phrases(text);
+    let mut best: Option<(String, i64, i64, usize, bool)> = None;
+    for &(start, end, date_offset) in dates {
+        let Some((phrase, distance, date_follows)) = nearest_phrase_for_date(&phrases, date_offset)
+        else {
+            continue;
+        };
+        let better = match &best {
+            None => true,
+            Some((_, _, _, best_distance, best_follows)) => {
+                distance < *best_distance
+                    || (distance == *best_distance && date_follows && !*best_follows)
+            }
+        };
+        if better {
+            best = Some((phrase, start, end, distance, date_follows));
+        }
+    }
+    best.map(|(phrase, start, end, ..)| (phrase, start, end))
 }
 
 /// Stop words dropped from both the phrase and the event name before
@@ -638,7 +838,16 @@ pub fn match_event<'a>(
 /// least 2 shared meaningful tokens against a name that itself carries 2 or
 /// more meaningful tokens. Used only when the model named no event at all
 /// (see [`text_matched_event`]), where an ordinary single-token overlap
-/// would match on a generic phrase far too easily.
+/// would match on a generic phrase far too easily. Also never matches an
+/// event learned from prose ([`EventSource::SubjectProse`] or
+/// [`EventSource::Prose`]): text matching against those is a second,
+/// unverified guess stacked on top of an already-inferred name, and would
+/// otherwise let a subject like "Draft Agreement - September 3" (learned,
+/// if at all, only because it names a real event) silently close an
+/// unrelated action whose text happens to share those same words, e.g.
+/// "Send the draft agreement to Alex". Restricted to
+/// [`EventSource::Meeting`] and [`EventSource::Subject`] -- structured
+/// calendar evidence, not an inference from ordinary prose.
 fn match_event_by_text<'a>(
     phrase: &str,
     evidence_timestamp: i64,
@@ -650,6 +859,7 @@ fn match_event_by_text<'a>(
     }
     index
         .iter()
+        .filter(|event| matches!(event.source, EventSource::Meeting | EventSource::Subject))
         .filter(|event| {
             event.start >= evidence_timestamp && event.start - evidence_timestamp <= 60 * 86_400
         })
@@ -1408,9 +1618,17 @@ pub fn close_passed_events(result: &mut ScanResult, messages: &[ReviewMessage], 
         .iter()
         .filter(|event| event.source == EventSource::Subject)
         .count();
-    let prose = index.len() - meetings - subjects;
+    let subject_prose = index
+        .iter()
+        .filter(|event| event.source == EventSource::SubjectProse)
+        .count();
+    let prose = index
+        .iter()
+        .filter(|event| event.source == EventSource::Prose)
+        .count();
+    let event_word = if index.len() == 1 { "event" } else { "events" };
     result.conversation_notes.push(format!(
-        "Event index: {} events learned ({meetings} meetings, {subjects} subjects, {prose} prose); {named} named an event, {timed} carried a time, {matched} matched by name, {matched_by_text} matched by request text, {closed_from_index} closed from the index, {closed_from_stated_time} closed from a stated time.",
+        "Event index: {} {event_word} learned ({meetings} meetings, {subjects} calendar subjects, {subject_prose} subject prose, {prose} body prose); {named} named an event, {timed} carried a time, {matched} matched by name, {matched_by_text} matched by request text, {closed_from_index} closed from the index, {closed_from_stated_time} closed from a stated time.",
         index.len(),
     ));
 }
@@ -2474,9 +2692,12 @@ mod tests {
                 "2026-09-07T17:00:00Z",
             ),
             (
+                // All-day: ends at local end-of-day (17:00), consistent
+                // with `prose_event_time`'s own all-day policy -- not
+                // literal midnight-to-midnight.
                 "Invitation: Design workshop @ Fri Aug 21, 2026",
                 "2026-08-21T00:00:00Z",
-                "2026-08-22T00:00:00Z",
+                "2026-08-21T17:00:00Z",
             ),
             (
                 "Invitation: Design workshop @ Fri Aug 21, 2026 11am - 12pm (XYZ)",
@@ -2546,7 +2767,10 @@ mod tests {
             ("Let's meet Sept 3 to review.", "Sept 3"),
             ("Let's meet Sep. 3, 2026 to review.", "Sep. 3"),
             ("Let's meet 3 September 2026 to review.", "3 September"),
-            ("Let's meet 9/3/2026 to review.", "9/3/2026"),
+            // No numeric-date case here: writing "September 3" as
+            // `n/m/yyyy` would need both fields <= 12 (9 and 3), which
+            // `parse_numeric_date`'s ambiguity policy refuses outright --
+            // see `numeric_date_ambiguity_policy` below.
             ("Let's meet 2026-09-03 to review.", "2026-09-03"),
         ];
         for (text, needle) in cases {
@@ -2562,6 +2786,36 @@ mod tests {
         }
     }
 
+    /// `n/m/yyyy` is refused when both fields are `<= 12` (ambiguous month
+    /// vs. day order), accepted when exactly one field is `> 12` (that
+    /// field is unambiguously the day).
+    #[test]
+    fn numeric_date_ambiguity_policy() {
+        assert_eq!(parse_numeric_date("3/9/2026"), None);
+        assert_eq!(
+            parse_numeric_date("9/15/2026"),
+            Some((9, 15, Some(2026))),
+            "month/day/year: 9 <= 12, 15 > 12 -- unambiguously month=9, day=15"
+        );
+        assert_eq!(
+            parse_numeric_date("15/9/2026"),
+            Some((9, 15, Some(2026))),
+            "day/month/year: 15 > 12, 9 <= 12 -- unambiguously day=15, month=9"
+        );
+    }
+
+    /// Same policy exercised through `prose_event_time`, matching the
+    /// review's exact probes.
+    #[test]
+    fn prose_event_time_refuses_ambiguous_numeric_dates_but_accepts_unambiguous_ones() {
+        let message = timestamp("2026-08-01T00:00:00Z");
+        assert!(prose_event_time("Meet on 3/9/2026.", message, 0).is_none());
+        let (start, _, _) = prose_event_time("Meet on 9/15/2026.", message, 0).unwrap();
+        assert_eq!(start, timestamp("2026-09-15T00:00:00Z"));
+        let (start, _, _) = prose_event_time("Meet on 15/9/2026.", message, 0).unwrap();
+        assert_eq!(start, timestamp("2026-09-15T00:00:00Z"));
+    }
+
     #[test]
     fn prose_event_time_reads_an_optional_trailing_time() {
         let message = timestamp("2026-08-01T00:00:00Z");
@@ -2572,6 +2826,27 @@ mod tests {
             ("Meet September 3 14:00 sharp.", 14 * 3600),
         ] {
             let (start, end, _) = prose_event_time(text, message, 0).unwrap();
+            let expected_start = day_start + seconds_since_midnight;
+            assert_eq!(start, expected_start, "{text}");
+            assert_eq!(end, start + 3600, "{text}");
+        }
+    }
+
+    /// A preposition ("at", "from", "starting") -- or a comma or "@", which
+    /// `prose_tokens` treats as pure separators and so never even reach
+    /// this far as their own token -- may sit between the date and its
+    /// trailing time without blocking it from being read.
+    #[test]
+    fn prose_event_time_reads_a_time_after_one_leading_preposition() {
+        let message = timestamp("2026-08-01T00:00:00Z");
+        let day_start = timestamp("2026-09-03T00:00:00Z");
+        for (text, seconds_since_midnight) in [
+            ("Let's meet on September 3 at 2 pm sharp.", 14 * 3600),
+            ("Let's meet on September 3 at 14:00 sharp.", 14 * 3600),
+            ("Let's meet on Sept 3 at 2:30 pm sharp.", 14 * 3600 + 1800),
+        ] {
+            let (start, end, _) =
+                prose_event_time(text, message, 0).unwrap_or_else(|| panic!("{text}"));
             let expected_start = day_start + seconds_since_midnight;
             assert_eq!(start, expected_start, "{text}");
             assert_eq!(end, start + 3600, "{text}");
@@ -2607,6 +2882,20 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    /// Minor-fix regression: a bare number preceded by "Room" (or "ext",
+    /// "suite", "unit", "no", "#") is never read as a day-then-month date
+    /// -- "Room 12 August notes" must learn nothing, since "12" here names
+    /// a room, not the 12th. An ordinary day-then-month date with no such
+    /// preceder ("3 September 2026") still parses.
+    #[test]
+    fn day_then_month_excludes_room_and_similar_preceders() {
+        let message = timestamp("2026-08-01T00:00:00Z");
+        assert!(prose_event_time("Room 12 August notes", message, 0).is_none());
+        let (start, _, _) = prose_event_time("Meet 3 September 2026 to review.", message, 0)
+            .expect("day-then-month with no preceder still parses");
+        assert_eq!(start, timestamp("2026-09-03T00:00:00Z"));
     }
 
     #[test]
@@ -2661,7 +2950,8 @@ mod tests {
     /// name in the subject, with its date appended in prose ("- Sept 3")
     /// rather than structured as a calendar invite or Graph meeting
     /// message, so neither of the first two sources in
-    /// `build_event_index`'s priority order finds anything.
+    /// `build_event_index`'s priority order finds anything. "Workshop" is
+    /// an event noun, so the subject-prose learner's gate accepts it.
     #[test]
     fn event_index_learns_a_date_from_subject_prose_when_no_invite_exists() {
         let mut mail = synthetic("Let's finalize the agenda.", 0, "a");
@@ -2675,7 +2965,122 @@ mod tests {
         let index = build_event_index(&[message]);
         assert_eq!(index.len(), 1);
         assert_eq!(index[0].name, "spring estate planning workshop");
-        assert_eq!(index[0].source, EventSource::Subject);
+        assert_eq!(index[0].source, EventSource::SubjectProse);
+    }
+
+    /// Critical review finding: the subject-prose learner previously
+    /// turned ANY "<words> <date>" subject into an event, with no
+    /// requirement that it actually name a gathering. "Draft Agreement"
+    /// contains no [`PROSE_EVENT_NOUNS`] entry, so nothing is learned --
+    /// and, with no body blocks either, the whole message contributes
+    /// nothing to the index.
+    #[test]
+    fn subject_prose_without_an_event_noun_learns_nothing() {
+        let mut mail = synthetic("", 0, "a");
+        mail.subject = "Draft Agreement - September 3".into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        assert!(build_event_index(&[message]).is_empty());
+    }
+
+    /// Companion to the above at the closure level: since the "Draft
+    /// Agreement" subject never enters the index, a real, unrelated
+    /// obligation whose action text happens to share those same words
+    /// ("Send the draft agreement to Alex") must not be closed as "event
+    /// passed".
+    #[test]
+    fn close_passed_events_does_not_close_a_request_via_a_rejected_subject_prose_candidate() {
+        let mut event_mail = synthetic("", 1, "event");
+        event_mail.subject = "Draft Agreement - September 3".into();
+        let event_message = prepare(&event_mail, "Inbox", 1).unwrap();
+        let (mut messages, mut item) = closure_test_messages();
+        messages[0].input.timestamp = timestamp("2026-08-01T00:00:00Z");
+        item.action = "Send the draft agreement to Alex".into();
+        messages.push(event_message);
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        close_passed_events(&mut result, &messages, timestamp("2026-10-01T00:00:00Z"));
+        assert!(result.analysis.items[0].event_passed.is_none());
+        assert_eq!(result.event_closures, 0);
+    }
+
+    /// A proper-named event still closes once passed via its `event`
+    /// anchor even though it was only ever learned from subject prose
+    /// (never a structured invite): the noun gate lets a genuine event
+    /// through, and `match_event` (unlike `match_event_by_text`) is not
+    /// restricted to structured sources.
+    #[test]
+    fn close_passed_events_closes_a_subject_prose_named_event_via_the_event_anchor() {
+        let mut event_mail = synthetic("", 1, "event");
+        event_mail.subject = "Spring Estate Planning Workshop - Aug 21, 2026".into();
+        let event_message = prepare(&event_mail, "Inbox", 1).unwrap();
+        let (mut messages, mut item) = closure_test_messages();
+        messages[0].input.timestamp = timestamp("2026-08-01T00:00:00Z");
+        item.event = Some(Anchor {
+            message: item.evidence.message.clone(),
+            block: 0,
+            quote: "the Spring Estate Planning Workshop".into(),
+            context: String::new(),
+        });
+        messages.push(event_message);
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        // Well clear of the machine's own local offset either way.
+        close_passed_events(&mut result, &messages, timestamp("2026-08-25T00:00:00Z"));
+        let passed = result.analysis.items[0].event_passed.as_ref().unwrap();
+        assert_eq!(passed.name, "spring estate planning workshop");
+        assert_eq!(result.event_closures, 1);
+    }
+
+    /// `match_event_by_text` must never match a prose-sourced event: text
+    /// matching is restricted to structured (Meeting/Subject) evidence, so
+    /// a subject-prose or body-prose entry can never be silently confirmed
+    /// by an unrelated request's own wording.
+    #[test]
+    fn match_event_by_text_never_matches_a_prose_sourced_event() {
+        let evidence = timestamp("2026-08-01T00:00:00Z");
+        for source in [EventSource::SubjectProse, EventSource::Prose] {
+            let index = vec![EventRef {
+                name: "draft agreement".into(),
+                start: timestamp("2026-09-03T00:00:00Z"),
+                end: timestamp("2026-09-03T17:00:00Z"),
+                message_handle: "m0".into(),
+                source,
+            }];
+            assert!(
+                match_event_by_text("Send the draft agreement to Alex", evidence, &index).is_none(),
+                "{source:?}"
+            );
+        }
     }
 
     /// The event's date is stated only in a body paragraph, next to a
@@ -2698,6 +3103,80 @@ at the downtown courthouse. Let me know if that works.",
         assert_eq!(index.len(), 1);
         assert_eq!(index[0].name, "johnson hearing");
         assert_eq!(index[0].source, EventSource::Prose);
+    }
+
+    /// Critical review finding: a block with more than one date must pair
+    /// the event phrase with the NEAREST date, not the first one in the
+    /// block -- "please RSVP by September 1" is an unrelated, earlier
+    /// date; "the Spring Workshop on September 15" is the phrase's real
+    /// date.
+    #[test]
+    fn event_index_pairs_a_body_prose_event_phrase_with_the_nearest_date_not_the_first() {
+        let mut mail = synthetic(
+            "Hi team - please RSVP by September 1 for the Spring Workshop on September 15.",
+            0,
+            "a",
+        );
+        mail.subject = "Re: scheduling".into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        let index = build_event_index(&[message]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].name, "spring workshop");
+        let local_date = chrono::DateTime::from_timestamp(index[0].start, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        assert_eq!(local_date, "2026-09-15");
+    }
+
+    /// Important-fix regression: a rejected (too-short) candidate must fall
+    /// through to the next candidate/block rather than aborting the whole
+    /// message. The message's one-word subject ("Fee") appears verbatim in
+    /// the first body block, which would otherwise be named "fee" (1 word,
+    /// rejected); the fix must instead try the second block, which names a
+    /// real, specific event.
+    #[test]
+    fn learn_one_event_falls_through_a_rejected_one_word_subject_match_to_a_later_block() {
+        let mut mail = synthetic("placeholder", 0, "a");
+        mail.subject = "Fee".into();
+        let mut message = prepare(&mail, "Inbox", 0).unwrap();
+        message.input.message.body_blocks = vec![
+            CanonicalBlock::new("The Fee is due September 1.").unwrap(),
+            CanonicalBlock::new("Update: the Johnson Hearing is now set for September 9.").unwrap(),
+        ];
+        let index = build_event_index(&[message]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].name, "johnson hearing");
+        assert_eq!(index[0].source, EventSource::Prose);
+    }
+
+    /// Minor-fix regression: a capitalized run must never cross a sentence
+    /// boundary. Without the period-break fix, "Notes. Onboarding
+    /// Training" would be read as one continuous capitalized run (and
+    /// still match, since it also ends in "training"), silently absorbing
+    /// the unrelated preceding sentence into the learned name.
+    #[test]
+    fn capitalized_event_phrase_breaks_at_a_token_ending_in_a_period() {
+        let mut mail = synthetic("Notes. Onboarding Training on 2026-09-03", 0, "a");
+        mail.subject = "Re: scheduling".into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        let index = build_event_index(&[message]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].name, "onboarding training");
+    }
+
+    #[test]
+    fn nearest_phrase_for_date_finds_the_closest_matching_run() {
+        let text = "the Design Workshop is set for September 3, plans pending.";
+        let phrases = capitalized_event_phrases(text);
+        let date_offset = text.find("September").unwrap();
+        let (phrase, _, date_follows) = nearest_phrase_for_date(&phrases, date_offset).unwrap();
+        assert_eq!(phrase, "design workshop");
+        assert!(date_follows);
+        assert!(
+            nearest_phrase_for_date(&capitalized_event_phrases("no capitals here"), 0).is_none()
+        );
     }
 
     /// A body date near the message's own (multi-word) normalized subject
@@ -3239,10 +3718,63 @@ at the downtown courthouse. Let me know if that works.",
         assert_eq!(result.event_closures, 1);
         assert_eq!(
             result.conversation_notes.last().unwrap(),
-            "Event index: 1 events learned (0 meetings, 1 subjects, 0 prose); \
+            "Event index: 1 event learned (0 meetings, 1 calendar subjects, \
+0 subject prose, 0 body prose); \
 1 named an event, 0 carried a time, 1 matched by name, 0 matched by request text, \
 1 closed from the index, 0 closed from a stated time."
         );
+    }
+
+    /// Important-fix regression: when the item's named event has a
+    /// matching index entry that has NOT ended yet, the index alone
+    /// decides this item -- the stated-time path
+    /// (`close_from_stated_time`) must never be consulted, even though the
+    /// item's own `event_time` anchor would, evaluated in isolation,
+    /// already read as passed.
+    #[test]
+    fn close_passed_events_a_future_index_match_suppresses_the_stated_time_path() {
+        let mut event_mail = synthetic("Calendar invitation.", 1, "event");
+        event_mail.subject =
+            "Invitation: Design workshop @ Fri Sep 25, 2026 11am - 12pm (UTC)".into();
+        let event_message = prepare(&event_mail, "Inbox", 1).unwrap();
+        let (mut messages, mut item) = closure_test_messages();
+        messages[0].input.timestamp = timestamp("2026-09-02T12:00:00Z"); // Wednesday
+        item.event = Some(Anchor {
+            message: item.evidence.message.clone(),
+            block: 0,
+            quote: "the design workshop".into(),
+            context: String::new(),
+        });
+        item.event_time = Some(Anchor {
+            message: item.evidence.message.clone(),
+            block: 0,
+            quote: "Friday".into(),
+            context: String::new(),
+        });
+        messages.push(event_message);
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        // After the stated "Friday" (Sep 4) but well before the indexed
+        // workshop (Sep 25): a naive stated-time classification alone
+        // would already read this item as passed.
+        close_passed_events(&mut result, &messages, timestamp("2026-09-10T00:00:00Z"));
+        assert!(result.analysis.items[0].event_passed.is_none());
+        assert_eq!(result.event_closures, 0);
     }
 
     /// The coverage note's live finding: the model emitted no `event` or
@@ -3284,7 +3816,8 @@ at the downtown courthouse. Let me know if that works.",
         assert_eq!(result.event_closures, 1);
         assert_eq!(
             result.conversation_notes.last().unwrap(),
-            "Event index: 1 events learned (0 meetings, 1 subjects, 0 prose); \
+            "Event index: 1 event learned (0 meetings, 1 calendar subjects, \
+0 subject prose, 0 body prose); \
 0 named an event, 0 carried a time, 0 matched by name, 1 matched by request text, \
 1 closed from the index, 0 closed from a stated time."
         );
@@ -3348,7 +3881,8 @@ at the downtown courthouse. Let me know if that works.",
         close_passed_events(&mut result, &messages, timestamp("2026-08-22T00:00:00Z"));
         assert_eq!(
             result.conversation_notes.last().unwrap(),
-            "Event index: 0 events learned (0 meetings, 0 subjects, 0 prose); \
+            "Event index: 0 events learned (0 meetings, 0 calendar subjects, \
+0 subject prose, 0 body prose); \
 0 named an event, 0 carried a time, 0 matched by name, 0 matched by request text, \
 0 closed from the index, 0 closed from a stated time."
         );

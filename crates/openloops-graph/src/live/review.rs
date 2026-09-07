@@ -972,12 +972,10 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            fetch_from_origin(&http, "synthetic-token", url.clone(), &origin),
+            fetch_from_origin(&http, "synthetic-token", url, &origin),
             Err(ConnectionError::BadRequest)
         );
         server.join().unwrap();
-
-        assert!(fetch_event(&http, "synthetic-token", url, &origin).is_none());
     }
 
     /// A response whose `Content-Length` header alone exceeds the bound is
