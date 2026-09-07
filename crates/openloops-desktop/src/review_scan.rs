@@ -627,12 +627,19 @@ fn learn_one_event(message: &ReviewMessage) -> Option<(String, i64, i64, EventSo
 }
 
 /// The event name and date for a body-block prose match: the message's own
-/// normalized subject, paired with the block's first date, when the
-/// block's text contains that subject verbatim; otherwise the (phrase,
-/// date) pairing [`nearest_body_event_pairing`] finds among every
-/// capitalized multi-word phrase ending in a [`PROSE_EVENT_NOUN`] and every
-/// date in `dates`. `None` when neither is found -- an unnamed date is not
-/// learned.
+/// normalized subject, paired with the block's first date, when that
+/// subject is itself specific ([`is_specific_event_name`]) AND the block's
+/// text contains it; otherwise (including when the subject is present but
+/// too generic to trust on its own, e.g. a one-word subject like "Prep"
+/// that happens to sit inside an unrelated word like "prepare") falls
+/// through to the (phrase, date) pairing [`nearest_body_event_pairing`]
+/// finds among every capitalized multi-word phrase ending in a
+/// [`PROSE_EVENT_NOUN`] and every date in `dates`. Requiring specificity
+/// FIRST matters: a short subject is exactly the case most likely to
+/// appear as a coincidental substring of ordinary prose (as opposed to
+/// actually naming the event), and matching on it there would silently
+/// mask a real, specific phrase later in the same text. `None` when
+/// nothing is found -- an unnamed date is not learned.
 ///
 /// [`PROSE_EVENT_NOUN`]: PROSE_EVENT_NOUNS
 fn body_event_name(
@@ -640,8 +647,10 @@ fn body_event_name(
     dates: &[(i64, i64, usize)],
     subject_name: &str,
 ) -> Option<(String, i64, i64)> {
-    if !subject_name.is_empty() && text.to_lowercase().contains(subject_name) {
-        let &(start, end, _) = dates.first()?;
+    if is_specific_event_name(subject_name)
+        && text.to_lowercase().contains(subject_name)
+        && let Some(&(start, end, _)) = dates.first()
+    {
         return Some((subject_name.to_string(), start, end));
     }
     nearest_body_event_pairing(text, dates)
