@@ -4,8 +4,8 @@ use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use crate::provider::{
-    MAX_REQUEST, MAX_RESPONSE, ModelClient, https_client, read_body, status_error, transport_error,
-    valid_key, valid_model_name,
+    MAX_REQUEST, ModelClient, https_client, json_document, parse_error, read_body, status_error,
+    transport_error, valid_key, valid_model_name,
 };
 use crate::validation::{AnalysisResult, ParticipantSlot, SuppliedContext, validate};
 
@@ -186,43 +186,12 @@ fn review_analysis(
     })
 }
 
-/// Accept only an entire JSON document, optionally inside one Markdown JSON fence.
-/// Never search prose for a plausible object or discard text around a fence.
-fn json_document(bytes: &[u8]) -> Result<&[u8], ProviderError> {
-    if bytes.len() > MAX_RESPONSE {
-        return Err(ProviderError::ResponseTooLarge);
-    }
-    let text = std::str::from_utf8(bytes)
-        .map_err(|_| ProviderError::InvalidJson)?
-        .trim();
-    if let Some(fenced) = text
-        .strip_prefix("```json\n")
-        .or_else(|| text.strip_prefix("```json\r\n"))
-        .or_else(|| text.strip_prefix("```\n"))
-    {
-        return fenced
-            .strip_suffix("```")
-            .map(|value| value.trim().as_bytes())
-            .ok_or(ProviderError::InvalidJson);
-    }
-    Ok(text.as_bytes())
-}
-
-fn parse_error(error: openloops_contracts::ParseRejection) -> ProviderError {
-    use openloops_contracts::ParseRejection;
-    match error {
-        ParseRejection::ResponseTooLarge => ProviderError::ResponseTooLarge,
-        ParseRejection::InvalidUtf8 | ParseRejection::InvalidJson => ProviderError::InvalidJson,
-        ParseRejection::InvalidSchema => ProviderError::InvalidSchema,
-    }
-}
-
 fn read_response(response: Response) -> Result<Zeroizing<Vec<u8>>, ProviderError> {
     match response.status().as_u16() {
         200 => {}
         status => return Err(status_error(status)),
     }
-    read_body(response)
+    read_body(response, crate::provider::MAX_RESPONSE)
 }
 
 /// Prefer the exact default label, or the dated version the provider lists.

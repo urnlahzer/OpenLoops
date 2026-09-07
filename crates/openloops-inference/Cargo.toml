@@ -17,6 +17,7 @@ zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"], 
 [features]
 default = []
 ollama-cloud = ["dep:reqwest", "dep:serde_json", "dep:zeroize"]
+openrouter = ["dep:reqwest", "dep:serde_json", "dep:zeroize"]
 
 [lints]
 workspace = true

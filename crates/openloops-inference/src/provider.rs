@@ -103,18 +103,23 @@ pub(crate) fn https_client() -> Result<Client, ProviderError> {
         .map_err(|error| transport_error(&error))
 }
 
-/// Reads a success body under the fixed size cap. The caller has already
-/// mapped the status, so this never inspects it.
-pub(crate) fn read_body(response: Response) -> Result<Zeroizing<Vec<u8>>, ProviderError> {
+/// Reads a success body under `limit` bytes. The caller has already mapped
+/// the status, so this never inspects it, and picks the limit its own
+/// contract allows: `MAX_RESPONSE` for a completion, a larger adapter-fixed
+/// bound for a content-free catalog listing.
+pub(crate) fn read_body(
+    response: Response,
+    limit: usize,
+) -> Result<Zeroizing<Vec<u8>>, ProviderError> {
     if response
         .content_length()
-        .is_some_and(|len| len > MAX_RESPONSE as u64)
+        .is_some_and(|len| len > limit as u64)
     {
         return Err(ProviderError::ResponseTooLarge);
     }
     let mut bytes = Zeroizing::new(Vec::new());
     response
-        .take(MAX_RESPONSE as u64 + 1)
+        .take(limit as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::TimedOut
@@ -128,10 +133,41 @@ pub(crate) fn read_body(response: Response) -> Result<Zeroizing<Vec<u8>>, Provid
                 ProviderError::Network
             }
         })?;
-    if bytes.len() > MAX_RESPONSE {
+    if bytes.len() > limit {
         return Err(ProviderError::ResponseTooLarge);
     }
     Ok(bytes)
+}
+
+/// Accept only an entire JSON document, optionally inside one Markdown JSON fence.
+/// Never search prose for a plausible object or discard text around a fence.
+pub(crate) fn json_document(bytes: &[u8]) -> Result<&[u8], ProviderError> {
+    if bytes.len() > MAX_RESPONSE {
+        return Err(ProviderError::ResponseTooLarge);
+    }
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| ProviderError::InvalidJson)?
+        .trim();
+    if let Some(fenced) = text
+        .strip_prefix("```json\n")
+        .or_else(|| text.strip_prefix("```json\r\n"))
+        .or_else(|| text.strip_prefix("```\n"))
+    {
+        return fenced
+            .strip_suffix("```")
+            .map(|value| value.trim().as_bytes())
+            .ok_or(ProviderError::InvalidJson);
+    }
+    Ok(text.as_bytes())
+}
+
+pub(crate) fn parse_error(error: openloops_contracts::ParseRejection) -> ProviderError {
+    use openloops_contracts::ParseRejection;
+    match error {
+        ParseRejection::ResponseTooLarge => ProviderError::ResponseTooLarge,
+        ParseRejection::InvalidUtf8 | ParseRejection::InvalidJson => ProviderError::InvalidJson,
+        ParseRejection::InvalidSchema => ProviderError::InvalidSchema,
+    }
 }
 
 pub(crate) fn transport_error(error: &reqwest::Error) -> ProviderError {
@@ -195,7 +231,7 @@ mod tests {
             .get(format!("http://{address}/"))
             .send()
             .unwrap();
-        let result = read_body(response);
+        let result = read_body(response, MAX_RESPONSE);
         drop(release);
         server.join().unwrap();
         assert_eq!(result.err(), Some(ProviderError::Timeout));
