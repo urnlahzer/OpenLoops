@@ -363,6 +363,8 @@ Timezone/DST resolution uses the configured timezone rules in force when the ope
 
 ### 6.7 Closure, manual completion, and delegation
 
+Deadline renegotiation (6.6) modifies the loop's operative deadline rather than serving as a closure kind; the closure kinds are completed, declined, withdrawn, superseded, and agreed.
+
 - **OL-CLOSE-001 MUST** detect possible fulfillment, decline, withdrawal, delegation, renegotiation, supersession, mootness, and completion evidence from later relevant email.
 - **OL-CLOSE-002 MUST** treat attachments, links, “Done,” substantive answers, forwarded responses, third-party delivery, and calendar responses only as candidate closure evidence.
 - **OL-CLOSE-003 MUST NOT** close a loop from inferred evidence without explicit user confirmation.

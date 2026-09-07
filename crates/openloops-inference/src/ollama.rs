@@ -574,7 +574,7 @@ mod tests {
             loop_candidate_handles: &[],
         };
         let valid = json!({"claim_type":"request","evidence":[{"source_handle":"message_0","component":"body_block","block_ordinal":0,"range_start":0,"range_end":body.chars().count()}],
-            "waiting_party_handle":null,"related_loop_handles":[],"temporal":null,"confidence_micros":900000,"ambiguity_codes":[]});
+            "waiting_party_handle":null,"related_loop_handles":[],"temporal":null,"confidence_micros":900_000,"ambiguity_codes":[]});
         let mut bad = valid.clone();
         bad["evidence"][0]["range_end"] = json!(1000);
         let bytes = serde_json::to_vec(&json!({"schema_version":1,"claims":[valid,bad]})).unwrap();
@@ -604,7 +604,7 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
             let mut buffer = [0; 4096];
-            socket.read(&mut buffer).unwrap();
+            let _bytes_read = socket.read(&mut buffer).unwrap();
             socket
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n")
                 .unwrap();

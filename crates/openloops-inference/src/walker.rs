@@ -3,6 +3,10 @@
 //! `contracts/evidence/identity-boundary.json`
 //! `canonical_projection_contract.html_text_profile`.
 //!
+//! See [`crate::reply_history`] for the separate, English-only,
+//! semantic-heuristic reply-history detection layered on top of this
+//! walker's output.
+//!
 //! # Dependency decision: no HTML-parsing crate is activated
 //!
 //! `html_text_profile.parser` pins "WHATWG HTML fragment parsing algorithm
@@ -92,8 +96,14 @@ pub struct WalkOutput {
     /// `component_block_order.body_block`: current-body blocks in document
     /// order.
     pub body_blocks: Vec<String>,
-    /// `component_block_order.quote_block`: quoted/forwarded blocks in
-    /// document order.
+    /// `component_block_order.quote_block`: quoted/forwarded blocks.
+    /// Blockquote-derived blocks come first, in document order. Any
+    /// Outlook-style reply history detected in `body_blocks` (text-based,
+    /// used when there is no `<blockquote>`, or when reply history comes
+    /// before one) is appended after them as a bounded number of chunks --
+    /// see [`crate::reply_history::split_reply_history`]. The final order
+    /// is therefore grouped by *source* (blockquote-derived first, then
+    /// reply-history chunks), not strictly by document position.
     pub quote_blocks: Vec<String>,
     /// `component_block_order.link_label`: sanitized visible link labels in
     /// document order.
@@ -478,9 +488,11 @@ impl Walker {
         } else {
             self.flush_body_if_nonempty();
         }
+        let (body_blocks, quote_blocks) =
+            crate::reply_history::split_reply_history(self.body_blocks, self.quote_blocks);
         WalkOutput {
-            body_blocks: self.body_blocks,
-            quote_blocks: self.quote_blocks,
+            body_blocks,
+            quote_blocks,
             link_labels: self.link_labels,
         }
     }

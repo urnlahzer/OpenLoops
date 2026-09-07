@@ -8,6 +8,7 @@ const CAP: usize = 50;
 const TARGET: &str = "OpenLoops/Decisions/v1";
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
 pub enum Decision {
     #[default]
     Review,
@@ -15,8 +16,10 @@ pub enum Decision {
     Done,
     Dismissed,
     Watching,
+    Moot,
 }
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
 pub enum Reminder {
     #[default]
     None,
@@ -159,7 +162,10 @@ impl Decisions {
         let old = self.records.clone();
         self.records.retain(|r| {
             r.reminder != Reminder::None
-                || !matches!(r.decision, Decision::Done | Decision::Dismissed)
+                || !matches!(
+                    r.decision,
+                    Decision::Done | Decision::Dismissed | Decision::Moot
+                )
                 || now() - r.updated < 30 * 86400
         });
         if let Some(existing) = self.records.iter_mut().find(|r| r.key == record.key) {
@@ -259,6 +265,7 @@ fn encode(secret: &[u8; 32], records: &[Record]) -> Result<Zeroizing<Vec<u8>>, (
             Decision::Done => 2,
             Decision::Dismissed => 3,
             Decision::Watching => 4,
+            Decision::Moot => 5,
         });
         bytes.push(match r.reminder {
             Reminder::None => 0,
@@ -293,6 +300,7 @@ fn decode(bytes: &[u8]) -> Result<([u8; 32], Vec<Record>), ()> {
                 2 => Decision::Done,
                 3 => Decision::Dismissed,
                 4 => Decision::Watching,
+                5 => Decision::Moot,
                 _ => return Err(()),
             },
             reminder: match row[33] {
@@ -310,6 +318,62 @@ fn decode(bytes: &[u8]) -> Result<([u8; 32], Vec<Record>), ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn terminal_records_expire_unless_a_reminder_is_present() {
+        for decision in [Decision::Done, Decision::Dismissed, Decision::Moot] {
+            for reminder in [Reminder::None, Reminder::Attempted, Reminder::Created] {
+                let mut state = Decisions::default();
+                state.records.push(Record {
+                    key: [7; 32],
+                    decision,
+                    reminder,
+                    updated: now() - 31 * 86400,
+                });
+                state
+                    .update(Record {
+                        key: [8; 32],
+                        decision: Decision::Review,
+                        reminder: Reminder::None,
+                        updated: now(),
+                    })
+                    .unwrap();
+                assert_eq!(
+                    state.records.iter().any(|r| r.key == [7; 32]),
+                    reminder != Reminder::None
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_decision_round_trips_with_stable_tags() {
+        for (tag, decision) in [
+            Decision::Review,
+            Decision::Mine,
+            Decision::Done,
+            Decision::Dismissed,
+            Decision::Watching,
+            Decision::Moot,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let record = Record {
+                key: [7; 32],
+                decision,
+                reminder: Reminder::Created,
+                updated: 1_788_350_400,
+            };
+            let bytes = encode(&[0; 32], &[record]).unwrap();
+            assert_eq!(usize::from(bytes[MAGIC.len() + 33 + 32]), tag);
+            let (_, records) = decode(&bytes).unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].key, record.key);
+            assert_eq!(records[0].decision, record.decision);
+            assert_eq!(records[0].reminder, record.reminder);
+            assert_eq!(records[0].updated, record.updated);
+        }
+    }
     #[test]
     fn decisions_replay_without_readable_mail_and_are_account_bound() {
         let mut state = Decisions::default();
@@ -329,7 +393,7 @@ mod tests {
         let bytes = encode(&state.secret, &state.records).unwrap();
         assert!(!String::from_utf8_lossy(&bytes).contains("draft"));
         let (_, records) = decode(&bytes).unwrap();
-        assert!(records[0].decision == Decision::Dismissed);
+        assert_eq!(records[0].decision, Decision::Dismissed);
         for n in 0..bytes.len() {
             assert!(decode(&bytes[..n]).is_err());
         }
@@ -389,7 +453,7 @@ mod tests {
         let result =
             child.status.success() && String::from_utf8_lossy(&child.stdout).contains("1 passed");
         let reopened = Decisions::open(Some(&target));
-        assert!(reopened.get(&key).reminder == Reminder::Attempted);
+        assert_eq!(reopened.get(&key).reminder, Reminder::Attempted);
         reopened
             .entry
             .as_ref()
@@ -419,7 +483,7 @@ mod tests {
         assert!(target.starts_with("OpenLoops/TestDecisions/"));
         let mut state = Decisions::open(Some(&target));
         let key = state.fingerprint("synthetic-account", "synthetic-source", "send the draft");
-        assert!(state.get(&key).decision == Decision::Watching);
+        assert_eq!(state.get(&key).decision, Decision::Watching);
         assert!(state.begin_reminder(key).is_err());
     }
 }
