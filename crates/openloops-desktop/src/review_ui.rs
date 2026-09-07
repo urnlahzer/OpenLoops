@@ -1,7 +1,6 @@
 //! Conversation review and explicit decisions. Readable mail stays in memory.
 use crate::deadline_view::{DeadlineView, classify, label};
 use crate::loop_state::{Decision, Decisions, Record, Reminder, marker, now};
-use chrono::TimeZone;
 use eframe::egui::{self, Color32, RichText};
 use openloops_graph::live::{reminders::ReminderRequest, review::SourceReview};
 use openloops_inference::ollama::expectations::{
@@ -248,10 +247,7 @@ impl ReviewState {
                 .iter()
                 .find(|m| m.input.handle == anchor.message)
                 .unwrap_or(source);
-            let offset = chrono::Local
-                .timestamp_opt(message.input.timestamp, 0)
-                .single()
-                .map_or(now_offset, |t| t.offset().local_minus_utc());
+            let offset = scanning::local_offset_seconds(message.input.timestamp, now_offset);
             classify(&anchor.quote, message.input.timestamp, now, offset)
         });
         Some(CardContext {
@@ -620,6 +616,9 @@ fn render_evidence_section(
     if let Some(event) = &item.event {
         show_anchor(ui, "Event evidence", event, messages);
     }
+    if let Some(passed) = &item.event_passed {
+        show_event_time_evidence(ui, "Event time evidence", &passed.message_handle, messages);
+    }
     if let Some(resolution) = &item.resolution {
         show_anchor(
             ui,
@@ -800,6 +799,30 @@ fn show_anchor(ui: &mut egui::Ui, label: &str, anchor: &Anchor, messages: &[Revi
             });
     }
 }
+/// Like [`show_anchor`] but for an `EventPassed`'s `message_handle`, which
+/// names the invitation, calendar-subject, or event-time-phrase message the
+/// closure evidence came from -- not a quoted anchor, so there is no quote
+/// or "Surrounding source text" to show, only the link to that message.
+fn show_event_time_evidence(
+    ui: &mut egui::Ui,
+    label: &str,
+    message_handle: &str,
+    messages: &[ReviewMessage],
+) {
+    ui.label(RichText::new(label).strong());
+    if let Some(m) = messages.iter().find(|m| m.input.handle == message_handle) {
+        ui.label(
+            RichText::new(format!(
+                "{} · {} · {}",
+                m.date_label,
+                m.source,
+                m.input.message.subject.as_string()
+            ))
+            .small(),
+        );
+        open_link(ui, &m.web_link);
+    }
+}
 fn default_reminder() -> String {
     (chrono::Local::now() + chrono::Duration::hours(1))
         .format("%Y-%m-%d %H:%M")
@@ -871,6 +894,7 @@ pub fn layout_fixture() -> ReviewState {
                 context: body.into(),
             }),
             event: None,
+            event_time: None,
             resolution: None,
             resolution_kind: None,
             uncertainty: if index == 0 {
@@ -942,6 +966,7 @@ mod tests {
             evidence: anchor.clone(),
             deadline: Some(anchor),
             event: None,
+            event_time: None,
             resolution: None,
             resolution_kind: None,
             uncertainty: String::new(),
@@ -1193,6 +1218,7 @@ mod tests {
         item.event_passed = Some(EventPassed {
             name: "design workshop".into(),
             end,
+            message_handle: "m0".into(),
         });
         let card = state.card_context(&item, 0, 0).unwrap();
         assert!(card.closed);

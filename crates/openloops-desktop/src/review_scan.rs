@@ -1,4 +1,5 @@
 use crate::deadline_view::{DeadlineView, classify};
+use chrono::TimeZone;
 use openloops_graph::live::{ConnectionError, review::MailItem};
 use openloops_inference::{
     blocks::CanonicalBlock,
@@ -34,7 +35,9 @@ pub struct ReviewMessage {
     /// Exchange split into different `conversationId`s but that share
     /// participants -- see [`merge_threads`].
     pub other_addresses: Vec<String>,
-    pub event: Option<(i64, i64)>,
+    /// `(start, end, out_of_date)`, in UTC seconds, from either Graph
+    /// meeting-message metadata or a calendar-invite subject line.
+    pub event: Option<(i64, i64, bool)>,
 }
 
 pub struct EventRef {
@@ -42,6 +45,10 @@ pub struct EventRef {
     pub start: i64,
     pub end: i64,
     pub message_handle: String,
+    /// True when this entry came from Graph meeting-message metadata rather
+    /// than a calendar-invite subject line -- used only for the coverage
+    /// diagnostic in [`close_passed_events`].
+    pub from_meeting: bool,
 }
 
 /// Parses a calendar time embedded in a subject. Unknown or absent timezone
@@ -49,17 +56,8 @@ pub struct EventRef {
 /// reliable local offset without a timezone database.
 pub fn subject_event_time(subject: &str, _message_timestamp: i64) -> Option<(i64, i64)> {
     let calendar = subject.rsplit_once(" @ ")?.1.trim();
-    let (calendar, abbreviation) = if calendar.ends_with(')') {
-        let open = calendar.rfind('(')?;
-        (
-            calendar[..open].trim(),
-            Some(calendar[open + 1..calendar.len() - 1].trim()),
-        )
-    } else {
-        (calendar, None)
-    };
-    let offset = timezone_offset(abbreviation.unwrap_or("")).unwrap_or_default();
-    let parts: Vec<&str> = calendar.split_whitespace().collect();
+    let (calendar, offset) = strip_organizer_and_timezone_suffix(calendar);
+    let parts = join_spaced_am_pm(calendar.split_whitespace());
     if parts.len() < 4 {
         return None;
     }
@@ -75,12 +73,59 @@ pub fn subject_event_time(subject: &str, _message_timestamp: i64) -> Option<(i64
     if parts.len() != 7 || parts[5] != "-" {
         return None;
     }
-    let start = parse_subject_clock(parts[4])?;
-    let end = parse_subject_clock(parts[6])?;
+    let start = parse_subject_clock(&parts[4])?;
+    let mut end = parse_subject_clock(&parts[6])?;
+    if end <= start {
+        end += 86_400;
+    }
     Some((
         local_midnight + i64::from(start - offset),
         local_midnight + i64::from(end - offset),
     ))
+}
+
+/// Repeatedly peels a trailing `(...)` group off `calendar` (e.g. an
+/// organizer name appended after the timezone abbreviation, "... (CDT) (Sam
+/// Rivera)"), using the LAST peeled group [`timezone_offset`] recognizes as
+/// the zone and stopping there; a group it does not recognize is discarded
+/// as decoration and peeling continues. Bounded to a handful of groups so a
+/// pathological subject cannot loop. Returns the calendar text with every
+/// peeled group removed and the resolved offset (0/UTC when none is found).
+fn strip_organizer_and_timezone_suffix(calendar: &str) -> (String, i32) {
+    let mut calendar = calendar.trim_end().to_string();
+    let mut offset = 0i32;
+    for _ in 0..5 {
+        if !calendar.ends_with(')') {
+            break;
+        }
+        let Some(open) = calendar.rfind('(') else {
+            break;
+        };
+        let content = calendar[open + 1..calendar.len() - 1].trim().to_string();
+        calendar.truncate(open);
+        calendar = calendar.trim_end().to_string();
+        if let Some(found) = timezone_offset(&content) {
+            offset = found;
+            break;
+        }
+    }
+    (calendar, offset)
+}
+
+/// Joins a bare "am"/"pm" token to its predecessor (e.g. "11:30", "am" ->
+/// "11:30am"), so a subject with a space before the meridiem still parses
+/// like the more common unspaced form.
+fn join_spaced_am_pm<'a>(tokens: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut joined: Vec<String> = Vec::new();
+    for token in tokens {
+        let lower = token.to_ascii_lowercase();
+        if (lower == "am" || lower == "pm") && !joined.is_empty() {
+            joined.last_mut().expect("checked above").push_str(token);
+        } else {
+            joined.push(token.to_string());
+        }
+    }
+    joined
 }
 
 fn timezone_offset(abbreviation: &str) -> Option<i32> {
@@ -113,70 +158,122 @@ fn parse_subject_clock(value: &str) -> Option<i32> {
     Some(((hour % 12) + if pm { 12 } else { 0 }) * 3600 + minute * 60)
 }
 
+/// Builds the event index from Graph meeting-message metadata and
+/// calendar-invite subject lines. An out-of-date entry (a superseded
+/// meeting-message revision) is dropped outright, never learned. When
+/// multiple messages name the same normalized event (a reschedule, or the
+/// same invite echoed by more than one message), only the entry with the
+/// LATEST start survives -- a stale "Aug 21" instance of "design workshop"
+/// must not shadow a later "Sep 15" reschedule of the same meeting.
 pub fn build_event_index(messages: &[ReviewMessage]) -> Vec<EventRef> {
-    let mut seen = BTreeSet::new();
-    messages
-        .iter()
-        .filter_map(|message| {
-            let subject = message.input.message.subject.as_string();
-            let (start, end) = message
-                .event
-                .or_else(|| subject_event_time(&subject, message.input.timestamp))?;
-            let name = normalize_subject(&subject);
-            if name.is_empty() {
-                return None;
-            }
-            seen.insert((name.clone(), start)).then(|| EventRef {
-                name,
-                start,
-                end,
-                message_handle: message.input.handle.clone(),
-            })
+    let mut best: BTreeMap<String, EventRef> = BTreeMap::new();
+    for message in messages {
+        let subject = message.input.message.subject.as_string();
+        let (start, end, out_of_date, from_meeting) = match message.event {
+            Some((start, end, out_of_date)) => (start, end, out_of_date, true),
+            None => match subject_event_time(&subject, message.input.timestamp) {
+                Some((start, end)) => (start, end, false, false),
+                None => continue,
+            },
+        };
+        if out_of_date {
+            continue;
+        }
+        let name = normalize_subject(&subject);
+        if name.is_empty() {
+            continue;
+        }
+        let entry = best.entry(name.clone()).or_insert(EventRef {
+            name,
+            start: i64::MIN,
+            end: 0,
+            message_handle: String::new(),
+            from_meeting: false,
+        });
+        if start > entry.start {
+            entry.start = start;
+            entry.end = end;
+            entry.message_handle.clone_from(&message.input.handle);
+            entry.from_meeting = from_meeting;
+        }
+    }
+    best.into_values().collect()
+}
+
+/// Stop words dropped from both the phrase and the event name before
+/// computing token overlap: too common to distinguish one event from
+/// another.
+const EVENT_MATCH_STOP_WORDS: &[&str] = &[
+    "the", "our", "a", "an", "this", "that", "with", "for", "of", "on", "at", "and",
+];
+
+/// Generic event nouns dropped the same way: "workshop", "call", etc. name
+/// the KIND of gathering, not which one, so they must not by themselves
+/// count as an overlap between an unrelated phrase and an event name that
+/// happen to share only this word.
+const EVENT_MATCH_GENERIC_NOUNS: &[&str] = &[
+    "call",
+    "meeting",
+    "event",
+    "session",
+    "review",
+    "workshop",
+    "hearing",
+    "sync",
+    "deposition",
+    "closing",
+];
+
+/// Lowercased, alphanumeric-tokenized `text` with stop words and generic
+/// event nouns removed.
+fn meaningful_event_tokens(text: &str) -> BTreeSet<String> {
+    let lower = text.to_lowercase();
+    lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .filter(|token| {
+            !EVENT_MATCH_STOP_WORDS.contains(token) && !EVENT_MATCH_GENERIC_NOUNS.contains(token)
         })
+        .map(str::to_string)
         .collect()
 }
 
+/// Matches a phrase naming an event (e.g. an expectation's `event` anchor
+/// quote) against the learned event index. Never substring matching: both
+/// sides are tokenized and reduced to their meaningful (non-stop-word,
+/// non-generic-noun) tokens first. A phrase with no meaningful tokens at all
+/// (e.g. "the call") matches nothing. Otherwise at least one meaningful
+/// token must be shared; when the event name itself has 2 or more
+/// meaningful tokens, that alone is not enough -- either 2 tokens must be
+/// shared, or every one of the phrase's meaningful tokens must appear in
+/// the name (so a short, specific phrase like "our quarterly workshop" can
+/// still identify a longer name it is a strict subset of).
 pub fn match_event<'a>(
     phrase: &str,
     evidence_timestamp: i64,
     index: &'a [EventRef],
 ) -> Option<&'a EventRef> {
-    let lower = phrase.to_lowercase();
-    let phrase = [
-        "prior to the ",
-        "ahead of the ",
-        "before the ",
-        "the ",
-        "our ",
-    ]
-    .into_iter()
-    .find_map(|prefix| lower.strip_prefix(prefix))
-    .unwrap_or(&lower)
-    .trim();
-    let phrase_tokens: BTreeSet<&str> = phrase
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .collect();
+    let phrase_tokens = meaningful_event_tokens(phrase);
+    if phrase_tokens.is_empty() {
+        return None;
+    }
     index
         .iter()
         .filter(|event| {
             event.start >= evidence_timestamp && event.start - evidence_timestamp <= 60 * 86_400
         })
         .filter(|event| {
-            let name_tokens: BTreeSet<&str> = event
-                .name
-                .split(|c: char| !c.is_alphanumeric())
-                .filter(|token| !token.is_empty())
-                .collect();
-            let required = if name_tokens.len() == 1 { 1 } else { 2 };
-            event.name.contains(phrase)
-                || phrase.contains(&event.name)
-                || phrase_tokens.intersection(&name_tokens).count() >= required
+            let name_tokens = meaningful_event_tokens(&event.name);
+            let shared = phrase_tokens.intersection(&name_tokens).count();
+            if shared == 0 {
+                return false;
+            }
+            name_tokens.len() < 2 || shared >= 2 || phrase_tokens.is_subset(&name_tokens)
         })
         .min_by_key(|event| (event.start - evidence_timestamp, &event.message_handle))
 }
 
-fn mail_event_time(item: &MailItem) -> Option<(i64, i64)> {
+fn mail_event_time(item: &MailItem) -> Option<(i64, i64, bool)> {
     let event = item.event.as_ref()?;
     let start = chrono::DateTime::parse_from_rfc3339(&event.start)
         .ok()?
@@ -184,7 +281,19 @@ fn mail_event_time(item: &MailItem) -> Option<(i64, i64)> {
     let end = chrono::DateTime::parse_from_rfc3339(&event.end)
         .ok()?
         .timestamp();
-    Some((start, end))
+    Some((start, end, event.out_of_date))
+}
+
+/// The message's own local UTC offset at its timestamp, falling back to
+/// `fallback` when that instant cannot be resolved to a local time (the
+/// same rule `ReviewState::card_context` uses to age a deadline against the
+/// message that stated it, shared here so `close_passed_events` ages event
+/// times the same way).
+pub fn local_offset_seconds(timestamp: i64, fallback: i32) -> i32 {
+    chrono::Local
+        .timestamp_opt(timestamp, 0)
+        .single()
+        .map_or(fallback, |t| t.offset().local_minus_utc())
 }
 #[derive(Default)]
 pub struct ScanProgress {
@@ -721,8 +830,46 @@ fn scan_conversations(
     result
 }
 
+/// The instant a [`DeadlineView`] says has already passed, or `None` when it
+/// is not a past-due variant (or its boundary could not be resolved). Shared
+/// by [`close_passed_events`]'s `event_time` path, which needs the same
+/// boundary a deadline card would age against, not just the past/future bit.
+fn past_due_boundary(view: &DeadlineView) -> Option<i64> {
+    match *view {
+        DeadlineView::PastDue { boundary, .. } => Some(boundary),
+        DeadlineView::DueDate { day, past: true }
+        | DeadlineView::DueBusinessDay { day, past: true } => day.checked_mul(86_400),
+        DeadlineView::DueRange {
+            end_day,
+            past: true,
+            ..
+        } => end_day.checked_mul(86_400),
+        _ => None,
+    }
+}
+
+/// Closes any open, unresolved expectation whose event has already ended,
+/// via two independent sources of evidence:
+///
+/// - the learned event index (Graph meeting metadata and calendar-invite
+///   subjects), matched against the expectation's `event` anchor or an
+///   `EventTied` deadline phrase ([`match_event`]);
+/// - a model-supplied `event_time` phrase -- a verbatim date/time anchor
+///   stating when the named event occurs, found anywhere in the
+///   conversation -- classified directly with [`classify`]. This path
+///   closes a loop even when the index has no entry at all, which is the
+///   only way to close one whose event date is stated only in an email
+///   body rather than a meeting invite or calendar subject.
+///
+/// Always pushes one content-free coverage note (even when every count is
+/// zero, so the chain from "events learned" to "expectations closed" stays
+/// visible), unless `result.cancelled` -- a cancelled scan's counts would be
+/// partial and therefore misleading.
 pub fn close_passed_events(result: &mut ScanResult, messages: &[ReviewMessage], now: i64) {
     let index = build_event_index(messages);
+    let mut named = 0usize;
+    let mut timed = 0usize;
+    let mut matched = 0usize;
     for item in &mut result.analysis.items {
         if item.resolution.is_some() || item.event_passed.is_some() {
             continue;
@@ -733,11 +880,12 @@ pub fn close_passed_events(result: &mut ScanResult, messages: &[ReviewMessage], 
         else {
             continue;
         };
+        let offset = local_offset_seconds(source.input.timestamp, 0);
         let phrase = if let Some(event) = &item.event {
             Some(event.quote.as_str())
         } else if let Some(deadline) = &item.deadline
             && matches!(
-                classify(&deadline.quote, source.input.timestamp, now, 0),
+                classify(&deadline.quote, source.input.timestamp, now, offset),
                 DeadlineView::EventTied
             )
         {
@@ -745,25 +893,55 @@ pub fn close_passed_events(result: &mut ScanResult, messages: &[ReviewMessage], 
         } else {
             None
         };
-        let Some(event) =
-            phrase.and_then(|phrase| match_event(phrase, source.input.timestamp, &index))
-        else {
-            continue;
-        };
-        if event.end < now {
+        named += usize::from(phrase.is_some());
+        let event_match =
+            phrase.and_then(|phrase| match_event(phrase, source.input.timestamp, &index));
+        matched += usize::from(event_match.is_some());
+        if let Some(event) = event_match
+            && event.end < now
+        {
             item.event_passed = Some(EventPassed {
                 name: event.name.clone(),
                 end: event.end,
+                message_handle: event.message_handle.clone(),
+            });
+            result.event_closures += 1;
+            continue;
+        }
+        let Some(event_time) = &item.event_time else {
+            continue;
+        };
+        timed += 1;
+        let Some(time_message) = messages
+            .iter()
+            .find(|m| m.input.handle == event_time.message)
+        else {
+            continue;
+        };
+        let offset = local_offset_seconds(time_message.input.timestamp, 0);
+        let view = classify(&event_time.quote, time_message.input.timestamp, now, offset);
+        if let Some(end) = past_due_boundary(&view) {
+            item.event_passed = Some(EventPassed {
+                name: item
+                    .event
+                    .as_ref()
+                    .map_or_else(|| "event".to_string(), |e| e.quote.clone()),
+                end,
+                message_handle: event_time.message.clone(),
             });
             result.event_closures += 1;
         }
     }
-    if result.event_closures > 0 {
-        result.conversation_notes.push(format!(
-            "{} expectation(s) closed because their event has passed.",
-            result.event_closures
-        ));
+    if result.cancelled {
+        return;
     }
+    let from_meetings = index.iter().filter(|event| event.from_meeting).count();
+    let from_subjects = index.len() - from_meetings;
+    result.conversation_notes.push(format!(
+        "Event index: {} events learned ({from_meetings} from meeting messages, {from_subjects} from subjects); {named} expectations named an event, {timed} carried an event time, {matched} matched the index, {} closed.",
+        index.len(),
+        result.event_closures,
+    ));
 }
 
 /// Hard cap on how many `closure()` provider calls one scan makes, however
@@ -1840,13 +2018,54 @@ mod tests {
     }
 
     #[test]
+    fn ranges_crossing_midnight_add_a_day_to_the_end() {
+        assert_eq!(
+            subject_event_time(
+                "Invitation: Late call @ Fri Aug 21, 2026 11pm - 1am (UTC)",
+                0
+            ),
+            Some((
+                timestamp("2026-08-21T23:00:00Z"),
+                timestamp("2026-08-22T01:00:00Z")
+            ))
+        );
+    }
+
+    #[test]
+    fn organizer_suffix_after_the_timezone_is_peeled_and_ignored() {
+        assert_eq!(
+            subject_event_time(
+                "Invitation: Design workshop @ Fri Aug 21, 2026 11:30am - 12:30pm (CDT) (Sam Rivera)",
+                0
+            ),
+            Some((
+                timestamp("2026-08-21T16:30:00Z"),
+                timestamp("2026-08-21T17:30:00Z")
+            ))
+        );
+    }
+
+    #[test]
+    fn spaced_am_pm_tokens_still_parse() {
+        assert_eq!(
+            subject_event_time(
+                "Invitation: Design workshop @ Fri Aug 21, 2026 11:30 am - 12:30 pm (CDT)",
+                0
+            ),
+            Some((
+                timestamp("2026-08-21T16:30:00Z"),
+                timestamp("2026-08-21T17:30:00Z")
+            ))
+        );
+    }
+
+    #[test]
     fn event_index_prefers_graph_metadata_and_deduplicates_name_and_start() {
         let mut mail = synthetic("Prepare the handout.", 0, "a");
         mail.subject = "Invitation: Design workshop @ Fri Aug 21, 2026 11am - 12pm (UTC)".into();
         mail.event = Some(openloops_graph::live::review::MailEvent {
             start: "2026-08-21T13:00:00Z".into(),
             end: "2026-08-21T14:00:00Z".into(),
-            kind: "meetingRequest".into(),
             out_of_date: false,
         });
         let first = prepare(&mail, "Inbox", 0).unwrap();
@@ -1857,10 +2076,95 @@ mod tests {
         assert_eq!(index[0].name, "design workshop");
         assert_eq!(index[0].start, timestamp("2026-08-21T13:00:00Z"));
         assert_eq!(index[0].message_handle, "m0");
+        assert!(index[0].from_meeting);
     }
 
     #[test]
-    fn event_matching_uses_text_overlap_and_nearest_future_event() {
+    fn event_index_keeps_the_latest_of_two_instances_of_the_same_named_event() {
+        let mut aug = synthetic("Save the date.", 0, "a");
+        aug.subject = "Invitation: Design workshop @ Fri Aug 21, 2026 11am - 12pm (UTC)".into();
+        let aug_message = prepare(&aug, "Inbox", 0).unwrap();
+        let mut sep = synthetic("Rescheduled, see below.", 1, "b");
+        sep.subject =
+            "Updated invitation: Design workshop @ Tue Sep 15, 2026 11am - 12pm (UTC)".into();
+        let sep_message = prepare(&sep, "Inbox", 1).unwrap();
+        let index = build_event_index(&[aug_message, sep_message]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].start, timestamp("2026-09-15T11:00:00Z"));
+        assert!(!index[0].from_meeting);
+    }
+
+    #[test]
+    fn event_index_drops_an_out_of_date_meeting_entry() {
+        let mut mail = synthetic("Old invite.", 0, "a");
+        mail.subject = "Design workshop".into();
+        mail.event = Some(openloops_graph::live::review::MailEvent {
+            start: "2026-08-21T11:00:00Z".into(),
+            end: "2026-08-21T12:00:00Z".into(),
+            out_of_date: true,
+        });
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        assert!(build_event_index(&[message]).is_empty());
+    }
+
+    #[test]
+    fn match_event_rejects_a_phrase_with_no_meaningful_tokens() {
+        let index = vec![EventRef {
+            name: "design workshop".into(),
+            start: timestamp("2026-08-20T00:00:00Z"),
+            end: timestamp("2026-08-20T01:00:00Z"),
+            message_handle: "m0".into(),
+            from_meeting: false,
+        }];
+        assert!(match_event("the call", timestamp("2026-08-01T00:00:00Z"), &index).is_none());
+    }
+
+    #[test]
+    fn match_event_requires_a_real_token_overlap_not_a_substring() {
+        let evidence = timestamp("2026-08-01T00:00:00Z");
+        let workshop_only = vec![EventRef {
+            name: "design workshop".into(),
+            start: timestamp("2026-08-20T00:00:00Z"),
+            end: timestamp("2026-08-20T01:00:00Z"),
+            message_handle: "m0".into(),
+            from_meeting: false,
+        }];
+        assert_eq!(
+            match_event("the design workshop", evidence, &workshop_only)
+                .unwrap()
+                .message_handle,
+            "m0"
+        );
+        let standup_only = vec![EventRef {
+            name: "weekly standup call".into(),
+            start: timestamp("2026-08-20T00:00:00Z"),
+            end: timestamp("2026-08-20T01:00:00Z"),
+            message_handle: "m1".into(),
+            from_meeting: false,
+        }];
+        assert!(match_event("the design workshop", evidence, &standup_only).is_none());
+    }
+
+    #[test]
+    fn match_event_drops_a_generic_event_noun_from_both_sides() {
+        let evidence = timestamp("2026-08-01T00:00:00Z");
+        let index = vec![EventRef {
+            name: "hearing motion to compel".into(),
+            start: timestamp("2026-08-20T00:00:00Z"),
+            end: timestamp("2026-08-20T01:00:00Z"),
+            message_handle: "m0".into(),
+            from_meeting: false,
+        }];
+        assert_eq!(
+            match_event("our hearing on the motion", evidence, &index)
+                .unwrap()
+                .message_handle,
+            "m0"
+        );
+    }
+
+    #[test]
+    fn match_event_prefers_the_nearest_future_event_within_the_sixty_day_window() {
         let evidence = timestamp("2026-08-01T00:00:00Z");
         let index = vec![
             EventRef {
@@ -1868,39 +2172,22 @@ mod tests {
                 start: timestamp("2026-08-20T00:00:00Z"),
                 end: timestamp("2026-08-20T01:00:00Z"),
                 message_handle: "m0".into(),
+                from_meeting: false,
             },
             EventRef {
-                name: "quarterly design workshop".into(),
+                name: "design workshop follow up".into(),
                 start: timestamp("2026-08-10T00:00:00Z"),
                 end: timestamp("2026-08-10T01:00:00Z"),
                 message_handle: "m1".into(),
-            },
-            EventRef {
-                name: "hearing".into(),
-                start: timestamp("2026-08-12T00:00:00Z"),
-                end: timestamp("2026-08-12T01:00:00Z"),
-                message_handle: "m2".into(),
+                from_meeting: false,
             },
         ];
         assert_eq!(
-            match_event("before the design workshop", evidence, &index)
+            match_event("design workshop", evidence, &index)
                 .unwrap()
                 .message_handle,
             "m1"
         );
-        assert_eq!(
-            match_event("our quarterly workshop", evidence, &index)
-                .unwrap()
-                .message_handle,
-            "m1"
-        );
-        assert_eq!(
-            match_event("the hearing", evidence, &index)
-                .unwrap()
-                .message_handle,
-            "m2"
-        );
-        assert!(match_event("unrelated call", evidence, &index).is_none());
         assert!(
             match_event("design workshop", timestamp("2026-05-01T00:00:00Z"), &index).is_none()
         );
@@ -2288,6 +2575,7 @@ mod tests {
             },
             deadline: None,
             event: None,
+            event_time: None,
             resolution: None,
             resolution_kind: None,
             uncertainty: String::new(),
@@ -2335,11 +2623,154 @@ mod tests {
         let passed = result.analysis.items[0].event_passed.as_ref().unwrap();
         assert_eq!(passed.name, "design workshop");
         assert_eq!(passed.end, timestamp("2026-08-21T12:00:00Z"));
+        assert_eq!(passed.message_handle, "m1");
         assert_eq!(result.event_closures, 1);
         assert_eq!(
             result.conversation_notes.last().unwrap(),
-            "1 expectation(s) closed because their event has passed."
+            "Event index: 1 events learned (0 from meeting messages, 1 from subjects); \
+1 expectations named an event, 0 carried an event time, 1 matched the index, 1 closed."
         );
+    }
+
+    #[test]
+    fn close_passed_events_always_pushes_a_coverage_note_even_when_nothing_is_learned() {
+        let (messages, item) = closure_test_messages();
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        close_passed_events(&mut result, &messages, timestamp("2026-08-22T00:00:00Z"));
+        assert_eq!(
+            result.conversation_notes.last().unwrap(),
+            "Event index: 0 events learned (0 from meeting messages, 0 from subjects); \
+0 expectations named an event, 0 carried an event time, 0 matched the index, 0 closed."
+        );
+    }
+
+    #[test]
+    fn close_passed_events_skips_the_note_when_the_scan_was_cancelled() {
+        let (messages, item) = closure_test_messages();
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: true,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        close_passed_events(&mut result, &messages, timestamp("2026-08-22T00:00:00Z"));
+        assert!(result.conversation_notes.is_empty());
+    }
+
+    /// The workshop's date is stated only in an email body -- no invitation
+    /// or calendar subject exists for it, so the event index has no entry
+    /// at all -- so closing it depends entirely on the model-supplied
+    /// `event_time` phrase, classified directly. Mirrors
+    /// `review_ui::tests::card_offset_comes_from_the_deadline_message_timestamp`'s
+    /// pattern of computing the expected offset via the same real-local-time
+    /// helper under test, so this stays deterministic across machine
+    /// timezones.
+    #[test]
+    fn close_passed_events_closes_from_a_stated_event_time_with_no_index_entry() {
+        let (mut messages, mut item) = closure_test_messages();
+        messages[0].input.timestamp = timestamp("2026-09-02T12:00:00Z"); // Wednesday
+        item.event = Some(Anchor {
+            message: item.evidence.message.clone(),
+            block: 0,
+            quote: "the workshop".into(),
+            context: String::new(),
+        });
+        item.event_time = Some(Anchor {
+            message: item.evidence.message.clone(),
+            block: 0,
+            quote: "Friday".into(),
+            context: String::new(),
+        });
+        let now = timestamp("2026-09-15T00:00:00Z"); // well past that Friday, any timezone
+        let offset = local_offset_seconds(messages[0].input.timestamp, 0);
+        let expected_end = match classify("Friday", messages[0].input.timestamp, now, offset) {
+            DeadlineView::DueDate { day, past: true } => day * 86_400,
+            other => panic!("expected a past DueDate, got {other:?}"),
+        };
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        close_passed_events(&mut result, &messages, now);
+        let passed = result.analysis.items[0].event_passed.as_ref().unwrap();
+        assert_eq!(passed.name, "the workshop");
+        assert_eq!(passed.end, expected_end);
+        assert_eq!(passed.message_handle, messages[0].input.handle);
+        assert_eq!(result.event_closures, 1);
+    }
+
+    #[test]
+    fn close_passed_events_names_a_stated_event_time_generically_with_no_event_anchor() {
+        let (mut messages, mut item) = closure_test_messages();
+        messages[0].input.timestamp = timestamp("2026-09-02T12:00:00Z"); // Wednesday
+        item.event_time = Some(Anchor {
+            message: item.evidence.message.clone(),
+            block: 0,
+            quote: "Friday".into(),
+            context: String::new(),
+        });
+        let now = timestamp("2026-09-15T00:00:00Z");
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        close_passed_events(&mut result, &messages, now);
+        let passed = result.analysis.items[0].event_passed.as_ref().unwrap();
+        assert_eq!(passed.name, "event");
+        assert_eq!(result.event_closures, 1);
     }
 
     #[test]

@@ -19,7 +19,8 @@ in the normal application.
    come from a reply you sent the same person in a different conversation;
    the card marks these "evidence in another conversation." Expectations tied
    to a passed event also close automatically; event times come from Graph
-   meeting messages or calendar-invite subject lines. Corrections that
+   meeting messages, calendar-invite subject lines, or a date or time stated
+   in an email body. Corrections that
    leave the action owed keep the card open with updated terms. If a quoted deadline or
    completion could not be validated against the mail, the card says so and
    keeps the item open.
