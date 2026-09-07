@@ -3,7 +3,7 @@ use crate::deadline_view::{DeadlineView, classify, label};
 use crate::loop_state::{Decision, Decisions, Record, Reminder, marker, now};
 use eframe::egui::{self, Color32, RichText};
 use openloops_graph::live::{reminders::ReminderRequest, review::SourceReview};
-use openloops_inference::ollama::expectations::{
+use openloops_inference::expectations::{
     Anchor, EventPassed, Expectation, Expectations, Owner, ResolutionKind,
 };
 #[path = "review_scan.rs"]
@@ -993,7 +993,7 @@ fn reminder_time(value: &str) -> Result<i64, ()> {
 #[cfg(feature = "ui-screenshot")]
 pub fn layout_fixture() -> ReviewState {
     use openloops_graph::live::review::MailItem;
-    use openloops_inference::ollama::expectations::Expectation;
+    use openloops_inference::expectations::Expectation;
     let mut state = ReviewState::default();
     let body = "Please send the draft budget by Friday.";
     for index in 0..2 {

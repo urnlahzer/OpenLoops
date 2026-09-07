@@ -1,6 +1,7 @@
-//! Transient conversation expectations. The model supplies quotations, never offsets.
-use super::{OllamaCloud, ProviderError, json_document, request};
+//! Transient conversation expectations, over any consented provider. The
+//! model supplies quotations, never offsets.
 use crate::message::CanonicalMessage;
+use crate::provider::{ModelClient, ProviderError, json_document, parse_error};
 use serde_json::{Value, json};
 
 #[derive(Clone)]
@@ -72,7 +73,8 @@ pub struct Expectation {
     /// the expectation was kept anyway with `resolution: None`.
     pub unverified_resolution: bool,
     /// True when `resolution` was found by the cross-thread closure pass
-    /// (`OllamaCloud::closure`) rather than within this same conversation.
+    /// ([`expectations::closure`](crate::expectations::closure)) rather
+    /// than within this same conversation.
     pub cross_thread: bool,
     pub event_passed: Option<EventPassed>,
 }
@@ -101,31 +103,61 @@ const CLOSURE_INSTRUCTIONS: &str = r#"You are given one open expectation the sig
 Use current body blocks b0, b1, etc. only; quoted q blocks are historical context and are never resolution evidence. The quote must be the whole original sentence copied VERBATIM from a b block; never count characters or supply offsets.
 Return JSON only: {"version":1,"resolution":null} or {"version":1,"resolution":{"message":"m7","block":"b0","quote":"<verbatim sentence>"},"resolution_kind":"completed"}. resolution is either null or an object with exactly message, block, quote. resolution_kind is exactly one of completed|declined|agreed when resolution is non-null, otherwise omitted or null. No other keys."#;
 
-impl OllamaCloud {
-    /// Extracts transient expectations from one chronologically ordered conversation.
+/// Extracts transient expectations from one chronologically ordered
+/// conversation, through any consented provider.
+/// # Errors
+/// Returns fixed errors for unavailable providers, invalid schema or oversized input.
+pub fn expectations(
+    client: &dyn ModelClient,
+    messages: &[ConversationMessage],
+) -> Result<Expectations, ProviderError> {
+    let input = projection(messages)?;
+    let answer = client.complete(INSTRUCTIONS, &input)?;
+    parse(answer.as_bytes(), messages)
+}
+
+/// Best-effort cross-thread closure pass: given one open expectation
+/// and candidate later messages the signed-in user sent to the
+/// waiting party in OTHER conversations, asks whether any of them
+/// shows the action is no longer owed. `evidence_timestamp` is the
+/// original request's timestamp; only a candidate strictly later than
+/// it, sent by the signed-in user, is accepted as closure evidence —
+/// re-checked here even though callers are expected to have already
+/// filtered `candidates` to the same rule, because this validation,
+/// not the caller's convenience filter, is the actual security
+/// boundary. A validation failure of the model's answer resolves to
+/// `Ok(None)`; this is a best-effort pass, never a hard failure. Only
+/// transport or provider failures propagate as `Err`.
+/// # Errors
+/// Returns fixed errors for unavailable providers or oversized input.
+pub fn closure(
+    client: &dyn ModelClient,
+    expectation: &Expectation,
+    evidence_timestamp: i64,
+    candidates: &[ConversationMessage],
+) -> Result<Option<(Anchor, ResolutionKind)>, ProviderError> {
+    let input = closure_projection(expectation, candidates)?;
+    let answer = client.complete(CLOSURE_INSTRUCTIONS, &input)?;
+    Ok(parse_closure(
+        answer.as_bytes(),
+        evidence_timestamp,
+        candidates,
+    ))
+}
+
+#[cfg(feature = "ollama-cloud")]
+impl crate::ollama::OllamaCloud {
+    /// Thin delegate to [`expectations`] for the Ollama Cloud adapter.
     /// # Errors
     /// Returns fixed errors for unavailable providers, invalid schema or oversized input.
     pub fn expectations(
         &self,
         messages: &[ConversationMessage],
     ) -> Result<Expectations, ProviderError> {
-        let input = projection(messages)?;
-        let answer = self.chat(request(&self.model, INSTRUCTIONS, &input)?)?;
-        parse(answer.as_bytes(), messages)
+        expectations(self, messages)
     }
 
-    /// Best-effort cross-thread closure pass: given one open expectation
-    /// and candidate later messages the signed-in user sent to the
-    /// waiting party in OTHER conversations, asks whether any of them
-    /// shows the action is no longer owed. `evidence_timestamp` is the
-    /// original request's timestamp; only a candidate strictly later than
-    /// it, sent by the signed-in user, is accepted as closure evidence —
-    /// re-checked here even though callers are expected to have already
-    /// filtered `candidates` to the same rule, because this validation,
-    /// not the caller's convenience filter, is the actual security
-    /// boundary. A validation failure of the model's answer resolves to
-    /// `Ok(None)`; this is a best-effort pass, never a hard failure. Only
-    /// transport or provider failures propagate as `Err`.
+    /// Thin delegate to [`closure`] for the Ollama Cloud adapter.
     /// # Errors
     /// Returns fixed errors for unavailable providers or oversized input.
     pub fn closure(
@@ -134,13 +166,7 @@ impl OllamaCloud {
         evidence_timestamp: i64,
         candidates: &[ConversationMessage],
     ) -> Result<Option<(Anchor, ResolutionKind)>, ProviderError> {
-        let input = closure_projection(expectation, candidates)?;
-        let answer = self.chat(request(&self.model, CLOSURE_INSTRUCTIONS, &input)?)?;
-        Ok(parse_closure(
-            answer.as_bytes(),
-            evidence_timestamp,
-            candidates,
-        ))
+        closure(self, expectation, evidence_timestamp, candidates)
     }
 }
 
@@ -584,7 +610,7 @@ fn push_rejection_reasons(
 
 /// Best-effort parse of the cross-thread closure answer: never propagates
 /// a validation error, only `Some`/`None`, matching the "best-effort pass"
-/// contract of [`OllamaCloud::closure`]. A `resolution_kind` key absent
+/// contract of [`closure`]. A `resolution_kind` key absent
 /// from a null-resolution answer is normalized to `null` first, exactly
 /// like `parse()` does for the per-conversation `expectations()` answer,
 /// so both accepted response shapes in `CLOSURE_INSTRUCTIONS` validate
@@ -617,8 +643,7 @@ fn parse_closure(
 }
 
 fn parse(bytes: &[u8], messages: &[ConversationMessage]) -> Result<Expectations, ProviderError> {
-    let v = openloops_contracts::parse_strict_json(json_document(bytes)?)
-        .map_err(super::parse_error)?;
+    let v = openloops_contracts::parse_strict_json(json_document(bytes)?).map_err(parse_error)?;
     keys(&v, &["version", "expectations"])?;
     if v["version"].as_u64() != Some(1) {
         return Err(ProviderError::InvalidSchema);

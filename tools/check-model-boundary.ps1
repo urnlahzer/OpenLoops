@@ -95,7 +95,7 @@ if ($null -eq $m) {
 
 $canonical = $m | ConvertTo-Json -Depth 100 -Compress
 $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($canonical))).ToLowerInvariant()
-if ($hash -ne '139792d20b43595232a8532ba91b4f71f800f5b538cd8f425353eea6a4bcfcdd') { Fail 'P0-MODEL-INVENTORY-001' }
+if ($hash -ne '10824370f5c7e3eb9343670fda2c382c85bbf14ea47ab4734ea2f39f7d2af3aa') { Fail 'P0-MODEL-INVENTORY-001' }
 
 $requirements = @('OL-SYNC-012','OL-SYNC-013','OL-TEST-003','OL-MODEL-001','OL-MODEL-002','OL-MODEL-003','OL-MODEL-004','OL-MODEL-005','OL-MODEL-006','OL-MODEL-007','OL-MODEL-008','OL-MODEL-009','OL-MODEL-010','OL-MODEL-011','OL-MODEL-012','OL-MODEL-013','OL-MODEL-014','OL-MODEL-015','OL-NFR-005','OL-NFR-007','OL-NFR-011')
 if ($m.schema_version -ne 1 -or $m.work_item -ne 'P0-WI-10' -or $m.adr -ne 'ADR-007' -or $m.decision_status -ne 'accepted_contract_runtime_unimplemented' -or $m.snapshot_date -ne '2026-07-20') { Fail 'P0-MODEL-INVENTORY-001' }
@@ -134,8 +134,17 @@ if ($local.Count -ne 1 -or $local[0].state -ne 'disabled_pending_gates' -or $loc
 Has (($local[0] | ConvertTo-Json -Compress)) @('direct IPv4 loopback only','no DNS proxy redirect LAN tunnel or alternate port','loopback is not proof of local processing','G-MODEL must prove cloud disabled and reject cloud models','always validate again in application') 'P0-MODEL-PROFILES-001'
 if ($cloud.Count -ne 1 -or $cloud[0].state -ne 'disabled_pending_gates' -or $cloud[0].authority -ne 'https://ollama.com' -or $cloud[0].chat_path -ne '/api/chat' -or $cloud[0].tags_path -ne '/api/tags') { Fail 'P0-MODEL-PROFILES-001' }
 Has (($cloud[0] | ConvertTo-Json -Compress)) @('provider-credential.dpapi','Authorization Bearer only to exact authority','no proxy redirect or cross-origin authorization','does not currently enforce structured outputs','application validation is authoritative') 'P0-MODEL-PROFILES-001'
-if ($https.Count -ne 1 -or $https[0].state -ne 'optional_disabled_pending_adapter_gates' -or $https[0].authority -ne 'one canonical user-consented public HTTPS origin' -or $https[0].chat_path -ne 'adapter-fixed and separately reviewed') { Fail 'P0-MODEL-PROFILES-001' }
+if ($https.Count -ne 1 -or $https[0].state -ne 'optional_disabled_pending_adapter_gates' -or $https[0].authority -ne 'one canonical user-consented public HTTPS origin' -or $https[0].chat_path -ne 'adapter-fixed and separately reviewed' -or $https[0].substitution -ne 'cannot replace the required tested ollama_cloud path' -or $https[0].credential -ne 'one write-only OS-protected adapter credential with fixed auth mapping; no arbitrary headers') { Fail 'P0-MODEL-PROFILES-001' }
 Has (($https[0] | ConvertTo-Json -Compress)) @('write-only OS-protected adapter credential','no arbitrary headers','no proxy redirect userinfo query fragment IP literal private link-local reserved metadata or cross-origin authorization','cannot replace the required tested ollama_cloud path') 'P0-MODEL-PROFILES-001'
+$adapterProperty = $https[0].PSObject.Properties['adapter']
+if ($null -eq $adapterProperty) {
+    Fail 'P0-MODEL-PROFILES-001'
+}
+else {
+    $adapter = $adapterProperty.Value
+    if ($adapter.id -ne 'openrouter' -or $adapter.authority -ne 'https://openrouter.ai' -or $adapter.chat_path -ne '/api/v1/chat/completions' -or $adapter.listing_path -ne '/api/v1/endpoints/zdr' -or $adapter.request_fields_in_order -ne 'model, messages, stream, provider' -or $adapter.substitution -ne 'cannot replace the required tested ollama_cloud path') { Fail 'P0-MODEL-PROFILES-001' }
+    Has (($adapter | ConvertTo-Json -Compress)) @('one bounded write-only OS-protected key','Authorization Bearer only to the exact authority after final authority validation','provider.zdr=true','ORs with the account setting','revalidates the selected model against the ZDR listing before any content is sent','content-free public GET /api/v1/endpoints/zdr with no credential and no mailbox projection','ignore unknown members','never persist the raw response','response_format and structured_outputs are not sent','application validation is authoritative','exactly one assistant choice from the exact selected model label') 'P0-MODEL-PROFILES-001'
+}
 $preflight = $m.provider_preflight
 if ($preflight.mailbox_content -ne 'prohibited') { Fail 'P0-MODEL-PROFILES-001' }
 Has (($preflight | ConvertTo-Json -Compress)) @('GET the fixed /api/tags path only after authority validation','bound and strictly parse name model digest and details','ignore unknown members','never persist the raw response','exact provider profile plus exact model label plus provider-reported digest when available plus adapter schema and policy versions','starts Ollama with OLLAMA_NO_CLOUD=1','confirms the content-free cloud-disabled status','confirms a locally resident selected digest','rejects every cloud model and any cloud-capable fallback','proves zero non-loopback connection','ordinary loopback reachability alone never passes','content-free bounded GET /api/tags with the write-only key','only after exact https://ollama.com authority validation','Ollama API is not strictly versioned','response shape capability model digest or documented behavior drift disables the profile pending review','provider remains disabled','no mailbox projection is sent','no alternate origin model provider or proxy is attempted') 'P0-MODEL-PROFILES-001'
@@ -235,18 +244,22 @@ $privacy = $m.privacy_boundary
 ExactOrdered @($privacy.diagnostics) @('provider_disabled','analysis_unavailable','timeout','transport_policy_rejected','response_too_large','invalid_utf8','invalid_json','invalid_schema','invalid_evidence','semantic_rejected') 'P0-MODEL-PRIVACY-001'
 Has (($privacy | ConvertTo-Json -Compress)) @('persistent_prompt_request_response_output_rationale_transcript_embedding','prohibited','fixed codes and bounded non-content counters only','no endpoint path host key header body prompt response model text or source identifier','disabled and source-sanitized before application exceptions','zero in every application-controlled durable temporary diagnostic crash browser package CI and repository artifact','exact enabled provider request is the only test-time exception') 'P0-MODEL-PRIVACY-001'
 
-ExactOrdered @($m.sources.id) @('SRC-SPEC-OWN-08','SRC-SPEC-MODEL','SRC-OLLAMA-API','SRC-OLLAMA-AUTH','SRC-OLLAMA-CLOUD','SRC-OLLAMA-FAQ','SRC-OLLAMA-STRUCTURED','SRC-OLLAMA-TAGS') 'P0-MODEL-SOURCES-001'
-ExactOrdered @($m.sources.location) @('docs/product-spec.md#31-approved-owner-decisions','docs/product-spec.md#611-model-and-policy-contract','https://docs.ollama.com/api/introduction','https://docs.ollama.com/api/authentication','https://docs.ollama.com/cloud','https://docs.ollama.com/faq','https://docs.ollama.com/capabilities/structured-outputs','https://docs.ollama.com/api/tags') 'P0-MODEL-SOURCES-001'
+ExactOrdered @($m.sources.id) @('SRC-SPEC-OWN-08','SRC-SPEC-MODEL','SRC-OLLAMA-API','SRC-OLLAMA-AUTH','SRC-OLLAMA-CLOUD','SRC-OLLAMA-FAQ','SRC-OLLAMA-STRUCTURED','SRC-OLLAMA-TAGS','SRC-OPENROUTER-ZDR','SRC-OPENROUTER-API') 'P0-MODEL-SOURCES-001'
+ExactOrdered @($m.sources.location) @('docs/product-spec.md#31-approved-owner-decisions','docs/product-spec.md#611-model-and-policy-contract','https://docs.ollama.com/api/introduction','https://docs.ollama.com/api/authentication','https://docs.ollama.com/cloud','https://docs.ollama.com/faq','https://docs.ollama.com/capabilities/structured-outputs','https://docs.ollama.com/api/tags','https://openrouter.ai/docs/features/zdr','https://openrouter.ai/docs/api-reference/overview') 'P0-MODEL-SOURCES-001'
 $remoteSources = @($m.sources | Where-Object { $_.location -like 'https://*' })
-if ($remoteSources.Count -ne 6 -or @($remoteSources | Where-Object { $_.verified -ne '2026-07-20' }).Count -ne 0) { Fail 'P0-MODEL-SOURCES-001' }
-ExactOrdered @($m.source_claims.source) @('SRC-OLLAMA-API','SRC-OLLAMA-AUTH','SRC-OLLAMA-CLOUD','SRC-OLLAMA-FAQ','SRC-OLLAMA-STRUCTURED','SRC-OLLAMA-TAGS') 'P0-MODEL-SOURCES-001'
+$ollamaSources = @($remoteSources | Where-Object { $_.id -like 'SRC-OLLAMA-*' })
+$openrouterSources = @($remoteSources | Where-Object { $_.id -like 'SRC-OPENROUTER-*' })
+if ($remoteSources.Count -ne 8 -or $ollamaSources.Count -ne 6 -or @($ollamaSources | Where-Object { $_.verified -ne '2026-07-20' }).Count -ne 0 -or $openrouterSources.Count -ne 2 -or @($openrouterSources | Where-Object { $_.verified -ne '2026-09-07' }).Count -ne 0) { Fail 'P0-MODEL-SOURCES-001' }
+ExactOrdered @($m.source_claims.source) @('SRC-OLLAMA-API','SRC-OLLAMA-AUTH','SRC-OLLAMA-CLOUD','SRC-OLLAMA-FAQ','SRC-OLLAMA-STRUCTURED','SRC-OLLAMA-TAGS','SRC-OPENROUTER-ZDR','SRC-OPENROUTER-API') 'P0-MODEL-SOURCES-001'
 ExactOrdered @($m.source_claims.claim) @(
     'documented local base is http://localhost:11434/api, cloud base is https://ollama.com/api, and the API is not strictly versioned',
     'local localhost API requires no authentication; direct ollama.com API uses an API-key Bearer authorization header',
     'cloud models may be reached through a signed-in local Ollama process or directly at ollama.com; P0-WI-10 permits only the separately gated direct cloud profile and never treats loopback as local-only proof',
     'OLLAMA_NO_CLOUD=1 disables Ollama cloud features and default serving binds loopback; G-MODEL must prove this in a disposable process rather than trusting reachability',
     'Ollama Cloud currently does not support structured outputs; application validation is authoritative',
-    'GET /api/tags returns a model list including name model and digest fields; raw responses remain transient'
+    'GET /api/tags returns a model list including name model and digest fields; raw responses remain transient',
+    'OpenRouter publishes its zero-data-retention endpoints at /api/v1/endpoints/zdr and honors provider.zdr=true on a request by routing only to zero-data-retention endpoints; the request-level flag ORs with the account setting',
+    'the OpenRouter chat completion endpoint is POST https://openrouter.ai/api/v1/chat/completions with an Authorization Bearer key and an OpenAI-compatible answer whose text is choices[0].message.content'
 ) 'P0-MODEL-SOURCES-001'
 
 $runtime = $m.runtime_boundary
@@ -307,9 +320,9 @@ $threatText = Read-Text $ThreatPath 'P0-MODEL-CROSS-CONTRACT-001'
 $traceText = Read-Text $TraceabilityPath 'P0-MODEL-INVENTORY-001'
 $adrCanonical = (($adrText -replace "`r`n", "`n").TrimEnd() + "`n")
 $adrHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($adrCanonical))).ToLowerInvariant()
-if ($adrHash -ne '0d5c48eff0d9fc1ff33a0dc8effa952dd1e8232eb51dec2c9e7451ff9ac044a3') { Fail 'P0-MODEL-CROSS-CONTRACT-001' }
-Has $adrText @('ADR-007','OWN-08','Accepted','implements no adapter, transport, credential store','G-MODEL','G-PRIV','ollama_local','ollama_cloud','approved_https','model-sensitivity-v1','Request sensitivity','Deadline inference sensitivity','Closure sensitivity','review_required','No settings change starts replay automatically','No tool surface exists','Prompts, requests, responses, outputs, rationales, transcripts','are never persisted') 'P0-MODEL-CROSS-CONTRACT-001'
-Has $threatText @('Model-provider boundary threat model','No provider adapter, origin, credential, request','redirect','proxy','DNS','consent','canary','untrusted','zero mutation') 'P0-MODEL-CROSS-CONTRACT-001'
+if ($adrHash -ne 'f11fa47dc3a9158a4f5bc0ec56c6e326ee9e4c069011d5106c0ccbf64f93d152') { Fail 'P0-MODEL-CROSS-CONTRACT-001' }
+Has $adrText @('ADR-007','OWN-08','Accepted','implements no adapter, transport, credential store','G-MODEL','G-PRIV','ollama_local','ollama_cloud','approved_https','openrouter','provider.zdr=true','zero-data-retention','model-sensitivity-v1','Request sensitivity','Deadline inference sensitivity','Closure sensitivity','review_required','No settings change starts replay automatically','No tool surface exists','Prompts, requests, responses, outputs, rationales, transcripts','are never persisted') 'P0-MODEL-CROSS-CONTRACT-001'
+Has $threatText @('Model-provider boundary threat model','No provider adapter, origin, credential, request','redirect','proxy','DNS','consent','canary','untrusted','zero mutation','zero-data-retention','provider.zdr=true') 'P0-MODEL-CROSS-CONTRACT-001'
 $traceIds = [regex]::Matches($traceText, '(?m)^\| (P0-MODEL-[A-Z-]+-001) \|') | ForEach-Object { $_.Groups[1].Value }
 Exact @($traceIds) $checks 'P0-MODEL-INVENTORY-001'
 $freshRow = [regex]::Match($traceText, '(?m)^\| P0-MODEL-FRESH-CHECKER-001 \|.*$').Value

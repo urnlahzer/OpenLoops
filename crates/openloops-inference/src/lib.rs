@@ -28,8 +28,17 @@ pub mod reply_history;
 pub mod validation;
 pub mod walker;
 
+#[cfg(any(feature = "ollama-cloud", feature = "openrouter"))]
+pub mod provider;
+
+#[cfg(any(feature = "ollama-cloud", feature = "openrouter"))]
+pub mod expectations;
+
 #[cfg(feature = "ollama-cloud")]
 pub mod ollama;
+
+#[cfg(feature = "openrouter")]
+pub mod openrouter;
 
 /// Phase 0 supplies no model provider or content-analysis path.
 #[must_use]
