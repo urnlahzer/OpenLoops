@@ -21,7 +21,7 @@ use openloops_inference::{
     walker::canonicalize_html,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 
 #[derive(Clone)]
 pub struct ReviewMessage {
@@ -913,6 +913,24 @@ pub struct ScanProgress {
     pub processed: AtomicUsize,
     pub total: AtomicUsize,
     pub cancel: AtomicBool,
+    /// 1-based position of the conversation (in `scan_conversations`) or
+    /// eligible item (in `scan_closures`) currently in flight; 0 before
+    /// that pass starts and again once it ends.
+    pub conversation_index: AtomicUsize,
+    /// Total conversations `scan_conversations` will analyze, or total
+    /// eligible items `scan_closures` will attempt -- whichever pass is
+    /// currently running.
+    pub conversation_total: AtomicUsize,
+    /// Unix seconds the current model request was sent, or 0 when no
+    /// request is in flight. Drives the desktop's "elapsed on this
+    /// request" display.
+    pub request_started_unix: AtomicI64,
+    /// Set once `scan_closures` starts (and left set for the rest of the
+    /// scan): tells the desktop to label `conversation_index`/
+    /// `conversation_total` as the closure pass ("Closure check {i} of
+    /// {n}") rather than the primary per-conversation pass ("Conversation
+    /// {i} of {n}").
+    pub closure_phase: AtomicBool,
 }
 pub struct ScanResult {
     pub analysis: Expectations,
@@ -1294,7 +1312,7 @@ pub fn scan(
     let client = connect(provider, key, model)?;
     let client = client.as_ref();
     let mut result = scan_conversations(messages, progress, |conversation| {
-        expectations_pass(client, conversation)
+        expectations_pass(client, conversation, Some(&progress.cancel))
     });
     close_passed_events(&mut result, messages, chrono::Utc::now().timestamp());
     scan_closures(
@@ -1302,7 +1320,13 @@ pub fn scan(
         progress,
         &mut result,
         |item, evidence_timestamp, candidates| {
-            closure_pass(client, item, evidence_timestamp, candidates)
+            closure_pass(
+                client,
+                item,
+                evidence_timestamp,
+                candidates,
+                Some(&progress.cancel),
+            )
         },
     );
     Ok(result)
@@ -1332,17 +1356,28 @@ pub fn scan(
 ///
 /// Text only, built from in-memory subjects: never call this from `probe`,
 /// and never persist or log its output.
+/// The first 60 Unicode scalars of `conversation`'s first message's
+/// subject (char-safe: a multibyte scalar is never split), used to make a
+/// diagnostic line identifiable without including full message text.
+/// Shared by [`conversation_note`] and `scan_conversations`'s failure
+/// line so both name the same conversation the same way.
+fn subject_snippet(conversation: &[&ReviewMessage]) -> String {
+    conversation
+        .first()
+        .map(|m| m.input.message.subject.as_string())
+        .unwrap_or_default()
+        .chars()
+        .take(60)
+        .collect()
+}
+
 fn conversation_note(
     index: usize,
     conversation: &[&ReviewMessage],
     analysis: &Expectations,
 ) -> Option<String> {
     let len = conversation.len();
-    let subject = conversation
-        .first()
-        .map(|m| m.input.message.subject.as_string())
-        .unwrap_or_default();
-    let snippet: String = subject.chars().take(60).collect();
+    let snippet = subject_snippet(conversation);
     if analysis.rejected > 0 || analysis.degraded > 0 || !analysis.rejection_reasons.is_empty() {
         let mut seen: Vec<&'static str> = Vec::new();
         for reason in &analysis.rejection_reasons {
@@ -1379,6 +1414,44 @@ fn conversation_note(
     None
 }
 
+/// Groups `messages` by `(account, conversation)`, then orders the groups
+/// smallest-first (stable on the grouping's existing `(account,
+/// conversation)` key order for ties), so quick conversations finish --
+/// and contribute progress and results -- before a single slow one. Every
+/// conversation is analyzed independently of every other, so this
+/// ordering never changes what `scan_conversations` finds, only when.
+/// Grouped as borrows rather than owned clones: each `ReviewMessage`
+/// already lives in `messages`, and the per-conversation `inputs` built
+/// during analysis is the only owned copy that pass actually needs.
+fn conversations_by_size(messages: &[ReviewMessage]) -> Vec<Vec<&ReviewMessage>> {
+    let mut conversations: BTreeMap<(&str, &str), Vec<&ReviewMessage>> = BTreeMap::new();
+    for m in messages {
+        conversations
+            .entry((&m.account, &m.conversation))
+            .or_default()
+            .push(m);
+    }
+    let mut ordered: Vec<Vec<&ReviewMessage>> = conversations.into_values().collect();
+    ordered.sort_by_key(Vec::len);
+    ordered
+}
+
+/// The provider error classes that mean the provider itself is currently
+/// unreachable or unusable, rather than this one conversation being
+/// rejected: both `scan_conversations` and `scan_closures` stop the whole
+/// pass early on one of these instead of continuing past it.
+fn is_transport_error(error: ProviderError) -> bool {
+    matches!(
+        error,
+        ProviderError::Unauthorized
+            | ProviderError::RateLimited
+            | ProviderError::Quota
+            | ProviderError::Network
+            | ProviderError::Timeout
+            | ProviderError::ServerError(_)
+    )
+}
+
 fn scan_conversations(
     messages: &[ReviewMessage],
     progress: &ScanProgress,
@@ -1401,25 +1474,27 @@ fn scan_conversations(
         primary_scan_transport_error: false,
         closure_pass_failure: None,
     };
-    // Grouped as borrows rather than owned clones: each `ReviewMessage`
-    // already lives in `messages`, and the per-conversation `inputs`
-    // (below) is the only owned copy this pass actually needs.
-    let mut conversations: BTreeMap<(&str, &str), Vec<&ReviewMessage>> = BTreeMap::new();
-    for m in messages {
-        conversations
-            .entry((&m.account, &m.conversation))
-            .or_default()
-            .push(m);
-    }
-    for (index, mut conversation) in conversations.into_values().enumerate() {
+    let ordered = conversations_by_size(messages);
+    progress
+        .conversation_total
+        .store(ordered.len(), Ordering::Relaxed);
+    for (index, mut conversation) in ordered.into_iter().enumerate() {
         if progress.cancel.load(Ordering::Relaxed) {
             result.cancelled = true;
             break;
         }
+        progress
+            .conversation_index
+            .store(index + 1, Ordering::Relaxed);
         conversation.sort_by_key(|m| m.input.timestamp);
         let inputs: Vec<ConversationMessage> =
             conversation.iter().map(|m| m.input.clone()).collect();
-        match analyze(&inputs) {
+        progress
+            .request_started_unix
+            .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
+        let outcome = analyze(&inputs);
+        progress.request_started_unix.store(0, Ordering::Relaxed);
+        match outcome {
             Ok(analysis) => {
                 result.analyzed += conversation.len();
                 if let Some(note) = conversation_note(index, &conversation, &analysis) {
@@ -1433,21 +1508,18 @@ fn scan_conversations(
                     .rejection_reasons
                     .extend(analysis.rejection_reasons);
             }
+            Err(ProviderError::Cancelled) => {
+                result.cancelled = true;
+                break;
+            }
             Err(e) => {
                 result.failures.push(format!(
-                    "Conversation {} ({} messages): {e}",
+                    "Conversation {} ({} messages; subject: {}): {e}",
                     index + 1,
-                    conversation.len()
+                    conversation.len(),
+                    subject_snippet(&conversation),
                 ));
-                if matches!(
-                    e,
-                    ProviderError::Unauthorized
-                        | ProviderError::RateLimited
-                        | ProviderError::Quota
-                        | ProviderError::Network
-                        | ProviderError::Timeout
-                        | ProviderError::ServerError(_)
-                ) {
+                if is_transport_error(e) {
                     result.primary_scan_transport_error = true;
                     break;
                 }
@@ -1457,6 +1529,8 @@ fn scan_conversations(
             .processed
             .fetch_add(conversation.len(), Ordering::Relaxed);
     }
+    // Idle once this pass ends, same as `scan_closures`.
+    progress.conversation_index.store(0, Ordering::Relaxed);
     result
 }
 
@@ -1671,6 +1745,102 @@ pub fn close_passed_events(result: &mut ScanResult, messages: &[ReviewMessage], 
 /// into dozens of extra model calls in a single scan.
 const MAX_CLOSURE_CALLS: usize = 40;
 
+/// What [`attempt_closure`] did with one eligible item: nothing worth
+/// recording in [`ScanResult`] (no candidates, a shared-mailbox address,
+/// the [`MAX_CLOSURE_CALLS`] cap, or a `None`/non-transport-class answer),
+/// a resolution to apply to the item, or a reason the whole pass must stop.
+enum ClosureAttempt {
+    Skipped,
+    Resolved(Anchor, ResolutionKind),
+    Cancelled,
+    TransportFailure(ProviderError),
+}
+
+/// The signature every `scan_closures` caller's `closure()` callback takes:
+/// the open expectation, its evidence timestamp, and the candidate later
+/// messages, answering with resolution evidence when found.
+type ClosureCall<'a> = dyn FnMut(
+        &Expectation,
+        i64,
+        &[ConversationMessage],
+    ) -> Result<Option<(Anchor, ResolutionKind)>, ProviderError>
+    + 'a;
+
+/// State [`attempt_closure`] threads across every item in one
+/// `scan_closures` pass: the account/address grouping
+/// [`is_shared_mailbox_address`] needs (computed once up front, since it
+/// depends on every message, not just the current item) and the
+/// [`MAX_CLOSURE_CALLS`] budget shared by every item's provider call.
+/// Bundled into one struct, rather than four separate parameters, so
+/// `attempt_closure` stays under the pedantic argument-count lint without
+/// an `allow`.
+struct ClosurePassState<'a> {
+    groups_per_account: GroupsPerAccount<'a>,
+    address_group_counts: AddressGroupCounts<'a>,
+    calls_made: usize,
+    capped: bool,
+}
+
+/// The per-item body of `scan_closures`'s loop, factored out to keep that
+/// function under the line-count lint: looks up `item`'s evidence message
+/// and waiting-party address, skips a shared-mailbox/list address (see
+/// [`is_shared_mailbox_address`]) or an item with no closure candidates,
+/// applies the [`MAX_CLOSURE_CALLS`] cap, and otherwise calls `closure`,
+/// timing it in `progress.request_started_unix` exactly like
+/// `scan_conversations` times its own provider call.
+fn attempt_closure(
+    item: &Expectation,
+    messages: &[ReviewMessage],
+    progress: &ScanProgress,
+    state: &mut ClosurePassState<'_>,
+    closure: &mut ClosureCall<'_>,
+) -> ClosureAttempt {
+    let Some(source) = messages
+        .iter()
+        .find(|m| m.input.handle == item.evidence.message)
+    else {
+        return ClosureAttempt::Skipped;
+    };
+    let Some(address) = waiting_party_address(&item.waiting_party) else {
+        return ClosureAttempt::Skipped;
+    };
+    if is_shared_mailbox_address(
+        &source.account,
+        &address,
+        &state.groups_per_account,
+        &state.address_group_counts,
+    ) {
+        return ClosureAttempt::Skipped;
+    }
+    let candidates = closure_candidates(
+        item,
+        messages,
+        &source.account,
+        &source.conversation,
+        source.input.timestamp,
+    );
+    if candidates.is_empty() {
+        return ClosureAttempt::Skipped;
+    }
+    if state.calls_made >= MAX_CLOSURE_CALLS {
+        state.capped = true;
+        return ClosureAttempt::Skipped;
+    }
+    let inputs: Vec<ConversationMessage> = candidates.iter().map(|m| m.input.clone()).collect();
+    state.calls_made += 1;
+    progress
+        .request_started_unix
+        .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
+    let outcome = closure(item, source.input.timestamp, &inputs);
+    progress.request_started_unix.store(0, Ordering::Relaxed);
+    match outcome {
+        Ok(Some((anchor, kind))) => ClosureAttempt::Resolved(anchor, kind),
+        Err(ProviderError::Cancelled) => ClosureAttempt::Cancelled,
+        Err(e) if is_transport_error(e) => ClosureAttempt::TransportFailure(e),
+        Ok(None) | Err(_) => ClosureAttempt::Skipped,
+    }
+}
+
 /// After the primary per-conversation scan, attempts to close any
 /// remaining open "you owe someone" requests using completion evidence the
 /// signed-in user sent to the same waiting party in a DIFFERENT
@@ -1690,11 +1860,13 @@ const MAX_CLOSURE_CALLS: usize = 40;
 /// a non-transport-class provider error -- `scan_closures` only ever
 /// `continue`s past those, exactly like `scan_conversations` does for the
 /// same error classes. Only a transport-class provider error (the same
-/// `matches!` set `scan_conversations` uses) stops the pass early, recorded
+/// error classes `scan_conversations` uses) stops the pass early, recorded
 /// content-free in `result.closure_pass_failure` rather than `failures`
 /// (which counts unanalyzed conversations -- a closure-pass failure never
-/// leaves a conversation unanalyzed). `progress.cancel` is checked between
-/// items exactly like `scan_conversations`.
+/// leaves a conversation unanalyzed). A `Cancelled` answer stops the pass
+/// the same way but sets `result.cancelled` instead, exactly like
+/// `scan_conversations`. `progress.cancel` is checked between items exactly
+/// like `scan_conversations`.
 fn scan_closures(
     messages: &[ReviewMessage],
     progress: &ScanProgress,
@@ -1720,9 +1892,21 @@ fn scan_closures(
         })
         .count();
     progress.total.fetch_add(eligible, Ordering::Relaxed);
+    progress
+        .conversation_total
+        .store(eligible, Ordering::Relaxed);
+    // Left set for the rest of the scan: tells the desktop to label
+    // `conversation_index`/`conversation_total` as this pass rather than
+    // the primary per-conversation one.
+    progress.closure_phase.store(true, Ordering::Relaxed);
     let (groups_per_account, address_group_counts) = conversation_group_address_counts(messages);
-    let mut calls_made = 0usize;
-    let mut capped = false;
+    let mut state = ClosurePassState {
+        groups_per_account,
+        address_group_counts,
+        calls_made: 0,
+        capped: false,
+    };
+    let mut item_number = 0usize;
     for item in &mut result.analysis.items {
         if progress.cancel.load(Ordering::Relaxed) {
             result.cancelled = true;
@@ -1735,72 +1919,39 @@ fn scan_closures(
         {
             continue;
         }
+        item_number += 1;
+        progress
+            .conversation_index
+            .store(item_number, Ordering::Relaxed);
         progress.processed.fetch_add(1, Ordering::Relaxed);
-        let Some(source) = messages
-            .iter()
-            .find(|m| m.input.handle == item.evidence.message)
-        else {
-            continue;
-        };
-        let Some(address) = waiting_party_address(&item.waiting_party) else {
-            continue;
-        };
-        if is_shared_mailbox_address(
-            &source.account,
-            &address,
-            &groups_per_account,
-            &address_group_counts,
-        ) {
-            continue;
-        }
-        let candidates = closure_candidates(
-            item,
-            messages,
-            &source.account,
-            &source.conversation,
-            source.input.timestamp,
-        );
-        if candidates.is_empty() {
-            continue;
-        }
-        if calls_made >= MAX_CLOSURE_CALLS {
-            capped = true;
-            continue;
-        }
-        let inputs: Vec<ConversationMessage> = candidates.iter().map(|m| m.input.clone()).collect();
-        calls_made += 1;
-        match closure(item, source.input.timestamp, &inputs) {
-            Ok(Some((anchor, kind))) => {
+        match attempt_closure(item, messages, progress, &mut state, &mut closure) {
+            ClosureAttempt::Resolved(anchor, kind) => {
                 item.resolution = Some(anchor);
                 item.resolution_kind = Some(kind);
                 item.cross_thread = true;
                 result.cross_thread_closures += 1;
             }
-            Ok(None) => {}
-            Err(e) => {
-                if matches!(
-                    e,
-                    ProviderError::Unauthorized
-                        | ProviderError::RateLimited
-                        | ProviderError::Quota
-                        | ProviderError::Network
-                        | ProviderError::Timeout
-                        | ProviderError::ServerError(_)
-                ) {
-                    result.closure_pass_failure =
-                        Some(format!("Cross-thread closure pass stopped: {e}"));
-                    break;
-                }
+            ClosureAttempt::Skipped => {}
+            ClosureAttempt::Cancelled => {
+                result.cancelled = true;
+                break;
+            }
+            ClosureAttempt::TransportFailure(e) => {
+                result.closure_pass_failure =
+                    Some(format!("Cross-thread closure pass stopped: {e}"));
+                break;
             }
         }
     }
+    // Idle once this pass ends, same as `scan_conversations`.
+    progress.conversation_index.store(0, Ordering::Relaxed);
     if result.cross_thread_closures > 0 {
         result.conversation_notes.push(format!(
             "Closing evidence found in another conversation for {} expectation(s).",
             result.cross_thread_closures
         ));
     }
-    if capped {
+    if state.capped {
         result.conversation_notes.push(format!(
             "Cross-thread closure checks were capped at {MAX_CLOSURE_CALLS} open requests this scan."
         ));
@@ -2452,7 +2603,7 @@ pub fn probe(provider: Provider, key: String, model: &str) -> Result<usize, Prov
         if from_user {
             set_outgoing(&mut m);
         }
-        let result = expectations_pass(client, &[m])?;
+        let result = expectations_pass(client, &[m], None)?;
         println!(
             "Semantic case {}: {} accepted, {} rejected, {} degraded; expected {}.",
             passed + 1,
@@ -2507,7 +2658,7 @@ pub fn probe(provider: Provider, key: String, model: &str) -> Result<usize, Prov
         .input;
     b.from_user = true;
     set_outgoing(&mut b);
-    let result = expectations_pass(client, &[a.clone(), b])?;
+    let result = expectations_pass(client, &[a.clone(), b], None)?;
     if result.items.len() != 1 || result.items[0].resolution.is_none() {
         return Err(ProviderError::InvalidAnalysis);
     }
@@ -2521,7 +2672,7 @@ pub fn probe(provider: Provider, key: String, model: &str) -> Result<usize, Prov
         .input;
     ack.from_user = true;
     set_outgoing(&mut ack);
-    let result = expectations_pass(client, &[a, ack])?;
+    let result = expectations_pass(client, &[a, ack], None)?;
     if result.items.len() != 1 || result.items[0].resolution.is_some() {
         return Err(ProviderError::InvalidAnalysis);
     }
@@ -2556,7 +2707,7 @@ fn probe_agreement_case(client: &dyn ModelClient, case_number: usize) -> Result<
         .input;
     reply_message.from_user = true;
     set_outgoing(&mut reply_message);
-    let result = expectations_pass(client, &[request_message, reply_message])?;
+    let result = expectations_pass(client, &[request_message, reply_message], None)?;
     let anchored = result
         .items
         .iter()
@@ -2607,7 +2758,7 @@ fn probe_amendment_case(client: &dyn ModelClient, case_number: usize) -> Result<
         .map_err(|_| ProviderError::InvalidAnalysis)?
         .input;
     correction_message.to_user = true;
-    let result = expectations_pass(client, &[request_message, correction_message])?;
+    let result = expectations_pass(client, &[request_message, correction_message], None)?;
     println!(
         "Semantic case {}: {} accepted, {} rejected, {} degraded.",
         case_number,
@@ -2648,7 +2799,7 @@ fn probe_completed_resolution_case(
         .input;
     reply_message.from_user = true;
     set_outgoing(&mut reply_message);
-    let result = expectations_pass(client, &[request_message, reply_message])?;
+    let result = expectations_pass(client, &[request_message, reply_message], None)?;
     println!(
         "Semantic case {}: {} accepted, {} rejected, {} degraded.",
         case_number,
@@ -3335,7 +3486,8 @@ at the downtown courthouse. Let me know if that works.",
         let b = prepare(&synthetic("Here is the draft.", 1, "a"), "Sent", 1).unwrap();
         let c = prepare(&synthetic("Unrelated conversation.", 0, "b"), "Inbox", 2).unwrap();
         let mut lengths = vec![];
-        let result = scan_conversations(&[b, a, c], &ScanProgress::default(), |messages| {
+        let progress = ScanProgress::default();
+        let result = scan_conversations(&[b, a, c], &progress, |messages| {
             lengths.push(messages.len());
             assert!(
                 messages
@@ -3349,8 +3501,11 @@ at the downtown courthouse. Let me know if that works.",
                 degraded: 0,
             })
         });
-        assert_eq!(lengths, [2, 1]);
+        // Smallest conversation first: the 1-message "b" conversation
+        // analyzes before the 2-message "a" one (see `conversations_by_size`).
+        assert_eq!(lengths, [1, 2]);
         assert_eq!(result.analyzed, 3);
+        assert_eq!(progress.conversation_total.load(Ordering::Relaxed), 2);
     }
     #[test]
     fn failed_conversation_is_not_reported_as_clean_scan() {
@@ -3361,6 +3516,19 @@ at the downtown courthouse. Let me know if that works.",
         let mut state = super::super::ReviewState::default();
         state.set_scan(result, "synthetic".into());
         assert!(state.scan_incomplete);
+    }
+    #[test]
+    fn failure_line_names_the_conversation_by_its_subject_snippet() {
+        let m = prepare(&synthetic("Please send the draft.", 0, "a"), "Inbox", 0).unwrap();
+        let result = scan_conversations(&[m], &ScanProgress::default(), |_| {
+            Err(ProviderError::InvalidJson)
+        });
+        assert_eq!(result.failures.len(), 1);
+        assert!(
+            result.failures[0].contains("subject: Synthetic budget conversation"),
+            "failure line: {}",
+            result.failures[0]
+        );
     }
     #[test]
     fn quoted_plain_history_is_not_current_evidence() {
@@ -3554,6 +3722,92 @@ at the downtown courthouse. Let me know if that works.",
         assert_eq!(calls, 1);
         assert_eq!(result.analyzed, 0);
         assert_eq!(result.failures.len(), 1);
+    }
+
+    #[test]
+    fn a_cancelled_request_stops_the_scan_without_a_failure_line() {
+        let a = prepare(&synthetic("Please send the draft.", 0, "a"), "Inbox", 0).unwrap();
+        let b = prepare(&synthetic("Please send the agenda.", 1, "b"), "Inbox", 1).unwrap();
+        let mut calls = 0;
+        let result = scan_conversations(&[a, b], &ScanProgress::default(), |_| {
+            calls += 1;
+            Err(ProviderError::Cancelled)
+        });
+        assert_eq!(calls, 1);
+        assert!(result.cancelled);
+        assert!(
+            result.failures.is_empty(),
+            "a stopped request is not a failure: {:?}",
+            result.failures
+        );
+        assert!(!result.primary_scan_transport_error);
+    }
+
+    #[test]
+    fn request_started_unix_is_set_during_a_conversation_and_cleared_after() {
+        let a = prepare(&synthetic("Please send the draft.", 0, "a"), "Inbox", 0).unwrap();
+        let progress = ScanProgress::default();
+        let mut observed_during = 0;
+        let result = scan_conversations(&[a], &progress, |_| {
+            observed_during = progress.request_started_unix.load(Ordering::Relaxed);
+            assert_eq!(progress.conversation_index.load(Ordering::Relaxed), 1);
+            assert_eq!(progress.conversation_total.load(Ordering::Relaxed), 1);
+            Ok(Expectations {
+                items: vec![],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            })
+        });
+        assert_ne!(observed_during, 0, "expected a request start timestamp");
+        assert_eq!(progress.request_started_unix.load(Ordering::Relaxed), 0);
+        assert_eq!(result.analyzed, 1);
+        assert_eq!(
+            progress.conversation_index.load(Ordering::Relaxed),
+            0,
+            "conversation_index resets once the pass ends"
+        );
+        assert!(!progress.closure_phase.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn closure_phase_and_conversation_index_track_the_closure_pass() {
+        let (mut all, item) = closure_test_messages();
+        let valid = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
+        all.push(prepare(&valid, "Sent", all.len()).unwrap());
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        let progress = ScanProgress::default();
+        let mut observed_phase_during = false;
+        let mut observed_index_during = 0;
+        scan_closures(&all, &progress, &mut result, |_, _, _| {
+            observed_phase_during = progress.closure_phase.load(Ordering::Relaxed);
+            observed_index_during = progress.conversation_index.load(Ordering::Relaxed);
+            Ok(None)
+        });
+        assert!(observed_phase_during);
+        assert_eq!(observed_index_during, 1);
+        assert!(progress.closure_phase.load(Ordering::Relaxed));
+        assert_eq!(
+            progress.conversation_index.load(Ordering::Relaxed),
+            0,
+            "conversation_index resets once the pass ends"
+        );
     }
 
     #[test]
@@ -4188,12 +4442,18 @@ at the downtown courthouse. Let me know if that works.",
             context: "Sure, let's do it.".into(),
         };
         let mut calls = 0;
+        let mut observed_during = 0;
         let progress = ScanProgress::default();
         scan_closures(&all, &progress, &mut result, |_, _, _| {
             calls += 1;
+            observed_during = progress.request_started_unix.load(Ordering::Relaxed);
+            assert_eq!(progress.conversation_index.load(Ordering::Relaxed), 1);
+            assert_eq!(progress.conversation_total.load(Ordering::Relaxed), 1);
             Ok(Some((resolved_anchor.clone(), ResolutionKind::Completed)))
         });
         assert_eq!(calls, 1);
+        assert_ne!(observed_during, 0, "expected a request start timestamp");
+        assert_eq!(progress.request_started_unix.load(Ordering::Relaxed), 0);
         assert_eq!(result.cross_thread_closures, 1);
         assert!(result.analysis.items[0].resolution.is_some());
         assert!(result.analysis.items[0].cross_thread);
@@ -4206,6 +4466,45 @@ at the downtown courthouse. Let me know if that works.",
         }));
         assert_eq!(progress.total.load(Ordering::Relaxed), 1);
         assert_eq!(progress.processed.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn scan_closures_treats_a_cancelled_call_as_stopped_not_a_pass_failure() {
+        let (mut all, item) = closure_test_messages();
+        let valid = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
+        all.push(prepare(&valid, "Sent", all.len()).unwrap());
+
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        let progress = ScanProgress::default();
+        let mut calls = 0;
+        scan_closures(&all, &progress, &mut result, |_, _, _| {
+            calls += 1;
+            Err(ProviderError::Cancelled)
+        });
+        assert_eq!(calls, 1);
+        assert!(result.cancelled);
+        assert!(
+            result.closure_pass_failure.is_none(),
+            "a stopped request is not a closure-pass failure: {:?}",
+            result.closure_pass_failure
+        );
+        assert!(result.analysis.items[0].resolution.is_none());
     }
 
     #[test]

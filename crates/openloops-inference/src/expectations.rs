@@ -1,5 +1,7 @@
 //! Transient conversation expectations, over any consented provider. The
 //! model supplies quotations, never offsets.
+use std::sync::atomic::AtomicBool;
+
 use crate::message::CanonicalMessage;
 use crate::provider::{ModelClient, ProviderError, json_document, parse_error};
 use serde_json::{Value, json};
@@ -104,15 +106,18 @@ Use current body blocks b0, b1, etc. only; quoted q blocks are historical contex
 Return JSON only: {"version":1,"resolution":null} or {"version":1,"resolution":{"message":"m7","block":"b0","quote":"<verbatim sentence>"},"resolution_kind":"completed"}. resolution is either null or an object with exactly message, block, quote. resolution_kind is exactly one of completed|declined|agreed when resolution is non-null, otherwise omitted or null. No other keys."#;
 
 /// Extracts transient expectations from one chronologically ordered
-/// conversation, through any consented provider.
+/// conversation, through any consented provider. `cancel`, when supplied,
+/// is threaded to the provider so a Stop action can abort this request
+/// while its response body is still being read.
 /// # Errors
 /// Returns fixed errors for unavailable providers, invalid schema or oversized input.
 pub fn expectations(
     client: &dyn ModelClient,
     messages: &[ConversationMessage],
+    cancel: Option<&AtomicBool>,
 ) -> Result<Expectations, ProviderError> {
     let input = projection(messages)?;
-    let answer = client.complete(INSTRUCTIONS, &input)?;
+    let answer = client.complete(INSTRUCTIONS, &input, cancel)?;
     parse(answer.as_bytes(), messages)
 }
 
@@ -128,6 +133,8 @@ pub fn expectations(
 /// boundary. A validation failure of the model's answer resolves to
 /// `Ok(None)`; this is a best-effort pass, never a hard failure. Only
 /// transport or provider failures propagate as `Err`.
+/// `cancel`, when supplied, is threaded to the provider so a Stop action
+/// can abort this request while its response body is still being read.
 /// # Errors
 /// Returns fixed errors for unavailable providers or oversized input.
 pub fn closure(
@@ -135,9 +142,10 @@ pub fn closure(
     expectation: &Expectation,
     evidence_timestamp: i64,
     candidates: &[ConversationMessage],
+    cancel: Option<&AtomicBool>,
 ) -> Result<Option<(Anchor, ResolutionKind)>, ProviderError> {
     let input = closure_projection(expectation, candidates)?;
-    let answer = client.complete(CLOSURE_INSTRUCTIONS, &input)?;
+    let answer = client.complete(CLOSURE_INSTRUCTIONS, &input, cancel)?;
     Ok(parse_closure(
         answer.as_bytes(),
         evidence_timestamp,
@@ -153,8 +161,9 @@ impl crate::ollama::OllamaCloud {
     pub fn expectations(
         &self,
         messages: &[ConversationMessage],
+        cancel: Option<&AtomicBool>,
     ) -> Result<Expectations, ProviderError> {
-        expectations(self, messages)
+        expectations(self, messages, cancel)
     }
 
     /// Thin delegate to [`closure`] for the Ollama Cloud adapter.
@@ -165,8 +174,9 @@ impl crate::ollama::OllamaCloud {
         expectation: &Expectation,
         evidence_timestamp: i64,
         candidates: &[ConversationMessage],
+        cancel: Option<&AtomicBool>,
     ) -> Result<Option<(Anchor, ResolutionKind)>, ProviderError> {
-        closure(self, expectation, evidence_timestamp, candidates)
+        closure(self, expectation, evidence_timestamp, candidates, cancel)
     }
 }
 

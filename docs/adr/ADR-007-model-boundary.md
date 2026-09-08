@@ -101,7 +101,8 @@ MVP contract. The request contract is one non-streaming JSON `POST`, at most 524
 with at most 64 blocks per message, 8,192 Unicode scalars per block, 500
 participants, 256 attachment names, and 256 link labels per message. The
 response is at most 262,144 bytes, with a five-second connection limit, a
-60-second wall-time limit, and no more than 64 claims. A bounded reader cancels
+60-second per-read idle-guard limit, a 150-second total wall-time limit on
+the whole request, and no more than 64 claims. A bounded reader cancels
 immediately when a byte or time limit is crossed.
 
 Application validation occurs in this exact order:
@@ -243,3 +244,48 @@ persisted model material, mutation authority, completed scenario, passed gate,
 or advertised capability fails closed. A fresh security/privacy/adversarial
 checker is required before the work item can close; its prompt, transcript, and
 model output are not repository evidence.
+
+## Amendment (2026-09-08)
+
+The original `response_contract.maximum_wall_time_seconds: 60` conflated two
+different bounds. reqwest's blocking client applies one configured timeout to
+both the header wait and every individual body `read()` call; a slow model
+that trickles occasional keep-alive bytes re-arms that timeout on each byte,
+so a non-streaming request could in practice run far longer than 60 seconds
+with no single `read()` ever exceeding it. This was found with a debugger
+attached to the live app: a scan worker sat inside one body read for over ten
+minutes on one conversation, and Stop had no effect until that read finally
+returned, because the abort check lived only between conversations.
+
+The contract now separates the two bounds:
+
+- `maximum_idle_read_seconds: 60` is the existing per-read idle guard
+  (`https_client`'s `.timeout(...)`), covering both the header wait and any
+  single body read that receives nothing at all.
+- `maximum_wall_time_seconds: 150` is a new, independent hard cap on the
+  whole request -- from `send()` to the last body byte -- enforced in
+  application code (`openloops-inference::provider::send_with_control` and
+  `read_body`), since the transport has no native concept of total request
+  wall time. Both the blocking `send()` (connection plus the full header
+  wait) and the blocking body reads run on a background thread while the
+  caller polls every 250 milliseconds, so the bound is observed within
+  about one poll tick whether the connection is silently withholding
+  headers, silently withholding body bytes, or slowly trickling either.
+  This matters because some providers -- Ollama Cloud, in practice -- send
+  no response headers at all until generation has finished, so a bound
+  applied only to the body-read phase would never engage for them. The
+  same check point is what a Stop click aborts through
+  (`ProviderError::Cancelled`), so Stop now takes effect within about a
+  second regardless of which phase a request is in, not only between
+  conversations.
+
+A slow reasoning model working through a large conversation can still hit
+150 seconds; that is a failed conversation, not a failed scan, and the rest
+of the scan continues. Abandoning a request (cancel or the deadline) does
+not instantly free the resources behind it: the background thread's one
+blocking `send()`/`read()` call, and the socket underneath it, can still
+linger for up to reqwest's own per-call timeout (`maximum_idle_read_seconds:
+60`) after abandonment, since that call has no way to be interrupted from
+outside. This is a mechanical correction to an inaccurate bound, made during
+code review of the wall-time fix; per `AGENTS.md`, the product owner should
+still review it before the next release.

@@ -75,14 +75,35 @@ exact selected model label. Tool calls, refusals, generated images or audio, an
 rejected. Duplicate JSON members are rejected before validation.
 
 Requests use fixed HTTPS endpoints, disabled redirects and proxies, a 5-second
-connection limit, a 60-second total limit, no tools, no automatic retries, and
-bounded request and response sizes. The key and response buffers are held in
-zeroizing wrappers. Failures report fixed codes — invalid key, quota, rate
-limit, timeout, network, HTTP status, malformed JSON, invalid fields — and never
-expose a raw upstream body.
+connection limit, a 60-second per-read idle limit, no tools, no automatic
+retries, and bounded request and response sizes. The key and response buffers
+are held in zeroizing wrappers. Failures report fixed codes — invalid key,
+quota, rate limit, timeout, network, HTTP status, malformed JSON, invalid
+fields — and never expose a raw upstream body.
 
 The ZDR listing is much larger than a completion (several hundred kilobytes),
 so it has its own larger read bound; the completion bound is unchanged.
+
+Every request — from the moment it is sent to the last byte of the response —
+is additionally bounded to 150 seconds of wall time, independently of the
+60-second per-read idle limit above. That per-read limit only bounds one
+`send()` or `read()` call and resets on every byte a connection sends, so a
+provider that trickles occasional keep-alive bytes while a slow model keeps
+working could otherwise hold a request open far longer than 60 seconds.
+OpenLoops runs the blocking `send()` (the connection and the full header
+wait) and the blocking body reads each on their own background thread and
+polls it every 250 milliseconds, so the 150-second bound is enforced within
+about a quarter second of expiry whether the connection is silently
+withholding response headers, silently withholding body bytes, or trickling
+either — and reports `Timeout` once it is exceeded. A slow reasoning model
+working through a large conversation can hit this bound; when it does, that
+one conversation is reported as a failed conversation, not a failed scan, and
+the rest of the scan continues. Clicking Stop abandons the request currently
+in flight — within about a second, not only between conversations. Abandoning
+a request this way does not instantly free the resources behind it: the
+background thread's one blocking `send()`/`read()` call, and the socket
+underneath it, can still linger for up to the 60-second per-read idle limit
+above, since that one call cannot be interrupted from outside.
 
 ## Validation
 

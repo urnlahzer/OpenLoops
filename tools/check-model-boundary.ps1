@@ -95,7 +95,7 @@ if ($null -eq $m) {
 
 $canonical = $m | ConvertTo-Json -Depth 100 -Compress
 $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($canonical))).ToLowerInvariant()
-if ($hash -ne '10824370f5c7e3eb9343670fda2c382c85bbf14ea47ab4734ea2f39f7d2af3aa') { Fail 'P0-MODEL-INVENTORY-001' }
+if ($hash -ne 'a1170aeab6b37cf5f4353d47b51cd79bc341a54317aa635a76cb3fb373fd7db4') { Fail 'P0-MODEL-INVENTORY-001' }
 
 $requirements = @('OL-SYNC-012','OL-SYNC-013','OL-TEST-003','OL-MODEL-001','OL-MODEL-002','OL-MODEL-003','OL-MODEL-004','OL-MODEL-005','OL-MODEL-006','OL-MODEL-007','OL-MODEL-008','OL-MODEL-009','OL-MODEL-010','OL-MODEL-011','OL-MODEL-012','OL-MODEL-013','OL-MODEL-014','OL-MODEL-015','OL-NFR-005','OL-NFR-007','OL-NFR-011')
 if ($m.schema_version -ne 1 -or $m.work_item -ne 'P0-WI-10' -or $m.adr -ne 'ADR-007' -or $m.decision_status -ne 'accepted_contract_runtime_unimplemented' -or $m.snapshot_date -ne '2026-07-20') { Fail 'P0-MODEL-INVENTORY-001' }
@@ -159,7 +159,7 @@ ExactOrdered @($request.prohibited) @('whole mailbox','whole thread by default',
 Has (($request | ConvertTo-Json -Compress)) @('no provider-side format or tools field is sent in the MVP contract','strict application validation of analysis-output-v1 is authoritative','tool_calls','prohibited','tools functions images attachments linked-document contents and remote retrieval fields are absent','one changed message projection plus at most four relevance-selected context projections supplied by deterministic code','length-framed untrusted data','cannot alter policy prompt schema scopes tools endpoint or model') 'P0-MODEL-REQUEST-001'
 
 $response = $m.response_contract
-if ($response.maximum_response_bytes -ne 262144 -or $response.maximum_wall_time_seconds -ne 60 -or $response.maximum_connect_time_seconds -ne 5 -or $response.schema_id -ne 'openloops-analysis-v1' -or $response.schema_path -ne 'contracts/model/analysis-output.schema.json' -or $response.schema_dialect -ne 'https://json-schema.org/draft/2020-12/schema' -or $response.unknown_fields -ne 'reject' -or $response.duplicate_json_members -ne 'reject before schema validation' -or $response.maximum_claims -ne 64) { Fail 'P0-MODEL-RESPONSE-001' }
+if ($response.maximum_response_bytes -ne 262144 -or $response.maximum_wall_time_seconds -ne 150 -or $response.maximum_idle_read_seconds -ne 60 -or $response.maximum_connect_time_seconds -ne 5 -or $response.schema_id -ne 'openloops-analysis-v1' -or $response.schema_path -ne 'contracts/model/analysis-output.schema.json' -or $response.schema_dialect -ne 'https://json-schema.org/draft/2020-12/schema' -or $response.unknown_fields -ne 'reject' -or $response.duplicate_json_members -ne 'reject before schema validation' -or $response.maximum_claims -ne 64) { Fail 'P0-MODEL-RESPONSE-001' }
 ExactOrdered @($response.required_validation_order) @('strict UTF-8 and one JSON value','duplicate-member and unknown-field rejection','schema and numeric/catalog bounds','supplied opaque-handle membership','canonical block and Unicode-scalar range bounds','transient evidence text correspondence','participant-position membership','deterministic date reparse and timezone resolution','internal claim and relation consistency','semantic adversarial and deterministic positive-policy checks') 'P0-MODEL-RESPONSE-001'
 Has (($response | ConvertTo-Json -Compress)) @('analysis_unavailable or needs_review','zero Graph Office reminder lifecycle or provider mutation','never persisted or evidence','reconstructed from validated templates and evidence','defense in depth only','never substitutes for application validation') 'P0-MODEL-RESPONSE-001'
 
@@ -320,7 +320,7 @@ $threatText = Read-Text $ThreatPath 'P0-MODEL-CROSS-CONTRACT-001'
 $traceText = Read-Text $TraceabilityPath 'P0-MODEL-INVENTORY-001'
 $adrCanonical = (($adrText -replace "`r`n", "`n").TrimEnd() + "`n")
 $adrHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($adrCanonical))).ToLowerInvariant()
-if ($adrHash -ne 'f11fa47dc3a9158a4f5bc0ec56c6e326ee9e4c069011d5106c0ccbf64f93d152') { Fail 'P0-MODEL-CROSS-CONTRACT-001' }
+if ($adrHash -ne '12be5a6e8081ec3938d8c0ceb59f7c10b874b37d52a628f3011e899ecba9eb15') { Fail 'P0-MODEL-CROSS-CONTRACT-001' }
 Has $adrText @('ADR-007','OWN-08','Accepted','implements no adapter, transport, credential store','G-MODEL','G-PRIV','ollama_local','ollama_cloud','approved_https','openrouter','provider.zdr=true','zero-data-retention','model-sensitivity-v1','Request sensitivity','Deadline inference sensitivity','Closure sensitivity','review_required','No settings change starts replay automatically','No tool surface exists','Prompts, requests, responses, outputs, rationales, transcripts','are never persisted') 'P0-MODEL-CROSS-CONTRACT-001'
 Has $threatText @('Model-provider boundary threat model','No provider adapter, origin, credential, request','redirect','proxy','DNS','consent','canary','untrusted','zero mutation','zero-data-retention','provider.zdr=true') 'P0-MODEL-CROSS-CONTRACT-001'
 $traceIds = [regex]::Matches($traceText, '(?m)^\| (P0-MODEL-[A-Z-]+-001) \|') | ForEach-Object { $_.Groups[1].Value }
