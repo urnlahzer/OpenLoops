@@ -8,7 +8,7 @@ use zeroize::Zeroizing;
 
 use crate::provider::{
     MAX_REQUEST, ModelClient, RequestControl, https_client, json_document, parse_error, read_body,
-    status_error, transport_error, valid_key, valid_model_name,
+    send_with_control, status_error, valid_key, valid_model_name,
 };
 use crate::validation::{AnalysisResult, ParticipantSlot, SuppliedContext, validate};
 
@@ -66,13 +66,11 @@ impl OllamaCloud {
             model: model.to_owned(),
         };
         let started = Instant::now();
-        let response = provider
-            .client
-            .get(TAGS)
-            .bearer_auth(provider.key.as_str())
-            .send()
-            .map_err(|error| transport_error(&error))?;
         let control = RequestControl::new(started);
+        let response = send_with_control(
+            provider.client.get(TAGS).bearer_auth(provider.key.as_str()),
+            &control,
+        )?;
         if !model_names(&read_response(response, &control)?)?
             .iter()
             .any(|name| name == model)
@@ -127,23 +125,24 @@ impl OllamaCloud {
 
     /// Sends `body` and reads the answer. Records the start instant
     /// immediately before `send()` so [`crate::provider::REQUEST_DEADLINE`]
-    /// bounds the whole request, not just an idle connection; `cancel`, when
-    /// supplied, lets a Stop action abort the read in progress.
+    /// bounds the whole request -- including the header wait, not just the
+    /// body -- rather than just an idle connection; `cancel`, when
+    /// supplied, lets a Stop action abort the request in progress, whether
+    /// it is still waiting on a response or partway through reading one.
     fn chat(
         &self,
         body: Vec<u8>,
         cancel: Option<&AtomicBool>,
     ) -> Result<Zeroizing<String>, ProviderError> {
         let started = Instant::now();
-        let response = self
+        let control = RequestControl::with_cancel(started, cancel);
+        let request = self
             .client
             .post(CHAT)
             .bearer_auth(self.key.as_str())
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body)
-            .send()
-            .map_err(|error| transport_error(&error))?;
-        let control = RequestControl::with_cancel(started, cancel);
+            .body(body);
+        let response = send_with_control(request, &control)?;
         parse_chat(&read_response(response, &control)?, &self.model)
     }
 }
@@ -263,12 +262,9 @@ pub fn available_models(key: &str) -> Result<Vec<String>, ProviderError> {
         return Err(ProviderError::InvalidKey);
     }
     let started = Instant::now();
-    let response = https_client()?
-        .get(TAGS)
-        .bearer_auth(key)
-        .send()
-        .map_err(|error| transport_error(&error))?;
-    model_names(&read_response(response, &RequestControl::new(started))?)
+    let control = RequestControl::new(started);
+    let response = send_with_control(https_client()?.get(TAGS).bearer_auth(key), &control)?;
+    model_names(&read_response(response, &control)?)
 }
 
 fn parse_chat(bytes: &[u8], selected: &str) -> Result<Zeroizing<String>, ProviderError> {

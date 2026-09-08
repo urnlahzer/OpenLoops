@@ -87,17 +87,23 @@ so it has its own larger read bound; the completion bound is unchanged.
 Every request — from the moment it is sent to the last byte of the response —
 is additionally bounded to 150 seconds of wall time, independently of the
 60-second per-read idle limit above. That per-read limit only bounds one
-`read()` call and resets on every byte a connection sends, so a provider that
-trickles occasional keep-alive bytes while a slow model keeps working could
-otherwise hold a request open far longer than 60 seconds; a background thread
-performs the actual reads while OpenLoops polls it every 250 milliseconds, so
-the 150-second bound is enforced within about a quarter second of expiry even
-while the connection is completely silent, and reports `Timeout` once it is
-exceeded. A slow reasoning model working through a large conversation can hit
-this bound; when it does, that one conversation is reported as a failed
-conversation, not a failed scan, and the rest of the scan continues. Clicking
-Stop abandons the request currently in flight — within about a second, not
-only between conversations.
+`send()` or `read()` call and resets on every byte a connection sends, so a
+provider that trickles occasional keep-alive bytes while a slow model keeps
+working could otherwise hold a request open far longer than 60 seconds.
+OpenLoops runs the blocking `send()` (the connection and the full header
+wait) and the blocking body reads each on their own background thread and
+polls it every 250 milliseconds, so the 150-second bound is enforced within
+about a quarter second of expiry whether the connection is silently
+withholding response headers, silently withholding body bytes, or trickling
+either — and reports `Timeout` once it is exceeded. A slow reasoning model
+working through a large conversation can hit this bound; when it does, that
+one conversation is reported as a failed conversation, not a failed scan, and
+the rest of the scan continues. Clicking Stop abandons the request currently
+in flight — within about a second, not only between conversations. Abandoning
+a request this way does not instantly free the resources behind it: the
+background thread's one blocking `send()`/`read()` call, and the socket
+underneath it, can still linger for up to the 60-second per-read idle limit
+above, since that one call cannot be interrupted from outside.
 
 ## Validation
 

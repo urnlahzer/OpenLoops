@@ -57,16 +57,25 @@ actions or pass a release gate.
 Every request — from the moment it is sent to the last byte of the response —
 is additionally bounded to 150 seconds of wall time, independently of the
 60-second per-read idle timeout above. That per-read timeout only bounds one
-`read()` call and resets on every byte a connection sends, so a slow
-keep-alive connection could otherwise hold a request open far longer than 60
-seconds; a background thread performs the actual reads while OpenLoops polls
-it every 250 milliseconds, so the 150-second bound is enforced within about a
-quarter second of expiry even while the connection is completely silent, and
-reports a timeout once it is exceeded. A slow reasoning model working through
-a large conversation can hit this bound; when it does, that one conversation
-is reported as a failed conversation, not a failed scan, and the rest of the
+`send()` or `read()` call and resets on every byte a connection sends, so a
+slow keep-alive connection could otherwise hold a request open far longer
+than 60 seconds. This matters especially for Ollama Cloud: a slow model can
+send no response headers at all until generation has finished, so a bound
+that only watched the body would never engage. OpenLoops runs the blocking
+`send()` (the connection and the full header wait) and the blocking body
+reads each on their own background thread and polls it every 250
+milliseconds, so the 150-second bound is enforced within about a quarter
+second of expiry whether the connection is silently withholding headers,
+silently withholding body bytes, or trickling either, and reports a timeout
+once it is exceeded. A slow reasoning model working through a large
+conversation can hit this bound; when it does, that one conversation is
+reported as a failed conversation, not a failed scan, and the rest of the
 scan continues. Clicking Stop in the native setup window abandons the request
 currently in flight — within about a second, not only between conversations.
+Abandoning a request this way does not instantly free the resources behind
+it: the background thread's one blocking `send()`/`read()` call, and the
+socket underneath it, can still linger for up to the 60-second per-read idle
+timeout above, since that one call cannot be interrupted from outside.
 
 Validation: `cargo test -p openloops-inference --features ollama-cloud --locked`.
 The unit tests do not contact Ollama; live authentication and generation require

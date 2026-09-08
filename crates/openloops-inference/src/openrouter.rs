@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 use crate::provider::{
     MAX_REQUEST, MAX_RESPONSE, ModelClient, ProviderError, RequestControl, https_client,
-    json_document, parse_error, read_body, status_error, transport_error, valid_key,
+    json_document, parse_error, read_body, send_with_control, status_error, valid_key,
     valid_model_name,
 };
 
@@ -85,9 +85,10 @@ impl OpenRouter {
 
     /// Sends `body` and reads the answer. Records the start instant
     /// immediately before `send()` so [`crate::provider::REQUEST_DEADLINE`]
-    /// bounds the whole request rather than only an idle connection;
-    /// `cancel`, when supplied, lets a Stop action abort the read in
-    /// progress.
+    /// bounds the whole request -- including the header wait, not just the
+    /// body -- rather than only an idle connection; `cancel`, when
+    /// supplied, lets a Stop action abort the request in progress, whether
+    /// it is still waiting on a response or partway through reading one.
     fn chat_at(
         &self,
         url: &str,
@@ -98,15 +99,14 @@ impl OpenRouter {
         // the loopback tests substitute their own origin.
         debug_assert!(cfg!(test) || url.starts_with(AUTHORITY));
         let started = Instant::now();
-        let response = self
+        let control = RequestControl::with_cancel(started, cancel);
+        let request = self
             .client
             .post(url)
             .bearer_auth(self.key.as_str())
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body)
-            .send()
-            .map_err(|error| transport_error(&error))?;
-        let control = RequestControl::with_cancel(started, cancel);
+            .body(body);
+        let response = send_with_control(request, &control)?;
         parse_chat(&read_response(response, &control)?, &self.model)
     }
 }
@@ -139,20 +139,18 @@ fn fetch_zdr(client: &Client, url: &str) -> Result<Vec<ModelChoice>, ProviderErr
     // build; the loopback tests substitute their own origin.
     debug_assert!(cfg!(test) || url.starts_with(AUTHORITY));
     let started = Instant::now();
-    let response = client
-        .get(url)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .send()
-        .map_err(|error| transport_error(&error))?;
+    let control = RequestControl::new(started);
+    let response = send_with_control(
+        client
+            .get(url)
+            .header(reqwest::header::ACCEPT, "application/json"),
+        &control,
+    )?;
     match response.status().as_u16() {
         200 => {}
         status => return Err(status_error(status)),
     }
-    zdr_models(&read_body(
-        response,
-        MAX_LISTING,
-        &RequestControl::new(started),
-    )?)
+    zdr_models(&read_body(response, MAX_LISTING, &control)?)
 }
 
 /// A displayable model label: present, bounded, and free of the control
