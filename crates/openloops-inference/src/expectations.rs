@@ -47,6 +47,11 @@ pub struct EventPassed {
     /// The invitation, calendar-subject, or event-time-phrase message this
     /// closure's evidence came from, so the card can render an anchor to it.
     pub message_handle: String,
+    /// True when the closing time was read from the message's subject line
+    /// (a calendar-invite subject, or an event date/time named in the
+    /// subject's own prose) rather than from a meeting invite's own
+    /// metadata or an event-time phrase found in a message body.
+    pub from_subject: bool,
 }
 
 #[derive(Clone)]

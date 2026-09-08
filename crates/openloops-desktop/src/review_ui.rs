@@ -733,7 +733,7 @@ fn render_evidence_section(
         show_anchor(ui, "Event evidence", event, messages);
     }
     if let Some(passed) = &item.event_passed {
-        show_event_time_evidence(ui, "Event time evidence", &passed.message_handle, messages);
+        show_event_time_evidence(ui, "Event time evidence", passed, messages);
     }
     if let Some(resolution) = &item.resolution {
         show_anchor(
@@ -955,18 +955,28 @@ fn show_anchor(ui: &mut egui::Ui, label: &str, anchor: &Anchor, messages: &[Revi
             });
     }
 }
-/// Like [`show_anchor`] but for an `EventPassed`'s `message_handle`, which
-/// names the invitation, calendar-subject, or event-time-phrase message the
-/// closure evidence came from -- not a quoted anchor, so there is no quote
-/// or "Surrounding source text" to show, only the link to that message.
+/// Like [`show_anchor`] but for an [`EventPassed`], which names the
+/// invitation, calendar-subject, or event-time-phrase message the closure
+/// evidence came from -- not a quoted anchor, so there is no quote or
+/// "Surrounding source text" to show. When `from_subject` is set (the time
+/// came from a calendar-invite subject or the subject's own prose, rather
+/// than a meeting invite's metadata or an event-time phrase found in a
+/// message body), an extra line says so; otherwise the rendering is
+/// unchanged, just the link to that message.
 fn show_event_time_evidence(
     ui: &mut egui::Ui,
     label: &str,
-    message_handle: &str,
+    passed: &EventPassed,
     messages: &[ReviewMessage],
 ) {
     ui.label(RichText::new(label).strong());
-    if let Some(m) = messages.iter().find(|m| m.input.handle == message_handle) {
+    if passed.from_subject {
+        ui.label(RichText::new("From the subject line of this message").small());
+    }
+    if let Some(m) = messages
+        .iter()
+        .find(|m| m.input.handle == passed.message_handle)
+    {
         ui.label(
             RichText::new(format!(
                 "{} · {} · {}",
@@ -1489,6 +1499,7 @@ mod tests {
             name: "design workshop".into(),
             end,
             message_handle: "m0".into(),
+            from_subject: false,
         });
         let card = state.card_context(&item, 0, 0).unwrap();
         assert!(card.closed);

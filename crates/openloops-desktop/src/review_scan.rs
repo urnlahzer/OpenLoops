@@ -342,25 +342,55 @@ fn match_date_at(tokens: &[(String, usize)], i: usize) -> Option<(MatchedDate, u
 /// completely against the token stream that could exist.
 const TIME_PREPOSITIONS: &[&str] = &["at", "@", ",", "from", "starting"];
 
-/// A clock time starting at `tokens[idx]`, as seconds since local midnight,
-/// and how many tokens it consumed: a 12-hour time with the meridiem
-/// attached ("2pm", "2:30pm") or spaced ("2:30 pm"), or a bare 24-hour time
-/// ("14:00"). Skips one leading [`TIME_PREPOSITIONS`] token first, so a
-/// time stated after one still parses.
-fn parse_prose_time(tokens: &[(String, usize)], idx: usize) -> Option<(i32, usize)> {
-    if let Some(result) = parse_prose_time_literal(tokens, idx) {
-        return Some(result);
-    }
-    let lower = tokens.get(idx)?.0.to_ascii_lowercase();
-    if !TIME_PREPOSITIONS.contains(&lower.as_str()) {
-        return None;
-    }
-    let (seconds, consumed) = parse_prose_time_literal(tokens, idx + 1)?;
-    Some((seconds, consumed + 1))
+/// True when `token` is, by itself, a dash acting as a separator: an ASCII
+/// hyphen surrounded by whitespace on both sides tokenizes this way (`-` is
+/// itself a `prose_tokens` word character, so it only ever stands alone
+/// when nothing else is glued to it, e.g. "August 25 - 2pm" or
+/// "2:00 - 5:30pm"); an en dash and an em dash are listed too, though
+/// `prose_tokens` never actually returns either as its own token, since
+/// neither is a word character -- listed anyway so the intent reads
+/// completely against the token stream that could exist.
+fn is_lone_dash_token(token: &str) -> bool {
+    matches!(token, "-" | "\u{2013}" | "\u{2014}")
 }
 
-/// The literal clock-time parse [`parse_prose_time`] wraps, with no
-/// preposition handling of its own.
+/// A clock time, or a clock time range, starting at `tokens[idx]`: `start`
+/// and `end` in seconds since local midnight, and how many tokens were
+/// consumed. A range is accepted as `H[:MM][am|pm]` optionally followed by
+/// a dash (an ASCII hyphen -- fused, standalone, or glued onto either
+/// side -- an en dash, an em dash, or the word "to") and a second
+/// `H[:MM][am|pm]` -- see [`parse_prose_time_range`] and
+/// [`resolve_range_meridiem`] for how a missing meridiem (and a range that
+/// crosses midnight) is resolved. With no range, this is just a single
+/// 12-hour time with the meridiem attached ("2pm", "2:30pm") or spaced
+/// ("2:30 pm"), or a bare 24-hour time ("14:00"), and `end` is `start +
+/// 1h`. Skips one leading [`TIME_PREPOSITIONS`] token, or a lone dash
+/// token (see [`is_lone_dash_token`]) sitting between the date and the
+/// time ("August 25 - 2pm"), first, so a time (or range) stated after one
+/// still parses.
+fn parse_prose_time(
+    text: &str,
+    tokens: &[(String, usize)],
+    idx: usize,
+) -> Option<(i32, i32, usize)> {
+    let (start_idx, prep_consumed) = match tokens.get(idx) {
+        Some(tok)
+            if is_lone_dash_token(&tok.0)
+                || TIME_PREPOSITIONS.contains(&tok.0.to_ascii_lowercase().as_str()) =>
+        {
+            (idx + 1, 1)
+        }
+        _ => (idx, 0),
+    };
+    if let Some((start, end, consumed)) = parse_prose_time_range(text, tokens, start_idx) {
+        return Some((start, end, prep_consumed + consumed));
+    }
+    let (seconds, consumed) = parse_prose_time_literal(tokens, start_idx)?;
+    Some((seconds, seconds + 3_600, prep_consumed + consumed))
+}
+
+/// The literal clock-time parse [`parse_prose_time`] falls back on for a
+/// single (non-range) time, with no preposition handling of its own.
 fn parse_prose_time_literal(tokens: &[(String, usize)], idx: usize) -> Option<(i32, usize)> {
     let token = &tokens.get(idx)?.0;
     if let Some(seconds) = parse_subject_clock(token) {
@@ -381,6 +411,219 @@ fn parse_prose_time_literal(tokens: &[(String, usize)], idx: usize) -> Option<(i
         return None;
     }
     Some((hour * 3600 + minute * 60, 1))
+}
+
+/// One clock-time component within a possible range: hour/minute plus
+/// whether "am"/"pm" was explicitly stated, and whether the source stated a
+/// `:MM` at all ([`range_is_plausible`] uses this). `meridiem` is `None`
+/// when the component stated neither, in which case `hour` is taken at
+/// face value (0..=23) until [`resolve_range_meridiem`] disambiguates an
+/// hour of 1..=12 (the only case a missing meridiem leaves ambiguous).
+#[derive(Clone, Copy)]
+struct RangeClock {
+    hour: i32,
+    minute: i32,
+    meridiem: Option<bool>,
+    has_colon: bool,
+}
+
+/// Parses one `H[:MM][am|pm]` range component, with no separator or range
+/// handling of its own. A trailing sentence period ("11:30.") is stripped
+/// first, the same way [`strip_trailing_period`] does for a date token.
+fn parse_range_clock_str(s: &str) -> Option<RangeClock> {
+    let s = s.strip_suffix('.').unwrap_or(s);
+    let lower = s.to_ascii_lowercase();
+    let (clock, meridiem) = if let Some(c) = lower.strip_suffix("am") {
+        (c, Some(false))
+    } else if let Some(c) = lower.strip_suffix("pm") {
+        (c, Some(true))
+    } else {
+        (lower.as_str(), None)
+    };
+    let has_colon = clock.contains(':');
+    let mut parts = clock.split(':');
+    let hour: i32 = parts.next().filter(|p| !p.is_empty())?.parse().ok()?;
+    let minute: i32 = parts.next().map_or(Some(0), |v| v.parse().ok())?;
+    if parts.next().is_some() || !(0..60).contains(&minute) {
+        return None;
+    }
+    let in_range = if meridiem.is_some() {
+        (1..=12).contains(&hour)
+    } else {
+        (0..24).contains(&hour)
+    };
+    in_range.then_some(RangeClock {
+        hour,
+        minute,
+        meridiem,
+        has_colon,
+    })
+}
+
+/// [`RangeClock`] resolved to seconds since local midnight, given whether it
+/// should be read as pm. An hour already outside 1..=12 (only reachable
+/// with no stated meridiem) is an unambiguous 24-hour value and `pm` is
+/// ignored.
+fn range_clock_seconds(clock: RangeClock, pm: bool) -> i32 {
+    if !(1..=12).contains(&clock.hour) {
+        return clock.hour * 3600 + clock.minute * 60;
+    }
+    ((clock.hour % 12) + if pm { 12 } else { 0 }) * 3600 + clock.minute * 60
+}
+
+/// Whether a bare range -- neither side stated a colon or a meridiem -- is
+/// specific enough to trust as a time rather than an ordinary "N to M"
+/// phrase ("5 to 7 people", "10 to 12 attendees"): a dash separator (a much
+/// rarer, stronger signal than the common word "to") between two hours of
+/// 1..=12 is trusted; a bare range joined by "to" never is, no matter the
+/// hours. A range where either side stated a colon or a meridiem is always
+/// trusted, regardless of the separator.
+fn range_is_plausible(start: RangeClock, end: RangeClock, dash_separator: bool) -> bool {
+    if start.has_colon || end.has_colon || start.meridiem.is_some() || end.meridiem.is_some() {
+        return true;
+    }
+    dash_separator && start.hour <= 12 && end.hour <= 12
+}
+
+/// Resolves a range's two components to `(start, end)` seconds since local
+/// midnight. When only one side states am/pm, the other inherits it (so
+/// "2:00-5:30pm" is 14:00-17:30 and "9-11am" is 09:00-11:00). When neither
+/// does, an hour of 1..=11 stays am and 12 stays noon, except the end is
+/// read as pm when it is numerically smaller than the start ("11-1" is
+/// 11am-1pm, not 11am-1am). Mirrors [`subject_event_time`]'s own policy for
+/// a range that crosses midnight: when the resolved `end` does not come
+/// after `start`, a day is added to it ("11pm-1am" is 23:00 to the next
+/// day's 01:00).
+fn resolve_range_meridiem(start: RangeClock, end: RangeClock) -> (i32, i32) {
+    let (start_pm, end_pm) = match (start.meridiem, end.meridiem) {
+        (Some(s), Some(e)) => (s, e),
+        (None, Some(e)) => (e, e),
+        (Some(s), None) => (s, s),
+        (None, None) => (start.hour == 12, end.hour == 12 || end.hour < start.hour),
+    };
+    let start_secs = range_clock_seconds(start, start_pm);
+    let mut end_secs = range_clock_seconds(end, end_pm);
+    if end_secs <= start_secs {
+        end_secs += 86_400;
+    }
+    (start_secs, end_secs)
+}
+
+/// True when `gap` -- the raw source text strictly between a range's two
+/// time components -- is nothing but ASCII hyphens, en dashes, em dashes,
+/// and whitespace. A plain ASCII hyphen only ever reaches here already
+/// isolated: [`parse_prose_time_range`] strips one off either edge of the
+/// two components first ([`strip_trailing_dash`] / [`strip_leading_dash`])
+/// before computing the gap, since `-` is itself a `prose_tokens` word
+/// character and would otherwise glue onto its neighbor's own token
+/// ("2:00-5:30pm" fuses into one token entirely, handled instead by
+/// [`parse_fused_range_token`]; "2:00- 5:30pm" and "2:00 -5:30pm" glue onto
+/// only one side).
+fn gap_is_dash_separator(gap: &str) -> bool {
+    let trimmed = gap.trim();
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|c| matches!(c, '-' | '\u{2013}' | '\u{2014}'))
+}
+
+/// A single fused token holding an ASCII-hyphen range ("2:00-5:30pm",
+/// "9-11am"): since `-` is itself a `prose_tokens` word character, such a
+/// range never splits into separate tokens the way an en/em dash or " to "
+/// does. Splits on the first `-` and parses both halves as [`RangeClock`]s.
+fn parse_fused_range_token(token: &str) -> Option<(RangeClock, RangeClock)> {
+    let (left, right) = token.split_once('-')?;
+    Some((parse_range_clock_str(left)?, parse_range_clock_str(right)?))
+}
+
+/// `token` with one trailing ASCII hyphen removed, when present and doing
+/// so would not leave it empty -- separates a start clock like "2:00" from
+/// a hyphen glued directly onto it ("2:00-", from "2:00- 5:30pm").
+fn strip_trailing_dash(token: &str) -> &str {
+    match token.strip_suffix('-') {
+        Some(rest) if !rest.is_empty() => rest,
+        _ => token,
+    }
+}
+
+/// Like [`strip_trailing_dash`] but for a leading hyphen glued onto an end
+/// clock ("-5:30pm", from "2:00 -5:30pm").
+fn strip_leading_dash(token: &str) -> &str {
+    match token.strip_prefix('-') {
+        Some(rest) if !rest.is_empty() => rest,
+        _ => token,
+    }
+}
+
+/// Finishes a range once its two components and separator are known:
+/// absorbs a meridiem spaced off from the end ("2:00-5:30 pm", where
+/// `end_next_idx` names the token right after the end clock), rejects an
+/// implausible bare range ([`range_is_plausible`]), then resolves the
+/// meridiem and any midnight crossing ([`resolve_range_meridiem`]).
+fn finalize_range(
+    start: RangeClock,
+    mut end: RangeClock,
+    dash_separator: bool,
+    tokens: &[(String, usize)],
+    end_next_idx: usize,
+    consumed: usize,
+) -> Option<(i32, i32, usize)> {
+    let mut consumed = consumed;
+    if end.meridiem.is_none()
+        && let Some(tok) = tokens.get(end_next_idx)
+    {
+        let lower = tok.0.to_ascii_lowercase();
+        if lower == "am" || lower == "pm" {
+            end.meridiem = Some(lower == "pm");
+            consumed += 1;
+        }
+    }
+    if !range_is_plausible(start, end, dash_separator) {
+        return None;
+    }
+    let (start_secs, end_secs) = resolve_range_meridiem(start, end);
+    Some((start_secs, end_secs, consumed))
+}
+
+/// A time range only (no preposition handling), starting exactly at
+/// `tokens[idx]`: fused in one token via an ASCII hyphen ("2:00-5:30pm"),
+/// across two tokens joined by a standalone "-" token, an en dash, an em
+/// dash, or the word "to", or across two tokens where the ASCII hyphen is
+/// instead glued onto the end of the start token ("2:00- 5:30pm") or the
+/// start of the end token ("2:00 -5:30pm"). Returns `(start, end,
+/// consumed)` in seconds since local midnight. `None` when no range is
+/// found at `idx`, including when `idx` holds a single, unpaired time, or
+/// when a bare range (see [`range_is_plausible`]) is not specific enough to
+/// trust.
+fn parse_prose_time_range(
+    text: &str,
+    tokens: &[(String, usize)],
+    idx: usize,
+) -> Option<(i32, i32, usize)> {
+    let token = &tokens.get(idx)?.0;
+    if let Some((start, end)) = parse_fused_range_token(token) {
+        return finalize_range(start, end, true, tokens, idx + 1, 1);
+    }
+    let start_core = strip_trailing_dash(token);
+    let start = parse_range_clock_str(start_core)?;
+    let next = tokens.get(idx + 1)?;
+    if next.0.eq_ignore_ascii_case("to") {
+        let end = parse_range_clock_str(&tokens.get(idx + 2)?.0)?;
+        return finalize_range(start, end, false, tokens, idx + 3, 3);
+    }
+    if is_lone_dash_token(&next.0) {
+        let end = parse_range_clock_str(&tokens.get(idx + 2)?.0)?;
+        return finalize_range(start, end, true, tokens, idx + 3, 3);
+    }
+    let end_core = strip_leading_dash(&next.0);
+    let gap_start = tokens[idx].1 + start_core.len();
+    let gap_end = next.1 + (next.0.len() - end_core.len());
+    let gap = text.get(gap_start..gap_end)?;
+    if !gap_is_dash_separator(gap) {
+        return None;
+    }
+    let end = parse_range_clock_str(end_core)?;
+    finalize_range(start, end, true, tokens, idx + 2, 2)
 }
 
 /// `message_timestamp`'s calendar year in the local time `offset` implies.
@@ -469,9 +712,11 @@ fn prose_event_time_candidates(
             day_start = local_midnight - i64::from(offset);
         }
         let byte_offset = tokens[i].1;
-        if let Some((time_seconds, _)) = parse_prose_time(&tokens, i + consumed) {
-            let start = local_midnight + i64::from(time_seconds) - i64::from(offset);
-            found.push((start, start + 3600, byte_offset));
+        if let Some((start_seconds, end_seconds, _)) = parse_prose_time(text, &tokens, i + consumed)
+        {
+            let start = local_midnight + i64::from(start_seconds) - i64::from(offset);
+            let end = local_midnight + i64::from(end_seconds) - i64::from(offset);
+            found.push((start, end, byte_offset));
         } else {
             let day_end =
                 local_midnight + i64::from(DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT) - i64::from(offset);
@@ -588,21 +833,32 @@ fn learn_one_event(message: &ReviewMessage) -> Option<(String, i64, i64, EventSo
         if out_of_date {
             return None;
         }
-        let name = normalize_subject(&subject);
+        let name = strip_leading_possessive(&normalize_subject(&subject));
         return is_specific_event_name(&name).then_some((name, start, end, EventSource::Meeting));
     }
     if let Some((start, end)) = subject_event_time(&subject, message.input.timestamp) {
-        let name = normalize_subject(&subject);
+        let name = strip_leading_possessive(&normalize_subject(&subject));
         return is_specific_event_name(&name).then_some((name, start, end, EventSource::Subject));
     }
     let offset = local_offset_seconds(message.input.timestamp, 0);
     if let Some((start, end, byte_offset)) =
         prose_event_time(&subject, message.input.timestamp, offset)
     {
+        let name_end = subject_prose_name_end(&subject, byte_offset);
+        let prefix = &subject[..name_end];
+        // A trailing ')' is only ever a stray, unmatched close -- one worth
+        // trimming alongside "-@:," -- when this prefix has more ')' than
+        // '(' overall. When they balance (or opens win), a trailing ')'
+        // closes a real group ("(draft)") that `normalize_subject`'s own
+        // trailing-paren handling must see intact to decide whether to keep
+        // or drop it.
+        let unmatched_closing_paren = prefix.matches(')').count() > prefix.matches('(').count();
         let name =
-            normalize_subject(subject[..byte_offset].trim_end_matches(|c: char| {
-                c.is_whitespace() || matches!(c, '-' | '@' | ':' | ',')
-            }));
+            strip_leading_possessive(&normalize_subject(prefix.trim_end_matches(|c: char| {
+                c.is_whitespace()
+                    || matches!(c, '-' | '@' | ':' | ',')
+                    || (c == ')' && unmatched_closing_paren)
+            })));
         if is_specific_event_name(&name) && contains_prose_event_noun(&name) {
             return Some((name, start, end, EventSource::SubjectProse));
         }
@@ -621,6 +877,54 @@ fn learn_one_event(message: &ReviewMessage) -> Option<(String, i64, i64, EventSo
         }
     }
     None
+}
+
+/// When `byte_offset` (a matched date's start, from [`prose_event_time`])
+/// sits inside a parenthesized group opened earlier in `subject`, returns
+/// that group's opening `(` byte index so the whole group -- including a
+/// leading weekday and comma, e.g. "(Tuesday, August 25 - 2:00-5:30pm)" --
+/// is dropped from the learned subject-prose event name, rather than just
+/// the date text onward. Otherwise returns `byte_offset` unchanged, e.g. for
+/// a date that follows a dash outside any parentheses ("Workshop - Sept
+/// 3").
+fn subject_prose_name_end(subject: &str, byte_offset: usize) -> usize {
+    let mut depth = 0i32;
+    let mut open_idx = None;
+    for (idx, c) in subject[..byte_offset].char_indices() {
+        match c {
+            '(' => {
+                if depth == 0 {
+                    open_idx = Some(idx);
+                }
+                depth += 1;
+            }
+            ')' => {
+                depth = (depth - 1).max(0);
+                if depth == 0 {
+                    open_idx = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth > 0 {
+        open_idx.unwrap_or(byte_offset)
+    } else {
+        byte_offset
+    }
+}
+
+/// Strips a leading possessive ("your ", "my ", or "our ") from a learned
+/// subject-prose event name, e.g. "your spring planning workshop
+/// checklist" becomes "spring planning workshop checklist". `name` is
+/// already lowercased ([`normalize_subject`]'s output).
+fn strip_leading_possessive(name: &str) -> String {
+    for prefix in ["your ", "my ", "our "] {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            return rest.to_string();
+        }
+    }
+    name.to_string()
 }
 
 /// The event name and date for a body-block prose match: the message's own
@@ -1607,6 +1911,10 @@ fn close_from_index(item: &mut Expectation, event: &EventRef, now: i64) -> bool 
         name: event.name.clone(),
         end: event.end,
         message_handle: event.message_handle.clone(),
+        from_subject: matches!(
+            event.source,
+            EventSource::Subject | EventSource::SubjectProse
+        ),
     });
     true
 }
@@ -1642,6 +1950,10 @@ fn close_from_stated_time(
         name: name.to_string(),
         end,
         message_handle: event_time.message.clone(),
+        // `event_time` is an `Anchor`, which the model can only ground in a
+        // message's `body_blocks` (never its subject -- see
+        // `expectations::anchor`), so this path is always body prose.
+        from_subject: false,
     });
     true
 }
@@ -3015,6 +3327,207 @@ mod tests {
         }
     }
 
+    /// A time range -- `H[:MM][am|pm]` followed by a dash (ASCII hyphen,
+    /// en dash, em dash) or " to " and a second `H[:MM][am|pm]` -- resolves
+    /// `end` to the range's own end instead of `start + 1h`, and a missing
+    /// meridiem is filled in per the documented rules.
+    #[test]
+    fn prose_event_time_reads_a_time_range() {
+        let message = timestamp("2026-08-01T00:00:00Z");
+        let day_start = timestamp("2026-09-03T00:00:00Z");
+        for (text, start_seconds, end_seconds) in [
+            (
+                "Meet September 3 2:00-5:30pm sharp.",
+                14 * 3600,
+                17 * 3600 + 1800,
+            ),
+            (
+                "Meet September 3 2:00\u{2013}5:30pm sharp.",
+                14 * 3600,
+                17 * 3600 + 1800,
+            ),
+            (
+                "Meet September 3 2:00\u{2014}5:30pm sharp.",
+                14 * 3600,
+                17 * 3600 + 1800,
+            ),
+            (
+                "Meet September 3 2:00 to 5:30pm sharp.",
+                14 * 3600,
+                17 * 3600 + 1800,
+            ),
+            ("Meet September 3 9-11am sharp.", 9 * 3600, 11 * 3600),
+            (
+                "Meet September 3 11-1 sharp.",
+                11 * 3600,
+                13 * 3600,
+                // Neither side states am/pm and the end (1) is smaller than
+                // the start (11), so the end is read as pm: 11am-1pm.
+            ),
+        ] {
+            let (start, end, _) =
+                prose_event_time(text, message, 0).unwrap_or_else(|| panic!("{text}"));
+            assert_eq!(start, day_start + start_seconds, "{text}");
+            assert_eq!(end, day_start + end_seconds, "{text}");
+        }
+    }
+
+    /// A spaced ASCII hyphen ("2:00 - 5:30pm", a standalone "-" token) or
+    /// one glued onto only one side ("2:00- 5:30pm", "2:00 -5:30pm") reads
+    /// the same as the fused "2:00-5:30pm".
+    #[test]
+    fn prose_event_time_reads_a_spaced_or_one_sided_ascii_hyphen_range() {
+        let message = timestamp("2026-08-01T00:00:00Z");
+        let day_start = timestamp("2026-09-03T00:00:00Z");
+        for text in [
+            "Meet September 3 2:00 - 5:30pm sharp.",
+            "Meet September 3 2:00- 5:30pm sharp.",
+            "Meet September 3 2:00 -5:30pm sharp.",
+        ] {
+            let (start, end, _) =
+                prose_event_time(text, message, 0).unwrap_or_else(|| panic!("{text}"));
+            assert_eq!(start, day_start + 14 * 3600, "{text}");
+            assert_eq!(end, day_start + 17 * 3600 + 1800, "{text}");
+        }
+    }
+
+    /// "9 - 11am" (a spaced dash with the meridiem only on the end) used to
+    /// yield nothing at all; it now reads the same as "9-11am".
+    #[test]
+    fn prose_event_time_reads_a_spaced_ascii_hyphen_range_with_a_one_sided_meridiem() {
+        let message = timestamp("2026-08-01T00:00:00Z");
+        let day_start = timestamp("2026-09-03T00:00:00Z");
+        let (start, end, _) =
+            prose_event_time("Meet September 3 9 - 11am sharp.", message, 0).expect("9 - 11am");
+        assert_eq!(start, day_start + 9 * 3600);
+        assert_eq!(end, day_start + 11 * 3600);
+    }
+
+    /// A range that crosses midnight adds a day to `end`, mirroring
+    /// `subject_event_time`'s own policy for the same case.
+    #[test]
+    fn prose_event_time_range_crossing_midnight_adds_a_day_to_the_end() {
+        let message = timestamp("2026-08-01T00:00:00Z");
+        let day_start = timestamp("2026-09-03T00:00:00Z");
+        for (text, start_seconds, end_seconds) in [
+            ("Meet September 3 11pm-1am sharp.", 23 * 3600, 86_400 + 3600),
+            (
+                "Meet September 3 3pm-1pm sharp.",
+                15 * 3600,
+                86_400 + 13 * 3600,
+            ),
+        ] {
+            let (start, end, _) =
+                prose_event_time(text, message, 0).unwrap_or_else(|| panic!("{text}"));
+            assert_eq!(start, day_start + start_seconds, "{text}");
+            assert_eq!(end, day_start + end_seconds, "{text}");
+        }
+    }
+
+    /// A meridiem spaced off from the range's end ("2:00-5:30 pm") is
+    /// absorbed into it, and from there inherited by the start exactly as
+    /// an attached one would be.
+    #[test]
+    fn prose_event_time_reads_a_spaced_trailing_meridiem() {
+        let message = timestamp("2026-08-01T00:00:00Z");
+        let day_start = timestamp("2026-09-03T00:00:00Z");
+        let (start, end, _) =
+            prose_event_time("Meet September 3 2:00\u{2013}5:30 pm sharp.", message, 0)
+                .expect("2:00-5:30 pm");
+        assert_eq!(start, day_start + 14 * 3600);
+        assert_eq!(end, day_start + 17 * 3600 + 1800);
+    }
+
+    /// A lone "-" token between the date and the time -- an ASCII hyphen
+    /// surrounded by whitespace, e.g. "September 3 - 2pm" -- is skipped the
+    /// same way a preposition is, for both a single time and a range.
+    #[test]
+    fn prose_event_time_skips_a_lone_dash_between_the_date_and_the_time() {
+        let message = timestamp("2026-08-01T00:00:00Z");
+        let day_start = timestamp("2026-09-03T00:00:00Z");
+        let (start, end, _) =
+            prose_event_time("Meet September 3 - 2pm sharp.", message, 0).expect("- 2pm");
+        assert_eq!(start, day_start + 14 * 3600);
+        assert_eq!(end, start + 3600);
+
+        let (start, end, _) = prose_event_time("Meet September 3 - 2:00-5:30pm sharp.", message, 0)
+            .expect("- 2:00-5:30pm");
+        assert_eq!(start, day_start + 14 * 3600);
+        assert_eq!(end, day_start + 17 * 3600 + 1800);
+    }
+
+    /// A trailing sentence period on the range's end ("10:00 to 11:30.")
+    /// does not block it from parsing, the same way one never blocks a
+    /// date.
+    #[test]
+    fn prose_event_time_reads_a_range_that_ends_the_sentence() {
+        let message = timestamp("2026-08-01T00:00:00Z");
+        let day_start = timestamp("2026-09-03T00:00:00Z");
+        let (start, end, _) = prose_event_time("Meet September 3 10:00 to 11:30.", message, 0)
+            .expect("10:00 to 11:30.");
+        assert_eq!(start, day_start + 10 * 3600);
+        assert_eq!(end, day_start + 11 * 3600 + 1800);
+    }
+
+    /// A bare range (no colon, no meridiem on either side) joined by the
+    /// word "to" is never trusted as a time -- "to" is far too common for
+    /// two adjacent bare numbers to be good evidence ("5 to 7 people", "10
+    /// to 12 attendees"). Each case still finds its date, and falls back to
+    /// an all-day match rather than inventing a bogus time.
+    #[test]
+    fn prose_event_time_rejects_a_bare_to_joined_range_as_not_a_time() {
+        let message = timestamp("2026-08-01T00:00:00Z");
+        let day_start = timestamp("2026-09-03T00:00:00Z");
+        let all_day_end = day_start + i64::from(DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT);
+        for text in [
+            "September 3, 5 to 7 people will attend.",
+            "September 3, 10 to 12 attendees expected.",
+        ] {
+            let (start, end, _) =
+                prose_event_time(text, message, 0).unwrap_or_else(|| panic!("{text}"));
+            assert_eq!(start, day_start, "{text}");
+            assert_eq!(end, all_day_end, "{text}");
+        }
+    }
+
+    /// A bare range is still trusted with a dash separator (a much rarer,
+    /// stronger signal than "to") between two hours of 1..=12, or with a
+    /// meridiem on either side regardless of separator.
+    #[test]
+    fn prose_event_time_accepts_a_plausible_bare_dash_range() {
+        let message = timestamp("2026-08-01T00:00:00Z");
+        let day_start = timestamp("2026-09-03T00:00:00Z");
+        for (text, start_seconds, end_seconds) in [
+            ("Meet September 3 11\u{2013}1 sharp.", 11 * 3600, 13 * 3600),
+            ("Meet September 3 2-5pm sharp.", 14 * 3600, 17 * 3600),
+        ] {
+            let (start, end, _) =
+                prose_event_time(text, message, 0).unwrap_or_else(|| panic!("{text}"));
+            assert_eq!(start, day_start + start_seconds, "{text}");
+            assert_eq!(end, day_start + end_seconds, "{text}");
+        }
+    }
+
+    /// Pins down the token count `parse_prose_time` reports consumed for
+    /// each range form, including the extra token absorbed for a spaced
+    /// trailing meridiem.
+    #[test]
+    fn parse_prose_time_reports_tokens_consumed_for_each_range_form() {
+        let cases: &[(&str, usize)] = &[
+            ("2:00-5:30pm", 1),
+            ("2:00 to 5:30pm", 3),
+            ("2:00 - 5:30pm", 3),
+            ("2:00\u{2013}5:30pm", 2),
+            ("2:00\u{2013}5:30 pm", 3),
+        ];
+        for (text, expected_consumed) in cases {
+            let tokens = prose_tokens(text);
+            let (_, _, consumed) =
+                parse_prose_time(text, &tokens, 0).unwrap_or_else(|| panic!("{text}"));
+            assert_eq!(consumed, *expected_consumed, "{text}");
+        }
+    }
+
     /// A preposition ("at", "from", "starting") -- or a comma or "@", which
     /// `prose_tokens` treats as pure separators and so never even reach
     /// this far as their own token -- may sit between the date and its
@@ -3151,6 +3664,111 @@ mod tests {
         assert_eq!(index[0].source, EventSource::SubjectProse);
     }
 
+    /// The live finding this task fixes: the date and its time range sit
+    /// inside a parenthesized group with a leading weekday and comma, and
+    /// the subject itself opens with a possessive "Your ". The whole
+    /// parenthesized group -- not just the date onward -- is dropped from
+    /// the learned name, and the leading possessive is stripped too.
+    #[test]
+    fn event_index_strips_a_parenthesized_date_and_a_leading_possessive_from_the_name() {
+        const SUBJECT: &str =
+            "Your Spring Planning Workshop checklist (Tuesday, August 25 \u{2013} 2:00-5:30pm)";
+        let mut mail = synthetic("Let's finalize the agenda.", 0, "a");
+        mail.subject = SUBJECT.into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        let index = build_event_index(&[message]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].name, "spring planning workshop checklist");
+        assert_eq!(index[0].source, EventSource::SubjectProse);
+
+        // The exact time, pinned down offset-independently the same way
+        // `prose_event_time_reads_a_time_range` does -- `build_event_index`
+        // itself resolves against the message's own machine-local offset.
+        let (start, end, _) =
+            prose_event_time(SUBJECT, timestamp("2026-08-01T00:00:00Z"), 0).unwrap();
+        assert_eq!(start, timestamp("2026-08-25T14:00:00Z"));
+        assert_eq!(end, timestamp("2026-08-25T17:30:00Z"));
+    }
+
+    /// The learned name strips the leading possessive and the whole date
+    /// parenthetical, but the model's own `event` anchor -- which keeps the
+    /// possessive and adds unrelated words -- still finds it: `match_event`
+    /// drops stop words ("your") from both sides before comparing tokens.
+    #[test]
+    fn match_event_finds_a_subject_prose_event_despite_the_stripped_possessive() {
+        let mut mail = synthetic("Let's finalize the agenda.", 0, "a");
+        mail.subject =
+            "Your Spring Planning Workshop checklist (Tuesday, August 25 \u{2013} 2:00-5:30pm)"
+                .into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        let index = build_event_index(&[message]);
+        let evidence = timestamp("2026-08-01T00:00:00Z");
+        let matched = match_event(
+            "your Spring Planning Workshop in San Francisco",
+            evidence,
+            &index,
+        )
+        .unwrap();
+        assert_eq!(matched.name, "spring planning workshop checklist");
+    }
+
+    /// `strip_leading_possessive` applies to the Meeting and Subject name
+    /// branches too, not just `SubjectProse`: a Graph meeting-metadata entry
+    /// named "Your Team Sync" dedupes against a calendar-invite-subject
+    /// entry for the same meeting named plainly "Team Sync", rather than
+    /// standing as two separate learned events.
+    #[test]
+    fn learn_one_event_strips_a_leading_possessive_from_meeting_and_subject_names_too() {
+        let mut meeting_mail = synthetic("", 0, "a");
+        meeting_mail.subject = "Your Team Sync".into();
+        meeting_mail.event = Some(openloops_graph::live::review::MailEvent {
+            start: "2026-08-21T11:00:00Z".into(),
+            end: "2026-08-21T12:00:00Z".into(),
+            out_of_date: false,
+        });
+        let meeting_message = prepare(&meeting_mail, "Inbox", 0).unwrap();
+
+        let mut subject_mail = synthetic("", 1, "b");
+        subject_mail.subject = "Invitation: Team Sync @ Fri Aug 28, 2026 11am - 12pm (UTC)".into();
+        let subject_message = prepare(&subject_mail, "Inbox", 1).unwrap();
+
+        let index = build_event_index(&[meeting_message, subject_message]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].name, "team sync");
+        assert_eq!(index[0].source, EventSource::Subject);
+        assert_eq!(index[0].start, timestamp("2026-08-28T11:00:00Z"));
+    }
+
+    /// A stray, unmatched trailing `)` immediately before the date (not
+    /// part of any parenthesized group `subject_prose_name_end` finds still
+    /// open) is trimmed from the learned name too, alongside the existing
+    /// "-@:," set -- so a malformed subject never leaves a dangling
+    /// unbalanced paren in the learned name.
+    #[test]
+    fn event_index_trims_a_stray_unmatched_closing_paren_from_the_name() {
+        let mut mail = synthetic("Let's finalize the agenda.", 0, "a");
+        mail.subject = "Design Workshop) Sept 3".into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        let index = build_event_index(&[message]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].name, "design workshop");
+    }
+
+    /// Companion to the above: a trailing `)` that closes a REAL group
+    /// ("(draft)", balanced against its own '(') must survive the trim --
+    /// only a genuinely unmatched close is stray. `normalize_subject`'s own
+    /// trailing-paren handling then decides to keep it (no digit, not a
+    /// timezone abbreviation).
+    #[test]
+    fn event_index_keeps_a_matched_trailing_paren_group_in_the_name() {
+        let mut mail = synthetic("Let's finalize the agenda.", 0, "a");
+        mail.subject = "Planning Workshop (draft) September 3 2pm".into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        let index = build_event_index(&[message]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].name, "planning workshop (draft)");
+    }
+
     /// Critical review finding: the subject-prose learner previously
     /// turned ANY "<words> <date>" subject into an event, with no
     /// requirement that it actually name a gathering. "Draft Agreement"
@@ -3242,6 +3860,10 @@ mod tests {
         let passed = result.analysis.items[0].event_passed.as_ref().unwrap();
         assert_eq!(passed.name, "spring estate planning workshop");
         assert_eq!(result.event_closures, 1);
+        assert!(
+            passed.from_subject,
+            "a SubjectProse-sourced closure came from the subject line"
+        );
     }
 
     /// `match_event_by_text` must never match a prose-sourced event: text
@@ -4016,6 +4638,10 @@ at the downtown courthouse. Let me know if that works.",
         assert_eq!(passed.end, timestamp("2026-08-21T12:00:00Z"));
         assert_eq!(passed.message_handle, "m1");
         assert_eq!(result.event_closures, 1);
+        assert!(
+            passed.from_subject,
+            "a calendar-invite-subject closure came from the subject line"
+        );
         assert_eq!(
             result.conversation_notes.last().unwrap(),
             "Event index: 1 event learned (0 meetings, 1 calendar subjects, \
@@ -4260,6 +4886,10 @@ at the downtown courthouse. Let me know if that works.",
         assert_eq!(passed.name, "the workshop");
         assert_eq!(passed.message_handle, messages[0].input.handle);
         assert_eq!(result.event_closures, 1);
+        assert!(
+            !passed.from_subject,
+            "a stated-event-time closure came from body prose, not the subject line"
+        );
         let local_date = chrono::DateTime::from_timestamp(passed.end, 0)
             .unwrap()
             .with_timezone(&chrono::Local)
