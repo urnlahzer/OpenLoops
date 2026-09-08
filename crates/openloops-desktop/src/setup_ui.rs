@@ -637,7 +637,7 @@ impl SetupApp {
             self.start(
                 ui.ctx(),
                 Service::Model,
-                "Testing the selected cloud model (up to 60 seconds per request)",
+                "Testing the selected cloud model (up to 150 seconds per request)",
                 move || {
                     Outcome::Generation(match provider {
                         Provider::OllamaCloud => OllamaCloud::connect(key.to_string(), &model)
@@ -981,13 +981,14 @@ impl eframe::App for SetupApp {
                         let started = progress.request_started_unix.load(Ordering::Relaxed);
                         if started != 0 {
                             let elapsed = (chrono::Utc::now().timestamp() - started).max(0);
+                            let label = if progress.closure_phase.load(Ordering::Relaxed) { "Closure check" } else { "Conversation" };
                             ui.label(format!(
-                                "Conversation {} of {} · {elapsed}s on this request",
+                                "{label} {} of {} · {elapsed}s on this request",
                                 progress.conversation_index.load(Ordering::Relaxed),
                                 progress.conversation_total.load(Ordering::Relaxed),
                             ));
                         }
-                        if progress.cancel.load(Ordering::Relaxed) { ui.label("Stopping; the current request is abandoned within a second."); }
+                        if progress.cancel.load(Ordering::Relaxed) { ui.label("Stopping; the current request is dropped within a second."); }
                         else if ui.button("Stop scan").clicked() { progress.cancel.store(true, Ordering::Relaxed); }
                     }
                 }

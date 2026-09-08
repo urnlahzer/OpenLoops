@@ -2,8 +2,9 @@
 //! HTTPS transport every adapter shares, and the one trait a selected
 //! model is reached through. Credentials and payloads are session-only and
 //! no upstream error text escapes this module.
-use std::io::Read;
+use std::io::{self, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::{Client, Response};
@@ -12,18 +13,33 @@ use zeroize::Zeroizing;
 pub(crate) const MAX_RESPONSE: usize = 262_144;
 pub(crate) const MAX_REQUEST: usize = 524_288;
 const MAX_KEY: usize = 4096;
-/// Chunk size `read_body` reads the response body in, so a stopped or
-/// deadline-expired request never blocks longer than one chunk read past
-/// its bound (bounded below by the client's own per-read idle timeout).
+/// Chunk size the background reader thread `read_body` spawns reads the
+/// response body in.
 const READ_CHUNK: usize = 16_384;
 
+/// How often `read_body`'s polling loop wakes to check `cancel` and the
+/// wall deadline while a background thread performs the actual
+/// (potentially long-blocking) socket reads -- see [`RequestControl`] and
+/// [`read_body`]. Also the granularity of the [`READ_IDLE_GUARD`] check.
+const POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// If no body chunk arrives for this long, `read_body` gives up with
+/// [`ProviderError::Timeout`]. This is independent of, and far shorter
+/// than, reqwest's own per-`read()` timeout (`https_client`'s
+/// `.timeout(...)`), which applies to the whole blocking `read()` call
+/// the header wait and every body read share and so cannot be lowered
+/// without also cutting the time allowed to receive response headers.
+const READ_IDLE_GUARD: Duration = Duration::from_mins(1);
+
 /// Bounds the whole request -- from `send()` to the last body byte -- to
-/// [`REQUEST_DEADLINE`], independently of reqwest's per-read idle timeout
-/// (`https_client`'s `.timeout(...)`, which only bounds a single `read()`
-/// and is re-armed by each trickled byte a slow keep-alive connection
-/// sends). Every adapter records `Instant::now()` immediately before
-/// `send()` and threads the same instant, plus the caller's cancel flag
-/// when one exists, into `read_body`.
+/// [`REQUEST_DEADLINE`], and lets a Stop action abort the read in
+/// progress via `cancel`. reqwest gives no way to observe either
+/// condition while blocked inside one `read()` call, so `read_body` runs
+/// the actual reads on a background thread (see [`read_body`]) and polls
+/// it every [`POLL_INTERVAL`] instead; `RequestControl` is what that poll
+/// loop checks on each tick. Every adapter records `Instant::now()`
+/// immediately before `send()` and threads the same instant, plus the
+/// caller's cancel flag when one exists, into `read_body`.
 pub struct RequestControl<'a> {
     pub started: Instant,
     pub cancel: Option<&'a AtomicBool>,
@@ -61,13 +77,38 @@ impl<'a> RequestControl<'a> {
             deadline,
         }
     }
+
+    /// `Err` when `cancel` is set ([`ProviderError::Cancelled`]) or the
+    /// deadline has passed ([`ProviderError::Timeout`]); checked before
+    /// the first read and after every poll tick and body chunk in
+    /// [`read_body`].
+    fn check(&self) -> Result<(), ProviderError> {
+        if self
+            .cancel
+            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+        {
+            return Err(ProviderError::Cancelled);
+        }
+        if self.started.elapsed() > self.deadline {
+            return Err(ProviderError::Timeout);
+        }
+        Ok(())
+    }
 }
 
-/// The whole request -- from `send()` to the last body byte -- must finish
-/// within this wall time. `OpenRouter` and other providers can trickle
-/// keep-alive bytes while a slow model works, which re-arms reqwest's
-/// per-read idle timeout on every byte; this bound catches that case
-/// without waiting on the idle timeout at all.
+/// The whole request -- from `send()` to the last body byte -- must
+/// finish within this wall time, checked at least once per
+/// [`POLL_INTERVAL`] (and again after every body chunk received) while
+/// [`read_body`] runs. `cancel` and this deadline are both inert during
+/// `send()` itself -- `read_body` has not been entered yet while reqwest
+/// is still waiting for response headers -- so the effective upper bound
+/// on how long a single request can run before *something* fails is
+/// better described as this deadline plus reqwest's own header-wait
+/// timeout (`https_client`'s `.timeout(...)`) than as this deadline
+/// alone. `OpenRouter` and other providers can trickle keep-alive body
+/// bytes while a slow model works, which re-arms that same per-read
+/// timeout on every byte; this deadline catches that case without
+/// waiting on it at all.
 pub const REQUEST_DEADLINE: Duration = Duration::from_secs(150);
 
 /// Fixed error codes only; no upstream error text escapes this boundary.
@@ -101,7 +142,7 @@ impl std::fmt::Display for ProviderError {
             Self::InvalidKey => "Enter a valid API key for the selected provider.",
             Self::Unauthorized => "The provider rejected the API key or account access.",
             Self::InputUnavailable => "Could not read a model selection from the terminal.",
-            Self::Timeout => "The provider did not finish within 60 seconds. Try the model again or select another model.",
+            Self::Timeout => "The provider did not answer in time. Try the model again or select a faster model.",
             Self::Network => "Could not establish or complete a secure connection to the selected provider. Check connectivity.",
             Self::RateLimited => "The provider returned HTTP 429 (rate limit). Wait before trying again.",
             Self::Quota => "The provider returned HTTP 402. Check your plan or usage balance.",
@@ -174,20 +215,81 @@ pub(crate) fn https_client() -> Result<Client, ProviderError> {
         .map_err(|error| transport_error(&error))
 }
 
-/// Reads a success body under `limit` bytes, in bounded chunks so
-/// `control` can cut the read short. The caller has already mapped the
-/// status, so this never inspects it, and picks the limit its own contract
-/// allows: `MAX_RESPONSE` for a completion, a larger adapter-fixed bound
-/// for a content-free catalog listing.
+/// One message a [`spawn_reader`] thread hands back over its channel: a
+/// non-empty chunk, an empty chunk meaning clean EOF, or the first read
+/// error (after which the thread stops).
+type ChunkResult = io::Result<Vec<u8>>;
+
+/// Performs the actual (potentially long-blocking) chunked reads of
+/// `response` on a background thread, so [`read_body`]'s caller-side loop
+/// never blocks inside a single `read()` call and can instead poll for
+/// cancellation and the deadline. Reads up to `limit + 1` bytes in
+/// `READ_CHUNK`-sized pieces, retrying a read interrupted by a signal
+/// (`io::ErrorKind::Interrupted`) rather than treating it as a failure,
+/// and sends each chunk -- or the first error, or a final empty chunk for
+/// EOF -- over `sender`. Stops as soon as a send fails: the caller
+/// dropped its receiver because it cancelled, hit the deadline, or the
+/// response was already complete, so there is nothing left to do with
+/// whatever this thread reads next (which may not return for as long as
+/// reqwest's own per-read timeout allows).
+fn spawn_reader(response: Response, limit: usize, sender: mpsc::SyncSender<ChunkResult>) {
+    std::thread::spawn(move || {
+        let mut reader = response.take(limit as u64 + 1);
+        let mut buffer = [0u8; READ_CHUNK];
+        loop {
+            let read = loop {
+                match reader.read(&mut buffer) {
+                    Ok(read) => break Ok(read),
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                    Err(error) => break Err(error),
+                }
+            };
+            let (message, done) = match read {
+                Ok(0) => (Ok(Vec::new()), true),
+                Ok(read) => (Ok(buffer[..read].to_vec()), false),
+                Err(error) => (Err(error), true),
+            };
+            if sender.send(message).is_err() || done {
+                return;
+            }
+        }
+    });
+}
+
+/// `Timeout` when `error` is a per-read idle timeout (either reqwest's own
+/// `io::ErrorKind::TimedOut` or a wrapped `reqwest::Error` that
+/// `is_timeout()`), otherwise `Network`.
+fn read_error(error: &io::Error) -> ProviderError {
+    if error.kind() == io::ErrorKind::TimedOut
+        || error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<reqwest::Error>())
+            .is_some_and(reqwest::Error::is_timeout)
+    {
+        ProviderError::Timeout
+    } else {
+        ProviderError::Network
+    }
+}
+
+/// Reads a success body under `limit` bytes. The caller has already
+/// mapped the status, so this never inspects it, and picks the limit its
+/// own contract allows: `MAX_RESPONSE` for a completion, a larger
+/// adapter-fixed bound for a content-free catalog listing.
 ///
-/// Each `read()` call is still bounded by the client's own per-read idle
-/// timeout (the existing guard against a connection that stops sending
-/// entirely). After every chunk this additionally checks `control.cancel`
-/// (returning [`ProviderError::Cancelled`] when set) and then
-/// `control.started.elapsed()` against `control.deadline` (returning
-/// [`ProviderError::Timeout`] when exceeded) -- catching a connection that
-/// keeps trickling bytes indefinitely, which the per-read idle timeout
-/// alone never would.
+/// The actual reads happen on a background thread (see [`spawn_reader`]);
+/// this function only polls that thread's channel with
+/// `recv_timeout(`[`POLL_INTERVAL`]`)`, so `control` is checked before the
+/// first read, after every chunk, and on every idle poll tick -- an
+/// overshoot of at most one tick past `cancel` being set or the deadline
+/// elapsing, even while the connection sends nothing at all (a plain
+/// per-read timeout, the only bound reqwest itself offers, cannot detect
+/// that case any faster than its own multi-second-to-minute duration).
+/// [`READ_IDLE_GUARD`] separately catches a connection that stops
+/// sending entirely, ahead of `control`'s deadline if that deadline is
+/// longer. A chunk that completes the body (a clean EOF) is returned
+/// immediately without a further deadline check, so a response that
+/// finished exactly as the deadline expired is not turned into an error.
 pub(crate) fn read_body(
     response: Response,
     limit: usize,
@@ -199,36 +301,27 @@ pub(crate) fn read_body(
     {
         return Err(ProviderError::ResponseTooLarge);
     }
+    control.check()?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    spawn_reader(response, limit, sender);
     let mut bytes = Zeroizing::new(Vec::new());
-    let mut reader = response.take(limit as u64 + 1);
-    let mut chunk = [0u8; READ_CHUNK];
+    let mut last_chunk = Instant::now();
     loop {
-        let read = reader.read(&mut chunk).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::TimedOut
-                || error
-                    .get_ref()
-                    .and_then(|source| source.downcast_ref::<reqwest::Error>())
-                    .is_some_and(reqwest::Error::is_timeout)
-            {
-                ProviderError::Timeout
-            } else {
-                ProviderError::Network
+        match receiver.recv_timeout(POLL_INTERVAL) {
+            Ok(Ok(chunk)) if chunk.is_empty() => break,
+            Ok(Ok(chunk)) => {
+                bytes.extend_from_slice(&chunk);
+                if bytes.len() > limit {
+                    return Err(ProviderError::ResponseTooLarge);
+                }
+                last_chunk = Instant::now();
             }
-        })?;
-        if read == 0 {
-            break;
+            Ok(Err(error)) => return Err(read_error(&error)),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(ProviderError::Network),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-        bytes.extend_from_slice(&chunk[..read]);
-        if bytes.len() > limit {
-            return Err(ProviderError::ResponseTooLarge);
-        }
-        if control
-            .cancel
-            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
-        {
-            return Err(ProviderError::Cancelled);
-        }
-        if control.started.elapsed() > control.deadline {
+        control.check()?;
+        if last_chunk.elapsed() > READ_IDLE_GUARD {
             return Err(ProviderError::Timeout);
         }
     }
@@ -334,10 +427,11 @@ mod tests {
     }
 
     /// Starts a loopback server that writes `head`, then trickles one byte
-    /// of `body` every `interval` until `body` is exhausted, then holds the
-    /// connection open (so a passing test never depends on the peer
-    /// eventually closing it). Returns the connected `Response` and the
-    /// server's join handle.
+    /// of `body` every `interval` until `body` is exhausted (an empty
+    /// `body` sends nothing at all after `head`, simulating a connection
+    /// that goes completely silent), then holds the connection open (so a
+    /// passing test never depends on the peer eventually closing it).
+    /// Returns the connected `Response` and the server's join handle.
     fn trickling_response(
         head: &str,
         body: &'static [u8],
@@ -395,17 +489,21 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_mid_body_returns_cancelled_within_one_chunk() {
+    fn cancelling_mid_body_returns_cancelled_promptly_not_at_body_completion() {
+        // 100 bytes at 100ms apart is ~10 seconds of trickling body: long
+        // enough that the assertion below (well under one second) only
+        // passes if cancellation is actually observed promptly, not because
+        // it happened to coincide with the body finishing on its own.
         let (response, server) = trickling_response(
-            "HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\n",
-            b"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-            Duration::from_millis(50),
+            "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n",
+            &[b'x'; 100],
+            Duration::from_millis(100),
         );
         let cancel = std::sync::Arc::new(AtomicBool::new(false));
         let setter = std::thread::spawn({
             let cancel = cancel.clone();
             move || {
-                std::thread::sleep(Duration::from_millis(120));
+                std::thread::sleep(Duration::from_millis(150));
                 cancel.store(true, Ordering::Relaxed);
             }
         });
@@ -414,9 +512,68 @@ mod tests {
             Some(cancel.as_ref()),
             Duration::from_mins(2),
         );
+        let started = Instant::now();
         let result = read_body(response, MAX_RESPONSE, &control);
+        let elapsed = started.elapsed();
         assert_eq!(result.err(), Some(ProviderError::Cancelled));
+        assert!(elapsed < Duration::from_secs(1), "cancel took {elapsed:?}");
         setter.join().unwrap();
+        drop(server);
+    }
+
+    #[test]
+    fn cancel_is_observed_within_half_a_second_while_the_server_stays_silent() {
+        // No body bytes at all after the headers: a plain per-chunk check
+        // would never run because no chunk ever arrives. Only polling a
+        // background reader thread (rather than blocking on its `read()`)
+        // can observe `cancel` promptly here.
+        let (response, server) = trickling_response(
+            "HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n",
+            b"",
+            Duration::from_millis(0),
+        );
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let setter = std::thread::spawn({
+            let cancel = cancel.clone();
+            move || {
+                std::thread::sleep(Duration::from_millis(100));
+                cancel.store(true, Ordering::Relaxed);
+            }
+        });
+        let control = RequestControl::with_deadline(
+            Instant::now(),
+            Some(cancel.as_ref()),
+            Duration::from_mins(2),
+        );
+        let started = Instant::now();
+        let result = read_body(response, MAX_RESPONSE, &control);
+        let elapsed = started.elapsed();
+        assert_eq!(result.err(), Some(ProviderError::Cancelled));
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "cancel took {elapsed:?}"
+        );
+        setter.join().unwrap();
+        drop(server);
+    }
+
+    #[test]
+    fn deadline_is_observed_within_half_a_second_of_expiry_while_the_server_stays_silent() {
+        let (response, server) = trickling_response(
+            "HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n",
+            b"",
+            Duration::from_millis(0),
+        );
+        let control =
+            RequestControl::with_deadline(Instant::now(), None, Duration::from_millis(150));
+        let started = Instant::now();
+        let result = read_body(response, MAX_RESPONSE, &control);
+        let elapsed = started.elapsed();
+        assert_eq!(result.err(), Some(ProviderError::Timeout));
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "deadline took {elapsed:?}"
+        );
         drop(server);
     }
 
@@ -438,6 +595,7 @@ mod tests {
         });
         let response = Client::builder()
             .no_proxy()
+            .timeout(Duration::from_secs(5))
             .build()
             .unwrap()
             .get(format!("http://{address}/"))
@@ -463,7 +621,11 @@ mod tests {
             let text = error.to_string();
             assert!(!text.contains("http"), "error text must name no endpoint");
         }
-        assert!(ProviderError::Timeout.to_string().contains("60 seconds"));
+        assert!(
+            ProviderError::Timeout
+                .to_string()
+                .contains("did not answer in time")
+        );
         assert!(
             ProviderError::ServerError(502)
                 .to_string()

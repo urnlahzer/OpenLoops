@@ -914,8 +914,8 @@ pub struct ScanProgress {
     pub total: AtomicUsize,
     pub cancel: AtomicBool,
     /// 1-based position of the conversation (in `scan_conversations`) or
-    /// eligible item (in `scan_closures`) currently in flight; 0 when idle
-    /// or between conversation groups.
+    /// eligible item (in `scan_closures`) currently in flight; 0 before
+    /// that pass starts and again once it ends.
     pub conversation_index: AtomicUsize,
     /// Total conversations `scan_conversations` will analyze, or total
     /// eligible items `scan_closures` will attempt -- whichever pass is
@@ -925,6 +925,12 @@ pub struct ScanProgress {
     /// request is in flight. Drives the desktop's "elapsed on this
     /// request" display.
     pub request_started_unix: AtomicI64,
+    /// Set once `scan_closures` starts (and left set for the rest of the
+    /// scan): tells the desktop to label `conversation_index`/
+    /// `conversation_total` as the closure pass ("Closure check {i} of
+    /// {n}") rather than the primary per-conversation pass ("Conversation
+    /// {i} of {n}").
+    pub closure_phase: AtomicBool,
 }
 pub struct ScanResult {
     pub analysis: Expectations,
@@ -1350,17 +1356,28 @@ pub fn scan(
 ///
 /// Text only, built from in-memory subjects: never call this from `probe`,
 /// and never persist or log its output.
+/// The first 60 Unicode scalars of `conversation`'s first message's
+/// subject (char-safe: a multibyte scalar is never split), used to make a
+/// diagnostic line identifiable without including full message text.
+/// Shared by [`conversation_note`] and `scan_conversations`'s failure
+/// line so both name the same conversation the same way.
+fn subject_snippet(conversation: &[&ReviewMessage]) -> String {
+    conversation
+        .first()
+        .map(|m| m.input.message.subject.as_string())
+        .unwrap_or_default()
+        .chars()
+        .take(60)
+        .collect()
+}
+
 fn conversation_note(
     index: usize,
     conversation: &[&ReviewMessage],
     analysis: &Expectations,
 ) -> Option<String> {
     let len = conversation.len();
-    let subject = conversation
-        .first()
-        .map(|m| m.input.message.subject.as_string())
-        .unwrap_or_default();
-    let snippet: String = subject.chars().take(60).collect();
+    let snippet = subject_snippet(conversation);
     if analysis.rejected > 0 || analysis.degraded > 0 || !analysis.rejection_reasons.is_empty() {
         let mut seen: Vec<&'static str> = Vec::new();
         for reason in &analysis.rejection_reasons {
@@ -1497,9 +1514,10 @@ fn scan_conversations(
             }
             Err(e) => {
                 result.failures.push(format!(
-                    "Conversation {} ({} messages): {e}",
+                    "Conversation {} ({} messages; subject: {}): {e}",
                     index + 1,
-                    conversation.len()
+                    conversation.len(),
+                    subject_snippet(&conversation),
                 ));
                 if is_transport_error(e) {
                     result.primary_scan_transport_error = true;
@@ -1511,6 +1529,8 @@ fn scan_conversations(
             .processed
             .fetch_add(conversation.len(), Ordering::Relaxed);
     }
+    // Idle once this pass ends, same as `scan_closures`.
+    progress.conversation_index.store(0, Ordering::Relaxed);
     result
 }
 
@@ -1746,6 +1766,21 @@ type ClosureCall<'a> = dyn FnMut(
     ) -> Result<Option<(Anchor, ResolutionKind)>, ProviderError>
     + 'a;
 
+/// State [`attempt_closure`] threads across every item in one
+/// `scan_closures` pass: the account/address grouping
+/// [`is_shared_mailbox_address`] needs (computed once up front, since it
+/// depends on every message, not just the current item) and the
+/// [`MAX_CLOSURE_CALLS`] budget shared by every item's provider call.
+/// Bundled into one struct, rather than four separate parameters, so
+/// `attempt_closure` stays under the pedantic argument-count lint without
+/// an `allow`.
+struct ClosurePassState<'a> {
+    groups_per_account: GroupsPerAccount<'a>,
+    address_group_counts: AddressGroupCounts<'a>,
+    calls_made: usize,
+    capped: bool,
+}
+
 /// The per-item body of `scan_closures`'s loop, factored out to keep that
 /// function under the line-count lint: looks up `item`'s evidence message
 /// and waiting-party address, skips a shared-mailbox/list address (see
@@ -1753,15 +1788,11 @@ type ClosureCall<'a> = dyn FnMut(
 /// applies the [`MAX_CLOSURE_CALLS`] cap, and otherwise calls `closure`,
 /// timing it in `progress.request_started_unix` exactly like
 /// `scan_conversations` times its own provider call.
-#[allow(clippy::too_many_arguments)]
 fn attempt_closure(
     item: &Expectation,
     messages: &[ReviewMessage],
     progress: &ScanProgress,
-    groups_per_account: &GroupsPerAccount<'_>,
-    address_group_counts: &AddressGroupCounts<'_>,
-    calls_made: &mut usize,
-    capped: &mut bool,
+    state: &mut ClosurePassState<'_>,
     closure: &mut ClosureCall<'_>,
 ) -> ClosureAttempt {
     let Some(source) = messages
@@ -1776,8 +1807,8 @@ fn attempt_closure(
     if is_shared_mailbox_address(
         &source.account,
         &address,
-        groups_per_account,
-        address_group_counts,
+        &state.groups_per_account,
+        &state.address_group_counts,
     ) {
         return ClosureAttempt::Skipped;
     }
@@ -1791,12 +1822,12 @@ fn attempt_closure(
     if candidates.is_empty() {
         return ClosureAttempt::Skipped;
     }
-    if *calls_made >= MAX_CLOSURE_CALLS {
-        *capped = true;
+    if state.calls_made >= MAX_CLOSURE_CALLS {
+        state.capped = true;
         return ClosureAttempt::Skipped;
     }
     let inputs: Vec<ConversationMessage> = candidates.iter().map(|m| m.input.clone()).collect();
-    *calls_made += 1;
+    state.calls_made += 1;
     progress
         .request_started_unix
         .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
@@ -1864,10 +1895,18 @@ fn scan_closures(
     progress
         .conversation_total
         .store(eligible, Ordering::Relaxed);
+    // Left set for the rest of the scan: tells the desktop to label
+    // `conversation_index`/`conversation_total` as this pass rather than
+    // the primary per-conversation one.
+    progress.closure_phase.store(true, Ordering::Relaxed);
     let (groups_per_account, address_group_counts) = conversation_group_address_counts(messages);
-    let mut calls_made = 0usize;
+    let mut state = ClosurePassState {
+        groups_per_account,
+        address_group_counts,
+        calls_made: 0,
+        capped: false,
+    };
     let mut item_number = 0usize;
-    let mut capped = false;
     for item in &mut result.analysis.items {
         if progress.cancel.load(Ordering::Relaxed) {
             result.cancelled = true;
@@ -1885,16 +1924,7 @@ fn scan_closures(
             .conversation_index
             .store(item_number, Ordering::Relaxed);
         progress.processed.fetch_add(1, Ordering::Relaxed);
-        match attempt_closure(
-            item,
-            messages,
-            progress,
-            &groups_per_account,
-            &address_group_counts,
-            &mut calls_made,
-            &mut capped,
-            &mut closure,
-        ) {
+        match attempt_closure(item, messages, progress, &mut state, &mut closure) {
             ClosureAttempt::Resolved(anchor, kind) => {
                 item.resolution = Some(anchor);
                 item.resolution_kind = Some(kind);
@@ -1913,13 +1943,15 @@ fn scan_closures(
             }
         }
     }
+    // Idle once this pass ends, same as `scan_conversations`.
+    progress.conversation_index.store(0, Ordering::Relaxed);
     if result.cross_thread_closures > 0 {
         result.conversation_notes.push(format!(
             "Closing evidence found in another conversation for {} expectation(s).",
             result.cross_thread_closures
         ));
     }
-    if capped {
+    if state.capped {
         result.conversation_notes.push(format!(
             "Cross-thread closure checks were capped at {MAX_CLOSURE_CALLS} open requests this scan."
         ));
@@ -3486,6 +3518,19 @@ at the downtown courthouse. Let me know if that works.",
         assert!(state.scan_incomplete);
     }
     #[test]
+    fn failure_line_names_the_conversation_by_its_subject_snippet() {
+        let m = prepare(&synthetic("Please send the draft.", 0, "a"), "Inbox", 0).unwrap();
+        let result = scan_conversations(&[m], &ScanProgress::default(), |_| {
+            Err(ProviderError::InvalidJson)
+        });
+        assert_eq!(result.failures.len(), 1);
+        assert!(
+            result.failures[0].contains("subject: Synthetic budget conversation"),
+            "failure line: {}",
+            result.failures[0]
+        );
+    }
+    #[test]
     fn quoted_plain_history_is_not_current_evidence() {
         let item = synthetic(
             "Thanks.\nOn Monday Alex wrote:\nPlease send the draft.",
@@ -3717,6 +3762,52 @@ at the downtown courthouse. Let me know if that works.",
         assert_ne!(observed_during, 0, "expected a request start timestamp");
         assert_eq!(progress.request_started_unix.load(Ordering::Relaxed), 0);
         assert_eq!(result.analyzed, 1);
+        assert_eq!(
+            progress.conversation_index.load(Ordering::Relaxed),
+            0,
+            "conversation_index resets once the pass ends"
+        );
+        assert!(!progress.closure_phase.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn closure_phase_and_conversation_index_track_the_closure_pass() {
+        let (mut all, item) = closure_test_messages();
+        let valid = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
+        all.push(prepare(&valid, "Sent", all.len()).unwrap());
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            closure_pass_failure: None,
+        };
+        let progress = ScanProgress::default();
+        let mut observed_phase_during = false;
+        let mut observed_index_during = 0;
+        scan_closures(&all, &progress, &mut result, |_, _, _| {
+            observed_phase_during = progress.closure_phase.load(Ordering::Relaxed);
+            observed_index_during = progress.conversation_index.load(Ordering::Relaxed);
+            Ok(None)
+        });
+        assert!(observed_phase_during);
+        assert_eq!(observed_index_during, 1);
+        assert!(progress.closure_phase.load(Ordering::Relaxed));
+        assert_eq!(
+            progress.conversation_index.load(Ordering::Relaxed),
+            0,
+            "conversation_index resets once the pass ends"
+        );
     }
 
     #[test]

@@ -75,26 +75,29 @@ exact selected model label. Tool calls, refusals, generated images or audio, an
 rejected. Duplicate JSON members are rejected before validation.
 
 Requests use fixed HTTPS endpoints, disabled redirects and proxies, a 5-second
-connection limit, a 60-second total limit, no tools, no automatic retries, and
-bounded request and response sizes. The key and response buffers are held in
-zeroizing wrappers. Failures report fixed codes — invalid key, quota, rate
-limit, timeout, network, HTTP status, malformed JSON, invalid fields — and never
-expose a raw upstream body.
+connection limit, a 60-second per-read idle limit, no tools, no automatic
+retries, and bounded request and response sizes. The key and response buffers
+are held in zeroizing wrappers. Failures report fixed codes — invalid key,
+quota, rate limit, timeout, network, HTTP status, malformed JSON, invalid
+fields — and never expose a raw upstream body.
 
 The ZDR listing is much larger than a completion (several hundred kilobytes),
 so it has its own larger read bound; the completion bound is unchanged.
 
 Every request — from the moment it is sent to the last byte of the response —
 is additionally bounded to 150 seconds of wall time, independently of the
-60-second per-read limit above. That per-read limit resets on every byte a
-connection sends, so a provider that trickles occasional keep-alive bytes
-while a slow model keeps working could otherwise hold a request open far
-longer than 60 seconds; the 150-second bound catches that case and reports
-`Timeout` once it is exceeded. A slow reasoning model working through a large
-conversation can hit this bound; when it does, that one conversation is
-reported as a failed conversation, not a failed scan, and the rest of the
-scan continues. Clicking Stop abandons the request currently in flight —
-within about one second, not only between conversations.
+60-second per-read idle limit above. That per-read limit only bounds one
+`read()` call and resets on every byte a connection sends, so a provider that
+trickles occasional keep-alive bytes while a slow model keeps working could
+otherwise hold a request open far longer than 60 seconds; a background thread
+performs the actual reads while OpenLoops polls it every 250 milliseconds, so
+the 150-second bound is enforced within about a quarter second of expiry even
+while the connection is completely silent, and reports `Timeout` once it is
+exceeded. A slow reasoning model working through a large conversation can hit
+this bound; when it does, that one conversation is reported as a failed
+conversation, not a failed scan, and the rest of the scan continues. Clicking
+Stop abandons the request currently in flight — within about a second, not
+only between conversations.
 
 ## Validation
 

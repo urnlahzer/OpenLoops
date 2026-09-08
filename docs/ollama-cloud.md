@@ -42,8 +42,9 @@ it does not save provider payloads or outputs. The launcher restores
 its process environment after exit. The key and raw response buffers are held
 in zeroizing wrappers, without claiming removal of every allocator, TLS, OS, or
 provider copy. Requests use fixed HTTPS endpoints, disabled redirects/proxies,
-5-second connection and 60-second total timeouts, no tools, no automatic retries,
-and bounded request/response sizes. Model names are validated before display.
+a 5-second connection timeout and a 60-second per-read idle timeout, no tools,
+no automatic retries, and bounded request/response sizes. Model names are
+validated before display.
 Responses must match the selected model, complete normally, and contain no tool
 calls or generated images/audio. Duplicate JSON members are rejected at every
 depth, including the provider envelope. One outer Markdown JSON fence is removed
@@ -55,15 +56,17 @@ actions or pass a release gate.
 
 Every request — from the moment it is sent to the last byte of the response —
 is additionally bounded to 150 seconds of wall time, independently of the
-60-second per-read timeout above. That per-read timeout resets on every byte
-a connection sends, so a slow keep-alive connection could otherwise hold a
-request open far longer than 60 seconds; the 150-second bound catches that
-case and reports a timeout once it is exceeded. A slow reasoning model
-working through a large conversation can hit this bound; when it does, that
-one conversation is reported as a failed conversation, not a failed scan, and
-the rest of the scan continues. Clicking Stop in the native setup window
-abandons the request currently in flight — within about one second, not only
-between conversations.
+60-second per-read idle timeout above. That per-read timeout only bounds one
+`read()` call and resets on every byte a connection sends, so a slow
+keep-alive connection could otherwise hold a request open far longer than 60
+seconds; a background thread performs the actual reads while OpenLoops polls
+it every 250 milliseconds, so the 150-second bound is enforced within about a
+quarter second of expiry even while the connection is completely silent, and
+reports a timeout once it is exceeded. A slow reasoning model working through
+a large conversation can hit this bound; when it does, that one conversation
+is reported as a failed conversation, not a failed scan, and the rest of the
+scan continues. Clicking Stop in the native setup window abandons the request
+currently in flight — within about a second, not only between conversations.
 
 Validation: `cargo test -p openloops-inference --features ollama-cloud --locked`.
 The unit tests do not contact Ollama; live authentication and generation require

@@ -176,7 +176,12 @@ impl ReviewState {
             || self.source_failures > 0
             || result.analysis.rejected > 0
             || result.analysis.degraded > 0
-            || result.closure_pass_failure.is_some();
+            || result.closure_pass_failure.is_some()
+            // Stopped by you can leave `analyzed == total` when only the
+            // closure pass (which does not count toward `analyzed`/`total`)
+            // was cut short, so this must be checked on its own rather than
+            // assumed to already be covered by the `analyzed < total` case.
+            || result.cancelled;
         self.scan_errors = result.failures;
         for reason in &result.analysis.rejection_reasons {
             if !self.scan_errors.iter().any(|existing| existing == reason) {
@@ -1780,6 +1785,19 @@ mod tests {
         state.set_scan(empty_scan_result(), "model".into());
         assert!(state.draft.is_none());
         assert!(!state.draft_scrolled);
+    }
+
+    #[test]
+    fn set_scan_reports_a_cancelled_scan_as_incomplete_even_when_analyzed_equals_total() {
+        // `analyzed == total` here (both 0, via `empty_scan_result`): a
+        // cancellation that only cut short the closure pass (which does
+        // not count toward `analyzed`/`total`) must still be visible.
+        let mut state = ReviewState::default();
+        let mut result = empty_scan_result();
+        result.cancelled = true;
+        state.set_scan(result, "model".into());
+        assert!(state.scan_incomplete);
+        assert!(state.scan_summary.contains("stopped by you"));
     }
 
     #[test]

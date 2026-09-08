@@ -506,7 +506,11 @@ mod tests {
                 .to_string()
                 .contains("HTTP 502")
         );
-        assert!(ProviderError::Timeout.to_string().contains("60 seconds"));
+        assert!(
+            ProviderError::Timeout
+                .to_string()
+                .contains("did not answer in time")
+        );
     }
 
     #[test]
