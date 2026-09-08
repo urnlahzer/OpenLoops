@@ -845,10 +845,20 @@ fn learn_one_event(message: &ReviewMessage) -> Option<(String, i64, i64, EventSo
         prose_event_time(&subject, message.input.timestamp, offset)
     {
         let name_end = subject_prose_name_end(&subject, byte_offset);
+        let prefix = &subject[..name_end];
+        // A trailing ')' is only ever a stray, unmatched close -- one worth
+        // trimming alongside "-@:," -- when this prefix has more ')' than
+        // '(' overall. When they balance (or opens win), a trailing ')'
+        // closes a real group ("(draft)") that `normalize_subject`'s own
+        // trailing-paren handling must see intact to decide whether to keep
+        // or drop it.
+        let unmatched_closing_paren = prefix.matches(')').count() > prefix.matches('(').count();
         let name =
-            strip_leading_possessive(&normalize_subject(subject[..name_end].trim_end_matches(
-                |c: char| c.is_whitespace() || matches!(c, '-' | '@' | ':' | ',' | ')'),
-            )));
+            strip_leading_possessive(&normalize_subject(prefix.trim_end_matches(|c: char| {
+                c.is_whitespace()
+                    || matches!(c, '-' | '@' | ':' | ',')
+                    || (c == ')' && unmatched_closing_paren)
+            })));
         if is_specific_event_name(&name) && contains_prose_event_noun(&name) {
             return Some((name, start, end, EventSource::SubjectProse));
         }
@@ -3742,6 +3752,21 @@ mod tests {
         let index = build_event_index(&[message]);
         assert_eq!(index.len(), 1);
         assert_eq!(index[0].name, "design workshop");
+    }
+
+    /// Companion to the above: a trailing `)` that closes a REAL group
+    /// ("(draft)", balanced against its own '(') must survive the trim --
+    /// only a genuinely unmatched close is stray. `normalize_subject`'s own
+    /// trailing-paren handling then decides to keep it (no digit, not a
+    /// timezone abbreviation).
+    #[test]
+    fn event_index_keeps_a_matched_trailing_paren_group_in_the_name() {
+        let mut mail = synthetic("Let's finalize the agenda.", 0, "a");
+        mail.subject = "Planning Workshop (draft) September 3 2pm".into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        let index = build_event_index(&[message]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].name, "planning workshop (draft)");
     }
 
     /// Critical review finding: the subject-prose learner previously
