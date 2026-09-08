@@ -52,7 +52,8 @@
   },
   "response_contract": {
     "maximum_response_bytes": 262144,
-    "maximum_wall_time_seconds": 60,
+    "maximum_wall_time_seconds": 150,
+    "maximum_idle_read_seconds": 60,
     "maximum_connect_time_seconds": 5,
     "schema_id": "openloops-analysis-v1",
     "schema_path": "contracts/model/analysis-output.schema.json",

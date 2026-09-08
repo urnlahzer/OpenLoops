@@ -135,6 +135,8 @@ JsonCase 'attachment bytes no longer prohibited' 'P0-MODEL-REQUEST-001' 'contrac
 JsonCase 'untrusted framing weakened' 'P0-MODEL-REQUEST-001' 'contracts/model/provider-boundary.json' { param($c) $c.request_contract.untrusted_delimiting = 'plain concatenation' }
 
 JsonCase 'response byte bound widened' 'P0-MODEL-RESPONSE-001' 'contracts/model/provider-boundary.json' { param($c) $c.response_contract.maximum_response_bytes = 262145 }
+JsonCase 'wall time bound widened' 'P0-MODEL-RESPONSE-001' 'contracts/model/provider-boundary.json' { param($c) $c.response_contract.maximum_wall_time_seconds = 151 }
+JsonCase 'idle read bound widened' 'P0-MODEL-RESPONSE-001' 'contracts/model/provider-boundary.json' { param($c) $c.response_contract.maximum_idle_read_seconds = 61 }
 JsonCase 'response schema path changed' 'P0-MODEL-RESPONSE-001' 'contracts/model/provider-boundary.json' { param($c) $c.response_contract.schema_path = 'synthetic.json' }
 JsonCase 'unknown fields accepted' 'P0-MODEL-RESPONSE-001' 'contracts/model/provider-boundary.json' { param($c) $c.response_contract.unknown_fields = 'accept' }
 JsonCase 'validation reordered' 'P0-MODEL-RESPONSE-001' 'contracts/model/provider-boundary.json' { param($c) [array]::Reverse($c.response_contract.required_validation_order) }
