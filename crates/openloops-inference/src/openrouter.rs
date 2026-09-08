@@ -2,13 +2,17 @@
 //! Credentials and payloads are session-only, the model menu is built from
 //! the public ZDR endpoint listing, and every completion asks `OpenRouter`
 //! to route to ZDR endpoints only.
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
+
 use reqwest::blocking::{Client, Response};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use crate::provider::{
-    MAX_REQUEST, MAX_RESPONSE, ModelClient, ProviderError, https_client, json_document,
-    parse_error, read_body, status_error, transport_error, valid_key, valid_model_name,
+    MAX_REQUEST, MAX_RESPONSE, ModelClient, ProviderError, RequestControl, https_client,
+    json_document, parse_error, read_body, status_error, transport_error, valid_key,
+    valid_model_name,
 };
 
 const AUTHORITY: &str = "https://openrouter.ai";
@@ -69,6 +73,7 @@ impl OpenRouter {
         let content = self.complete(
             "Return only this JSON object: {\"schema_version\":1,\"claims\":[]}",
             "Connection check; there is no message to analyze.",
+            None,
         )?;
         let parsed = openloops_contracts::parse_analysis_output(json_document(content.as_bytes())?)
             .map_err(parse_error)?;
@@ -78,10 +83,21 @@ impl OpenRouter {
         Ok(())
     }
 
-    fn chat_at(&self, url: &str, body: Vec<u8>) -> Result<Zeroizing<String>, ProviderError> {
+    /// Sends `body` and reads the answer. Records the start instant
+    /// immediately before `send()` so [`crate::provider::REQUEST_DEADLINE`]
+    /// bounds the whole request rather than only an idle connection;
+    /// `cancel`, when supplied, lets a Stop action abort the read in
+    /// progress.
+    fn chat_at(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Zeroizing<String>, ProviderError> {
         // Only the adapter-fixed CHAT constant reaches here in a real build;
         // the loopback tests substitute their own origin.
         debug_assert!(cfg!(test) || url.starts_with(AUTHORITY));
+        let started = Instant::now();
         let response = self
             .client
             .post(url)
@@ -90,7 +106,8 @@ impl OpenRouter {
             .body(body)
             .send()
             .map_err(|error| transport_error(&error))?;
-        parse_chat(&read_response(response)?, &self.model)
+        let control = RequestControl::with_cancel(started, cancel);
+        parse_chat(&read_response(response, &control)?, &self.model)
     }
 }
 
@@ -99,8 +116,13 @@ impl ModelClient for OpenRouter {
         &self.model
     }
 
-    fn complete(&self, system: &str, user: &str) -> Result<Zeroizing<String>, ProviderError> {
-        self.chat_at(CHAT, request(&self.model, system, user)?)
+    fn complete(
+        &self,
+        system: &str,
+        user: &str,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Zeroizing<String>, ProviderError> {
+        self.chat_at(CHAT, request(&self.model, system, user)?, cancel)
     }
 }
 
@@ -116,6 +138,7 @@ fn fetch_zdr(client: &Client, url: &str) -> Result<Vec<ModelChoice>, ProviderErr
     // Only the adapter-fixed ZDR_ENDPOINTS constant reaches here in a real
     // build; the loopback tests substitute their own origin.
     debug_assert!(cfg!(test) || url.starts_with(AUTHORITY));
+    let started = Instant::now();
     let response = client
         .get(url)
         .header(reqwest::header::ACCEPT, "application/json")
@@ -125,7 +148,11 @@ fn fetch_zdr(client: &Client, url: &str) -> Result<Vec<ModelChoice>, ProviderErr
         200 => {}
         status => return Err(status_error(status)),
     }
-    zdr_models(&read_body(response, MAX_LISTING)?)
+    zdr_models(&read_body(
+        response,
+        MAX_LISTING,
+        &RequestControl::new(started),
+    )?)
 }
 
 /// A displayable model label: present, bounded, and free of the control
@@ -201,13 +228,16 @@ fn healthy_choice(endpoint: &Value) -> Option<ModelChoice> {
     })
 }
 
-fn read_response(response: Response) -> Result<Zeroizing<Vec<u8>>, ProviderError> {
+fn read_response(
+    response: Response,
+    control: &RequestControl<'_>,
+) -> Result<Zeroizing<Vec<u8>>, ProviderError> {
     match response.status().as_u16() {
         200 => {}
         401 => return Err(ProviderError::InvalidKey),
         status => return Err(status_error(status)),
     }
-    read_body(response, MAX_RESPONSE)
+    read_body(response, MAX_RESPONSE, control)
 }
 
 /// Builds one non-streaming completion pinned to ZDR routing.
@@ -498,7 +528,7 @@ mod tests {
         let (url, captured) = loopback(http(200, &answer("{}")));
         let provider = synthetic_provider();
         let content = provider
-            .chat_at(&url, request(MODEL, "policy", "data").unwrap())
+            .chat_at(&url, request(MODEL, "policy", "data").unwrap(), None)
             .unwrap();
         assert_eq!(&*content, "{}");
         let raw = captured.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -523,12 +553,12 @@ mod tests {
     fn rejected_credentials_and_oversized_answers_report_fixed_codes() {
         let (url, _captured) = loopback(http(401, br#"{"error":{"message":"no"}}"#));
         assert_eq!(
-            synthetic_provider().chat_at(&url, request(MODEL, "policy", "data").unwrap()),
+            synthetic_provider().chat_at(&url, request(MODEL, "policy", "data").unwrap(), None),
             Err(ProviderError::InvalidKey)
         );
         let (url, _captured) = loopback(http(200, &vec![b'x'; MAX_RESPONSE + 1]));
         assert_eq!(
-            synthetic_provider().chat_at(&url, request(MODEL, "policy", "data").unwrap()),
+            synthetic_provider().chat_at(&url, request(MODEL, "policy", "data").unwrap(), None),
             Err(ProviderError::ResponseTooLarge)
         );
         for (status, expected) in [
@@ -539,7 +569,7 @@ mod tests {
         ] {
             let (url, _captured) = loopback(http(status, b"{}"));
             assert_eq!(
-                synthetic_provider().chat_at(&url, request(MODEL, "policy", "data").unwrap()),
+                synthetic_provider().chat_at(&url, request(MODEL, "policy", "data").unwrap(), None),
                 Err(expected)
             );
         }

@@ -978,7 +978,16 @@ impl eframe::App for SetupApp {
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
                     if let Some(progress) = &self.scan_progress {
                         ui.label(format!("{} / {} messages processed", progress.processed.load(Ordering::Relaxed), progress.total.load(Ordering::Relaxed)));
-                        if progress.cancel.load(Ordering::Relaxed) { ui.label("Stopping after the current request finishes…"); }
+                        let started = progress.request_started_unix.load(Ordering::Relaxed);
+                        if started != 0 {
+                            let elapsed = (chrono::Utc::now().timestamp() - started).max(0);
+                            ui.label(format!(
+                                "Conversation {} of {} · {elapsed}s on this request",
+                                progress.conversation_index.load(Ordering::Relaxed),
+                                progress.conversation_total.load(Ordering::Relaxed),
+                            ));
+                        }
+                        if progress.cancel.load(Ordering::Relaxed) { ui.label("Stopping; the current request is abandoned within a second."); }
                         else if ui.button("Stop scan").clicked() { progress.cancel.store(true, Ordering::Relaxed); }
                     }
                 }

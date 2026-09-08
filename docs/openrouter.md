@@ -84,6 +84,18 @@ expose a raw upstream body.
 The ZDR listing is much larger than a completion (several hundred kilobytes),
 so it has its own larger read bound; the completion bound is unchanged.
 
+Every request — from the moment it is sent to the last byte of the response —
+is additionally bounded to 150 seconds of wall time, independently of the
+60-second per-read limit above. That per-read limit resets on every byte a
+connection sends, so a provider that trickles occasional keep-alive bytes
+while a slow model keeps working could otherwise hold a request open far
+longer than 60 seconds; the 150-second bound catches that case and reports
+`Timeout` once it is exceeded. A slow reasoning model working through a large
+conversation can hit this bound; when it does, that one conversation is
+reported as a failed conversation, not a failed scan, and the rest of the
+scan continues. Clicking Stop abandons the request currently in flight —
+within about one second, not only between conversations.
+
 ## Validation
 
 `cargo test -p openloops-inference --features ollama-cloud,openrouter --locked`.

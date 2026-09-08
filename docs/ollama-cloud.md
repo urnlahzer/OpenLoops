@@ -53,6 +53,18 @@ to validated message slots before transmission, and source/loop handles are
 checked before constructing the request. The adapter does not enable automatic
 actions or pass a release gate.
 
+Every request — from the moment it is sent to the last byte of the response —
+is additionally bounded to 150 seconds of wall time, independently of the
+60-second per-read timeout above. That per-read timeout resets on every byte
+a connection sends, so a slow keep-alive connection could otherwise hold a
+request open far longer than 60 seconds; the 150-second bound catches that
+case and reports a timeout once it is exceeded. A slow reasoning model
+working through a large conversation can hit this bound; when it does, that
+one conversation is reported as a failed conversation, not a failed scan, and
+the rest of the scan continues. Clicking Stop in the native setup window
+abandons the request currently in flight — within about one second, not only
+between conversations.
+
 Validation: `cargo test -p openloops-inference --features ollama-cloud --locked`.
 The unit tests do not contact Ollama; live authentication and generation require
 the user's API key entered locally. Repository Phase 0 no-network checks remain

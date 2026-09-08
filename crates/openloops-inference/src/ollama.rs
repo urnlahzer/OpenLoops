@@ -1,11 +1,14 @@
 //! Opt-in Ollama Cloud adapter. Credentials and payloads are session-only.
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
+
 use reqwest::blocking::{Client, Response};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use crate::provider::{
-    MAX_REQUEST, ModelClient, https_client, json_document, parse_error, read_body, status_error,
-    transport_error, valid_key, valid_model_name,
+    MAX_REQUEST, ModelClient, RequestControl, https_client, json_document, parse_error, read_body,
+    status_error, transport_error, valid_key, valid_model_name,
 };
 use crate::validation::{AnalysisResult, ParticipantSlot, SuppliedContext, validate};
 
@@ -62,13 +65,15 @@ impl OllamaCloud {
             key,
             model: model.to_owned(),
         };
+        let started = Instant::now();
         let response = provider
             .client
             .get(TAGS)
             .bearer_auth(provider.key.as_str())
             .send()
             .map_err(|error| transport_error(&error))?;
-        if !model_names(&read_response(response)?)?
+        let control = RequestControl::new(started);
+        if !model_names(&read_response(response, &control)?)?
             .iter()
             .any(|name| name == model)
         {
@@ -83,7 +88,7 @@ impl OllamaCloud {
     /// Rejects oversized input, tool calls, partial responses, and invalid analysis.
     pub fn analyze(&self, context: &SuppliedContext<'_>) -> Result<AnalysisResult, ProviderError> {
         let body = analysis_request(&self.model, context)?;
-        let answer = self.chat(body)?;
+        let answer = self.chat(body, None)?;
         let result = validate(json_document(answer.as_bytes())?, context);
         if matches!(result, AnalysisResult::AnalysisUnavailable) {
             return Err(ProviderError::InvalidAnalysis);
@@ -98,7 +103,7 @@ impl OllamaCloud {
         &self,
         context: &SuppliedContext<'_>,
     ) -> Result<ReviewAnalysis, ProviderError> {
-        let answer = self.chat(analysis_request(&self.model, context)?)?;
+        let answer = self.chat(analysis_request(&self.model, context)?, None)?;
         review_analysis(answer.as_bytes(), context)
     }
 
@@ -111,7 +116,7 @@ impl OllamaCloud {
             "Return only this JSON object: {\"schema_version\":1,\"claims\":[]}",
             "Connection check; there is no message to analyze.",
         )?;
-        let content = self.chat(body)?;
+        let content = self.chat(body, None)?;
         let parsed = openloops_contracts::parse_analysis_output(json_document(content.as_bytes())?)
             .map_err(parse_error)?;
         if !parsed.claims.is_empty() {
@@ -120,7 +125,16 @@ impl OllamaCloud {
         Ok(())
     }
 
-    fn chat(&self, body: Vec<u8>) -> Result<Zeroizing<String>, ProviderError> {
+    /// Sends `body` and reads the answer. Records the start instant
+    /// immediately before `send()` so [`crate::provider::REQUEST_DEADLINE`]
+    /// bounds the whole request, not just an idle connection; `cancel`, when
+    /// supplied, lets a Stop action abort the read in progress.
+    fn chat(
+        &self,
+        body: Vec<u8>,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Zeroizing<String>, ProviderError> {
+        let started = Instant::now();
         let response = self
             .client
             .post(CHAT)
@@ -129,7 +143,8 @@ impl OllamaCloud {
             .body(body)
             .send()
             .map_err(|error| transport_error(&error))?;
-        parse_chat(&read_response(response)?, &self.model)
+        let control = RequestControl::with_cancel(started, cancel);
+        parse_chat(&read_response(response, &control)?, &self.model)
     }
 }
 
@@ -138,8 +153,13 @@ impl ModelClient for OllamaCloud {
         &self.model
     }
 
-    fn complete(&self, system: &str, user: &str) -> Result<Zeroizing<String>, ProviderError> {
-        self.chat(request(&self.model, system, user)?)
+    fn complete(
+        &self,
+        system: &str,
+        user: &str,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Zeroizing<String>, ProviderError> {
+        self.chat(request(&self.model, system, user)?, cancel)
     }
 }
 
@@ -188,12 +208,15 @@ fn review_analysis(
     })
 }
 
-fn read_response(response: Response) -> Result<Zeroizing<Vec<u8>>, ProviderError> {
+fn read_response(
+    response: Response,
+    control: &RequestControl<'_>,
+) -> Result<Zeroizing<Vec<u8>>, ProviderError> {
     match response.status().as_u16() {
         200 => {}
         status => return Err(status_error(status)),
     }
-    read_body(response, crate::provider::MAX_RESPONSE)
+    read_body(response, crate::provider::MAX_RESPONSE, control)
 }
 
 /// Prefer the exact default label, or the dated version the provider lists.
@@ -239,12 +262,13 @@ pub fn available_models(key: &str) -> Result<Vec<String>, ProviderError> {
     if !valid_key(key) {
         return Err(ProviderError::InvalidKey);
     }
+    let started = Instant::now();
     let response = https_client()?
         .get(TAGS)
         .bearer_auth(key)
         .send()
         .map_err(|error| transport_error(&error))?;
-    model_names(&read_response(response)?)
+    model_names(&read_response(response, &RequestControl::new(started))?)
 }
 
 fn parse_chat(bytes: &[u8], selected: &str) -> Result<Zeroizing<String>, ProviderError> {
