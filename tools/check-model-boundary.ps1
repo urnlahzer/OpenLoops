@@ -320,7 +320,7 @@ $threatText = Read-Text $ThreatPath 'P0-MODEL-CROSS-CONTRACT-001'
 $traceText = Read-Text $TraceabilityPath 'P0-MODEL-INVENTORY-001'
 $adrCanonical = (($adrText -replace "`r`n", "`n").TrimEnd() + "`n")
 $adrHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($adrCanonical))).ToLowerInvariant()
-if ($adrHash -ne 'd85cb520a40bcf33dddc4eb95e7b7eba2054a4a1b6513c5698ee3d89d089008c') { Fail 'P0-MODEL-CROSS-CONTRACT-001' }
+if ($adrHash -ne '12be5a6e8081ec3938d8c0ceb59f7c10b874b37d52a628f3011e899ecba9eb15') { Fail 'P0-MODEL-CROSS-CONTRACT-001' }
 Has $adrText @('ADR-007','OWN-08','Accepted','implements no adapter, transport, credential store','G-MODEL','G-PRIV','ollama_local','ollama_cloud','approved_https','openrouter','provider.zdr=true','zero-data-retention','model-sensitivity-v1','Request sensitivity','Deadline inference sensitivity','Closure sensitivity','review_required','No settings change starts replay automatically','No tool surface exists','Prompts, requests, responses, outputs, rationales, transcripts','are never persisted') 'P0-MODEL-CROSS-CONTRACT-001'
 Has $threatText @('Model-provider boundary threat model','No provider adapter, origin, credential, request','redirect','proxy','DNS','consent','canary','untrusted','zero mutation','zero-data-retention','provider.zdr=true') 'P0-MODEL-CROSS-CONTRACT-001'
 $traceIds = [regex]::Matches($traceText, '(?m)^\| (P0-MODEL-[A-Z-]+-001) \|') | ForEach-Object { $_.Groups[1].Value }

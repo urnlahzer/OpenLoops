@@ -264,17 +264,28 @@ The contract now separates the two bounds:
   single body read that receives nothing at all.
 - `maximum_wall_time_seconds: 150` is a new, independent hard cap on the
   whole request -- from `send()` to the last body byte -- enforced in
-  application code (`openloops-inference::provider::read_body`), since the
-  transport has no native concept of total request wall time. The actual
-  (potentially long-blocking) reads happen on a background thread while the
-  caller polls every 250 milliseconds, so the bound is observed within about
-  one poll tick even while the connection is completely silent, not only
-  while it is slowly trickling bytes. The same check point is what a Stop
-  click aborts through (`ProviderError::Cancelled`), so Stop now takes
-  effect within about a second rather than only between conversations.
+  application code (`openloops-inference::provider::send_with_control` and
+  `read_body`), since the transport has no native concept of total request
+  wall time. Both the blocking `send()` (connection plus the full header
+  wait) and the blocking body reads run on a background thread while the
+  caller polls every 250 milliseconds, so the bound is observed within
+  about one poll tick whether the connection is silently withholding
+  headers, silently withholding body bytes, or slowly trickling either.
+  This matters because some providers -- Ollama Cloud, in practice -- send
+  no response headers at all until generation has finished, so a bound
+  applied only to the body-read phase would never engage for them. The
+  same check point is what a Stop click aborts through
+  (`ProviderError::Cancelled`), so Stop now takes effect within about a
+  second regardless of which phase a request is in, not only between
+  conversations.
 
-A slow reasoning model working through a large conversation can still hit 150
-seconds; that is a failed conversation, not a failed scan, and the rest of
-the scan continues. This is a mechanical correction to an inaccurate bound,
-made during code review of the wall-time fix; per `AGENTS.md`, the product
-owner should still review it before the next release.
+A slow reasoning model working through a large conversation can still hit
+150 seconds; that is a failed conversation, not a failed scan, and the rest
+of the scan continues. Abandoning a request (cancel or the deadline) does
+not instantly free the resources behind it: the background thread's one
+blocking `send()`/`read()` call, and the socket underneath it, can still
+linger for up to reqwest's own per-call timeout (`maximum_idle_read_seconds:
+60`) after abandonment, since that call has no way to be interrupted from
+outside. This is a mechanical correction to an inaccurate bound, made during
+code review of the wall-time fix; per `AGENTS.md`, the product owner should
+still review it before the next release.
