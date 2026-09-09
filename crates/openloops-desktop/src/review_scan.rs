@@ -2016,7 +2016,10 @@ fn run_jobs<T: Send>(
 ) -> JobResults<T> {
     let done: Mutex<JobResults<T>> = Mutex::new(Vec::new());
     std::thread::scope(|scope| {
-        for worker in 0..pass.max {
+        // A worker beyond the job count would only wake, find the cursor
+        // exhausted, and exit, so a three-conversation scan never spawns a
+        // hundred threads just because the ceiling allows them.
+        for worker in 0..pass.max.min(jobs) {
             let done = &done;
             scope.spawn(move || run_worker(worker, jobs, pass, progress, job, done));
         }
