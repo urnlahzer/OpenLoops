@@ -3,7 +3,7 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use crate::{
     app_model::{self, AccountDisplay, AppModel, Outcome, Service, Status},
-    review_model::{ReviewState, open_badge_count},
+    review_model::{ReviewState, open_badge_count, scan_strip},
     settings::{MAX_OPENROUTER_PARALLEL, MIN_OPENROUTER_PARALLEL, OllamaPlan, Provider},
 };
 use openloops_graph::live::{ConnectionConfig, check_connection};
@@ -22,6 +22,10 @@ const OPENROUTER_KEYS_URL: &str = "https://openrouter.ai/settings/keys";
 
 fn joined_status(status: &Status) -> String {
     status.lines.join("\n")
+}
+
+fn account_display(display_name: Option<&str>) -> AccountDisplay {
+    display_name.map_or_else(AccountDisplay::default, AccountDisplay::signed_in)
 }
 
 /// The label shown for the `ComboBox` row that means "nothing picked yet".
@@ -140,7 +144,9 @@ fn status_with_busy(status: &Status, busy: Option<&str>) -> String {
 
 #[allow(clippy::too_many_lines)]
 fn sync(model: &AppModel, window: &AppWindow) {
-    let account = AccountDisplay::default();
+    // Graph does not expose the signed-in display name through the current
+    // connection report yet; keep the adapter seam ready without inventing one.
+    let account = account_display(None);
     let cards = model
         .review
         .analysis
@@ -161,10 +167,12 @@ fn sync(model: &AppModel, window: &AppWindow) {
         )
     });
     window.set_busy(busy);
+    let review_scanning = model.scan_progress.is_some();
     window.set_scanning(busy);
     window.set_busy_chip_text(busy_text.as_deref().unwrap_or_default().into());
-    // T3 will populate this with "Scanning · Conversation i of n · m / total messages".
-    window.set_review_scan_chip_text("".into());
+    let strip = scan_strip(model.scan_progress.as_deref(), &model.review);
+    let (strip_model, scan_chip) = crate::slint_review::scan_strip_view(&strip, model, &cards);
+    window.set_review_scan_chip_text(scan_chip.into());
     window.set_account_name(account.name.into());
     window.set_account_initials(account.initials.into());
     window.set_account_signed_in(account.signed_in);
@@ -261,6 +269,7 @@ fn sync(model: &AppModel, window: &AppWindow) {
         Provider::OpenRouter => true,
     });
     window.set_can_test_model(!model.selected_model().is_empty() && !model.active_key().is_empty());
+    crate::slint_review::sync_review(model, window, &cards, busy, review_scanning, strip_model);
 }
 
 fn finish_edit(model: &mut AppModel) {
@@ -275,13 +284,13 @@ fn clear_microsoft_after_edit(model: &mut AppModel) {
     finish_edit(model);
 }
 
-fn refresh(model: &Rc<RefCell<AppModel>>, weak: &slint::Weak<AppWindow>) {
+pub(crate) fn refresh(model: &Rc<RefCell<AppModel>>, weak: &slint::Weak<AppWindow>) {
     if let Some(window) = weak.upgrade() {
         sync(&model.borrow(), &window);
     }
 }
 
-fn start_timer(timer: &Rc<Timer>) {
+pub(crate) fn start_timer(timer: &Rc<Timer>) {
     timer.restart();
 }
 
@@ -314,11 +323,27 @@ pub fn probe_saved_model() -> Result<usize, String> {
 /// Returns a platform error when Slint cannot create or run the native window.
 #[allow(clippy::too_many_lines)]
 pub fn run() -> Result<(), slint::PlatformError> {
-    let model = Rc::new(RefCell::new(AppModel::new()));
+    #[cfg(feature = "ui-screenshot")]
+    let mut initial_model = AppModel::new();
+    #[cfg(not(feature = "ui-screenshot"))]
+    let initial_model = AppModel::new();
+    #[cfg(feature = "ui-screenshot")]
+    let preview_review = std::env::args().any(|arg| arg == "--preview-review");
+    #[cfg(not(feature = "ui-screenshot"))]
+    let preview_review = false;
+    #[cfg(feature = "ui-screenshot")]
+    if preview_review {
+        initial_model.review = crate::review_model::layout_fixture();
+    }
+    let model = Rc::new(RefCell::new(initial_model));
     let window = AppWindow::new()?;
     let initial_screen = {
         let model = model.borrow();
-        i32::from(!(model.settings_existed && model.ready_for_review()))
+        if preview_review {
+            0
+        } else {
+            i32::from(!(model.settings_existed && model.ready_for_review()))
+        }
     };
     window.set_active_screen(initial_screen);
     window.set_show_key(false);
@@ -640,6 +665,8 @@ pub fn run() -> Result<(), slint::PlatformError> {
             refresh(&model, &weak);
         });
     }
+
+    crate::slint_review::register_callbacks(&window, &model, &timer);
 
     window.run()
 }

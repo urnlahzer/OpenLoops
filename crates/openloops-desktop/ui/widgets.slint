@@ -152,9 +152,12 @@ export component Pill {
     private property <color> fill: kind == "success" ? Tokens.success-bg : kind == "warning" ? Tokens.warning-bg : kind == "danger" ? Tokens.danger-bg : kind == "watch" ? Tokens.watch-bg : kind == "brand" ? Tokens.brand-subtle : Tokens.bg-bar;
     accessible-role: AccessibleRole.text;
     accessible-label: accessible-name;
-    Rectangle { background: root.fill; border-radius: Tokens.radius-pill;
+    width: pill-label.preferred-width + 2 * Tokens.space-2;
+    height: pill-label.preferred-height + 2 * Tokens.space-1;
+    vertical-stretch: 0;
+    Rectangle { background: root.fill; border-radius: self.height / 2;
         HorizontalLayout { padding-left: Tokens.space-2; padding-right: Tokens.space-2; padding-top: Tokens.space-1; padding-bottom: Tokens.space-1;
-            Text { text: root.text; color: root.ink; font-size: Tokens.font-13; font-weight: 600; }
+            pill-label := Text { text: root.text; color: root.ink; font-size: Tokens.font-13; font-weight: 600; }
         }
     }
 }

@@ -49,11 +49,15 @@ component NavItem inherits Rectangle {
         Text { text: root.label; color: root.selected ? Tokens.brand : Tokens.text-1; font-size: Tokens.font-11; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
     }
     if root.badge > 0: Rectangle {
-        x: parent.width - self.width - Tokens.space-1;
-        y: Tokens.space-1;
-        min-width: Tokens.badge-size; height: Tokens.badge-size;
+        // Anchored to the item's top-right corner and pushed outward by the
+        // item's own padding (space-1) rather than inset by it, so the badge
+        // sits clear of the centered icon glyph instead of sitting on top of
+        // it, however many digits the count grows to.
+        x: parent.width - self.width + Tokens.space-1;
+        y: -Tokens.space-1;
+        width: max(Tokens.badge-size, badge-text.preferred-width + 2 * Tokens.space-1); height: Tokens.badge-size;
         background: Tokens.danger; border-radius: Tokens.radius-pill;
-        Text { text: root.badge; color: Tokens.bg-surface; font-size: Tokens.font-11; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+        badge-text := Text { text: root.badge; color: Tokens.bg-surface; font-size: Tokens.font-11; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
     }
     TouchArea { enabled: root.enabled; clicked => { nav-focus.focus(); root.activated(); } }
     nav-focus := FocusScope {

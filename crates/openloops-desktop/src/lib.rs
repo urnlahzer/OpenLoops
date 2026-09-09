@@ -11,4 +11,6 @@ pub(crate) mod review_model;
 #[cfg(feature = "native-ui")]
 pub(crate) mod settings;
 #[cfg(feature = "native-ui")]
+pub(crate) mod slint_review;
+#[cfg(feature = "native-ui")]
 pub mod slint_ui;

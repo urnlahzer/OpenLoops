@@ -1,8 +1,10 @@
 import { Tokens } from "tokens.slint";
 import { TitleBar, NavRail, StatusBar } from "chrome.slint";
 import { SourcesScreen, StatusLine } from "sources.slint";
+import { ReviewScreen, ReviewRow, ReviewGroup, MetaCell, ReviewPill, ScanStripModel } from "review.slint";
 export { Tokens } from "tokens.slint";
 export { StatusLine } from "sources.slint";
+export { ReviewRow, ReviewGroup, MetaCell, ReviewPill, ScanStripModel } from "review.slint";
 
 export component AppWindow inherits Window {
     title: "OpenLoops";
@@ -54,6 +56,31 @@ export component AppWindow inherits Window {
     in property <bool> can-check-microsoft;
     in property <bool> can-load-models;
     in property <bool> can-test-model;
+    in property <bool> review-scanning;
+    in property <bool> can-scan;
+    in property <bool> can-rescan;
+    in-out property <int> review-filter-index;
+    in-out property <bool> show-handled;
+    in property <string> show-handled-label;
+    in property <[ReviewRow]> review-rows;
+    in property <int> review-open-count;
+    in property <ScanStripModel> scan-strip;
+    in-out property <bool> coverage-open;
+    in property <bool> review-has-analysis;
+    in property <bool> review-no-usable-items;
+    in property <string> review-no-usable-text;
+    in property <bool> review-has-selection;
+    in property <[ReviewPill]> review-pills;
+    in property <string> review-title;
+    in property <[MetaCell]> review-meta;
+    in property <string> review-uncertainty;
+    in property <string> review-action-status;
+    in property <bool> review-action-status-succeeded;
+    in property <bool> selected-open;
+    in property <bool> selected-terminal;
+    in property <bool> can-track;
+    in property <bool> can-watch;
+    in property <bool> can-remind;
 
     callback navigate(int);
     callback save-settings;
@@ -72,6 +99,17 @@ export component AppWindow inherits Window {
     callback plan-selected(int);
     callback parallel-committed(string);
     callback test-model;
+    callback scan-inboxes;
+    callback stop-scan;
+    callback rescan;
+    callback clear-results;
+    callback review-filter-selected(int);
+    callback show-handled-toggled(bool);
+    callback coverage-toggled(bool);
+    callback select-review-row(int);
+    callback move-review-selection(int);
+    callback review-decision(int);
+    callback open-reminder;
 
     VerticalLayout {
         spacing: 0px;
@@ -93,8 +131,19 @@ export component AppWindow inherits Window {
                 load-models => { root.load-models(); } model-selected(value) => { root.model-selected(value); } plan-selected(index) => { root.plan-selected(index); }
                 parallel-committed(value) => { root.parallel-committed(value); } test-model => { root.test-model(); }
             }
-            if root.active-screen == 0: Rectangle { background: Tokens.bg-surface; horizontal-stretch: 1;
-                Text { text: "Review screen arrives in T3"; color: Tokens.text-2; font-size: Tokens.font-16; horizontal-alignment: center; vertical-alignment: center; }
+            if root.active-screen == 0: ReviewScreen {
+                busy: root.busy; review-scanning: root.review-scanning; can-scan: root.can-scan; can-rescan: root.can-rescan;
+                filter-index <=> root.review-filter-index; show-handled <=> root.show-handled; show-handled-label: root.show-handled-label; rows: root.review-rows; open-count: root.review-open-count;
+                scan-strip: root.scan-strip; coverage-open <=> root.coverage-open; has-analysis: root.review-has-analysis;
+                no-usable-items: root.review-no-usable-items; no-usable-text: root.review-no-usable-text; has-selection: root.review-has-selection;
+                pills: root.review-pills; title: root.review-title; meta: root.review-meta; uncertainty: root.review-uncertainty;
+                action-status: root.review-action-status; action-status-succeeded: root.review-action-status-succeeded; selected-open: root.selected-open; selected-terminal: root.selected-terminal;
+                can-track: root.can-track; can-watch: root.can-watch; can-remind: root.can-remind;
+                scan-inboxes => { root.scan-inboxes(); } stop-scan => { root.stop-scan(); } rescan => { root.rescan(); } clear-results => { root.clear-results(); }
+                filter-selected(index) => { root.review-filter-selected(index); } show-handled-toggled(value) => { root.show-handled-toggled(value); }
+                coverage-toggled(value) => { root.coverage-toggled(value); } sources-link => { root.navigate(1); root.active-screen = 1; }
+                select-row(handle) => { root.select-review-row(handle); } move-selection(delta) => { root.move-review-selection(delta); }
+                decision(value) => { root.review-decision(value); } open-reminder => { root.open-reminder(); }
             }
         }
         StatusBar { left-text: root.status-left; center-text: root.status-center; right-text: root.status-right; }

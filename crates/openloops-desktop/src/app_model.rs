@@ -19,7 +19,6 @@ pub(crate) enum Outcome {
     Models(Result<Vec<String>, ProviderError>),
     ZdrModels(Result<Vec<ModelChoice>, ProviderError>),
     Generation(Result<(), ProviderError>),
-    #[allow(dead_code)]
     Mail(Result<Vec<openloops_graph::live::review::SourceReview>, ConnectionError>),
     Scan(
         Result<crate::review_model::ScanResult, ProviderError>,
@@ -420,13 +419,15 @@ impl AppModel {
         use crate::loop_state::{Reminder, now};
         use openloops_graph::live::reminders::ReminderOutcome;
         let mut record = self.review.decisions.get(&key);
-        let text=match outcome {
-            ReminderOutcome::Created=>{record.reminder=Reminder::Created; "Reminder created in your Microsoft To Do Tasks list.".to_owned()},
-            ReminderOutcome::NotCreated(error)=>{record.reminder=Reminder::None;format!("No reminder was created: {error} Sign in with the same account used for the scan.")},
-            ReminderOutcome::Uncertain=>"Microsoft did not confirm the write. Check To Do before trying again; OpenLoops will not automatically retry.".to_owned(),
+        let (text, outcome_succeeded)=match outcome {
+            ReminderOutcome::Created=>{record.reminder=Reminder::Created; ("Reminder created in your Microsoft To Do Tasks list.".to_owned(), true)},
+            ReminderOutcome::NotCreated(error)=>{record.reminder=Reminder::None;(format!("No reminder was created: {error} Sign in with the same account used for the scan."), false)},
+            ReminderOutcome::Uncertain=>("Microsoft did not confirm the write. Check To Do before trying again; OpenLoops will not automatically retry.".to_owned(), false),
         };
         record.updated = now();
-        self.review.action_status = match self.review.decisions.update(record) {
+        let saved = self.review.decisions.update(record);
+        self.review.action_status_succeeded = outcome_succeeded && saved.is_ok();
+        self.review.action_status = match saved {
             Ok(()) => text,
             Err(error) => format!("{text} {error}"),
         };
@@ -620,7 +621,6 @@ impl AccountDisplay {
     /// uppercased first character of each of up to the first two
     /// whitespace-separated words (e.g. "Alex Rivera" -> "AR", "Alex" ->
     /// "A", "" -> "").
-    #[allow(dead_code)]
     #[must_use]
     pub fn signed_in(display_name: &str) -> Self {
         let initials = display_name

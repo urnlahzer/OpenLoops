@@ -1,0 +1,272 @@
+import { Tokens } from "tokens.slint";
+import { PrimaryButton, SecondaryButton, SubtleButton, OutlineButton, LinkButton, Segmented, Pill, Callout, ProgressBar, Checkbox } from "widgets.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export struct ReviewRow {
+    handle: int,
+    group-title: string,
+    group-kind: string,
+    group-count: int,
+    first-in-group: bool,
+    selected: bool,
+    action: string,
+    waiting-source: string,
+    aging-status: string,
+    aging-kind: string,
+    date: string,
+}
+
+export struct ReviewGroup { title: string, kind: string, count: int }
+export struct MetaCell { label: string, value: string }
+export struct ReviewPill { text: string, kind: string }
+export struct ScanStripModel {
+    state: string,
+    title: string,
+    conversation: string,
+    messages: string,
+    elapsed: string,
+    provider: string,
+    summary: string,
+    coverage-label: string,
+    coverage-notes: string,
+    progress: float,
+    incomplete: bool,
+}
+
+component WrappedText {
+    in property <string> text;
+    in property <color> color: Tokens.text-2;
+    in property <length> size: Tokens.font-13;
+    in property <int> weight: 400;
+    width: 100%;
+    Rectangle { width: 100%; height: label.preferred-height;
+        label := Text { width: 100%; text: root.text; color: root.color; font-size: root.size; font-weight: root.weight; wrap: word-wrap; }
+    }
+}
+
+component GroupDot inherits Rectangle { in property <string> kind;
+    width: Tokens.group-dot-size; height: Tokens.group-dot-size;
+    background: kind == "danger" ? Tokens.danger : kind == "warning" ? Tokens.warning : kind == "brand" ? Tokens.brand : kind == "success" ? Tokens.success : Tokens.text-3;
+    border-radius: Tokens.radius-pill;
+}
+
+component MetaBlock {
+    in property <MetaCell> cell;
+    min-width: Tokens.review-meta-min-width;
+    horizontal-stretch: 1;
+    VerticalLayout { spacing: Tokens.space-1;
+        Text { text: root.cell.label; color: Tokens.text-2; font-size: Tokens.font-13; }
+        WrappedText { text: root.cell.value; color: Tokens.text-1; weight: 600; }
+    }
+}
+
+export component ReviewScreen {
+    in property <bool> busy;
+    in property <bool> review-scanning;
+    in property <bool> can-scan;
+    in property <bool> can-rescan;
+    in-out property <int> filter-index;
+    in-out property <bool> show-handled;
+    in property <string> show-handled-label;
+    in property <[ReviewRow]> rows;
+    in property <int> open-count;
+    in property <ScanStripModel> scan-strip;
+    in-out property <bool> coverage-open;
+    in property <bool> has-analysis;
+    in property <bool> no-usable-items;
+    in property <string> no-usable-text;
+    in property <bool> has-selection;
+    in property <[ReviewPill]> pills;
+    in property <string> title;
+    in property <[MetaCell]> meta;
+    in property <string> uncertainty;
+    in property <string> action-status;
+    in property <bool> action-status-succeeded;
+    in property <bool> selected-open;
+    in property <bool> selected-terminal;
+    in property <bool> can-track;
+    in property <bool> can-watch;
+    in property <bool> can-remind;
+
+    callback scan-inboxes;
+    callback stop-scan;
+    callback rescan;
+    callback clear-results;
+    callback filter-selected(int);
+    callback show-handled-toggled(bool);
+    callback coverage-toggled(bool);
+    callback sources-link;
+    callback select-row(int);
+    callback move-selection(int);
+    callback decision(int);
+    callback open-reminder;
+
+    VerticalLayout { spacing: 0px;
+        Rectangle { height: Tokens.command-height; background: Tokens.bg-bar; border-color: Tokens.stroke-1; border-width: Tokens.hairline;
+            HorizontalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-2;
+                if root.review-scanning: HorizontalLayout { spacing: Tokens.space-1; alignment: start;
+                    Text { text: "■"; color: Tokens.danger; font-size: Tokens.font-13; vertical-alignment: center; }
+                    SecondaryButton { text: "Stop scan"; accessible-name: "Stop scan"; clicked => { root.stop-scan(); } }
+                }
+                if !root.review-scanning: PrimaryButton { text: "Scan inboxes"; enabled: root.can-scan; clicked => { root.scan-inboxes(); } }
+                SubtleButton { text: "Rescan loaded mail"; enabled: root.can-rescan; clicked => { root.rescan(); } }
+                SubtleButton { text: "Clear results and mail"; clicked => { root.clear-results(); } }
+                Rectangle { horizontal-stretch: 1; }
+                Segmented { width: Tokens.review-filter-width; options: ["All", "Mine", "Team"]; selected-index <=> root.filter-index; accessible-name: "Review filter"; enabled: !root.busy; selected(index) => { root.filter-selected(index); } }
+                Checkbox { text: root.show-handled-label; checked <=> root.show-handled; enabled: !root.busy; toggled(value) => { root.show-handled-toggled(value); } }
+            }
+        }
+
+        if root.scan-strip.state == "scanning": Rectangle { background: Tokens.brand-subtle; height: scanning-strip.preferred-height;
+            scanning-strip := VerticalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-1;
+                HorizontalLayout { spacing: Tokens.space-4;
+                    Text { text: root.scan-strip.title; color: Tokens.brand; font-size: Tokens.font-13; font-weight: 600; }
+                    Text { text: root.scan-strip.conversation; color: Tokens.text-1; font-size: Tokens.font-13; }
+                    Text { text: root.scan-strip.messages; color: Tokens.text-2; font-size: Tokens.font-13; }
+                    Text { text: root.scan-strip.elapsed; color: Tokens.text-2; font-size: Tokens.font-13; }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text { text: "Message text and participants go to your chosen model at " + root.scan-strip.provider + ". Attachments are not sent."; color: Tokens.text-2; font-size: Tokens.font-11; }
+                }
+                ProgressBar { value: root.scan-strip.progress; accessible-name: root.scan-strip.messages; }
+                if !root.scan-strip.summary.is-empty: WrappedText { text: root.scan-strip.summary; color: Tokens.warning; size: Tokens.font-11; }
+            }
+        }
+        if root.scan-strip.state == "finished": Rectangle { background: Tokens.bg-surface; border-color: Tokens.stroke-1; border-width: Tokens.hairline; height: finished-strip.preferred-height;
+            finished-strip := VerticalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-2;
+                HorizontalLayout { spacing: Tokens.space-2;
+                    GroupDot { kind: root.scan-strip.incomplete ? "warning" : "success"; }
+                    Text { text: root.scan-strip.title; color: root.scan-strip.incomplete ? Tokens.warning : Tokens.success; font-size: Tokens.font-13; font-weight: 600; vertical-alignment: center; }
+                    Rectangle { horizontal-stretch: 1; }
+                    LinkButton { text: root.scan-strip.coverage-label; clicked => { root.coverage-open = !root.coverage-open; root.coverage-toggled(root.coverage-open); } }
+                }
+                // On its own row (the VerticalLayout's cross-axis width, not a
+                // HorizontalLayout main-axis share) so it wraps at the strip's
+                // own inner edge instead of first laying out at its unwrapped
+                // natural width alongside the title and link button.
+                WrappedText { text: root.scan-strip.summary; color: Tokens.text-2; }
+                if root.coverage-open: Callout { kind: "warning"; text: root.scan-strip.coverage-notes; }
+            }
+        }
+        if root.scan-strip.state == "warning": Rectangle { background: Tokens.warning-bg; border-color: Tokens.warning-stroke; border-width: Tokens.hairline; height: warning-strip.preferred-height;
+            warning-strip := VerticalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-2;
+                HorizontalLayout { spacing: Tokens.space-2; alignment: start;
+                    GroupDot { kind: "warning"; }
+                    Text { text: root.scan-strip.title; color: Tokens.warning; font-size: Tokens.font-13; font-weight: 600; vertical-alignment: center; }
+                }
+                WrappedText { text: root.scan-strip.summary; color: Tokens.warning; }
+            }
+        }
+        if root.scan-strip.state == "idle": Rectangle { background: Tokens.bg-surface; border-color: Tokens.stroke-1; border-width: Tokens.hairline; height: idle-strip.preferred-height;
+            idle-strip := VerticalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-1;
+                WrappedText { text: "Scan the last 30 days of Inbox and Sent Items, plus configured Groups and shared mailboxes. Each conversation is checked for expectations and later replies."; color: Tokens.text-1; }
+                WrappedText { text: "Message text and participants go to your chosen model at " + root.scan-strip.provider + ". Attachments are not sent."; }
+                LinkButton { text: "Scan scope and data sent to the model provider"; clicked => { root.sources-link(); } }
+            }
+        }
+
+        HorizontalLayout { spacing: 0px; vertical-stretch: 1;
+            Rectangle { width: Tokens.review-list-width; background: Tokens.bg-list; border-color: Tokens.stroke-1; border-width: Tokens.hairline;
+                VerticalLayout { spacing: 0px;
+                    Rectangle { min-height: Tokens.command-height; border-color: Tokens.stroke-1; border-width: Tokens.hairline;
+                        HorizontalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; spacing: Tokens.space-2;
+                            Text { text: "Who is waiting on you · " + root.open-count + " open"; color: Tokens.text-1; font-size: Tokens.font-16; font-weight: 600; vertical-alignment: center; }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                    }
+                    list-focus := FocusScope {
+                        vertical-stretch: 1; accessible-role: list; accessible-label: "Review expectations";
+                        key-pressed(event) => {
+                            if event.text == Key.UpArrow { root.move-selection(-1); return accept; }
+                            if event.text == Key.DownArrow { root.move-selection(1); return accept; }
+                            return reject;
+                        }
+                        ScrollView { width: 100%; height: 100%;
+                            VerticalLayout { width: 100%; spacing: 0px; alignment: start;
+                                for row in root.rows: VerticalLayout { width: 100%; spacing: 0px;
+                                    if row.first-in-group: Rectangle { min-height: Tokens.click-min;
+                                        HorizontalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; spacing: Tokens.space-2;
+                                            GroupDot { kind: row.group-kind; }
+                                            Text { text: row.group-title; color: Tokens.text-2; font-size: Tokens.font-13; font-weight: 600; vertical-alignment: center; }
+                                            Rectangle { horizontal-stretch: 1; }
+                                            Text { text: row.group-count; color: Tokens.text-3; font-size: Tokens.font-11; vertical-alignment: center; }
+                                        }
+                                    }
+                                    item := Rectangle { min-height: Tokens.review-row-min-height; background: row.selected ? Tokens.brand-subtle : mouse.has-hover ? Tokens.bg-canvas : Tokens.transparent; accessible-role: list-item; accessible-label: row.action;
+                                        // Measured off-layout (explicit x/y excludes it from the row's
+                                        // HorizontalLayout) purely to decide whether the date fits beside
+                                        // the title on one line or needs its own row above it.
+                                        date-probe := Text { x: 0px; y: 0px; visible: false; text: row.date; font-size: Tokens.font-11; }
+                                        private property <bool> date-fits-inline: date-probe.preferred-width <= Tokens.review-row-date-max-inline;
+                                        Rectangle { x: 0px; y: 0px; width: Tokens.review-row-bar-width; height: parent.height; background: row.selected ? Tokens.brand : row.aging-kind == "danger" ? Tokens.danger : row.aging-kind == "brand" ? Tokens.brand : row.aging-kind == "success" ? Tokens.success : Tokens.text-3; }
+                                        HorizontalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-2;
+                                            VerticalLayout { horizontal-stretch: 1; spacing: Tokens.space-1; alignment: start;
+                                                if !item.date-fits-inline: Text { text: row.date; color: Tokens.text-3; font-size: Tokens.font-11; horizontal-alignment: right; width: 100%; wrap: no-wrap; }
+                                                HorizontalLayout { width: 100%; spacing: Tokens.space-2;
+                                                    WrappedText { text: row.action; color: Tokens.text-1; weight: 600; horizontal-stretch: 1; width: 100%; }
+                                                    if item.date-fits-inline: Text { text: row.date; color: Tokens.text-3; font-size: Tokens.font-11; horizontal-alignment: right; horizontal-stretch: 0; wrap: no-wrap; }
+                                                }
+                                                WrappedText { text: row.waiting-source; }
+                                                WrappedText { text: row.aging-status; color: row.aging-kind == "danger" ? Tokens.danger : Tokens.text-3; size: Tokens.font-11; }
+                                            }
+                                        }
+                                        mouse := TouchArea { clicked => { list-focus.focus(); root.select-row(row.handle); } }
+                                    }
+                                }
+                                if root.rows.length == 0: Rectangle { min-height: Tokens.review-row-min-height * 3;
+                                    Text { width: parent.width - 2 * Tokens.space-5; x: Tokens.space-5; text: "No open expectations match this filter. Missing replies in the scanned folders never prove work is finished."; color: Tokens.text-2; font-size: Tokens.font-13; wrap: word-wrap; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                        if list-focus.has-focus: Rectangle { x: -Tokens.focus-ring; y: -Tokens.focus-ring; width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring; border-width: Tokens.focus-ring; border-color: Tokens.brand; }
+                    }
+                }
+            }
+
+            Rectangle { background: Tokens.bg-surface; horizontal-stretch: 1;
+                ScrollView { width: 100%; height: 100%;
+                    VerticalLayout { width: 100%; padding-left: Tokens.pane-gutter-x; padding-right: Tokens.pane-gutter-x; padding-top: Tokens.pane-gutter-y; padding-bottom: Tokens.pane-gutter-y; spacing: Tokens.review-section-gap; alignment: start;
+                        Rectangle { horizontal-stretch: 1; max-width: Tokens.review-reading-max-width;
+                            VerticalLayout { width: 100%; spacing: Tokens.review-section-gap; alignment: start;
+                                if root.no-usable-items: WrappedText { text: root.no-usable-text; color: Tokens.text-2; size: Tokens.font-14; }
+                                if root.has-analysis && !root.no-usable-items && !root.has-selection: WrappedText { text: "No open expectations match this filter. Missing replies in the scanned folders never prove work is finished."; color: Tokens.text-2; size: Tokens.font-14; }
+                                if root.has-selection: VerticalLayout { width: 100%; spacing: Tokens.review-section-gap; alignment: start;
+                                    HorizontalLayout { width: 100%; spacing: Tokens.space-2; alignment: start; for pill in root.pills: Pill { text: pill.text; kind: pill.kind; } Rectangle { horizontal-stretch: 1; } }
+                                    WrappedText { text: root.title; color: Tokens.text-1; size: Tokens.font-22; weight: 600; }
+                                    Rectangle { background: Tokens.bg-bar; border-radius: Tokens.radius-6;
+                                        GridLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-3; padding-bottom: Tokens.space-3; spacing: Tokens.space-3;
+                                            for cell[index] in root.meta: MetaBlock { row: index / 2; col: mod(index, 2); cell: cell; }
+                                        }
+                                    }
+                                    if !root.uncertainty.is-empty: Rectangle { width: 100%; background: Tokens.warning-bg; border-color: Tokens.warning-stroke; border-width: Tokens.hairline; border-radius: Tokens.radius-4; accessible-role: AccessibleRole.text; accessible-label: "Uncertainty: " + root.uncertainty;
+                                        VerticalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-1; alignment: start;
+                                            Text { text: "Uncertainty:"; color: Tokens.warning; font-size: Tokens.font-13; font-weight: 600; }
+                                            WrappedText { text: root.uncertainty; color: Tokens.warning; }
+                                        }
+                                    }
+                                    VerticalLayout { width: 100%; spacing: Tokens.space-2; alignment: start;
+                                        if root.selected-open: HorizontalLayout { width: 100%; spacing: Tokens.space-2; alignment: start;
+                                            // Decision callback codes are defined once in slint_review.rs.
+                                            if root.can-track: PrimaryButton { text: "Track — this is mine"; enabled: !root.busy; clicked => { root.decision(1); } }
+                                            if root.can-watch: SecondaryButton { text: "Keep an eye on this"; enabled: !root.busy; clicked => { root.decision(4); } }
+                                            SecondaryButton { text: "Handled"; enabled: !root.busy; clicked => { root.decision(2); } }
+                                            SecondaryButton { text: "Not mine / dismiss"; enabled: !root.busy; clicked => { root.decision(3); } }
+                                            SecondaryButton { text: "No longer relevant"; enabled: !root.busy; clicked => { root.decision(5); } }
+                                            Rectangle { horizontal-stretch: 1; }
+                                        }
+                                        if root.selected-open: HorizontalLayout { width: 100%; Rectangle { horizontal-stretch: 1; } OutlineButton { text: "Set To Do reminder…"; enabled: root.can-remind; clicked => { root.open-reminder(); } } }
+                                        if !root.selected-open: HorizontalLayout { width: 100%; spacing: Tokens.space-2; alignment: start;
+                                            if root.selected-terminal: PrimaryButton { text: "Reopen for review"; enabled: !root.busy; clicked => { root.decision(0); } }
+                                            if !root.selected-terminal: SecondaryButton { text: "Still open — track it"; enabled: !root.busy; clicked => { root.decision(1); } }
+                                            Rectangle { horizontal-stretch: 1; }
+                                        }
+                                    }
+                                }
+                                if !root.action-status.is-empty: WrappedText { text: root.action-status; color: root.action-status-succeeded ? Tokens.success : Tokens.warning; size: Tokens.font-13; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

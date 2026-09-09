@@ -10,16 +10,17 @@ use std::sync::atomic::Ordering;
 mod scanning;
 pub(crate) use scanning::{ReviewMessage, ScanProgress, ScanResult, probe, scan};
 
-#[allow(dead_code)]
-pub(crate) const SHOW_HANDLED_LABEL: &str =
-    "Show resolved, handled, dismissed, and no-longer-relevant items";
+pub(crate) const SHOW_HANDLED_LABEL: &str = "Show resolved, handled and dismissed";
 
-#[allow(dead_code)]
 pub(crate) struct ReminderDraft {
     pub(crate) key: [u8; 32],
+    #[allow(dead_code)] // T4 reminder draft submission
     pub(crate) account: String,
+    #[allow(dead_code)] // T4 editable reminder title
     pub(crate) title: String,
+    #[allow(dead_code)] // T4 reminder time editor
     pub(crate) when: String,
+    #[allow(dead_code)] // T4 inline validation error
     pub(crate) error: String,
     /// The decision in force on this card immediately before the draft
     /// opened -- i.e. before [`decision_after_setting_reminder`] applied its
@@ -30,13 +31,9 @@ pub(crate) struct ReminderDraft {
     pub(crate) prior_decision: Decision,
 }
 
-/// Per-card decision/urgency facts, independent of the source mail or the
-/// expectation item -- entirely owned/`Copy`, so a `Vec<Option<CardContext>>`
-/// never borrows `self` and stays usable in `show_analysis`'s render loop
-/// alongside `&mut self.draft`/`self.decisions` for whichever card owns an
-/// open reminder draft.
+/// Per-card decision and urgency facts, independent of the source mail or
+/// expectation item.
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
 pub(crate) struct CardContext {
     pub(crate) record: Record,
     pub(crate) terminal: bool,
@@ -58,7 +55,6 @@ pub(crate) fn is_past_due(view: &DeadlineView) -> bool {
     )
 }
 
-#[allow(dead_code)]
 fn card_rank(card: Option<&CardContext>) -> u8 {
     match card {
         Some(card) if card.closed => 2,
@@ -67,7 +63,6 @@ fn card_rank(card: Option<&CardContext>) -> u8 {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn card_order(cards: &[Option<CardContext>]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..cards.len()).collect();
     order.sort_by_key(|&i| (card_rank(cards[i].as_ref()), i));
@@ -75,6 +70,7 @@ pub(crate) fn card_order(cards: &[Option<CardContext>]) -> Vec<usize> {
 }
 
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ReviewState {
     pub messages: Vec<ReviewMessage>,
     pub notices: Vec<String>,
@@ -86,14 +82,15 @@ pub struct ReviewState {
     pub source_failures: usize,
     pub decisions: Decisions,
     pub action_status: String,
+    pub action_status_succeeded: bool,
     #[allow(dead_code)]
     pub pending_reminder: Option<([u8; 32], ReminderRequest)>,
     /// An open reminder draft's implied-tracking change is reverted (see
     /// [`ReviewState::revert_draft_decision`]) whenever this field is
     /// cleared from *inside* `ReviewState` -- an explicit Cancel click or
     /// [`ReviewState::set_scan`] discarding a stale draft on rescan. The
-    /// setup screen's "Scan inboxes" and "Clear results and mail" actions
-    /// (`setup_ui.rs`) instead replace the whole `ReviewState` with
+    /// adapter's "Scan inboxes" and "Clear results and mail" actions instead
+    /// replace the whole `ReviewState` with
     /// `ReviewState::default()`, dropping any open `draft` without going
     /// through that revert. This is left as is deliberately, not an
     /// oversight: unlike a rescan, which redraws the very same cards in
@@ -111,7 +108,6 @@ pub struct ReviewState {
     /// the open draft closes (see [`ReviewState::show_draft`]), so the
     /// scroll-into-view happens exactly once per draft.
     pub(crate) draft_scrolled: bool,
-    #[allow(dead_code)]
     pub(crate) show_handled: bool,
 }
 
@@ -227,7 +223,9 @@ impl ReviewState {
             let mut r = self.decisions.get(&key);
             r.decision = decision;
             r.updated = now();
-            self.action_status = match self.decisions.update(r) {
+            let saved = self.decisions.update(r);
+            self.action_status_succeeded = saved.is_ok();
+            self.action_status = match saved {
                 Ok(()) => "Decision saved on this Windows account.".into(),
                 Err(e) => e,
             };
@@ -276,10 +274,8 @@ impl ReviewState {
             .collect()
     }
 
-    /// Applies a decision/reminder change requested from the "What may need
-    /// your attention" render loop (`review_ui.rs`'s `ReviewState::show_analysis`)
-    /// for the card identified by `key`, updating `self.action_status` with
-    /// the outcome.
+    /// Applies a decision/reminder change requested for the card identified
+    /// by `key`, updating `self.action_status` with the outcome.
     ///
     /// A terminal decision (reached from an action button while a reminder
     /// draft was open on this same card, e.g. "Handled") closes the card
@@ -290,7 +286,6 @@ impl ReviewState {
     /// recorded decision never actually became terminal, so the draft must
     /// stay open and attached to its still-open card rather than vanishing
     /// out from under it.
-    #[allow(dead_code)]
     pub(crate) fn apply_decision_change(
         &mut self,
         key: [u8; 32],
@@ -302,6 +297,7 @@ impl ReviewState {
         r.reminder = reminder;
         r.updated = now();
         let saved = self.decisions.update(r);
+        self.action_status_succeeded = saved.is_ok();
         self.action_status = match &saved {
             Ok(()) => "Decision saved on this Windows account.".into(),
             Err(e) => e.clone(),
@@ -327,7 +323,6 @@ impl ReviewState {
 /// `item.resolution` is `Some` -- it must not flip back to resolved wording
 /// just because closure evidence exists. Only when there is no override at
 /// all does a resolution get to speak for itself.
-#[allow(dead_code)]
 pub(crate) fn status_base_label(decision: Decision, item: &Expectation) -> String {
     match decision {
         Decision::Done => "Handled".into(),
@@ -345,7 +340,6 @@ pub(crate) fn status_base_label(decision: Decision, item: &Expectation) -> Strin
     }
 }
 
-#[allow(dead_code)]
 fn event_passed_status_label(event: &EventPassed) -> String {
     let date = chrono::DateTime::from_timestamp(event.end, 0).map_or_else(
         || "unknown date".to_string(),
@@ -357,7 +351,6 @@ fn event_passed_status_label(event: &EventPassed) -> String {
     );
     format!("Closed: event passed ({}, ended {date})", event.name)
 }
-#[allow(dead_code)]
 fn resolution_status_label(kind: Option<ResolutionKind>) -> &'static str {
     match kind {
         None => "Resolved",
@@ -370,7 +363,6 @@ fn resolution_status_label(kind: Option<ResolutionKind>) -> &'static str {
 }
 /// Appends " (evidence in another conversation)" to `base` when
 /// [`status_shows_cross_thread`] says the suffix applies.
-#[allow(dead_code)]
 pub(crate) fn status_label(base: &str, cross_thread: bool) -> String {
     if cross_thread {
         format!("{base} (evidence in another conversation)")
@@ -387,7 +379,6 @@ pub(crate) fn status_label(base: &str, cross_thread: bool) -> String {
 /// status text instead. A manually "Handled" item, for example, must not
 /// read "Handled (evidence in another conversation)" just because some
 /// earlier cross-thread resolution happens to sit on the same item.
-#[allow(dead_code)]
 pub(crate) fn status_shows_cross_thread(
     decision: Decision,
     resolved: bool,
@@ -427,7 +418,6 @@ pub(crate) fn resolution_anchor_label(
 /// resolution came from the cross-thread closure pass (`item.cross_thread`),
 /// surfaced as its own segment alongside the "Scan coverage and errors"
 /// panel note (`scanning::scan_closures`'s own conversation note).
-#[allow(dead_code)]
 pub(crate) fn expectations_summary(
     analysis: &Expectations,
     cards: &[Option<CardContext>],
@@ -486,7 +476,6 @@ pub(crate) fn expectations_summary(
 /// so `closed` is not (and must not be) a parameter here: `draft_open_here`
 /// is the only thing that can additionally disable the button, guarding
 /// against silently replacing a draft the user may have already edited.
-#[allow(dead_code)]
 pub(crate) fn reminder_button_enabled(reminder: Reminder, draft_open_here: bool) -> bool {
     reminder == Reminder::None && !draft_open_here
 }
@@ -499,7 +488,6 @@ pub(crate) fn reminder_button_enabled(reminder: Reminder, draft_open_here: bool)
 /// (which rules out a terminal decision or an un-overridden resolution)
 /// guards `card_action_buttons`'s open-card branch -- so no other input is
 /// meaningful here.
-#[allow(dead_code)]
 pub(crate) fn decision_after_setting_reminder(current: Decision) -> Decision {
     match current {
         Decision::Watching => Decision::Watching,
@@ -531,12 +519,10 @@ fn decision_after_cancel(prior: Decision, current: Decision) -> Option<Decision>
 /// reminder draft is currently open for this card's key, in which case the
 /// card (and its draft) must stay visible so a rescan-independent decision
 /// change (e.g. closure by later evidence) can never strand an open draft
-/// behind a hidden card. See [`ReviewState::show_analysis`].
-#[allow(dead_code)]
+/// behind a hidden card.
 pub(crate) fn card_hidden(closed: bool, show_handled: bool, draft_open_here: bool) -> bool {
     closed && !show_handled && !draft_open_here
 }
-#[allow(dead_code)]
 pub(crate) fn default_reminder() -> String {
     (chrono::Local::now() + chrono::Duration::hours(1))
         .format("%Y-%m-%d %H:%M")
@@ -558,11 +544,6 @@ pub(crate) fn reminder_time(value: &str) -> Result<i64, ()> {
 /// belongs in (spec §4.3). `closed` always wins, regardless of the deadline
 /// -- matches [`card_rank`]'s existing rank-2-for-closed behavior.
 ///
-/// Not yet consumed by any render loop -- the T2+ review list groups by
-/// this, but `review_ui.rs` still renders a single flat, ranked list (see
-/// `card_order`). `#[allow(dead_code)]` is scoped to just this type/fn until
-/// that wiring lands.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ListGroup {
     PastDue,
@@ -571,7 +552,6 @@ pub(crate) enum ListGroup {
     Closed,
 }
 
-#[allow(dead_code)]
 #[must_use]
 pub(crate) fn list_group(card: &CardContext) -> ListGroup {
     if card.closed {
@@ -590,10 +570,6 @@ pub(crate) fn list_group(card: &CardContext) -> ListGroup {
 /// `Mine`/`Team` match only their own [`Owner`] -- `Owner::Unclear` matches
 /// neither, so it appears only under `All`.
 ///
-/// Not yet consumed by any render loop -- the T2+ review nav filters by
-/// this; `review_ui.rs` shows every card today. `#[allow(dead_code)]` is
-/// scoped to just this type/method until that wiring lands.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Filter {
     All,
@@ -602,7 +578,6 @@ pub enum Filter {
 }
 
 impl Filter {
-    #[allow(dead_code)]
     #[must_use]
     pub fn matches(self, owner: Owner) -> bool {
         match self {
@@ -638,11 +613,6 @@ pub fn open_badge_count(cards: &[Option<CardContext>]) -> usize {
 /// The scan-progress strip's state (spec §4.2): actively scanning, a
 /// finished scan's summary/coverage, or idle (no scan has run yet).
 ///
-/// Not yet consumed by `setup_ui.rs` -- it still renders the busy block
-/// inline (see the T1 brief's note that wiring this through is optional for
-/// T1). `#[allow(dead_code)]` is scoped to just this type/fn until the T2+
-/// scan strip reads it.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScanStrip {
     Scanning {
@@ -653,6 +623,7 @@ pub enum ScanStrip {
         total: usize,
         elapsed_secs: i64,
         percent: u8,
+        stopping: bool,
     },
     Finished {
         incomplete: bool,
@@ -662,7 +633,6 @@ pub enum ScanStrip {
     Idle,
 }
 
-#[allow(dead_code)]
 #[must_use]
 pub fn scan_strip(progress: Option<&ScanProgress>, review: &ReviewState) -> ScanStrip {
     let Some(progress) = progress else {
@@ -709,11 +679,11 @@ pub fn scan_strip(progress: Option<&ScanProgress>, review: &ReviewState) -> Scan
         total,
         elapsed_secs,
         percent,
+        stopping: progress.cancel.load(Ordering::Relaxed),
     }
 }
 
-#[cfg(feature = "ui-screenshot")]
-#[allow(dead_code)]
+#[cfg(any(test, feature = "ui-screenshot"))]
 pub fn layout_fixture() -> ReviewState {
     use openloops_graph::live::review::MailItem;
     use openloops_inference::expectations::{Anchor, Expectation};
@@ -802,6 +772,8 @@ pub fn layout_fixture() -> ReviewState {
         },
         "Synthetic layout check".into(),
     );
+    state.action_status = "Decision saved on this Windows account.".into();
+    state.action_status_succeeded = true;
     state
 }
 
@@ -1178,12 +1150,10 @@ mod tests {
         }
     }
 
-    /// `closed` (together with whether a draft is open for the card) is
-    /// what `card_hidden` decides on, which is `show_analysis`'s hide
-    /// condition (`if card_hidden(card.closed, self.show_handled,
-    /// show_draft_here) { continue; }`). Exercising `closed` here, with no
-    /// draft open, covers "hidden unless the show-handled checkbox is on"
-    /// without needing to render native widgets; `card_hidden`
+    /// `closed` (together with whether a draft is open for the card) is what
+    /// `card_hidden` decides on. Exercising `closed` here, with no draft open,
+    /// covers "hidden unless the show-handled checkbox is on" without needing
+    /// to render native widgets; `card_hidden`
     /// itself (including the open-draft override) is covered separately by
     /// its own table test above.
     #[test]
@@ -1784,6 +1754,7 @@ mod tests {
                 total,
                 elapsed_secs,
                 percent,
+                stopping,
             } => {
                 assert_eq!(phase, "Finding open loops");
                 assert_eq!(conversation_index, 0);
@@ -1792,6 +1763,7 @@ mod tests {
                 assert_eq!(total, 10);
                 assert_eq!(elapsed_secs, 0);
                 assert_eq!(percent, 40);
+                assert!(!stopping);
             }
             other => panic!("expected Scanning, got {other:?}"),
         }
@@ -1815,4 +1787,8 @@ mod tests {
             other => panic!("expected Scanning, got {other:?}"),
         }
     }
+}
+#[test]
+fn show_handled_label_matches_the_review_spec() {
+    assert_eq!(SHOW_HANDLED_LABEL, "Show resolved, handled and dismissed");
 }
