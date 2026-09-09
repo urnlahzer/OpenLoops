@@ -14,13 +14,9 @@ pub(crate) const SHOW_HANDLED_LABEL: &str = "Show resolved, handled and dismisse
 
 pub(crate) struct ReminderDraft {
     pub(crate) key: [u8; 32],
-    #[allow(dead_code)] // T4 reminder draft submission
     pub(crate) account: String,
-    #[allow(dead_code)] // T4 editable reminder title
     pub(crate) title: String,
-    #[allow(dead_code)] // T4 reminder time editor
     pub(crate) when: String,
-    #[allow(dead_code)] // T4 inline validation error
     pub(crate) error: String,
     /// The decision in force on this card immediately before the draft
     /// opened -- i.e. before [`decision_after_setting_reminder`] applied its
@@ -83,7 +79,6 @@ pub struct ReviewState {
     pub decisions: Decisions,
     pub action_status: String,
     pub action_status_succeeded: bool,
-    #[allow(dead_code)]
     pub pending_reminder: Option<([u8; 32], ReminderRequest)>,
     /// An open reminder draft's implied-tracking change is reverted (see
     /// [`ReviewState::revert_draft_decision`]) whenever this field is
@@ -103,11 +98,6 @@ pub struct ReviewState {
     /// purpose. Treating "I was mid-draft when I started over" as "still
     /// tracking" is also the safer default of the two silent outcomes.
     pub(crate) draft: Option<ReminderDraft>,
-    /// Whether the open `draft`'s card has already been scrolled into view
-    /// this time it opened. Reset to `false` whenever a new draft opens or
-    /// the open draft closes (see [`ReviewState::show_draft`]), so the
-    /// scroll-into-view happens exactly once per draft.
-    pub(crate) draft_scrolled: bool,
     pub(crate) show_handled: bool,
 }
 
@@ -209,7 +199,6 @@ impl ReviewState {
         if let Some(draft) = self.draft.take() {
             self.revert_draft_decision(draft.prior_decision, draft.key);
         }
-        self.draft_scrolled = false;
     }
     /// Reverts the implied-tracking change from opening a reminder draft
     /// (see [`decision_after_setting_reminder`]) for `key`, given `prior` --
@@ -310,7 +299,6 @@ impl ReviewState {
             && self.draft.as_ref().is_some_and(|d| d.key == key)
         {
             self.draft = None;
-            self.draft_scrolled = false;
         }
     }
 }
@@ -387,7 +375,6 @@ pub(crate) fn status_shows_cross_thread(
     cross_thread && decision == Decision::Review && resolved
 }
 
-#[allow(dead_code)]
 pub(crate) fn resolution_anchor_label(
     kind: Option<ResolutionKind>,
     cross_thread: bool,
@@ -528,7 +515,6 @@ pub(crate) fn default_reminder() -> String {
         .format("%Y-%m-%d %H:%M")
         .to_string()
 }
-#[allow(dead_code)]
 pub(crate) fn reminder_time(value: &str) -> Result<i64, ()> {
     use chrono::TimeZone;
     let naive = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M").map_err(|_| ())?;
@@ -683,56 +669,142 @@ pub fn scan_strip(progress: Option<&ScanProgress>, review: &ReviewState) -> Scan
     }
 }
 
+/// A message fixture row for [`layout_fixture`]: `(subject, body, sender,
+/// sender_address, source_label, conversation)`. `own_addresses` is always
+/// `user@example.invalid`, so a message "from" that address renders with the
+/// sent tint (see `conversation_rows`'s `sent` flag).
 #[cfg(any(test, feature = "ui-screenshot"))]
+type MessageFixture = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+);
+
+#[cfg(any(test, feature = "ui-screenshot"))]
+#[allow(clippy::too_many_lines)]
 pub fn layout_fixture() -> ReviewState {
     use openloops_graph::live::review::MailItem;
     use openloops_inference::expectations::{Anchor, Expectation};
     let mut state = ReviewState::default();
     let body = "Please send the draft budget by Friday.";
-    for index in 0..2 {
+    // m2 sits in its own conversation ("synthetic-thread-2") rather than
+    // reusing m0/m1's "synthetic-thread": item 0's completion evidence
+    // points at it, and the "evidence in another conversation" badge
+    // (`cross_thread`) must stay truthful -- it would be a lie if the
+    // completion lived in the very thread `conversation_rows` already shows
+    // for that same card.
+    let fixtures: [MessageFixture; 4] = [
+        (
+            "Quarterly planning",
+            body,
+            "Alex <alex@example.invalid>",
+            "alex@example.invalid",
+            "Personal mailbox / Inbox",
+            "synthetic-thread",
+        ),
+        (
+            "Quarterly planning",
+            "I sent the draft budget this morning.\n-----Original Message-----\nPlease send the draft budget by Friday.",
+            "Synthetic User <user@example.invalid>",
+            "user@example.invalid",
+            "Group: planning@example.invalid",
+            "synthetic-thread",
+        ),
+        (
+            "Budget follow-up",
+            "I sent the draft budget this morning.",
+            "Synthetic User <user@example.invalid>",
+            "user@example.invalid",
+            "Group: planning@example.invalid",
+            "synthetic-thread-2",
+        ),
+        (
+            "Vendor invoice",
+            "Please confirm the vendor invoice by end of day Friday.",
+            "Priya <priya@example.invalid>",
+            "priya@example.invalid",
+            "Personal mailbox / Inbox",
+            "synthetic-thread-3",
+        ),
+    ];
+    for (index, (subject, body, sender, sender_address, label, conversation)) in
+        fixtures.into_iter().enumerate()
+    {
         let item = MailItem {
-            subject: "Quarterly planning".into(),
+            subject: subject.into(),
             body: body.into(),
-            sender: "Alex <alex@example.invalid>".into(),
-            sender_address: "alex@example.invalid".into(),
+            sender: sender.into(),
+            sender_address: sender_address.into(),
+            own_addresses: vec!["user@example.invalid".into()],
             received: "2026-09-06T12:00:00Z".into(),
             id: format!("synthetic-{index}"),
             account: "synthetic".into(),
-            conversation: format!("synthetic-{index}"),
+            conversation: conversation.into(),
+            web_link: format!("https://outlook.office.com/mail/synthetic-{index}"),
             ..MailItem::default()
         };
-        state.messages.push(
-            scanning::prepare(
-                &item,
-                if index == 0 {
-                    "Personal mailbox / Inbox"
-                } else {
-                    "Group: planning@example.invalid"
-                },
-                index,
-            )
-            .expect("synthetic fixture"),
-        );
+        state
+            .messages
+            .push(scanning::prepare(&item, label, index).expect("synthetic fixture"));
     }
-    let items = (0..2)
-        .map(|index| Expectation {
-            action: if index == 0 {
-                "Send the draft budget to Alex".into()
-            } else {
-                "Confirm who will send the team budget".into()
-            },
+    let items = vec![
+        // Card 1: tracked by you, a reminder already created, and completion
+        // evidence found in another conversation (m2).
+        Expectation {
+            action: "Send the draft budget to Alex".into(),
             action_phrase: "send the draft budget".into(),
-            owner: if index == 0 { Owner::You } else { Owner::Team },
+            owner: Owner::You,
             waiting_party: "Alex <alex@example.invalid>".into(),
             kind: "request".into(),
             evidence: Anchor {
-                message: format!("m{index}"),
+                message: "m0".into(),
                 block: 0,
                 quote: body.into(),
                 context: body.into(),
             },
             deadline: Some(Anchor {
-                message: format!("m{index}"),
+                message: "m0".into(),
+                block: 0,
+                quote: "Friday".into(),
+                context: body.into(),
+            }),
+            event: None,
+            event_time: None,
+            resolution: Some(Anchor {
+                message: "m2".into(),
+                block: 0,
+                quote: "I sent the draft budget this morning.".into(),
+                context: "I sent the draft budget this morning.".into(),
+            }),
+            resolution_kind: Some(ResolutionKind::Completed),
+            uncertainty: String::new(),
+            unverified_deadline: false,
+            unverified_resolution: false,
+            cross_thread: true,
+            event_passed: None,
+        },
+        // Card 2: still needs a decision, no reminder -- this is the card
+        // the preview's open draft attaches to. Its evidence message (m1)
+        // shares m0's conversation, so the expanded "Full scanned
+        // conversation" disclosure shows both messages: the sent tint on
+        // m1 and its nested quoted-history block.
+        Expectation {
+            action: "Confirm who will send the team budget".into(),
+            action_phrase: "send the draft budget".into(),
+            owner: Owner::Team,
+            waiting_party: "Alex <alex@example.invalid>".into(),
+            kind: "request".into(),
+            evidence: Anchor {
+                message: "m1".into(),
+                block: 0,
+                quote: body.into(),
+                context: body.into(),
+            },
+            deadline: Some(Anchor {
+                message: "m1".into(),
                 block: 0,
                 quote: "Friday".into(),
                 context: body.into(),
@@ -741,17 +813,44 @@ pub fn layout_fixture() -> ReviewState {
             event_time: None,
             resolution: None,
             resolution_kind: None,
-            uncertainty: if index == 0 {
-                String::new()
-            } else {
-                "The request was sent to the Group; no individual owner is named.".into()
-            },
+            uncertainty: "The request was sent to the Group; no individual owner is named.".into(),
             unverified_deadline: false,
             unverified_resolution: false,
             cross_thread: false,
             event_passed: None,
-        })
-        .collect();
+        },
+        // Card 3: a reminder attempt with no confirmed outcome, so the
+        // preview also exercises the "attempted" marker callout and its two
+        // reconcile buttons.
+        Expectation {
+            action: "Confirm the vendor invoice by Friday".into(),
+            action_phrase: "confirm the vendor invoice".into(),
+            owner: Owner::You,
+            waiting_party: "Priya <priya@example.invalid>".into(),
+            kind: "request".into(),
+            evidence: Anchor {
+                message: "m3".into(),
+                block: 0,
+                quote: "Please confirm the vendor invoice by end of day Friday.".into(),
+                context: "Please confirm the vendor invoice by end of day Friday.".into(),
+            },
+            deadline: Some(Anchor {
+                message: "m3".into(),
+                block: 0,
+                quote: "Friday".into(),
+                context: "Please confirm the vendor invoice by end of day Friday.".into(),
+            }),
+            event: None,
+            event_time: None,
+            resolution: None,
+            resolution_kind: None,
+            uncertainty: String::new(),
+            unverified_deadline: false,
+            unverified_resolution: false,
+            cross_thread: false,
+            event_passed: None,
+        },
+    ];
     state.set_scan(
         ScanResult {
             analysis: Expectations {
@@ -761,8 +860,8 @@ pub fn layout_fixture() -> ReviewState {
                 degraded: 0,
             },
             failures: vec![],
-            analyzed: 2,
-            total: 2,
+            analyzed: 4,
+            total: 4,
             cancelled: false,
             conversation_notes: vec![],
             cross_thread_closures: 0,
@@ -772,6 +871,38 @@ pub fn layout_fixture() -> ReviewState {
         },
         "Synthetic layout check".into(),
     );
+    let first_key =
+        state
+            .decisions
+            .fingerprint("synthetic", "synthetic-0", "send the draft budget");
+    let second_key =
+        state
+            .decisions
+            .fingerprint("synthetic", "synthetic-1", "send the draft budget");
+    let third_key =
+        state
+            .decisions
+            .fingerprint("synthetic", "synthetic-3", "confirm the vendor invoice");
+    state.decisions.records.push(Record {
+        key: first_key,
+        decision: Decision::Mine,
+        reminder: Reminder::Created,
+        updated: now(),
+    });
+    state.decisions.records.push(Record {
+        key: third_key,
+        decision: Decision::Watching,
+        reminder: Reminder::Attempted,
+        updated: now(),
+    });
+    state.draft = Some(ReminderDraft {
+        key: second_key,
+        account: "synthetic".into(),
+        title: "Confirm who will send the team budget".into(),
+        when: default_reminder(),
+        error: String::new(),
+        prior_decision: Decision::Review,
+    });
     state.action_status = "Decision saved on this Windows account.".into();
     state.action_status_succeeded = true;
     state
@@ -1457,7 +1588,7 @@ mod tests {
     }
 
     #[test]
-    fn set_scan_clears_an_open_draft_and_its_scroll_flag() {
+    fn set_scan_clears_an_open_draft() {
         // A rescan rebuilds `analysis`/`messages` from scratch; an open
         // draft refers to a card that may no longer exist, so it must not
         // survive the rescan orphaned.
@@ -1470,12 +1601,10 @@ mod tests {
                 error: String::new(),
                 prior_decision: Decision::Review,
             }),
-            draft_scrolled: true,
             ..ReviewState::default()
         };
         state.set_scan(empty_scan_result(), "model".into());
         assert!(state.draft.is_none());
-        assert!(!state.draft_scrolled);
     }
 
     #[test]
@@ -1786,6 +1915,27 @@ mod tests {
             ScanStrip::Scanning { percent, .. } => assert_eq!(percent, 0),
             other => panic!("expected Scanning, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sender_label_falls_back_to_other_participant_without_a_sender_block() {
+        let mail = openloops_graph::live::review::MailItem {
+            id: "no-sender".into(),
+            account: "synthetic".into(),
+            received: "2026-09-06T12:00:00Z".into(),
+            sender: String::new(),
+            sender_address: String::new(),
+            own_addresses: vec!["user@example.invalid".into()],
+            body: "Body text.".into(),
+            ..Default::default()
+        };
+        let message = scanning::prepare(&mail, "Inbox", 0).unwrap();
+        assert!(!message.input.from_user);
+        assert!(message.input.message.sender.is_none());
+        assert_eq!(
+            crate::slint_review::sender_label(&message),
+            "Other participant"
+        );
     }
 }
 #[test]

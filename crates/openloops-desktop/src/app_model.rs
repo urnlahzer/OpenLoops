@@ -24,7 +24,6 @@ pub(crate) enum Outcome {
         Result<crate::review_model::ScanResult, ProviderError>,
         String,
     ),
-    #[allow(dead_code)]
     Reminder([u8; 32], openloops_graph::live::reminders::ReminderOutcome),
 }
 
@@ -588,7 +587,6 @@ pub(crate) fn busy_indicator(elapsed_millis: u128) -> &'static str {
 /// `https://example.invalid/outlook.office.com/`, where the accepted text
 /// appears but not as the scheme+host prefix.
 #[must_use]
-#[allow(dead_code)]
 pub fn is_outlook_link(url: &str) -> bool {
     url.starts_with("https://outlook.office.com/")
         || url.starts_with("https://outlook.office365.com/")

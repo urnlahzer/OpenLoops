@@ -2,19 +2,25 @@
 use std::{cell::RefCell, rc::Rc, sync::atomic::Ordering};
 
 use crate::{
-    app_model::{AppModel, Outcome, Service, Status},
+    app_model::{self, AppModel, Outcome, Service, Status},
     deadline_view::label as deadline_label,
-    loop_state::{Decision, Reminder},
+    loop_state::{Decision, Reminder, marker},
     review_model::{
         CardContext, Filter, ListGroup, ReminderDraft, ReviewState, SHOW_HANDLED_LABEL, ScanStrip,
         card_hidden, card_order, decision_after_setting_reminder, default_reminder,
-        expectations_summary, list_group, open_badge_count, reminder_button_enabled,
-        status_base_label, status_label, status_shows_cross_thread,
+        expectations_summary, list_group, open_badge_count, reminder_button_enabled, reminder_time,
+        resolution_anchor_label, status_base_label, status_label, status_shows_cross_thread,
     },
-    slint_ui::{AppWindow, MetaCell, ReviewPill, ReviewRow, ScanStripModel, refresh, start_timer},
+    slint_ui::{
+        AppWindow, CompletionCard, ConversationRow, EvidenceCard, MetaCell, ReminderStateView,
+        ReviewPill, ReviewRow, ScanStripModel, refresh, start_timer,
+    },
 };
 use openloops_graph::live::{ConnectionConfig, review::load_recent};
-use openloops_inference::expectations::{Expectation, Owner};
+use openloops_inference::{
+    blocks::CanonicalBlock,
+    expectations::{Anchor, EventPassed, Expectation, Owner},
+};
 use slint::{ComponentHandle, ModelRc, Timer, VecModel};
 
 // Review decision callback codes used by `ui/review.slint`.
@@ -60,6 +66,336 @@ fn reminder_title(decision: Decision, action: &str) -> String {
     } else {
         action.to_owned()
     }
+}
+
+const REMINDER_VALIDATION_HINT: &str = "Enter a future local date/time and a title of 3–320 bytes. Ambiguous daylight-saving times need a different time.";
+const TODO_URL: &str = "https://to-do.office.com/tasks/";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DraftView {
+    title: String,
+    when: String,
+    scheduled_line: String,
+    valid: bool,
+}
+
+fn reminder_quick_pick_in_hour(now: chrono::DateTime<chrono::Local>) -> String {
+    (now + chrono::Duration::hours(1))
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
+}
+
+fn reminder_quick_pick_tomorrow(now: chrono::DateTime<chrono::Local>) -> String {
+    (now + chrono::Duration::days(1))
+        .format("%Y-%m-%d 09:00")
+        .to_string()
+}
+
+fn scheduled_instant_line(value: &str) -> (String, bool) {
+    let Ok(at) = reminder_time(value) else {
+        return (REMINDER_VALIDATION_HINT.into(), false);
+    };
+    let Some(time) = chrono::DateTime::from_timestamp(at, 0) else {
+        return (REMINDER_VALIDATION_HINT.into(), false);
+    };
+    (
+        format!(
+            "Scheduled instant: {}",
+            time.with_timezone(&chrono::Local)
+                .format("%a %b %d, %Y at %H:%M %:z")
+        ),
+        true,
+    )
+}
+
+/// The reminder title rule, shared by [`draft_view`] (as-you-type validity)
+/// and the "Create this reminder" click handler (the same rule enforced
+/// before dispatch): at least 3 non-whitespace-trimmed bytes, and the raw
+/// (untrimmed) title never over 320 bytes.
+fn title_is_valid(title: &str) -> bool {
+    title.trim().len() >= 3 && title.len() <= 320
+}
+
+fn draft_view(draft: Option<&ReminderDraft>) -> Option<DraftView> {
+    let draft = draft?;
+    let (scheduled_line, time_valid) = scheduled_instant_line(&draft.when);
+    Some(DraftView {
+        title: draft.title.clone(),
+        when: draft.when.clone(),
+        scheduled_line: if draft.error.is_empty() {
+            scheduled_line
+        } else {
+            draft.error.clone()
+        },
+        valid: time_valid && title_is_valid(&draft.title),
+    })
+}
+
+/// Updates only the draft-panel properties from `model`'s current draft,
+/// rather than the full [`refresh`]/`sync` -- an edit to the title or the
+/// reminder time changes nothing else on screen (the title/time text boxes
+/// are already current through their own two-way binding), so re-deriving
+/// every row, pill, evidence card and conversation row on each keystroke
+/// would be wasted work. A no-op once the draft has closed.
+fn refresh_draft(model: &Rc<RefCell<AppModel>>, weak: &slint::Weak<AppWindow>) {
+    let Some(window) = weak.upgrade() else {
+        return;
+    };
+    let Some(view) = draft_view(model.borrow().review.draft.as_ref()) else {
+        return;
+    };
+    window.set_draft_title(view.title.into());
+    window.set_draft_when(view.when.into());
+    window.set_draft_scheduled_line(view.scheduled_line.into());
+    window.set_draft_valid(view.valid);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReminderView {
+    state: &'static str,
+    text: &'static str,
+    marker: String,
+}
+
+fn reminder_state_view(record: &crate::loop_state::Record) -> ReminderView {
+    match record.reminder {
+        Reminder::None => ReminderView {
+            state: "none",
+            text: "",
+            marker: String::new(),
+        },
+        Reminder::Created => ReminderView {
+            state: "created",
+            text: "Reminder created in Microsoft To Do. Manage its alerts and completion there; marking this loop handled does not modify the task.",
+            marker: String::new(),
+        },
+        Reminder::Attempted => ReminderView {
+            state: "attempted",
+            text: "A reminder attempt has no confirmed outcome. Inspect Microsoft To Do before allowing another attempt.",
+            marker: format!("Reference: {}", marker(&record.key)),
+        },
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EvidenceView {
+    label: String,
+    sender: String,
+    time: String,
+    quote: String,
+    context: String,
+    subject_note: String,
+    url: String,
+}
+
+pub(crate) fn sender_label(message: &crate::review_model::ReviewMessage) -> String {
+    if message.input.from_user {
+        "You".into()
+    } else {
+        message
+            .input
+            .message
+            .sender
+            .as_ref()
+            .map_or_else(|| "Other participant".into(), CanonicalBlock::as_string)
+    }
+}
+
+fn gated_outlook_url(url: &str) -> String {
+    if app_model::is_outlook_link(url) {
+        url.to_owned()
+    } else {
+        String::new()
+    }
+}
+
+/// Wraps a non-empty evidence quote in typographic quotes (Companion §4.4);
+/// an empty quote stays empty so `!evidence.quote.is-empty` in `review.slint`
+/// still gates the quote block correctly.
+fn typographic_quote(quote: &str) -> String {
+    if quote.is_empty() {
+        String::new()
+    } else {
+        format!("“{quote}”")
+    }
+}
+
+fn evidence_card(
+    label: &str,
+    anchor: &Anchor,
+    messages: &[crate::review_model::ReviewMessage],
+) -> EvidenceView {
+    let message = messages
+        .iter()
+        .find(|message| message.input.handle == anchor.message);
+    EvidenceView {
+        label: label.into(),
+        sender: message.map_or_else(String::new, sender_label),
+        time: message.map_or_else(String::new, |message| message.date_label.clone()),
+        quote: typographic_quote(&anchor.quote),
+        context: if anchor.context == anchor.quote {
+            String::new()
+        } else {
+            anchor.context.clone()
+        },
+        subject_note: String::new(),
+        url: message.map_or_else(String::new, |message| gated_outlook_url(&message.web_link)),
+    }
+}
+
+fn event_time_evidence_card(
+    label: &str,
+    event: &EventPassed,
+    messages: &[crate::review_model::ReviewMessage],
+) -> EvidenceView {
+    let message = messages
+        .iter()
+        .find(|message| message.input.handle == event.message_handle);
+    EvidenceView {
+        label: label.into(),
+        sender: message.map_or_else(String::new, sender_label),
+        time: message.map_or_else(String::new, |message| message.date_label.clone()),
+        quote: String::new(),
+        context: String::new(),
+        subject_note: if event.from_subject {
+            "From the subject line of this message".into()
+        } else {
+            String::new()
+        },
+        url: message.map_or_else(String::new, |message| gated_outlook_url(&message.web_link)),
+    }
+}
+
+fn evidence_cards(
+    item: &Expectation,
+    messages: &[crate::review_model::ReviewMessage],
+) -> Vec<EvidenceView> {
+    let mut cards = vec![evidence_card(
+        "Original expectation",
+        &item.evidence,
+        messages,
+    )];
+    if let Some(anchor) = &item.deadline {
+        cards.push(evidence_card("Deadline evidence", anchor, messages));
+    }
+    if let Some(anchor) = &item.event {
+        cards.push(evidence_card("Event evidence", anchor, messages));
+    }
+    if let Some(event) = &item.event_passed {
+        cards.push(event_time_evidence_card(
+            "Event time evidence",
+            event,
+            messages,
+        ));
+    }
+    cards
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CompletionView {
+    state: &'static str,
+    label: String,
+    sender: String,
+    time: String,
+    quote: String,
+    cross_thread: bool,
+    url: String,
+}
+
+fn completion_card(
+    item: &Expectation,
+    messages: &[crate::review_model::ReviewMessage],
+) -> CompletionView {
+    if let Some(anchor) = &item.resolution {
+        let evidence = evidence_card(
+            resolution_anchor_label(item.resolution_kind, item.cross_thread),
+            anchor,
+            messages,
+        );
+        CompletionView {
+            state: "evidence",
+            label: evidence.label,
+            sender: evidence.sender,
+            time: evidence.time,
+            quote: evidence.quote,
+            cross_thread: item.cross_thread,
+            url: evidence.url,
+        }
+    } else if item.unverified_resolution {
+        CompletionView {
+            state: "unvalidated",
+            label:
+                "The analysis proposed a completion but it could not be validated; treat as open."
+                    .into(),
+            sender: String::new(),
+            time: String::new(),
+            quote: String::new(),
+            cross_thread: false,
+            url: String::new(),
+        }
+    } else {
+        CompletionView {
+            state: "none",
+            label: "No matching completion was identified in the scanned conversation. Work may have happened elsewhere or outside this history window.".into(),
+            sender: String::new(), time: String::new(), quote: String::new(), cross_thread: false, url: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ConversationRowView {
+    initials: String,
+    sender: String,
+    meta: String,
+    body: String,
+    sent: bool,
+    quoted_history: String,
+}
+
+fn initials(name: &str) -> String {
+    name.split(|character: char| character.is_whitespace() || character == '(' || character == '<')
+        .filter(|part| !part.is_empty())
+        .take(2)
+        .filter_map(|part| part.chars().next())
+        .flat_map(char::to_uppercase)
+        .collect()
+}
+
+fn conversation_rows(
+    messages: &[crate::review_model::ReviewMessage],
+    source: &crate::review_model::ReviewMessage,
+) -> Vec<ConversationRowView> {
+    messages
+        .iter()
+        .filter(|message| {
+            message.account == source.account && message.conversation == source.conversation
+        })
+        .map(|message| {
+            let sender = sender_label(message);
+            ConversationRowView {
+                initials: initials(&sender),
+                sender,
+                meta: format!("{} · {}", message.date_label, source_short(&message.source)),
+                body: message
+                    .input
+                    .message
+                    .body_blocks
+                    .iter()
+                    .map(CanonicalBlock::as_string)
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+                sent: message.input.from_user,
+                quoted_history: message
+                    .input
+                    .message
+                    .quote_blocks
+                    .iter()
+                    .map(CanonicalBlock::as_string)
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+            }
+        })
+        .collect()
 }
 
 struct ReviewUiState {
@@ -111,6 +447,12 @@ struct SelectedView {
     can_track: bool,
     can_watch: bool,
     can_remind: bool,
+    draft: Option<DraftView>,
+    reminder: ReminderView,
+    evidence: Vec<EvidenceView>,
+    completion: CompletionView,
+    conversation_title: String,
+    conversation: Vec<ConversationRowView>,
 }
 
 fn source_message<'a>(
@@ -339,6 +681,26 @@ fn selected_view(
             && item.owner != Owner::You
             && card.record.decision != Decision::Watching,
         can_remind: !card.closed && reminder_button_enabled(card.record.reminder, draft_open),
+        draft: draft_view(
+            review
+                .draft
+                .as_ref()
+                .filter(|draft| draft.key == card.record.key),
+        ),
+        reminder: reminder_state_view(&card.record),
+        evidence: evidence_cards(item, &review.messages),
+        completion: completion_card(item, &review.messages),
+        conversation_title: format!(
+            "Full scanned conversation · {} · {} messages",
+            source.input.message.subject.as_string(),
+            review
+                .messages
+                .iter()
+                .filter(|message| message.account == source.account
+                    && message.conversation == source.conversation)
+                .count()
+        ),
+        conversation: conversation_rows(&review.messages, source),
     })
 }
 
@@ -592,6 +954,63 @@ fn sync_review_inner(
         window.set_can_track(selected.can_track);
         window.set_can_watch(selected.can_watch);
         window.set_can_remind(selected.can_remind && !busy);
+        if let Some(draft) = selected.draft {
+            window.set_draft_open(true);
+            window.set_draft_title(draft.title.into());
+            window.set_draft_when(draft.when.into());
+            window.set_draft_scheduled_line(draft.scheduled_line.into());
+            window.set_draft_valid(draft.valid);
+        } else {
+            window.set_draft_open(false);
+            window.set_draft_title("".into());
+            window.set_draft_when("".into());
+            window.set_draft_scheduled_line("".into());
+            window.set_draft_valid(false);
+        }
+        window.set_reminder_state(ReminderStateView {
+            state: selected.reminder.state.into(),
+            text: selected.reminder.text.into(),
+            marker: selected.reminder.marker.into(),
+        });
+        window.set_evidence_cards(ModelRc::new(VecModel::from(
+            selected
+                .evidence
+                .into_iter()
+                .map(|evidence| EvidenceCard {
+                    label: evidence.label.into(),
+                    sender: evidence.sender.into(),
+                    time: evidence.time.into(),
+                    quote: evidence.quote.into(),
+                    context: evidence.context.into(),
+                    subject_note: evidence.subject_note.into(),
+                    url: evidence.url.into(),
+                })
+                .collect::<Vec<_>>(),
+        )));
+        window.set_completion_card(CompletionCard {
+            state: selected.completion.state.into(),
+            label: selected.completion.label.into(),
+            sender: selected.completion.sender.into(),
+            time: selected.completion.time.into(),
+            quote: selected.completion.quote.into(),
+            cross_thread: selected.completion.cross_thread,
+            url: selected.completion.url.into(),
+        });
+        window.set_conversation_title(selected.conversation_title.into());
+        window.set_conversation_rows(ModelRc::new(VecModel::from(
+            selected
+                .conversation
+                .into_iter()
+                .map(|message| ConversationRow {
+                    initials: message.initials.into(),
+                    sender: message.sender.into(),
+                    meta: message.meta.into(),
+                    body: message.body.into(),
+                    sent: message.sent,
+                    quoted_history: message.quoted_history.into(),
+                })
+                .collect::<Vec<_>>(),
+        )));
     } else {
         window.set_review_has_selection(false);
         window.set_review_title("".into());
@@ -603,6 +1022,16 @@ fn sync_review_inner(
         window.set_can_track(false);
         window.set_can_watch(false);
         window.set_can_remind(false);
+        window.set_draft_open(false);
+        window.set_draft_title("".into());
+        window.set_draft_when("".into());
+        window.set_draft_scheduled_line("".into());
+        window.set_draft_valid(false);
+        window.set_reminder_state(ReminderStateView::default());
+        window.set_evidence_cards(ModelRc::default());
+        window.set_completion_card(CompletionCard::default());
+        window.set_conversation_title("".into());
+        window.set_conversation_rows(ModelRc::default());
     }
     let decision_error = model.review.decisions.error.as_deref();
     window.set_review_action_status(decision_error.unwrap_or(&model.review.action_status).into());
@@ -632,12 +1061,73 @@ pub(crate) fn sync_review(
     });
 }
 
+/// Applies a "the task exists" / "no task was created" reconcile answer for
+/// the record at `key`, matching `apply_decision_change`'s own reminder
+/// state to it. Only replaces `apply_decision_change`'s own status text (and
+/// marks it a success) when that change actually saved; a failure (e.g. the
+/// saved-decision storage bound) must keep its error text and
+/// `succeeded = false` rather than being papered over here. Factored out of
+/// `on_reconcile_reminder` so both outcomes are directly testable without a
+/// live `AppWindow`.
+fn apply_reconcile(review: &mut ReviewState, key: [u8; 32], exists: bool) {
+    let record = review.decisions.get(&key);
+    let reminder = if exists {
+        Reminder::Created
+    } else {
+        Reminder::None
+    };
+    review.apply_decision_change(key, record.decision, reminder);
+    if review.action_status_succeeded {
+        review.action_status = if exists {
+            "Recorded: the To Do task exists. Manage it in Microsoft To Do."
+        } else {
+            "Recorded: no task was created. You can set a reminder again."
+        }
+        .into();
+    }
+}
+
+fn dispatch_pending_reminder(model: &mut AppModel) -> bool {
+    let Some((key, request)) = model.review.pending_reminder.take() else {
+        return false;
+    };
+    match ConnectionConfig::new(model.client_id.trim(), None) {
+        Ok(config) => {
+            model.start(
+                Service::Review,
+                "Sign in to create the reviewed Microsoft To Do reminder",
+                move || {
+                    Outcome::Reminder(
+                        key,
+                        openloops_graph::live::reminders::create(&config, &request),
+                    )
+                },
+                || {},
+            );
+            true
+        }
+        Err(error) => {
+            let mut record = model.review.decisions.get(&key);
+            record.reminder = Reminder::None;
+            record.updated = crate::loop_state::now();
+            let _ = model.review.decisions.update(record);
+            model.review.action_status = error.to_string();
+            model.review.action_status_succeeded = false;
+            false
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn register_callbacks(
     window: &AppWindow,
     model: &Rc<RefCell<AppModel>>,
     timer: &Rc<Timer>,
 ) {
+    // Set once here rather than in every `sync`: the To Do URL never
+    // changes, and `review.slint` never embeds the literal itself (it calls
+    // back through `open-external(root.todo-url)`).
+    window.set_todo_url(TODO_URL.into());
     let model = Rc::clone(model);
     let timer = Rc::clone(timer);
     {
@@ -889,7 +1379,6 @@ pub(crate) fn register_callbacks(
                     error: String::new(),
                     prior_decision: record.decision,
                 });
-                model_ref.review.draft_scrolled = false;
                 if record.decision == Decision::Review {
                     model_ref.review.action_status = "Opening a reminder draft tracks this as yours. Cancel restores the previous decision.".into();
                     model_ref.review.action_status_succeeded = true;
@@ -899,6 +1388,123 @@ pub(crate) fn register_callbacks(
             refresh(&model, &weak);
         });
     }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_draft_title_edited(move |value| {
+            if let Some(draft) = &mut model.borrow_mut().review.draft {
+                draft.title = value.to_string();
+                draft.error.clear();
+            }
+            refresh_draft(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_draft_when_edited(move |value| {
+            if let Some(draft) = &mut model.borrow_mut().review.draft {
+                draft.when = value.to_string();
+                draft.error.clear();
+            }
+            refresh_draft(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_draft_in_hour(move || {
+            if let Some(draft) = &mut model.borrow_mut().review.draft {
+                draft.when = reminder_quick_pick_in_hour(chrono::Local::now());
+                draft.error.clear();
+            }
+            refresh_draft(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_draft_tomorrow(move || {
+            if let Some(draft) = &mut model.borrow_mut().review.draft {
+                draft.when = reminder_quick_pick_tomorrow(chrono::Local::now());
+                draft.error.clear();
+            }
+            refresh_draft(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_cancel_reminder(move || {
+            let draft = model.borrow_mut().review.draft.take();
+            if let Some(draft) = draft {
+                let mut model_ref = model.borrow_mut();
+                model_ref
+                    .review
+                    .revert_draft_decision(draft.prior_decision, draft.key);
+            }
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        let timer = Rc::clone(&timer);
+        window.on_create_reminder(move || {
+            let mut model_ref = model.borrow_mut();
+            let Some(draft) = model_ref.review.draft.take() else {
+                return;
+            };
+            match reminder_time(&draft.when) {
+                Ok(at) if title_is_valid(&draft.title) => {
+                    match model_ref.review.decisions.begin_reminder(draft.key) {
+                        Ok(()) => {
+                            model_ref.review.pending_reminder = Some((
+                                draft.key,
+                                openloops_graph::live::reminders::ReminderRequest {
+                                    account: draft.account,
+                                    title: draft.title.trim().into(),
+                                    at_utc: at,
+                                    marker: marker(&draft.key),
+                                },
+                            ));
+                            if dispatch_pending_reminder(&mut model_ref) {
+                                start_timer(&timer);
+                            }
+                        }
+                        Err(error) => {
+                            model_ref.review.draft = Some(ReminderDraft { error, ..draft });
+                        }
+                    }
+                }
+                _ => {
+                    model_ref.review.draft = Some(ReminderDraft {
+                        error: REMINDER_VALIDATION_HINT.into(),
+                        ..draft
+                    });
+                }
+            }
+            drop(model_ref);
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_reconcile_reminder(move |exists| {
+            let selected = REVIEW_UI.with(|state| state.borrow().selected);
+            let Some(key) = selected else { return };
+            let mut model_ref = model.borrow_mut();
+            apply_reconcile(&mut model_ref.review, key, exists);
+            drop(model_ref);
+            refresh(&model, &weak);
+        });
+    }
+    window.on_open_external(|url| {
+        if url.as_str() == TODO_URL || app_model::is_outlook_link(&url) {
+            let _ = opener::open(url.as_str());
+        }
+    });
 }
 
 #[cfg(test)]
@@ -916,13 +1522,15 @@ mod tests {
         let cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
         let selected = cards[0].as_ref().map(|card| card.record.key);
         let rows = review_rows(&review, Filter::All, false, selected, &cards);
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3);
         assert!(rows[0].first_in_group);
         assert_ne!(rows[0].group, ListGroup::Closed);
         assert_eq!(rows[0].group, rows[1].group);
+        assert_eq!(rows[0].group, rows[2].group);
         assert!(!rows[1].first_in_group);
         assert_eq!(rows[0].handle, 0);
         assert_eq!(rows[1].handle, 1);
+        assert_eq!(rows[2].handle, 2);
         assert!(rows[0].selected);
         assert!(rows[0].waiting_source.contains("Waiting:"));
     }
@@ -933,11 +1541,11 @@ mod tests {
         let cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
         assert_eq!(
             visible_handles(&review, &cards, Filter::All, false),
-            vec![0, 1]
+            vec![0, 1, 2]
         );
         assert_eq!(
             visible_handles(&review, &cards, Filter::Mine, false),
-            vec![0]
+            vec![0, 2]
         );
         assert_eq!(
             visible_handles(&review, &cards, Filter::Team, false),
@@ -960,8 +1568,20 @@ mod tests {
     #[test]
     fn selected_view_covers_deadline_metadata_and_actions() {
         let mut review = crate::review_model::layout_fixture();
+        let initial_cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
+        let key = initial_cards[0].as_ref().unwrap().record.key;
+        review.draft = None;
+        review.analysis.as_mut().unwrap().items[0].resolution = None;
+        review.analysis.as_mut().unwrap().items[0].cross_thread = false;
+        let record = review
+            .decisions
+            .records
+            .iter_mut()
+            .find(|record| record.key == key)
+            .unwrap();
+        record.decision = Decision::Review;
+        record.reminder = Reminder::None;
         let cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
-        let key = cards[0].as_ref().unwrap().record.key;
         let selected = selected_view(&review, Some(key), &cards).unwrap();
         assert_eq!(
             selected.meta[0],
@@ -1023,6 +1643,14 @@ mod tests {
         let review = crate::review_model::layout_fixture();
         let mut item = review.analysis.as_ref().unwrap().items[0].clone();
         let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0].unwrap();
+        let base = CardContext {
+            record: Record {
+                decision: Decision::Review,
+                reminder: Reminder::None,
+                ..base.record
+            },
+            ..base
+        };
         for (decision, text) in [
             (Decision::Done, "Handled"),
             (Decision::Dismissed, "Dismissed – not mine"),
@@ -1058,6 +1686,14 @@ mod tests {
         let review = crate::review_model::layout_fixture();
         let item = &review.analysis.as_ref().unwrap().items[0];
         let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0].unwrap();
+        let base = CardContext {
+            record: Record {
+                decision: Decision::Review,
+                reminder: Reminder::None,
+                ..base.record
+            },
+            ..base
+        };
         let no_deadline = CardContext {
             deadline: None,
             ..base
@@ -1186,7 +1822,7 @@ mod tests {
 
         let (finished, chip) = scan_strip_view(&scan_strip(None, &app.review), &app, &cards);
         assert_eq!(finished.title.as_str(), "Scan finished");
-        assert!(finished.summary.contains("2 expectations"));
+        assert!(finished.summary.contains("3 expectations"));
         assert!(chip.is_empty());
 
         let (idle, chip) = scan_strip_view(&ScanStrip::Idle, &model(), &[]);
@@ -1199,7 +1835,7 @@ mod tests {
             finished.coverage_label.as_str(),
             "Coverage: 1 source incomplete"
         );
-        assert!(finished.summary.contains("Reviewed 2 of 2 loaded messages"));
+        assert!(finished.summary.contains("Reviewed 4 of 4 loaded messages"));
     }
 
     #[test]
@@ -1222,5 +1858,242 @@ mod tests {
         let pills = pills_for(&item, cards[0].as_ref().unwrap());
         assert_eq!(pills[0].text, "Watching team follow-up");
         assert!(pills.iter().any(|pill| pill.text == "Reminder unconfirmed"));
+    }
+
+    #[test]
+    fn draft_prefill_quick_picks_and_scheduled_line_are_pure() {
+        assert_eq!(reminder_title(Decision::Mine, "Send notes"), "Send notes");
+        assert_eq!(
+            reminder_title(Decision::Watching, "Send notes"),
+            "Follow up: Send notes"
+        );
+        let now = chrono::Local::now();
+        assert_eq!(
+            reminder_quick_pick_in_hour(now),
+            (now + chrono::Duration::hours(1))
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        );
+        assert_eq!(
+            reminder_quick_pick_tomorrow(now),
+            (now + chrono::Duration::days(1))
+                .format("%Y-%m-%d 09:00")
+                .to_string()
+        );
+        let valid_value = reminder_quick_pick_in_hour(now);
+        let (line, valid) = scheduled_instant_line(&valid_value);
+        assert!(valid);
+        assert!(line.starts_with("Scheduled instant: "));
+        assert_eq!(
+            scheduled_instant_line("not a date"),
+            (REMINDER_VALIDATION_HINT.into(), false)
+        );
+        let draft = ReminderDraft {
+            key: [1; 32],
+            account: "synthetic".into(),
+            title: "Send notes".into(),
+            when: valid_value,
+            error: String::new(),
+            prior_decision: Decision::Mine,
+        };
+        assert!(draft_view(Some(&draft)).unwrap().valid);
+    }
+
+    #[test]
+    fn reminder_state_view_covers_every_variant() {
+        let mut record = Record {
+            key: [0xab; 32],
+            decision: Decision::Mine,
+            reminder: Reminder::None,
+            updated: 0,
+        };
+        assert_eq!(reminder_state_view(&record).state, "none");
+        record.reminder = Reminder::Created;
+        let created = reminder_state_view(&record);
+        assert_eq!(created.state, "created");
+        assert!(
+            created
+                .text
+                .starts_with("Reminder created in Microsoft To Do.")
+        );
+        record.reminder = Reminder::Attempted;
+        let attempted = reminder_state_view(&record);
+        assert_eq!(attempted.state, "attempted");
+        assert!(attempted.marker.starts_with("Reference: "));
+    }
+
+    #[test]
+    fn evidence_cards_cover_request_deadline_event_and_subject_time() {
+        let review = crate::review_model::layout_fixture();
+        let mut item = review.analysis.as_ref().unwrap().items[0].clone();
+        item.event = Some(Anchor {
+            message: "m0".into(),
+            block: 0,
+            quote: "the planning meeting".into(),
+            context: "Before the planning meeting".into(),
+        });
+        item.event_passed = Some(EventPassed {
+            name: "planning meeting".into(),
+            end: 1,
+            message_handle: "m0".into(),
+            from_subject: true,
+        });
+        let cards = evidence_cards(&item, &review.messages);
+        assert_eq!(
+            cards
+                .iter()
+                .map(|card| card.label.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Original expectation",
+                "Deadline evidence",
+                "Event evidence",
+                "Event time evidence"
+            ]
+        );
+        assert_eq!(cards[2].context, "Before the planning meeting");
+        assert_eq!(
+            cards[3].subject_note,
+            "From the subject line of this message"
+        );
+        assert!(
+            cards
+                .iter()
+                .all(|card| card.url.starts_with("https://outlook.office.com/"))
+        );
+    }
+
+    #[test]
+    fn completion_card_covers_same_cross_unvalidated_and_none() {
+        let review = crate::review_model::layout_fixture();
+        let mut item = review.analysis.as_ref().unwrap().items[0].clone();
+        item.cross_thread = false;
+        let same = completion_card(&item, &review.messages);
+        assert_eq!(same.state, "evidence");
+        assert!(!same.cross_thread);
+        item.cross_thread = true;
+        assert!(completion_card(&item, &review.messages).cross_thread);
+        item.resolution = None;
+        item.unverified_resolution = true;
+        let unvalidated = completion_card(&item, &review.messages);
+        assert_eq!(unvalidated.state, "unvalidated");
+        assert!(unvalidated.label.contains("could not be validated"));
+        item.unverified_resolution = false;
+        let none = completion_card(&item, &review.messages);
+        assert_eq!(none.state, "none");
+        assert!(none.label.starts_with("No matching completion"));
+    }
+
+    #[test]
+    fn conversation_rows_mark_sent_mail_and_keep_quote_nested() {
+        let review = crate::review_model::layout_fixture();
+        let source = &review.messages[0];
+        let rows = conversation_rows(&review.messages, source);
+        assert_eq!(rows.len(), 2);
+        assert!(!rows[0].sent);
+        assert!(rows[1].sent);
+        assert!(!rows[1].quoted_history.is_empty());
+        assert!(!rows[1].body.contains("Original Message"));
+    }
+
+    #[test]
+    fn outlook_link_projection_rejects_every_other_url() {
+        assert_eq!(
+            gated_outlook_url("https://outlook.office.com/mail/item"),
+            "https://outlook.office.com/mail/item"
+        );
+        assert_eq!(
+            gated_outlook_url("https://outlook.office365.com/mail/item"),
+            "https://outlook.office365.com/mail/item"
+        );
+        assert!(gated_outlook_url("https://example.invalid/outlook.office.com/").is_empty());
+        assert!(gated_outlook_url("http://outlook.office.com/mail/item").is_empty());
+    }
+
+    #[test]
+    fn initials_split_on_whitespace_parens_and_angle_brackets_and_cap_at_two() {
+        assert_eq!(initials("Jane Doe"), "JD");
+        assert_eq!(initials("jane doe"), "JD");
+        assert_eq!(initials("Alice Bob Carol"), "AB");
+        assert_eq!(initials("Madonna"), "M");
+        assert_eq!(initials("Team (Alice) <alice@example.invalid>"), "TA");
+        assert_eq!(initials("  "), "");
+    }
+
+    #[test]
+    fn draft_view_overrides_scheduled_line_with_a_pending_error_and_flags_a_short_title() {
+        let valid_when = reminder_quick_pick_in_hour(chrono::Local::now());
+        let with_error = ReminderDraft {
+            key: [1; 32],
+            account: "synthetic".into(),
+            title: "Send notes".into(),
+            when: valid_when.clone(),
+            error: "The saved-decision limit (50) is reached. Existing decisions are preserved."
+                .into(),
+            prior_decision: Decision::Mine,
+        };
+        let view = draft_view(Some(&with_error)).unwrap();
+        assert_eq!(
+            view.scheduled_line,
+            "The saved-decision limit (50) is reached. Existing decisions are preserved."
+        );
+        // A pending error still reflects the title/time validity underneath
+        // it -- the override only replaces the displayed line, not `valid`.
+        assert!(view.valid);
+
+        let short_title = ReminderDraft {
+            key: [1; 32],
+            account: "synthetic".into(),
+            title: "ab".into(),
+            when: valid_when.clone(),
+            error: String::new(),
+            prior_decision: Decision::Mine,
+        };
+        assert!(!draft_view(Some(&short_title)).unwrap().valid);
+
+        let long_title = ReminderDraft {
+            key: [1; 32],
+            account: "synthetic".into(),
+            title: "x".repeat(321),
+            when: valid_when,
+            error: String::new(),
+            prior_decision: Decision::Mine,
+        };
+        assert!(!draft_view(Some(&long_title)).unwrap().valid);
+
+        assert!(draft_view(None).is_none());
+    }
+
+    #[test]
+    fn reconcile_keeps_the_error_status_when_the_decision_update_is_rejected() {
+        let mut review = crate::review_model::layout_fixture();
+        let key = review
+            .decisions
+            .fingerprint("synthetic", "synthetic-0", "send the draft budget");
+
+        apply_reconcile(&mut review, key, true);
+        assert!(review.action_status_succeeded);
+        assert_eq!(
+            review.action_status,
+            "Recorded: the To Do task exists. Manage it in Microsoft To Do."
+        );
+        assert_eq!(review.decisions.get(&key).reminder, Reminder::Created);
+        let before_rejected_call = review.decisions.get(&key);
+
+        review.decisions.error = Some(
+            "The saved-decision limit (50) is reached. Existing decisions are preserved.".into(),
+        );
+        apply_reconcile(&mut review, key, false);
+        assert!(!review.action_status_succeeded);
+        assert_eq!(
+            review.action_status,
+            "The saved-decision limit (50) is reached. Existing decisions are preserved."
+        );
+        // The rejected update (Created -> None) must not have taken effect.
+        assert_eq!(
+            review.decisions.get(&key).reminder,
+            before_rejected_call.reminder
+        );
+        assert_eq!(review.decisions.get(&key).reminder, Reminder::Created);
     }
 }

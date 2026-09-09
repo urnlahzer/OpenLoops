@@ -169,11 +169,13 @@ export component Callout {
     private property <color> ink: kind == "success" ? Tokens.success : kind == "warning" ? Tokens.warning : Tokens.brand;
     private property <color> fill: kind == "success" ? Tokens.success-bg : kind == "warning" ? Tokens.warning-bg : Tokens.brand-subtle;
     private property <color> stroke: kind == "success" ? Tokens.success-stroke : kind == "warning" ? Tokens.warning-stroke : Tokens.brand-stroke;
+    width: 100%;
     accessible-role: AccessibleRole.text;
     accessible-label: accessible-name;
     Rectangle { background: root.fill; border-color: root.stroke; border-width: Tokens.hairline; border-radius: Tokens.radius-4;
-        HorizontalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2;
-            Text { text: root.text; color: root.ink; font-size: Tokens.font-13; wrap: word-wrap; vertical-alignment: center; }
+        VerticalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-2; alignment: start;
+            if !root.text.is-empty: Text { text: root.text; color: root.ink; font-size: Tokens.font-13; wrap: word-wrap; width: 100%; }
+            @children
         }
     }
 }

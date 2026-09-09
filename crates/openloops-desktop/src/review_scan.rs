@@ -33,7 +33,6 @@ pub struct ReviewMessage {
     pub account: String,
     pub conversation: String,
     pub date_label: String,
-    #[allow(dead_code)]
     pub web_link: String,
     /// Lowercase addresses of sender, to, and cc, minus the account's own
     /// addresses, deduplicated and sorted. Used to link conversations that

@@ -1,10 +1,10 @@
 import { Tokens } from "tokens.slint";
 import { TitleBar, NavRail, StatusBar } from "chrome.slint";
 import { SourcesScreen, StatusLine } from "sources.slint";
-import { ReviewScreen, ReviewRow, ReviewGroup, MetaCell, ReviewPill, ScanStripModel } from "review.slint";
+import { ReviewScreen, ReviewRow, ReviewGroup, MetaCell, ReviewPill, ScanStripModel, EvidenceCard, CompletionCard, ConversationRow, ReminderStateView } from "review.slint";
 export { Tokens } from "tokens.slint";
 export { StatusLine } from "sources.slint";
-export { ReviewRow, ReviewGroup, MetaCell, ReviewPill, ScanStripModel } from "review.slint";
+export { ReviewRow, ReviewGroup, MetaCell, ReviewPill, ScanStripModel, EvidenceCard, CompletionCard, ConversationRow, ReminderStateView } from "review.slint";
 
 export component AppWindow inherits Window {
     title: "OpenLoops";
@@ -81,6 +81,18 @@ export component AppWindow inherits Window {
     in property <bool> can-track;
     in property <bool> can-watch;
     in property <bool> can-remind;
+    in property <bool> draft-open;
+    in-out property <string> draft-title;
+    in-out property <string> draft-when;
+    in property <string> draft-scheduled-line;
+    in property <bool> draft-valid;
+    in property <ReminderStateView> reminder-state;
+    in property <[EvidenceCard]> evidence-cards;
+    in property <CompletionCard> completion-card;
+    in property <string> conversation-title;
+    in property <[ConversationRow]> conversation-rows;
+    in property <string> todo-url;
+    in property <bool> conversation-expanded-default;
 
     callback navigate(int);
     callback save-settings;
@@ -110,6 +122,14 @@ export component AppWindow inherits Window {
     callback move-review-selection(int);
     callback review-decision(int);
     callback open-reminder;
+    callback draft-title-edited(string);
+    callback draft-when-edited(string);
+    callback draft-in-hour;
+    callback draft-tomorrow;
+    callback create-reminder;
+    callback cancel-reminder;
+    callback reconcile-reminder(bool);
+    callback open-external(string);
 
     VerticalLayout {
         spacing: 0px;
@@ -139,11 +159,17 @@ export component AppWindow inherits Window {
                 pills: root.review-pills; title: root.review-title; meta: root.review-meta; uncertainty: root.review-uncertainty;
                 action-status: root.review-action-status; action-status-succeeded: root.review-action-status-succeeded; selected-open: root.selected-open; selected-terminal: root.selected-terminal;
                 can-track: root.can-track; can-watch: root.can-watch; can-remind: root.can-remind;
+                draft-open: root.draft-open; draft-title <=> root.draft-title; draft-when <=> root.draft-when; draft-scheduled-line: root.draft-scheduled-line; draft-valid: root.draft-valid;
+                reminder-state: root.reminder-state; evidence-cards: root.evidence-cards; completion-card: root.completion-card; conversation-title: root.conversation-title; conversation-rows: root.conversation-rows;
+                todo-url: root.todo-url; conversation-expanded-default: root.conversation-expanded-default;
                 scan-inboxes => { root.scan-inboxes(); } stop-scan => { root.stop-scan(); } rescan => { root.rescan(); } clear-results => { root.clear-results(); }
                 filter-selected(index) => { root.review-filter-selected(index); } show-handled-toggled(value) => { root.show-handled-toggled(value); }
                 coverage-toggled(value) => { root.coverage-toggled(value); } sources-link => { root.navigate(1); root.active-screen = 1; }
                 select-row(handle) => { root.select-review-row(handle); } move-selection(delta) => { root.move-review-selection(delta); }
                 decision(value) => { root.review-decision(value); } open-reminder => { root.open-reminder(); }
+                draft-title-edited(value) => { root.draft-title-edited(value); } draft-when-edited(value) => { root.draft-when-edited(value); }
+                draft-in-hour => { root.draft-in-hour(); } draft-tomorrow => { root.draft-tomorrow(); } create-reminder => { root.create-reminder(); } cancel-reminder => { root.cancel-reminder(); }
+                reconcile-reminder(exists) => { root.reconcile-reminder(exists); } open-external(url) => { root.open-external(url); }
             }
         }
         StatusBar { left-text: root.status-left; center-text: root.status-center; right-text: root.status-right; }

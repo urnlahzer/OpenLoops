@@ -1,5 +1,5 @@
 import { Tokens } from "tokens.slint";
-import { PrimaryButton, SecondaryButton, SubtleButton, OutlineButton, LinkButton, Segmented, Pill, Callout, ProgressBar, Checkbox } from "widgets.slint";
+import { PrimaryButton, SecondaryButton, SubtleButton, OutlineButton, LinkButton, Segmented, Pill, Callout, Field, Disclosure, Avatar, ProgressBar, Checkbox } from "widgets.slint";
 import { ScrollView } from "std-widgets.slint";
 
 export struct ReviewRow {
@@ -19,6 +19,10 @@ export struct ReviewRow {
 export struct ReviewGroup { title: string, kind: string, count: int }
 export struct MetaCell { label: string, value: string }
 export struct ReviewPill { text: string, kind: string }
+export struct EvidenceCard { label: string, sender: string, time: string, quote: string, context: string, subject-note: string, url: string }
+export struct CompletionCard { state: string, label: string, sender: string, time: string, quote: string, cross-thread: bool, url: string }
+export struct ConversationRow { initials: string, sender: string, meta: string, body: string, sent: bool, quoted-history: string }
+export struct ReminderStateView { state: string, text: string, marker: string }
 export struct ScanStripModel {
     state: string,
     title: string,
@@ -87,6 +91,23 @@ export component ReviewScreen {
     in property <bool> can-track;
     in property <bool> can-watch;
     in property <bool> can-remind;
+    in property <bool> draft-open;
+    in-out property <string> draft-title;
+    in-out property <string> draft-when;
+    in property <string> draft-scheduled-line;
+    in property <bool> draft-valid;
+    in property <ReminderStateView> reminder-state;
+    in property <string> todo-url;
+    in property <[EvidenceCard]> evidence-cards;
+    in property <CompletionCard> completion-card;
+    in property <string> conversation-title;
+    in property <[ConversationRow]> conversation-rows;
+    // Set once at startup by the `--preview-review` screenshot fixture only;
+    // normal runs never touch this, so the Disclosure still starts collapsed
+    // and stays fully user-toggled from then on (see "Slint facts": a
+    // runtime assignment -- the Disclosure's own click handler -- drops this
+    // binding after the first toggle).
+    in property <bool> conversation-expanded-default: false;
 
     callback scan-inboxes;
     callback stop-scan;
@@ -100,6 +121,14 @@ export component ReviewScreen {
     callback move-selection(int);
     callback decision(int);
     callback open-reminder;
+    callback draft-title-edited(string);
+    callback draft-when-edited(string);
+    callback draft-in-hour;
+    callback draft-tomorrow;
+    callback create-reminder;
+    callback cancel-reminder;
+    callback reconcile-reminder(bool);
+    callback open-external(string);
 
     VerticalLayout { spacing: 0px;
         Rectangle { height: Tokens.command-height; background: Tokens.bg-bar; border-color: Tokens.stroke-1; border-width: Tokens.hairline;
@@ -223,9 +252,9 @@ export component ReviewScreen {
             }
 
             Rectangle { background: Tokens.bg-surface; horizontal-stretch: 1;
-                ScrollView { width: 100%; height: 100%;
+                ScrollView { width: 100%; height: 100%; viewport-width: self.visible-width;
                     VerticalLayout { width: 100%; padding-left: Tokens.pane-gutter-x; padding-right: Tokens.pane-gutter-x; padding-top: Tokens.pane-gutter-y; padding-bottom: Tokens.pane-gutter-y; spacing: Tokens.review-section-gap; alignment: start;
-                        Rectangle { horizontal-stretch: 1; max-width: Tokens.review-reading-max-width;
+                        reading-column := Rectangle { horizontal-stretch: 1; max-width: Tokens.review-reading-max-width;
                             VerticalLayout { width: 100%; spacing: Tokens.review-section-gap; alignment: start;
                                 if root.no-usable-items: WrappedText { text: root.no-usable-text; color: Tokens.text-2; size: Tokens.font-14; }
                                 if root.has-analysis && !root.no-usable-items && !root.has-selection: WrappedText { text: "No open expectations match this filter. Missing replies in the scanned folders never prove work is finished."; color: Tokens.text-2; size: Tokens.font-14; }
@@ -244,10 +273,19 @@ export component ReviewScreen {
                                         }
                                     }
                                     VerticalLayout { width: 100%; spacing: Tokens.space-2; alignment: start;
-                                        if root.selected-open: HorizontalLayout { width: 100%; spacing: Tokens.space-2; alignment: start;
-                                            // Decision callback codes are defined once in slint_review.rs.
+                                        // Decision callback codes are defined once in slint_review.rs.
+                                        // Two rows, not one: an undecided Team-owned card shows Track
+                                        // *and* Watch alongside all three terminal actions, five buttons
+                                        // that do not fit one row at the reading pane's width; splitting
+                                        // unconditionally (row one hidden when neither applies) keeps this
+                                        // from ever silently overflowing regardless of which combination
+                                        // of can-track/can-watch is in play.
+                                        if root.selected-open && (root.can-track || root.can-watch): HorizontalLayout { width: 100%; spacing: Tokens.space-2; alignment: start;
                                             if root.can-track: PrimaryButton { text: "Track — this is mine"; enabled: !root.busy; clicked => { root.decision(1); } }
                                             if root.can-watch: SecondaryButton { text: "Keep an eye on this"; enabled: !root.busy; clicked => { root.decision(4); } }
+                                            Rectangle { horizontal-stretch: 1; }
+                                        }
+                                        if root.selected-open: HorizontalLayout { width: 100%; spacing: Tokens.space-2; alignment: start;
                                             SecondaryButton { text: "Handled"; enabled: !root.busy; clicked => { root.decision(2); } }
                                             SecondaryButton { text: "Not mine / dismiss"; enabled: !root.busy; clicked => { root.decision(3); } }
                                             SecondaryButton { text: "No longer relevant"; enabled: !root.busy; clicked => { root.decision(5); } }
@@ -260,8 +298,126 @@ export component ReviewScreen {
                                             Rectangle { horizontal-stretch: 1; }
                                         }
                                     }
+                                    if !root.action-status.is-empty: WrappedText { text: root.action-status; color: root.action-status-succeeded ? Tokens.success : Tokens.warning; size: Tokens.font-13; }
+                                    if root.draft-open: draft-focus := FocusScope {
+                                        width: 100%;
+                                        init => { self.focus(); }
+                                        key-pressed(event) => { if event.text == Key.Escape { root.cancel-reminder(); return accept; } return reject; }
+                                        Rectangle { width: 100%; height: draft-body.preferred-height; background: Tokens.brand-panel; border-color: Tokens.brand-stroke; border-width: Tokens.hairline; border-radius: Tokens.radius-6;
+                                            draft-body := VerticalLayout { padding-left: Tokens.card-pad-x; padding-right: Tokens.card-pad-x; padding-top: Tokens.space-4; padding-bottom: Tokens.space-4; spacing: Tokens.space-3; alignment: start;
+                                                WrappedText { text: "Review your Microsoft To Do reminder"; color: Tokens.text-1; size: Tokens.font-16; weight: 600; }
+                                                WrappedText { text: "Creates one task in your personal default Tasks list. Only the title, reminder time, and an opaque OpenLoops reference are sent to Microsoft. This requires delegated Tasks.ReadWrite and a separate browser sign-in."; }
+                                                if reading-column.width >= Tokens.review-reading-max-width: HorizontalLayout { spacing: Tokens.space-3;
+                                                    Field { label: "Task title"; value <=> root.draft-title; enabled: !root.busy; horizontal-stretch: 2; edited(value) => { root.draft-title-edited(value); } }
+                                                    Field { label: "Remind me at (local time)"; placeholder: "YYYY-MM-DD HH:MM"; value <=> root.draft-when; monospace: true; enabled: !root.busy; horizontal-stretch: 1; edited(value) => { root.draft-when-edited(value); } }
+                                                }
+                                                if reading-column.width < Tokens.review-reading-max-width: VerticalLayout { spacing: Tokens.space-3;
+                                                    Field { label: "Task title"; value <=> root.draft-title; enabled: !root.busy; edited(value) => { root.draft-title-edited(value); } }
+                                                    Field { label: "Remind me at (local time)"; placeholder: "YYYY-MM-DD HH:MM"; value <=> root.draft-when; monospace: true; enabled: !root.busy; edited(value) => { root.draft-when-edited(value); } }
+                                                }
+                                                HorizontalLayout { spacing: Tokens.space-2;
+                                                    SecondaryButton { text: "In one hour"; enabled: !root.busy; clicked => { root.draft-in-hour(); } }
+                                                    SecondaryButton { text: "Tomorrow at 9 am"; enabled: !root.busy; clicked => { root.draft-tomorrow(); } }
+                                                    Text { text: root.draft-scheduled-line; color: root.draft-valid ? Tokens.text-2 : Tokens.danger; font-size: Tokens.font-13; horizontal-stretch: 1; wrap: word-wrap; vertical-alignment: center; }
+                                                }
+                                                WrappedText { text: "This time is your choice, separate from the email deadline. Microsoft To Do controls alert delivery, including when OpenLoops is closed. A failed or uncertain write is never retried automatically."; }
+                                                HorizontalLayout { spacing: Tokens.space-2; alignment: start;
+                                                    PrimaryButton { text: "Create this reminder in Microsoft To Do"; enabled: !root.busy && root.draft-valid; clicked => { root.create-reminder(); } }
+                                                    SecondaryButton { text: "Cancel"; enabled: !root.busy; clicked => { root.cancel-reminder(); } }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if root.reminder-state.state == "created": Callout { kind: "success"; text: root.reminder-state.text; accessible-name: root.reminder-state.text;
+                                        HorizontalLayout { spacing: Tokens.space-2;
+                                            Rectangle { horizontal-stretch: 1; }
+                                            LinkButton { text: "Open Microsoft To Do"; enabled: !root.busy; clicked => { root.open-external(root.todo-url); } }
+                                        }
+                                    }
+                                    if root.reminder-state.state == "attempted": Callout { kind: "warning"; text: root.reminder-state.text; accessible-name: root.reminder-state.text;
+                                        Text { text: root.reminder-state.marker; color: Tokens.warning; font-family: Tokens.mono-font-family; font-size: Tokens.font-13; }
+                                        HorizontalLayout { spacing: Tokens.space-2;
+                                            Rectangle { horizontal-stretch: 1; }
+                                            LinkButton { text: "Inspect Microsoft To Do"; enabled: !root.busy; clicked => { root.open-external(root.todo-url); } }
+                                        }
+                                        HorizontalLayout { spacing: Tokens.space-2; alignment: start;
+                                            SecondaryButton { text: "I checked: the task exists"; enabled: !root.busy; clicked => { root.reconcile-reminder(true); } }
+                                            SecondaryButton { text: "I checked: no task was created"; enabled: !root.busy; clicked => { root.reconcile-reminder(false); } }
+                                        }
+                                    }
+                                    VerticalLayout { width: 100%; spacing: Tokens.space-3; alignment: start;
+                                        HorizontalLayout { spacing: Tokens.space-2;
+                                            Text { text: "Why this was suggested"; color: Tokens.text-1; font-size: Tokens.font-16; font-weight: 600; vertical-alignment: center; }
+                                            Text { text: "Exact quotations resolved against the source mail. Quoted history is context, not evidence."; color: Tokens.text-2; font-size: Tokens.font-13; horizontal-stretch: 1; wrap: word-wrap; vertical-alignment: center; }
+                                        }
+                                        for evidence in root.evidence-cards: Rectangle { width: 100%; background: Tokens.bg-surface; border-color: Tokens.stroke-1; border-width: Tokens.hairline; border-radius: Tokens.radius-6; clip: true;
+                                            VerticalLayout { spacing: 0px; alignment: start;
+                                                Rectangle { background: Tokens.bg-bar;
+                                                    HorizontalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-2;
+                                                        Text { text: evidence.label; color: Tokens.brand-label; font-size: Tokens.font-13; font-weight: 600; }
+                                                        Text { text: "· " + evidence.sender + " · " + evidence.time; color: Tokens.text-2; font-size: Tokens.font-13; horizontal-stretch: 1; wrap: word-wrap; }
+                                                        if !evidence.url.is-empty: LinkButton { text: "Open message in Outlook"; enabled: !root.busy; clicked => { root.open-external(evidence.url); } }
+                                                    }
+                                                }
+                                                Rectangle { height: Tokens.hairline; background: Tokens.stroke-1; }
+                                                VerticalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-3; padding-bottom: Tokens.space-3; spacing: Tokens.space-2; alignment: start;
+                                                    if !evidence.subject-note.is-empty: WrappedText { text: evidence.subject-note; color: Tokens.text-2; size: Tokens.font-11; }
+                                                    if !evidence.quote.is-empty: HorizontalLayout { width: 100%; spacing: Tokens.space-3;
+                                                        Rectangle { width: Tokens.review-row-bar-width; background: Tokens.brand; }
+                                                        WrappedText { text: evidence.quote; color: Tokens.text-1; size: Tokens.font-15; horizontal-stretch: 1; }
+                                                    }
+                                                    if !evidence.context.is-empty: WrappedText { text: evidence.context; color: Tokens.text-2; size: Tokens.font-13; }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    VerticalLayout { width: 100%; spacing: Tokens.space-2; alignment: start;
+                                        WrappedText { text: "Possible later completion"; color: Tokens.text-1; size: Tokens.font-16; weight: 600; }
+                                        if root.completion-card.state == "evidence": Rectangle { width: 100%; background: Tokens.success-bg; border-color: Tokens.success-stroke; border-width: Tokens.hairline; border-radius: Tokens.radius-6; clip: true;
+                                            VerticalLayout { spacing: 0px; alignment: start;
+                                                Rectangle { background: Tokens.bg-bar;
+                                                    VerticalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-1; alignment: start;
+                                                        HorizontalLayout { spacing: Tokens.space-2;
+                                                            Text { text: root.completion-card.label; color: Tokens.success; font-size: Tokens.font-13; font-weight: 600; }
+                                                            Text { text: "· " + root.completion-card.sender + " · " + root.completion-card.time; color: Tokens.text-2; font-size: Tokens.font-13; horizontal-stretch: 1; wrap: word-wrap; }
+                                                        }
+                                                        HorizontalLayout { spacing: Tokens.space-2;
+                                                            Rectangle { horizontal-stretch: 1; }
+                                                            if root.completion-card.cross-thread: Pill { text: "evidence in another conversation"; kind: "success"; }
+                                                            if !root.completion-card.url.is-empty: LinkButton { text: "Open message in Outlook"; enabled: !root.busy; clicked => { root.open-external(root.completion-card.url); } }
+                                                        }
+                                                    }
+                                                }
+                                                Rectangle { height: Tokens.hairline; background: Tokens.stroke-1; }
+                                                VerticalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-3; padding-bottom: Tokens.space-3; spacing: Tokens.space-2; alignment: start;
+                                                    HorizontalLayout { width: 100%; spacing: Tokens.space-3;
+                                                        Rectangle { width: Tokens.review-row-bar-width; background: Tokens.success; }
+                                                        WrappedText { text: root.completion-card.quote; color: Tokens.text-1; size: Tokens.font-15; horizontal-stretch: 1; }
+                                                    }
+                                                    WrappedText { text: "Completion is a hypothesis for you to confirm; it is never treated as final."; color: Tokens.text-2; size: Tokens.font-11; }
+                                                }
+                                            }
+                                        }
+                                        if root.completion-card.state != "evidence": WrappedText { text: root.completion-card.label; color: Tokens.text-3; size: Tokens.font-13; }
+                                    }
+                                    Disclosure { title: root.conversation-title; expanded: root.conversation-expanded-default;
+                                        VerticalLayout { width: 100%; spacing: Tokens.space-3; alignment: start;
+                                            for message in root.conversation-rows: Rectangle { width: 100%; background: message.sent ? Tokens.brand-panel : Tokens.bg-surface; border-color: Tokens.stroke-1; border-width: Tokens.hairline; border-radius: Tokens.radius-4;
+                                                HorizontalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-3; padding-bottom: Tokens.space-3; spacing: Tokens.space-3;
+                                                    Avatar { initials: message.initials; accessible-name: message.sender; }
+                                                    VerticalLayout { horizontal-stretch: 1; spacing: Tokens.space-1; alignment: start;
+                                                        WrappedText { text: message.sender; color: Tokens.text-1; weight: 600; }
+                                                        WrappedText { text: message.meta; color: Tokens.text-2; size: Tokens.font-11; }
+                                                        WrappedText { text: message.body; color: Tokens.text-1; }
+                                                        if !message.quoted-history.is-empty: Disclosure { title: "Quoted history";
+                                                            WrappedText { text: message.quoted-history; color: Tokens.text-2; size: Tokens.font-13; }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
-                                if !root.action-status.is-empty: WrappedText { text: root.action-status; color: root.action-status-succeeded ? Tokens.success : Tokens.warning; size: Tokens.font-13; }
                             }
                         }
                     }

@@ -347,6 +347,15 @@ pub fn run() -> Result<(), slint::PlatformError> {
     };
     window.set_active_screen(initial_screen);
     window.set_show_key(false);
+    // Preview-fixture only: start the reading pane's "Full scanned
+    // conversation" disclosure expanded so a `--preview-review` screenshot
+    // shows the message rows, the sent tint, and the nested quoted-history
+    // block without a click. `review.slint` binds this once at startup; a
+    // real user's own toggle click still drops the binding as usual.
+    #[cfg(feature = "ui-screenshot")]
+    if preview_review {
+        window.set_conversation_expanded_default(true);
+    }
     sync(&model.borrow(), &window);
 
     let timer = Rc::new(Timer::default());
