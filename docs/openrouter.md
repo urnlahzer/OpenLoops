@@ -143,11 +143,8 @@ above, since that one call cannot be interrupted from outside.
 `cargo test -p openloops-inference --features ollama-cloud,openrouter --locked`.
 
 The unit tests answer from a loopback socket and never contact OpenRouter. They
-cover listing parse and deduplication, malformed listings, terminal-escape
-rejection, the exact request bytes (`provider.zdr` present, `response_format`
-absent), response binding, an invalid key, an oversized answer, the parallel
-ceiling, and the key-status budget parse including absent and out-of-range
-members. Live
+cover ZDR menu parsing, model revalidation, request shape, terminal HTTP 402,
+and concurrency narrowing after HTTP 429. Live
 authentication and generation require your own key, entered locally.
 
 `openloops-ui.exe --probe-saved-model` runs the semantic smoke suite against

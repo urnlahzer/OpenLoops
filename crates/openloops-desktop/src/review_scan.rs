@@ -2194,9 +2194,8 @@ fn merge_conversation(
             }
         }
         JobOutcome::Panicked => result.failures.push(format!(
-            "Conversation {} (subject: {}): the analysis failed unexpectedly and was skipped.",
-            index + 1,
-            subject_snippet(conversation)
+            "Conversation {}: the analysis failed unexpectedly and was skipped.",
+            index + 1
         )),
         JobOutcome::NotStarted => result.failures.push(format!(
             "Conversation {} (subject: {}): not started because the scan stopped.",
@@ -5187,7 +5186,7 @@ at the downtown courthouse. Let me know if that works.",
         assert_eq!(result.failures.len(), 1);
         assert_eq!(
             result.failures[0],
-            "Conversation 1 (subject: Synthetic budget conversation): the analysis failed unexpectedly and was skipped."
+            "Conversation 1: the analysis failed unexpectedly and was skipped."
         );
     }
 
