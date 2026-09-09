@@ -421,10 +421,7 @@ mod tests {
                 let truncated = Settings::decode(&encoded[..length]).unwrap();
                 assert_eq!(truncated.provider, Provider::OpenRouter);
                 assert_eq!(truncated.ollama_plan, OllamaPlan::Free);
-                assert_eq!(
-                    truncated.openrouter_parallel,
-                    DEFAULT_OPENROUTER_PARALLEL
-                );
+                assert_eq!(truncated.openrouter_parallel, DEFAULT_OPENROUTER_PARALLEL);
                 continue;
             }
             assert!(Settings::decode(&encoded[..length]).is_err());

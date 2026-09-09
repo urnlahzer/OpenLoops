@@ -21,9 +21,9 @@ use openloops_inference::{
     walker::canonicalize_html,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
-use std::sync::{Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex, PoisonError};
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct ReviewMessage {
@@ -1214,34 +1214,76 @@ pub fn local_offset_seconds(timestamp: i64, fallback: i32) -> i32 {
         .single()
         .map_or(fallback, |t| t.offset().local_minus_utc())
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProgressSnapshot {
+    pub conversation_index: usize,
+    pub in_flight: usize,
+    pub request_started_unix: i64,
+}
+
+#[derive(Default)]
+struct ProgressState {
+    conversation_index: usize,
+    active_requests: BTreeMap<usize, i64>,
+}
+
 #[derive(Default)]
 pub struct ScanProgress {
     pub processed: AtomicUsize,
     pub total: AtomicUsize,
     pub cancel: AtomicBool,
-    /// How many conversations (in `scan_conversations`) or eligible items
-    /// (in `scan_closures`) the current pass has STARTED; 0 before that
-    /// pass starts and again once it ends. With several requests in flight
-    /// this is a high-water mark, not a position: subtract
-    /// [`ScanProgress::in_flight`] for the number actually finished.
-    pub conversation_index: AtomicUsize,
     /// Total conversations `scan_conversations` will analyze, or total
     /// eligible items `scan_closures` will attempt -- whichever pass is
     /// currently running.
     pub conversation_total: AtomicUsize,
-    /// Model requests currently in flight across the running pass's
-    /// workers. 0 between passes and once the scan ends.
-    pub in_flight: AtomicUsize,
-    /// Unix seconds the OLDEST model request still in flight was sent, or
-    /// 0 when nothing is in flight. Drives the desktop's "elapsed on the
-    /// oldest request" display.
-    pub request_started_unix: AtomicI64,
+    /// The started count and active per-worker request clocks are changed
+    /// under one lock, so the UI can read a self-consistent snapshot. The
+    /// oldest published timestamp is the minimum of the requests still
+    /// running rather than an approximation based on the first worker.
+    state: Mutex<ProgressState>,
     /// Set once `scan_closures` starts (and left set for the rest of the
     /// scan): tells the desktop to label `conversation_index`/
     /// `conversation_total` as the closure pass ("Closure check {i} of
     /// {n}") rather than the primary per-conversation pass ("Conversation
     /// {i} of {n}").
     pub closure_phase: AtomicBool,
+}
+
+impl ScanProgress {
+    pub fn snapshot(&self) -> ProgressSnapshot {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        ProgressSnapshot {
+            conversation_index: state.conversation_index,
+            in_flight: state.active_requests.len(),
+            request_started_unix: state.active_requests.values().copied().min().unwrap_or(0),
+        }
+    }
+
+    fn start_request(&self, worker: usize) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.conversation_index += 1;
+        state
+            .active_requests
+            .insert(worker, chrono::Utc::now().timestamp());
+    }
+
+    fn finish_request(&self, worker: usize, processed: usize, sent: bool) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.active_requests.remove(&worker);
+        if !sent {
+            state.conversation_index = state.conversation_index.saturating_sub(1);
+        }
+        drop(state);
+        if sent {
+            self.processed.fetch_add(processed, Ordering::Relaxed);
+        }
+    }
+
+    fn reset_pass(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.conversation_index = 0;
+        debug_assert!(state.active_requests.is_empty());
+    }
 }
 pub struct ScanResult {
     pub analysis: Expectations,
@@ -1640,7 +1682,7 @@ pub fn scan(
     progress.total.store(messages.len(), Ordering::Relaxed);
     let client = connect(provider, key, model, parallel)?;
     let client = client.as_ref();
-    let pass = ParallelPass::new(client.max_parallel(), client.request_budget());
+    let pass = ParallelPass::new(client.max_parallel());
     let mut result = scan_conversations(messages, progress, &pass, &|conversation| {
         expectations_pass(client, conversation, Some(&progress.cancel))
     });
@@ -1798,14 +1840,21 @@ enum JobSignal {
     /// The provider answered. Whether that answer was usable says nothing
     /// about provider health, so a rejected analysis counts here too.
     Ok,
-    /// Rate limited or out of quota: narrow the concurrency and pace new
-    /// dispatches. The request is NOT resent -- `network_policy.retries`
+    /// Rate limited: narrow the concurrency. The request is NOT resent --
+    /// `network_policy.retries`
     /// forbids automatically retrying any request that carried content --
     /// so the conversation is reported as failed instead.
     Backoff,
     /// The provider is unreachable or unusable, or the caller cancelled:
     /// stop dispatching new jobs. Requests already in flight still finish.
     Stop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LimiterState {
+    allowed: usize,
+    consecutive_successes: usize,
+    max: usize,
 }
 
 /// Shared state for one parallel pass: the job cursor every worker draws
@@ -1818,48 +1867,57 @@ enum JobSignal {
 /// provider.
 struct ParallelPass {
     cursor: AtomicUsize,
-    /// How many workers may currently run: starts at `max`, halves (never
-    /// below 1) on a rate-limit or quota answer, and widens by a quarter
-    /// after [`RAISE_AFTER_SUCCESSES`] consecutive completed requests.
-    /// Workers whose index is at or above this park until it rises.
-    allowed: AtomicUsize,
-    max: usize,
-    successes: AtomicUsize,
+    /// `allowed` and its success streak change as one linearizable
+    /// transition. Workers above `allowed` park on `wake` for at most one
+    /// [`PARK_INTERVAL`] before checking stop and cancellation again.
+    limiter: Mutex<LimiterState>,
+    wake: Condvar,
     stop: AtomicBool,
-    /// The provider's published per-interval request budget, when it
-    /// publishes one; used to sleep-spread dispatches after a rate limit.
-    budget: Option<(u32, Duration)>,
-    /// `None` until the first rate-limit answer arms the spread; then the
-    /// earliest instant the next request may be dispatched, advanced by
-    /// one budget slot per dispatch.
-    next_dispatch: Mutex<Option<Instant>>,
 }
 
 impl ParallelPass {
-    fn new(max: usize, budget: Option<(u32, Duration)>) -> Self {
+    fn new(max: usize) -> Self {
         let max = max.clamp(1, MAX_PARALLEL_REQUESTS);
         Self {
             cursor: AtomicUsize::new(0),
-            allowed: AtomicUsize::new(max),
-            max,
-            successes: AtomicUsize::new(0),
+            limiter: Mutex::new(LimiterState {
+                allowed: max,
+                consecutive_successes: 0,
+                max,
+            }),
+            wake: Condvar::new(),
             stop: AtomicBool::new(false),
-            budget,
-            next_dispatch: Mutex::new(None),
         }
     }
 
-    /// Readies the same pool for a second pass, keeping the concurrency
-    /// and pacing it already learned from the provider.
+    /// Readies the same pool for a second pass, keeping the concurrency it
+    /// already learned from the provider.
     fn restart(&self) {
         self.cursor.store(0, Ordering::Relaxed);
         self.stop.store(false, Ordering::Relaxed);
     }
 
-    fn lock_dispatch(&self) -> std::sync::MutexGuard<'_, Option<Instant>> {
-        self.next_dispatch
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+    fn limiter(&self) -> std::sync::MutexGuard<'_, LimiterState> {
+        self.limiter.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    #[cfg(test)]
+    fn limiter_state(&self) -> (usize, usize, usize) {
+        let state = self.limiter();
+        (state.allowed, state.consecutive_successes, state.max)
+    }
+
+    fn max(&self) -> usize {
+        self.limiter().max
+    }
+
+    fn wake_workers(&self) {
+        self.wake.notify_all();
+    }
+
+    fn stop(&self) {
+        self.stop.store(true, Ordering::Release);
+        self.wake_workers();
     }
 
     /// Blocks until this worker is inside the allowed concurrency.
@@ -1869,82 +1927,61 @@ impl ParallelPass {
     /// no longer has any work behind it. The stop and cancel checks here
     /// are also the ones made before taking any job.
     fn wait_for_slot(&self, worker: usize, jobs: usize, cancel: &AtomicBool) -> bool {
+        let mut limiter = self.limiter();
         loop {
-            if self.stop.load(Ordering::Relaxed)
-                || cancel.load(Ordering::Relaxed)
-                || self.cursor.load(Ordering::Relaxed) >= jobs
+            if self.stop.load(Ordering::Acquire)
+                || cancel.load(Ordering::Acquire)
+                || self.cursor.load(Ordering::Acquire) >= jobs
             {
                 return false;
             }
-            if worker < self.allowed.load(Ordering::Relaxed) {
+            if worker < limiter.allowed {
                 return true;
             }
-            std::thread::sleep(PARK_INTERVAL);
+            limiter = self
+                .wake
+                .wait_timeout(limiter, PARK_INTERVAL)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
         }
     }
 
     /// The next job index, or `None` once the jobs run out or the pass
     /// stopped between the slot check and here.
-    fn next_job(&self, jobs: usize) -> Option<usize> {
-        if self.stop.load(Ordering::Relaxed) {
+    fn next_job(&self, jobs: usize, cancel: &AtomicBool) -> Option<usize> {
+        if self.stop.load(Ordering::Acquire) || cancel.load(Ordering::Acquire) {
             return None;
         }
-        let index = self.cursor.fetch_add(1, Ordering::Relaxed);
+        let index = self.cursor.fetch_add(1, Ordering::AcqRel);
         (index < jobs).then_some(index)
     }
 
-    /// Sleeps until the provider's published budget allows another
-    /// request. Does nothing until a rate-limit answer has armed the
-    /// spread, so an untroubled scan pays nothing for this.
-    fn throttle(&self) {
-        let Some((requests, interval)) = self.budget else {
-            return;
-        };
-        let spacing = interval / requests.max(1);
-        let mut slot = self.lock_dispatch();
-        let Some(next) = *slot else {
-            return;
-        };
-        let now = Instant::now();
-        let at = next.max(now);
-        *slot = Some(at + spacing);
-        drop(slot);
-        let wait = at.saturating_duration_since(now);
-        if !wait.is_zero() {
-            std::thread::sleep(wait);
-        }
-    }
-
     fn on_success(&self) {
-        if self.successes.fetch_add(1, Ordering::Relaxed) + 1 < RAISE_AFTER_SUCCESSES {
+        let mut state = self.limiter();
+        state.consecutive_successes += 1;
+        if state.consecutive_successes < RAISE_AFTER_SUCCESSES {
             return;
         }
-        self.successes.store(0, Ordering::Relaxed);
-        let _ = self
-            .allowed
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |allowed| {
-                (allowed < self.max).then(|| (allowed + (allowed / 4).max(1)).min(self.max))
-            });
+        state.consecutive_successes = 0;
+        let previous = state.allowed;
+        state.allowed = (state.allowed + (state.allowed / 4).max(1)).min(state.max);
+        drop(state);
+        if previous < self.max() {
+            self.wake_workers();
+        }
     }
 
     fn on_backoff(&self) {
-        self.successes.store(0, Ordering::Relaxed);
-        let _ = self
-            .allowed
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |allowed| {
-                Some((allowed / 2).max(1))
-            });
-        if self.budget.is_some() {
-            let mut slot = self.lock_dispatch();
-            if slot.is_none() {
-                *slot = Some(Instant::now());
-            }
-        }
+        let mut state = self.limiter();
+        state.consecutive_successes = 0;
+        state.allowed = (state.allowed / 2).max(1);
+        drop(state);
+        self.wake_workers();
     }
 }
 
-/// How one finished job's answer steers the limiter. Rate limiting and
-/// quota narrow the pass; the other transport-class errors stop it; a
+/// How one finished job's answer steers the limiter. Rate limiting narrows
+/// the pass; quota and the other transport-class errors stop it; a
 /// cancelled request stops it too (the caller's flag is normally already
 /// set, but a provider may answer `Cancelled` on its own).
 fn job_signal<T>(outcome: &Result<T, ProviderError>) -> JobSignal {
@@ -1952,7 +1989,7 @@ fn job_signal<T>(outcome: &Result<T, ProviderError>) -> JobSignal {
         return JobSignal::Ok;
     };
     match *error {
-        ProviderError::RateLimited | ProviderError::Quota => JobSignal::Backoff,
+        ProviderError::RateLimited => JobSignal::Backoff,
         ProviderError::Cancelled => JobSignal::Stop,
         error if is_transport_error(error) => JobSignal::Stop,
         // Any other failure is about this one request, not the provider:
@@ -1962,54 +1999,45 @@ fn job_signal<T>(outcome: &Result<T, ProviderError>) -> JobSignal {
 }
 
 /// The transport-class errors that stop a pass dispatching new jobs.
-/// Rate limiting and quota are excluded: the provider is answering, just
-/// not this fast, so the pass narrows instead of giving up. Nothing is
-/// ever resent either way.
+/// Rate limiting is excluded because it narrows rather than stops the
+/// pass. Nothing is ever resent either way.
 fn is_stop_error(error: ProviderError) -> bool {
-    is_transport_error(error) && !matches!(error, ProviderError::RateLimited | ProviderError::Quota)
+    is_transport_error(error) && !matches!(error, ProviderError::RateLimited)
 }
 
-/// One more request in flight. The first concurrent request records the
-/// instant the busy view ages against, so that display tracks the oldest
-/// request still running rather than flickering to whichever started last.
-fn start_request(progress: &ScanProgress) {
-    progress.in_flight.fetch_add(1, Ordering::Relaxed);
-    arm_request_clock(progress);
+enum JobOutcome<T> {
+    Completed(Result<T, ProviderError>),
+    Panicked,
+    NotStarted,
 }
 
-fn arm_request_clock(progress: &ScanProgress) {
-    let _ = progress.request_started_unix.compare_exchange(
-        0,
-        chrono::Utc::now().timestamp(),
-        Ordering::Relaxed,
-        Ordering::Relaxed,
-    );
+struct InFlightGuard<'a> {
+    progress: &'a ScanProgress,
+    pass: &'a ParallelPass,
+    worker: usize,
+    processed: usize,
+    sent: bool,
 }
 
-/// One fewer request in flight; the clock stops once none are left. A
-/// worker that started a request between the decrement and the clear
-/// would have found the clock still armed, so it is re-armed here rather
-/// than left at zero while requests are running.
-fn finish_request(progress: &ScanProgress) {
-    if progress.in_flight.fetch_sub(1, Ordering::Relaxed) == 1 {
-        progress.request_started_unix.store(0, Ordering::Relaxed);
-        if progress.in_flight.load(Ordering::Relaxed) > 0 {
-            arm_request_clock(progress);
-        }
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.progress
+            .finish_request(self.worker, self.processed, self.sent);
+        self.pass.wake_workers();
     }
 }
 
 /// Answers for one pass's jobs, keyed by job index.
-type JobResults<T> = Vec<(usize, Result<T, ProviderError>)>;
+type JobResults<T> = Vec<(usize, JobOutcome<T>)>;
 
-/// Runs jobs `0..jobs` across `pass.max` scoped worker threads and returns
+/// Runs jobs across the pass's maximum number of scoped worker threads and returns
 /// every completed job's answer sorted by job index, so the caller merges
 /// them in exactly the order the sequential loop produced them.
 ///
 /// Jobs that were never dispatched -- because the pass stopped or the
 /// caller cancelled -- are simply absent.
 fn run_jobs<T: Send>(
-    jobs: usize,
+    processed_per_job: &[usize],
     pass: &ParallelPass,
     progress: &ScanProgress,
     job: &(dyn Fn(usize) -> Result<T, ProviderError> + Sync),
@@ -2019,9 +2047,11 @@ fn run_jobs<T: Send>(
         // A worker beyond the job count would only wake, find the cursor
         // exhausted, and exit, so a three-conversation scan never spawns a
         // hundred threads just because the ceiling allows them.
-        for worker in 0..pass.max.min(jobs) {
+        for worker in 0..pass.max().min(processed_per_job.len()) {
             let done = &done;
-            scope.spawn(move || run_worker(worker, jobs, pass, progress, job, done));
+            scope.spawn(move || {
+                run_worker(worker, processed_per_job, pass, progress, job, done);
+            });
         }
     });
     let mut done = done.into_inner().unwrap_or_else(PoisonError::into_inner);
@@ -2030,30 +2060,55 @@ fn run_jobs<T: Send>(
 }
 
 /// One worker's whole life: park until it is inside the allowed
-/// concurrency, take the next job, pace it against any armed budget, run
-/// it, and report what its answer means for the limiter.
+/// concurrency, take the next job, run it, and report what its answer
+/// means for the limiter.
 fn run_worker<T: Send>(
     worker: usize,
-    jobs: usize,
+    processed_per_job: &[usize],
     pass: &ParallelPass,
     progress: &ScanProgress,
     job: &(dyn Fn(usize) -> Result<T, ProviderError> + Sync),
     done: &Mutex<JobResults<T>>,
 ) {
-    while pass.wait_for_slot(worker, jobs, &progress.cancel) {
-        let Some(index) = pass.next_job(jobs) else {
+    while pass.wait_for_slot(worker, processed_per_job.len(), &progress.cancel) {
+        let Some(index) = pass.next_job(processed_per_job.len(), &progress.cancel) else {
             return;
         };
-        pass.throttle();
-        progress.conversation_index.fetch_add(1, Ordering::Relaxed);
-        start_request(progress);
-        let outcome = job(index);
-        finish_request(progress);
-        match job_signal(&outcome) {
-            JobSignal::Ok => pass.on_success(),
-            JobSignal::Backoff => pass.on_backoff(),
-            JobSignal::Stop => pass.stop.store(true, Ordering::Relaxed),
+        if pass.stop.load(Ordering::Acquire) || progress.cancel.load(Ordering::Acquire) {
+            done.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((index, JobOutcome::NotStarted));
+            return;
         }
+        progress.start_request(worker);
+        let guard = InFlightGuard {
+            progress,
+            pass,
+            worker,
+            processed: processed_per_job[index],
+            sent: false,
+        };
+        // These loads are deliberately adjacent to the invocation: work
+        // claimed just before a stop is reported as not started, never sent.
+        let mut guard = guard;
+        let outcome =
+            if pass.stop.load(Ordering::Acquire) || progress.cancel.load(Ordering::Acquire) {
+                JobOutcome::NotStarted
+            } else {
+                guard.sent = true;
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(index))) {
+                    Ok(outcome) => JobOutcome::Completed(outcome),
+                    Err(_) => JobOutcome::Panicked,
+                }
+            };
+        if let JobOutcome::Completed(completed) = &outcome {
+            match job_signal(completed) {
+                JobSignal::Ok => pass.on_success(),
+                JobSignal::Backoff => pass.on_backoff(),
+                JobSignal::Stop => pass.stop(),
+            }
+        }
+        drop(guard);
         done.lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push((index, outcome));
@@ -2107,13 +2162,13 @@ fn empty_result(total: usize) -> ScanResult {
 /// happened to run it.
 fn merge_conversation(
     result: &mut ScanResult,
-    progress: &ScanProgress,
     index: usize,
     conversation: &[&ReviewMessage],
-    outcome: Result<Expectations, ProviderError>,
+    outcome: JobOutcome<Expectations>,
+    quota_reported: &mut bool,
 ) {
     match outcome {
-        Ok(analysis) => {
+        JobOutcome::Completed(Ok(analysis)) => {
             result.analyzed += conversation.len();
             if let Some(note) = conversation_note(index, conversation, &analysis) {
                 result.conversation_notes.push(note);
@@ -2125,27 +2180,33 @@ fn merge_conversation(
                 .analysis
                 .rejection_reasons
                 .extend(analysis.rejection_reasons);
-            progress
-                .processed
-                .fetch_add(conversation.len(), Ordering::Relaxed);
         }
-        Err(ProviderError::Cancelled) => result.cancelled = true,
-        Err(error) => {
-            result
-                .failures
-                .push(failure_line(index, conversation, error));
+        JobOutcome::Completed(Err(ProviderError::Cancelled)) => result.cancelled = true,
+        JobOutcome::Completed(Err(error)) => {
+            if error != ProviderError::Quota || !*quota_reported {
+                result
+                    .failures
+                    .push(failure_line(index, conversation, error));
+            }
+            *quota_reported |= error == ProviderError::Quota;
             if is_stop_error(error) {
                 result.primary_scan_transport_error = true;
-            } else {
-                progress
-                    .processed
-                    .fetch_add(conversation.len(), Ordering::Relaxed);
             }
         }
+        JobOutcome::Panicked => result.failures.push(format!(
+            "Conversation {} (subject: {}): the analysis failed unexpectedly and was skipped.",
+            index + 1,
+            subject_snippet(conversation)
+        )),
+        JobOutcome::NotStarted => result.failures.push(format!(
+            "Conversation {} (subject: {}): not started because the scan stopped.",
+            index + 1,
+            subject_snippet(conversation)
+        )),
     }
 }
 
-/// Analyzes every conversation in `messages`, up to `pass.max` of them at
+/// Analyzes every conversation in `messages`, up to the pass's ceiling at
 /// once. Conversations are independent, so running several concurrently
 /// changes only when each answer arrives; the answers are merged in the
 /// smallest-first job order [`conversations_by_size`] produced, so the
@@ -2167,19 +2228,27 @@ fn scan_conversations(
     progress
         .conversation_total
         .store(ordered.len(), Ordering::Relaxed);
-    let outcomes = run_jobs(ordered.len(), pass, progress, &|index| {
+    let processed_per_job: Vec<usize> = ordered.iter().map(Vec::len).collect();
+    let outcomes = run_jobs(&processed_per_job, pass, progress, &|index| {
         let inputs: Vec<ConversationMessage> =
             ordered[index].iter().map(|m| m.input.clone()).collect();
         analyze(&inputs)
     });
+    let mut quota_reported = false;
     for (index, outcome) in outcomes {
-        merge_conversation(&mut result, progress, index, &ordered[index], outcome);
+        merge_conversation(
+            &mut result,
+            index,
+            &ordered[index],
+            outcome,
+            &mut quota_reported,
+        );
     }
     if progress.cancel.load(Ordering::Relaxed) {
         result.cancelled = true;
     }
     // Idle once this pass ends, same as `scan_closures`.
-    progress.conversation_index.store(0, Ordering::Relaxed);
+    progress.reset_pass();
     result
 }
 
@@ -2503,10 +2572,10 @@ fn attempt_closure(
 /// eligible item as it is processed, including one skipped for having no
 /// candidates, a shared-mailbox/list waiting party (see
 /// [`is_shared_mailbox_address`]), the [`MAX_CLOSURE_CALLS`] cap binding, or
-/// a non-transport-class provider error -- `scan_closures` only ever
-/// `continue`s past those, exactly like `scan_conversations` does for the
-/// same error classes. Only a transport-class provider error (the same
-/// error classes `scan_conversations` uses) stops the pass early, recorded
+/// a non-terminal provider error -- `scan_closures` only ever `continue`s
+/// past those, exactly like `scan_conversations` does for the same error
+/// classes. Quota and the terminal transport-class provider errors (the
+/// same error classes `scan_conversations` uses) stop the pass early, recorded
 /// content-free in `result.closure_pass_failure` rather than `failures`
 /// (which counts unanalyzed conversations -- a closure-pass failure never
 /// leaves a conversation unanalyzed). A `Cancelled` answer stops the pass
@@ -2552,16 +2621,16 @@ fn scan_closures(
         capped: AtomicBool::new(false),
     };
     pass.restart();
+    let processed_per_job = vec![1; eligible.len()];
     let outcomes = {
         let items = &result.analysis.items;
-        run_jobs(eligible.len(), pass, progress, &|slot| {
-            progress.processed.fetch_add(1, Ordering::Relaxed);
+        run_jobs(&processed_per_job, pass, progress, &|slot| {
             attempt_closure(&items[eligible[slot]], messages, &state, closure)
         })
     };
     merge_closures(result, &eligible, outcomes);
     // Idle once this pass ends, same as `scan_conversations`.
-    progress.conversation_index.store(0, Ordering::Relaxed);
+    progress.reset_pass();
     if progress.cancel.load(Ordering::Relaxed) {
         result.cancelled = true;
     }
@@ -2589,16 +2658,16 @@ fn merge_closures(
     let mut rate_limited = 0usize;
     for (slot, outcome) in outcomes {
         match outcome {
-            Ok(Some((anchor, kind))) => {
+            JobOutcome::Completed(Ok(Some((anchor, kind)))) => {
                 let item = &mut result.analysis.items[eligible[slot]];
                 item.resolution = Some(anchor);
                 item.resolution_kind = Some(kind);
                 item.cross_thread = true;
                 result.cross_thread_closures += 1;
             }
-            Err(ProviderError::Cancelled) => result.cancelled = true,
-            Err(ProviderError::RateLimited | ProviderError::Quota) => rate_limited += 1,
-            Err(error) if is_stop_error(error) => {
+            JobOutcome::Completed(Err(ProviderError::Cancelled)) => result.cancelled = true,
+            JobOutcome::Completed(Err(ProviderError::RateLimited)) => rate_limited += 1,
+            JobOutcome::Completed(Err(error)) if is_stop_error(error) => {
                 if result.closure_pass_failure.is_none() {
                     result.closure_pass_failure =
                         Some(format!("Cross-thread closure pass stopped: {error}"));
@@ -2606,7 +2675,13 @@ fn merge_closures(
             }
             // No closing evidence, a skipped item, or a failure about this
             // one item: the expectation simply stays open.
-            Ok(None) | Err(_) => {}
+            JobOutcome::Panicked => {
+                if result.closure_pass_failure.is_none() {
+                    result.closure_pass_failure =
+                        Some("Cross-thread closure pass failed unexpectedly.".into());
+                }
+            }
+            JobOutcome::Completed(Ok(None) | Err(_)) | JobOutcome::NotStarted => {}
         }
     }
     if rate_limited > 0 {
@@ -3513,6 +3588,7 @@ fn synthetic(body: &str, index: usize, conversation: &str) -> MailItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     /// Runs the primary pass with a single worker and an `FnMut` callback:
     /// the shape the pass had before it was parallelized. Most tests here
@@ -3532,14 +3608,9 @@ mod tests {
         analyze: impl FnMut(&[ConversationMessage]) -> Result<Expectations, ProviderError> + Send,
     ) -> ScanResult {
         let analyze = Mutex::new(analyze);
-        super::scan_conversations(
-            messages,
-            progress,
-            &ParallelPass::new(1, None),
-            &|conversation| {
-                (analyze.lock().unwrap_or_else(PoisonError::into_inner))(conversation)
-            },
-        )
+        super::scan_conversations(messages, progress, &ParallelPass::new(1), &|conversation| {
+            (analyze.lock().unwrap_or_else(PoisonError::into_inner))(conversation)
+        })
     }
 
     /// The closure-pass counterpart of [`scan_conversations`].
@@ -3559,7 +3630,7 @@ mod tests {
             messages,
             progress,
             result,
-            &ParallelPass::new(1, None),
+            &ParallelPass::new(1),
             &|item, evidence_timestamp, candidates| {
                 (closure.lock().unwrap_or_else(PoisonError::into_inner))(
                     item,
@@ -4821,28 +4892,22 @@ at the downtown courthouse. Let me know if that works.",
         let seen = Concurrency::default();
         let progress = ScanProgress::default();
         let started = Instant::now();
-        let result = super::scan_conversations(
-            &messages,
-            &progress,
-            &ParallelPass::new(4, None),
-            &|_| {
+        let result =
+            super::scan_conversations(&messages, &progress, &ParallelPass::new(4), &|_| {
                 seen.enter();
                 std::thread::sleep(DELAY);
                 seen.leave();
                 Ok(no_expectations())
-            },
-        );
+            });
         let elapsed = started.elapsed();
         assert_eq!(result.analyzed, 8);
         assert_eq!(seen.peak(), 4, "four workers must run at once");
         assert!(
-            elapsed < DELAY * 5,
+            elapsed < Duration::from_millis(1500) + DELAY * 5,
             "eight 120ms conversations across four workers took {elapsed:?}"
         );
         assert_eq!(progress.processed.load(Ordering::Relaxed), 8);
-        assert_eq!(progress.in_flight.load(Ordering::Relaxed), 0);
-        assert_eq!(progress.conversation_index.load(Ordering::Relaxed), 0);
-        assert_eq!(progress.request_started_unix.load(Ordering::Relaxed), 0);
+        assert_eq!(progress.snapshot(), ProgressSnapshot::default());
     }
 
     #[test]
@@ -4867,13 +4932,13 @@ at the downtown courthouse. Let me know if that works.",
         let sequential = super::scan_conversations(
             &messages,
             &ScanProgress::default(),
-            &ParallelPass::new(1, None),
+            &ParallelPass::new(1),
             &analyze,
         );
         let parallel = super::scan_conversations(
             &messages,
             &ScanProgress::default(),
-            &ParallelPass::new(8, None),
+            &ParallelPass::new(8),
             &analyze,
         );
         let handles = |result: &ScanResult| -> Vec<String> {
@@ -4899,7 +4964,7 @@ at the downtown courthouse. Let me know if that works.",
         let positions = handle_positions(&messages);
         let calls: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
         let seen = Concurrency::default();
-        let pass = ParallelPass::new(8, None);
+        let pass = ParallelPass::new(8);
         let result = super::scan_conversations(&messages, &ScanProgress::default(), &pass, &|c| {
             *calls
                 .lock()
@@ -4925,15 +4990,18 @@ at the downtown courthouse. Let me know if that works.",
         // straight successes widened it back first; either way it narrowed.
         assert_eq!(result.failures.len(), 2);
         assert!(
-            result.failures.iter().all(|line| line
-                .ends_with("The provider rate-limited this request; it was not resent.")),
+            result
+                .failures
+                .iter()
+                .all(|line| line
+                    .ends_with("The provider rate-limited this request; it was not resent.")),
             "{:?}",
             result.failures
         );
         assert!(!result.primary_scan_transport_error);
         assert!(!result.cancelled);
         assert_eq!(result.analyzed, 22);
-        let allowed = pass.allowed.load(Ordering::Relaxed);
+        let allowed = pass.limiter_state().0;
         assert!(
             (1..=8).contains(&allowed),
             "allowed concurrency stays inside 1..=max: {allowed}"
@@ -4942,20 +5010,20 @@ at the downtown courthouse. Let me know if that works.",
 
     #[test]
     fn halving_never_falls_below_one_worker_and_widening_never_passes_the_ceiling() {
-        let pass = ParallelPass::new(8, None);
+        let pass = ParallelPass::new(8);
         for expected in [4, 2, 1, 1, 1] {
             pass.on_backoff();
-            assert_eq!(pass.allowed.load(Ordering::Relaxed), expected);
+            assert_eq!(pass.limiter_state().0, expected);
         }
         // Eight consecutive completed requests widen it, by at least one.
         for _ in 0..RAISE_AFTER_SUCCESSES {
             pass.on_success();
         }
-        assert_eq!(pass.allowed.load(Ordering::Relaxed), 2);
+        assert_eq!(pass.limiter_state().0, 2);
         for _ in 0..RAISE_AFTER_SUCCESSES * 40 {
             pass.on_success();
         }
-        assert_eq!(pass.allowed.load(Ordering::Relaxed), 8);
+        assert_eq!(pass.limiter_state().0, 8);
         // A rate limit resets the success streak, so the very next success
         // cannot widen what the backoff just narrowed.
         for _ in 0..RAISE_AFTER_SUCCESSES - 1 {
@@ -4963,33 +5031,32 @@ at the downtown courthouse. Let me know if that works.",
         }
         pass.on_backoff();
         pass.on_success();
-        assert_eq!(pass.allowed.load(Ordering::Relaxed), 4);
+        assert_eq!(pass.limiter_state().0, 4);
     }
 
     #[test]
-    fn a_published_budget_spreads_dispatch_only_after_a_rate_limit() {
-        let budget = Some((10, Duration::from_secs(1)));
-        let pass = ParallelPass::new(4, budget);
-        let started = Instant::now();
-        for _ in 0..4 {
-            pass.throttle();
+    fn concurrent_successes_widen_once_per_eight_and_backoff_resets_the_streak() {
+        let pass = ParallelPass::new(8);
+        for _ in 0..3 {
+            pass.on_backoff();
         }
-        assert!(
-            started.elapsed() < Duration::from_millis(50),
-            "an untroubled pass pays nothing for pacing"
-        );
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..4 {
+                        pass.on_success();
+                    }
+                });
+            }
+        });
+        assert_eq!(pass.limiter_state(), (3, 0, 8));
+
+        for _ in 0..RAISE_AFTER_SUCCESSES - 1 {
+            pass.on_success();
+        }
         pass.on_backoff();
-        let started = Instant::now();
-        for _ in 0..4 {
-            pass.throttle();
-        }
-        // 10 requests per second is one every 100ms; three of the four
-        // dispatches wait for their slot.
-        assert!(
-            started.elapsed() >= Duration::from_millis(250),
-            "paced dispatch took {:?}",
-            started.elapsed()
-        );
+        pass.on_success();
+        assert_eq!(pass.limiter_state().1, 1);
     }
 
     #[test]
@@ -4998,7 +5065,7 @@ at the downtown courthouse. Let me know if that works.",
         let progress = ScanProgress::default();
         let started = AtomicUsize::new(0);
         let result =
-            super::scan_conversations(&messages, &progress, &ParallelPass::new(4, None), &|_| {
+            super::scan_conversations(&messages, &progress, &ParallelPass::new(4), &|_| {
                 started.fetch_add(1, Ordering::SeqCst);
                 progress.cancel.store(true, Ordering::SeqCst);
                 // Every worker sees the flag the same way a real request
@@ -5017,7 +5084,45 @@ at the downtown courthouse. Let me know if that works.",
             result.failures
         );
         assert!(!result.primary_scan_transport_error);
-        assert_eq!(progress.in_flight.load(Ordering::Relaxed), 0);
+        assert_eq!(progress.snapshot().in_flight, 0);
+    }
+
+    #[test]
+    fn a_stop_flag_wakes_parked_workers_without_sending_more_requests() {
+        let progress = ScanProgress::default();
+        let pass = ParallelPass::new(4);
+        pass.on_backoff();
+        pass.on_backoff();
+        let sent = AtomicUsize::new(0);
+        let (first_started_tx, first_started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let release_rx = Mutex::new(release_rx);
+                let processed_per_job = [1; 8];
+                let _ = run_jobs(&processed_per_job, &pass, &progress, &|_| {
+                    if sent.fetch_add(1, Ordering::SeqCst) == 0 {
+                        first_started_tx.send(()).unwrap();
+                        release_rx.lock().unwrap().recv().unwrap();
+                    }
+                    Ok::<_, ProviderError>(())
+                });
+                finished_tx.send(()).unwrap();
+            });
+            first_started_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap();
+            pass.stop.store(true, Ordering::SeqCst);
+            pass.wake_workers();
+            release_tx.send(()).unwrap();
+            finished_rx
+                .recv_timeout(Duration::from_millis(1500))
+                .expect("the pool should observe stop within the 500 ms contract");
+        });
+        assert_eq!(sent.load(Ordering::SeqCst), 1);
+        assert_eq!(progress.processed.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -5026,7 +5131,7 @@ at the downtown courthouse. Let me know if that works.",
         let progress = ScanProgress::default();
         let started = AtomicUsize::new(0);
         let result =
-            super::scan_conversations(&messages, &progress, &ParallelPass::new(4, None), &|_| {
+            super::scan_conversations(&messages, &progress, &ParallelPass::new(4), &|_| {
                 started.fetch_add(1, Ordering::SeqCst);
                 std::thread::sleep(Duration::from_millis(20));
                 Err(ProviderError::Network)
@@ -5039,7 +5144,51 @@ at the downtown courthouse. Let me know if that works.",
         assert!(result.primary_scan_transport_error);
         assert_eq!(result.failures.len(), started);
         assert!(!result.cancelled);
-        assert_eq!(progress.in_flight.load(Ordering::Relaxed), 0);
+        assert_eq!(progress.snapshot().in_flight, 0);
+    }
+
+    #[test]
+    fn quota_stops_dispatch_and_is_reported_once() {
+        let messages = parallel_corpus(8);
+        let progress = ScanProgress::default();
+        let calls = AtomicUsize::new(0);
+        let first_wave = std::sync::Barrier::new(4);
+        let result =
+            super::scan_conversations(&messages, &progress, &ParallelPass::new(4), &|_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                first_wave.wait();
+                Err(ProviderError::Quota)
+            });
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert!(result.primary_scan_transport_error);
+        assert_eq!(result.failures.len(), 1);
+        assert!(result.failures[0].contains("HTTP 402"));
+        assert_eq!(progress.processed.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn a_panicking_job_is_skipped_and_releases_the_only_limiter_slot() {
+        let messages = parallel_corpus(3);
+        let positions = handle_positions(&messages);
+        let progress = ScanProgress::default();
+        let pass = ParallelPass::new(2);
+        pass.on_backoff();
+        let ran = AtomicUsize::new(0);
+        let result = super::scan_conversations(&messages, &progress, &pass, &|conversation| {
+            let index = positions[&conversation[0].handle];
+            assert_ne!(index, 0, "synthetic provider panic");
+            ran.fetch_add(1, Ordering::SeqCst);
+            Ok(no_expectations())
+        });
+        assert_eq!(ran.load(Ordering::SeqCst), 2);
+        assert_eq!(progress.snapshot().in_flight, 0);
+        assert_eq!(progress.processed.load(Ordering::Relaxed), 3);
+        assert_eq!(result.analyzed, 2);
+        assert_eq!(result.failures.len(), 1);
+        assert_eq!(
+            result.failures[0],
+            "Conversation 1 (subject: Synthetic budget conversation): the analysis failed unexpectedly and was skipped."
+        );
     }
 
     #[test]
@@ -5047,12 +5196,13 @@ at the downtown courthouse. Let me know if that works.",
         let messages = parallel_corpus(4);
         let progress = ScanProgress::default();
         let observed = Mutex::new(Vec::new());
-        super::scan_conversations(&messages, &progress, &ParallelPass::new(4, None), &|_| {
+        super::scan_conversations(&messages, &progress, &ParallelPass::new(4), &|_| {
             std::thread::sleep(Duration::from_millis(60));
-            observed.lock().unwrap().push((
-                progress.in_flight.load(Ordering::Relaxed),
-                progress.request_started_unix.load(Ordering::Relaxed),
-            ));
+            let snapshot = progress.snapshot();
+            observed
+                .lock()
+                .unwrap()
+                .push((snapshot.in_flight, snapshot.request_started_unix));
             Ok(no_expectations())
         });
         let observed = observed.into_inner().unwrap();
@@ -5065,8 +5215,7 @@ at the downtown courthouse. Let me know if that works.",
             observed.iter().all(|(_, clock)| *clock != 0),
             "the request clock is armed while requests run: {observed:?}"
         );
-        assert_eq!(progress.in_flight.load(Ordering::Relaxed), 0);
-        assert_eq!(progress.request_started_unix.load(Ordering::Relaxed), 0);
+        assert_eq!(progress.snapshot(), ProgressSnapshot::default());
     }
 
     #[test]
@@ -5116,8 +5265,11 @@ at the downtown courthouse. Let me know if that works.",
         );
         assert_eq!(result.failures.len(), 2);
         assert!(
-            result.failures.iter().all(|line| line
-                .ends_with("The provider rate-limited this request; it was not resent.")),
+            result
+                .failures
+                .iter()
+                .all(|line| line
+                    .ends_with("The provider rate-limited this request; it was not resent.")),
             "failure lines: {:?}",
             result.failures
         );
@@ -5150,8 +5302,9 @@ at the downtown courthouse. Let me know if that works.",
         let progress = ScanProgress::default();
         let mut observed_during = 0;
         let result = scan_conversations(&[a], &progress, |_| {
-            observed_during = progress.request_started_unix.load(Ordering::Relaxed);
-            assert_eq!(progress.conversation_index.load(Ordering::Relaxed), 1);
+            let snapshot = progress.snapshot();
+            observed_during = snapshot.request_started_unix;
+            assert_eq!(snapshot.conversation_index, 1);
             assert_eq!(progress.conversation_total.load(Ordering::Relaxed), 1);
             Ok(Expectations {
                 items: vec![],
@@ -5161,10 +5314,10 @@ at the downtown courthouse. Let me know if that works.",
             })
         });
         assert_ne!(observed_during, 0, "expected a request start timestamp");
-        assert_eq!(progress.request_started_unix.load(Ordering::Relaxed), 0);
+        assert_eq!(progress.snapshot().request_started_unix, 0);
         assert_eq!(result.analyzed, 1);
         assert_eq!(
-            progress.conversation_index.load(Ordering::Relaxed),
+            progress.snapshot().conversation_index,
             0,
             "conversation_index resets once the pass ends"
         );
@@ -5198,14 +5351,14 @@ at the downtown courthouse. Let me know if that works.",
         let mut observed_index_during = 0;
         scan_closures(&all, &progress, &mut result, |_, _, _| {
             observed_phase_during = progress.closure_phase.load(Ordering::Relaxed);
-            observed_index_during = progress.conversation_index.load(Ordering::Relaxed);
+            observed_index_during = progress.snapshot().conversation_index;
             Ok(None)
         });
         assert!(observed_phase_during);
         assert_eq!(observed_index_during, 1);
         assert!(progress.closure_phase.load(Ordering::Relaxed));
         assert_eq!(
-            progress.conversation_index.load(Ordering::Relaxed),
+            progress.snapshot().conversation_index,
             0,
             "conversation_index resets once the pass ends"
         );
@@ -5457,7 +5610,7 @@ at the downtown courthouse. Let me know if that works.",
             &all,
             &ScanProgress::default(),
             &mut sequential,
-            &ParallelPass::new(1, None),
+            &ParallelPass::new(1),
             &closure,
         );
 
@@ -5469,7 +5622,7 @@ at the downtown courthouse. Let me know if that works.",
             &all,
             &progress,
             &mut parallel,
-            &ParallelPass::new(4, None),
+            &ParallelPass::new(4),
             &|item, evidence_timestamp, candidates| {
                 seen.enter();
                 std::thread::sleep(DELAY);
@@ -5483,7 +5636,7 @@ at the downtown courthouse. Let me know if that works.",
         assert_eq!(parallel.cross_thread_closures, 4);
         assert_eq!(seen.peak(), 4, "four closure checks must run at once");
         assert!(
-            elapsed < DELAY * 5,
+            elapsed < Duration::from_millis(1500) + DELAY * 5,
             "eight 80ms closure checks across four workers took {elapsed:?}"
         );
         let resolved = |result: &ScanResult| -> Vec<bool> {
@@ -5505,7 +5658,7 @@ at the downtown courthouse. Let me know if that works.",
                 .all(|item| item.cross_thread)
         );
         assert_eq!(progress.processed.load(Ordering::Relaxed), 8);
-        assert_eq!(progress.in_flight.load(Ordering::Relaxed), 0);
+        assert_eq!(progress.snapshot().in_flight, 0);
     }
 
     #[test]
@@ -5517,7 +5670,7 @@ at the downtown courthouse. Let me know if that works.",
             &all,
             &ScanProgress::default(),
             &mut result,
-            &ParallelPass::new(4, None),
+            &ParallelPass::new(4),
             &|_, _, _| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Err(ProviderError::RateLimited)
@@ -6019,14 +6172,15 @@ at the downtown courthouse. Let me know if that works.",
         let progress = ScanProgress::default();
         scan_closures(&all, &progress, &mut result, |_, _, _| {
             calls += 1;
-            observed_during = progress.request_started_unix.load(Ordering::Relaxed);
-            assert_eq!(progress.conversation_index.load(Ordering::Relaxed), 1);
+            let snapshot = progress.snapshot();
+            observed_during = snapshot.request_started_unix;
+            assert_eq!(snapshot.conversation_index, 1);
             assert_eq!(progress.conversation_total.load(Ordering::Relaxed), 1);
             Ok(Some((resolved_anchor.clone(), ResolutionKind::Completed)))
         });
         assert_eq!(calls, 1);
         assert_ne!(observed_during, 0, "expected a request start timestamp");
-        assert_eq!(progress.request_started_unix.load(Ordering::Relaxed), 0);
+        assert_eq!(progress.snapshot().request_started_unix, 0);
         assert_eq!(result.cross_thread_closures, 1);
         assert!(result.analysis.items[0].resolution.is_some());
         assert!(result.analysis.items[0].cross_thread);

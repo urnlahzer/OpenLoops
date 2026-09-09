@@ -436,7 +436,6 @@ mod tests {
     fn the_plan_slot_count_is_clamped_and_defaults_to_the_free_plan() {
         // Free is the only plan safe to assume: one concurrent request.
         assert_eq!(synthetic_provider().max_parallel(), 1);
-        assert_eq!(synthetic_provider().request_budget(), None);
         for (slots, expected) in [(0, 1), (1, 1), (3, 3), (10, 10)] {
             assert_eq!(
                 synthetic_provider().with_max_parallel(slots).max_parallel(),

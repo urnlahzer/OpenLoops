@@ -76,18 +76,10 @@ separately limited to 20 requests per minute by OpenRouter, and the upstream
 provider behind any given model may return HTTP 429 under load whatever your
 key allows.
 
-Connecting also reads `GET https://openrouter.ai/api/v1/key` with your key. It
-is content-free — it names no model and carries no message text — and is used
-only to read the account's published request budget (`rate_limit.requests` per
-`rate_limit.interval`). Every member is optional and revalidated; if the answer
-is missing, unreadable, or out of range, OpenLoops simply records no budget and
-connects anyway. The answer is parsed, bounded, and dropped, never persisted.
-
-When a request comes back rate-limited (or out of quota), OpenLoops halves how
-many requests it keeps in flight, down to a floor of one, and — if a request
-budget was read — paces new dispatches to that budget. It widens the
-concurrency back by a quarter after eight consecutive completed requests, up to
-your configured ceiling.
+When a request comes back rate-limited, OpenLoops halves how many requests it
+keeps in flight, down to a floor of one. It widens the concurrency back by a
+quarter after eight consecutive completed requests, up to your configured
+ceiling.
 
 **A rate-limited request is never resent.** `network_policy.retries` in
 `contracts/model/provider-boundary.json` forbids automatically retrying any
@@ -97,11 +89,11 @@ reported in the scan's failure list as
 > Conversation *n* (*k* messages; subject: …): The provider rate-limited this
 > request; it was not resent.
 
-and the scan continues with the remaining conversations. Rate limiting narrows
-the scan; it does not stop it. The other transport-class failures —
-unauthorized, network, timeout, HTTP server error — do stop it: no further
-conversation is dispatched, requests already in flight finish, and the scan is
-reported as incomplete.
+and the scan continues with the remaining conversations. HTTP 429 narrows the
+scan; it does not stop it. HTTP 402 (out of credits), unauthorized, network,
+timeout, and HTTP server errors do stop it: no further conversation is
+dispatched, requests already in flight finish, and the scan is reported as
+incomplete.
 
 ## Contract and limits
 

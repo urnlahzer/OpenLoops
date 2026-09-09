@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use crate::review_ui::ReviewState;
 use crate::settings::{
-    MAX_OPENROUTER_PARALLEL, MIN_OPENROUTER_PARALLEL, OllamaPlan, Provider, Settings, SettingsError,
-    SettingsStore, max_parallel, production_store,
+    MAX_OPENROUTER_PARALLEL, MIN_OPENROUTER_PARALLEL, OllamaPlan, Provider, Settings,
+    SettingsError, SettingsStore, max_parallel, production_store,
 };
 use eframe::egui::{self, Color32, RichText};
 use openloops_graph::live::{
@@ -1052,14 +1052,13 @@ impl eframe::App for SetupApp {
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
                     if let Some(progress) = &self.scan_progress {
                         ui.label(format!("{} / {} messages processed", progress.processed.load(Ordering::Relaxed), progress.total.load(Ordering::Relaxed)));
-                        let started = progress.request_started_unix.load(Ordering::Relaxed);
+                        let snapshot = progress.snapshot();
+                        let started = snapshot.request_started_unix;
                         if started != 0 {
                             let elapsed = (chrono::Utc::now().timestamp() - started).max(0);
                             let label = if progress.closure_phase.load(Ordering::Relaxed) { "Closure check" } else { "Conversation" };
-                            // conversation_index counts what has STARTED, so
-                            // subtracting what is still running gives what is done.
-                            let in_flight = progress.in_flight.load(Ordering::Relaxed);
-                            let done = progress.conversation_index.load(Ordering::Relaxed).saturating_sub(in_flight);
+                            let in_flight = snapshot.in_flight;
+                            let done = snapshot.conversation_index.saturating_sub(in_flight);
                             ui.label(format!(
                                 "{label} {done} of {} done · {in_flight} in flight · {elapsed}s on the oldest request",
                                 progress.conversation_total.load(Ordering::Relaxed),

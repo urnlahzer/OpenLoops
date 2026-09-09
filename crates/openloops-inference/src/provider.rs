@@ -200,16 +200,6 @@ pub trait ModelClient: Sync {
     /// retrying any request that carried content.
     fn max_parallel(&self) -> usize;
 
-    /// The provider's published per-interval request budget -- `(requests,
-    /// interval)` -- when it publishes one and the adapter could read it.
-    /// A caller that has been rate-limited uses it to spread dispatches
-    /// instead of guessing. `None` means the provider publishes no budget,
-    /// which is the default and says nothing about how fast requests may
-    /// be sent.
-    fn request_budget(&self) -> Option<(u32, Duration)> {
-        None
-    }
-
     /// Sends one system/user pair and returns the assistant's content.
     ///
     /// Calling this explicitly opts into transmitting `user` to the

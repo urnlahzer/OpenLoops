@@ -3,7 +3,7 @@
 //! the public ZDR endpoint listing, and every completion asks `OpenRouter`
 //! to route to ZDR endpoints only.
 use std::sync::atomic::AtomicBool;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use reqwest::blocking::{Client, Response};
 use serde_json::{Value, json};
@@ -11,29 +11,18 @@ use zeroize::Zeroizing;
 
 use crate::provider::{
     MAX_PARALLEL_REQUESTS, MAX_REQUEST, MAX_RESPONSE, ModelClient, ProviderError, RequestControl,
-    https_client, json_document, parse_error, read_body, send_with_control, status_error, valid_key,
-    valid_model_name,
+    https_client, json_document, parse_error, read_body, send_with_control, status_error,
+    valid_key, valid_model_name,
 };
 
 const AUTHORITY: &str = "https://openrouter.ai";
 const CHAT: &str = "https://openrouter.ai/api/v1/chat/completions";
 const ZDR_ENDPOINTS: &str = "https://openrouter.ai/api/v1/endpoints/zdr";
-/// The account's own key status. Content-free: it names no model and
-/// carries no mailbox projection, and its answer is read only for the
-/// published request budget below.
-const KEY_STATUS: &str = "https://openrouter.ai/api/v1/key";
 /// The catalog listing is content-free and much larger than a completion:
 /// every ZDR endpoint of every model, several hundred kilobytes today.
 const MAX_LISTING: usize = 4_194_304;
 const MAX_ENDPOINTS: usize = 8192;
 const MAX_LABEL: usize = 128;
-/// The key status answer is a single small object; anything larger is not
-/// the document this adapter knows how to read.
-const MAX_KEY_STATUS: usize = 16_384;
-/// Bounds on a published request budget. A budget outside these is not
-/// usable pacing information and is treated as absent.
-const MAX_BUDGET_REQUESTS: u64 = 100_000;
-const MAX_BUDGET_SECONDS: u64 = 3600;
 
 /// One selectable zero-data-retention model: the exact provider-side
 /// `id` a request is bound to, and the human `label` shown beside it.
@@ -51,10 +40,6 @@ pub struct OpenRouter {
     /// Caller-chosen dispatch ceiling; see
     /// [`OpenRouter::with_max_parallel`].
     parallel: usize,
-    /// The account's published per-interval request budget, read once at
-    /// connect time. `None` when `OpenRouter` published none or the answer
-    /// could not be read.
-    budget: Option<(u32, Duration)>,
 }
 
 impl OpenRouter {
@@ -77,13 +62,11 @@ impl OpenRouter {
         {
             return Err(ProviderError::ModelUnavailable);
         }
-        let budget = key_budget(&client, &key, KEY_STATUS);
         Ok(Self {
             client,
             key,
             model: model.to_owned(),
             parallel: 1,
-            budget,
         })
     }
 
@@ -153,10 +136,6 @@ impl ModelClient for OpenRouter {
         self.parallel
     }
 
-    fn request_budget(&self) -> Option<(u32, Duration)> {
-        self.budget
-    }
-
     fn complete(
         &self,
         system: &str,
@@ -192,73 +171,6 @@ fn fetch_zdr(client: &Client, url: &str) -> Result<Vec<ModelChoice>, ProviderErr
         status => return Err(status_error(status)),
     }
     zdr_models(&read_body(response, MAX_LISTING, &control)?)
-}
-
-/// Reads the account's published per-interval request budget from the
-/// content-free key status endpoint. Advisory only: any failure --
-/// network, a non-200 status, an unreadable or absent budget -- answers
-/// `None`, because a connection that can list ZDR endpoints and complete
-/// a chat must not be refused over a pacing hint. The key is sent as a
-/// Bearer credential to the same exact authority every other request
-/// uses, and the answer is parsed, bounded, and dropped, never persisted.
-fn key_budget(client: &Client, key: &str, url: &str) -> Option<(u32, Duration)> {
-    // Only the adapter-fixed KEY_STATUS constant reaches here in a real
-    // build; the loopback tests substitute their own origin.
-    debug_assert!(cfg!(test) || url.starts_with(AUTHORITY));
-    let control = RequestControl::new(Instant::now());
-    let response = send_with_control(
-        client
-            .get(url)
-            .bearer_auth(key)
-            .header(reqwest::header::ACCEPT, "application/json"),
-        &control,
-    )
-    .ok()?;
-    if response.status().as_u16() != 200 {
-        return None;
-    }
-    rate_limit(&read_body(response, MAX_KEY_STATUS, &control).ok()?)
-}
-
-/// Parses `{"data":{"rate_limit":{"requests":N,"interval":"10s"}}}`.
-///
-/// Every member is optional and every one is revalidated: a document
-/// without a readable, in-range budget answers `None` rather than
-/// producing a guess. Parsed strictly (duplicate members reject) because
-/// unlike the ZDR listing this is a single small document whose one value
-/// is used directly, not a menu the user re-picks from.
-fn rate_limit(bytes: &[u8]) -> Option<(u32, Duration)> {
-    if bytes.len() > MAX_KEY_STATUS {
-        return None;
-    }
-    let value = openloops_contracts::parse_strict_json(bytes).ok()?;
-    let limit = value.get("data")?.get("rate_limit")?.as_object()?;
-    let requests = limit.get("requests")?.as_u64()?;
-    if requests == 0 || requests > MAX_BUDGET_REQUESTS {
-        return None;
-    }
-    let interval = parse_interval(limit.get("interval")?.as_str()?)?;
-    Some((u32::try_from(requests).ok()?, interval))
-}
-
-/// A published interval such as `"10s"`: decimal digits followed by a
-/// single seconds, minutes, or hours unit, bounded by
-/// [`MAX_BUDGET_SECONDS`].
-fn parse_interval(text: &str) -> Option<Duration> {
-    let (digits, unit) = text.split_at_checked(text.len().checked_sub(1)?)?;
-    if !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let count: u64 = digits.parse().ok()?;
-    let seconds = count.checked_mul(match unit {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3600,
-        _ => return None,
-    })?;
-    (1..=MAX_BUDGET_SECONDS)
-        .contains(&seconds)
-        .then(|| Duration::from_secs(seconds))
 }
 
 /// A displayable model label: present, bounded, and free of the control
@@ -428,6 +340,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc::Receiver;
+    use std::time::Duration;
 
     const MODEL: &str = "vendor/model-1";
 
@@ -513,7 +426,6 @@ mod tests {
             key: Zeroizing::new("synthetic-key".into()),
             model: MODEL.to_owned(),
             parallel: 1,
-            budget: None,
         }
     }
 
@@ -727,91 +639,14 @@ mod tests {
     }
 
     #[test]
-    fn a_published_request_budget_is_read_from_the_key_status_endpoint() {
-        let body = serde_json::to_vec(&json!({
-            "data": {
-                "label": "synthetic key",
-                "usage": 0,
-                "is_free_tier": false,
-                "rate_limit": {"requests": 20, "interval": "10s"}
-            }
-        }))
-        .unwrap();
-        let (url, requests) = loopback(http(200, &body));
-        let client = Client::builder().no_proxy().build().unwrap();
-        assert_eq!(
-            key_budget(&client, "synthetic-key", &url),
-            Some((20, Duration::from_secs(10)))
-        );
-        let sent = String::from_utf8_lossy(&requests.recv().unwrap()).to_lowercase();
-        assert!(sent.starts_with("get "), "key status is a GET: {sent}");
-        assert!(sent.contains("authorization: bearer synthetic-key"));
-    }
-
-    #[test]
-    fn a_key_status_without_a_readable_budget_reports_no_budget() {
-        for body in [
-            json!({"data": {"label": "synthetic key", "usage": 0}}),
-            json!({"data": {"rate_limit": {"interval": "10s"}}}),
-            json!({"data": {"rate_limit": {"requests": 20}}}),
-            json!({"data": {"rate_limit": {"requests": 0, "interval": "10s"}}}),
-            json!({"data": {"rate_limit": {"requests": 20, "interval": "0s"}}}),
-            json!({"data": {"rate_limit": {"requests": 20, "interval": "10"}}}),
-            json!({"data": {"rate_limit": {"requests": 20, "interval": "ss"}}}),
-            json!({"data": {"rate_limit": {"requests": 20, "interval": "10d"}}}),
-            json!({"data": {"rate_limit": {"requests": 20, "interval": "2h"}}}),
-            json!({"data": {"rate_limit": {"requests": -1, "interval": "10s"}}}),
-            json!({"data": {"rate_limit": {"requests": 200_000, "interval": "10s"}}}),
-            json!({"data": {"rate_limit": "20/10s"}}),
-            json!({"data": []}),
-            json!({"rate_limit": {"requests": 20, "interval": "10s"}}),
-        ] {
-            assert_eq!(
-                rate_limit(&serde_json::to_vec(&body).unwrap()),
-                None,
-                "unreadable budget must not produce a guess: {body}"
-            );
-        }
-        // Duplicate members reject rather than collapsing to the last value.
-        assert_eq!(
-            rate_limit(
-                br#"{"data":{"rate_limit":{"requests":1,"requests":900,"interval":"10s"}}}"#
-            ),
-            None
-        );
-        assert_eq!(rate_limit(b"synthetic-private-canary"), None);
-        assert_eq!(rate_limit(&vec![b'x'; MAX_KEY_STATUS + 1]), None);
-        assert_eq!(
-            rate_limit(br#"{"data":{"rate_limit":{"requests":600,"interval":"1m"}}}"#),
-            Some((600, Duration::from_mins(1)))
-        );
-        assert_eq!(
-            rate_limit(br#"{"data":{"rate_limit":{"requests":1,"interval":"1h"}}}"#),
-            Some((1, Duration::from_hours(1)))
-        );
-    }
-
-    #[test]
-    fn a_key_status_that_fails_never_fails_the_connection() {
-        let client = Client::builder().no_proxy().build().unwrap();
-        let (url, _requests) = loopback(http(401, b"{}"));
-        assert_eq!(key_budget(&client, "synthetic-key", &url), None);
-        let (url, _requests) = loopback(http(500, b"{}"));
-        assert_eq!(key_budget(&client, "synthetic-key", &url), None);
-        // A closed port: no answer at all is still only a missing budget.
-        assert_eq!(
-            key_budget(&client, "synthetic-key", "http://127.0.0.1:1/"),
-            None
-        );
-    }
-
-    #[test]
     fn the_parallel_ceiling_is_clamped_and_defaults_to_one() {
         let provider = synthetic_provider();
         assert_eq!(provider.max_parallel(), 1);
-        assert_eq!(provider.request_budget(), None);
         assert_eq!(synthetic_provider().with_max_parallel(0).max_parallel(), 1);
-        assert_eq!(synthetic_provider().with_max_parallel(32).max_parallel(), 32);
+        assert_eq!(
+            synthetic_provider().with_max_parallel(32).max_parallel(),
+            32
+        );
         assert_eq!(
             synthetic_provider()
                 .with_max_parallel(usize::MAX)
