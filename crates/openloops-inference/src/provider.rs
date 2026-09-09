@@ -172,13 +172,43 @@ impl std::fmt::Display for ProviderError {
     }
 }
 
+/// The most requests any adapter may report it can run at once. Nothing
+/// in `contracts/model/provider-boundary.json` restricts concurrency, so
+/// this is a sanity ceiling on a user-supplied or provider-reported
+/// number, not a contract limit.
+pub const MAX_PARALLEL_REQUESTS: usize = 100;
+
 /// One consented provider, bound to one exact model label.
 ///
 /// Implementors own their own authority, credential, and wire format;
 /// callers see only the selected label and a system/user completion.
-pub trait ModelClient {
+///
+/// `Sync` is required because one client serves every worker of a
+/// parallel scan: the workers share a single `&dyn ModelClient` and call
+/// [`ModelClient::complete`] on it concurrently.
+pub trait ModelClient: Sync {
     /// The exact provider-side model label this client is bound to.
     fn model(&self) -> &str;
+
+    /// How many [`ModelClient::complete`] calls a caller may keep in
+    /// flight against this client at once, always at least 1 and never
+    /// above [`MAX_PARALLEL_REQUESTS`].
+    ///
+    /// This is a dispatch ceiling, not a promise: a provider may still
+    /// rate-limit below it, and the caller is expected to back off rather
+    /// than resend, since `network_policy.retries` forbids automatically
+    /// retrying any request that carried content.
+    fn max_parallel(&self) -> usize;
+
+    /// The provider's published per-interval request budget -- `(requests,
+    /// interval)` -- when it publishes one and the adapter could read it.
+    /// A caller that has been rate-limited uses it to spread dispatches
+    /// instead of guessing. `None` means the provider publishes no budget,
+    /// which is the default and says nothing about how fast requests may
+    /// be sent.
+    fn request_budget(&self) -> Option<(u32, Duration)> {
+        None
+    }
 
     /// Sends one system/user pair and returns the assistant's content.
     ///
