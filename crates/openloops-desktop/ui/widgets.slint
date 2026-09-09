@@ -1,0 +1,365 @@
+import { Tokens } from "tokens.slint";
+import { Button, CheckBox as StdCheckBox, ComboBox, LineEdit, TextEdit } from "std-widgets.slint";
+
+component ButtonBase {
+    in property <string> text;
+    in property <string> accessible-name: text;
+    in property <bool> enabled: true;
+    in property <bool> primary: false;
+    callback clicked;
+    min-height: Tokens.click-min;
+    opacity: enabled ? 1 : Tokens.disabled-opacity;
+    button := Button {
+        text: root.text;
+        accessible-label: root.accessible-name;
+        enabled: root.enabled;
+        primary: root.primary;
+        clicked => { root.clicked(); }
+    }
+    if button.has-focus && root.enabled: Rectangle {
+        x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+        width: parent.width + 2 * Tokens.focus-ring;
+        height: parent.height + 2 * Tokens.focus-ring;
+        border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+    }
+}
+
+export component PrimaryButton inherits ButtonBase { primary: true; }
+export component SecondaryButton inherits ButtonBase { }
+export component SubtleButton inherits ButtonBase { }
+export component OutlineButton inherits ButtonBase { }
+
+export component LinkButton {
+    in property <string> text;
+    in property <string> accessible-name: text;
+    in property <bool> enabled: true;
+    callback clicked;
+    min-height: Tokens.click-min;
+    horizontal-stretch: 0;
+    opacity: enabled ? 1 : Tokens.disabled-opacity;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    HorizontalLayout {
+        alignment: start;
+        Text { text: root.text; color: Tokens.brand; font-size: Tokens.font-13; font-weight: 600; vertical-alignment: center; accessible-role: none; }
+    }
+    TouchArea { enabled: root.enabled; clicked => { link-focus.focus(); root.clicked(); } }
+    link-focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    if link-focus.has-focus && root.enabled: Rectangle {
+        x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+        width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring;
+        border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+    }
+}
+
+export component Segmented {
+    in property <[string]> options;
+    in-out property <int> selected-index;
+    in property <string> accessible-name;
+    in property <bool> enabled: true;
+    callback selected(int);
+    min-height: Tokens.click-min;
+    width: 100%;
+    opacity: enabled ? 1 : Tokens.disabled-opacity;
+    accessible-role: groupbox;
+    accessible-label: accessible-name;
+    HorizontalLayout {
+        spacing: Tokens.space-2;
+        for option[index] in root.options: segment := Rectangle {
+            min-width: Tokens.segment-min-width;
+            min-height: Tokens.click-min;
+            horizontal-stretch: 1;
+            background: index == root.selected-index ? Tokens.brand : Tokens.bg-surface;
+            border-width: Tokens.hairline;
+            border-color: index == root.selected-index ? Tokens.brand : Tokens.stroke-2;
+            border-radius: Tokens.radius-4;
+            forward-focus: segment-focus;
+            accessible-role: button;
+            accessible-label: option;
+            accessible-enabled: root.enabled;
+            accessible-checkable: true;
+            accessible-checked: index == root.selected-index;
+            accessible-action-default => {
+                if root.enabled && index != root.selected-index {
+                    root.selected-index = index;
+                    root.selected(index);
+                }
+            }
+            Text {
+                text: option;
+                color: index == root.selected-index ? Tokens.bg-surface : Tokens.text-1;
+                font-size: Tokens.font-13; font-weight: 600;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+            TouchArea {
+                enabled: root.enabled;
+                clicked => {
+                    segment-focus.focus();
+                    if index != root.selected-index {
+                        root.selected-index = index;
+                        root.selected(index);
+                    }
+                }
+            }
+            segment-focus := FocusScope {
+                enabled: root.enabled;
+                key-pressed(event) => {
+                    if event.text == Key.LeftArrow {
+                        if root.selected-index > 0 {
+                            root.selected-index -= 1;
+                            root.selected(root.selected-index);
+                        }
+                        return accept;
+                    } else if event.text == Key.RightArrow {
+                        if root.selected-index < root.options.length - 1 {
+                            root.selected-index += 1;
+                            root.selected(root.selected-index);
+                        }
+                        return accept;
+                    } else if event.text == " " || event.text == Key.Return {
+                        if index != root.selected-index {
+                            root.selected-index = index;
+                            root.selected(index);
+                        }
+                        return accept;
+                    }
+                    return reject;
+                }
+            }
+            if segment-focus.has-focus && root.enabled: Rectangle {
+                x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+                width: parent.width + 2 * Tokens.focus-ring;
+                height: parent.height + 2 * Tokens.focus-ring;
+                border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+            }
+        }
+    }
+}
+
+export component Pill {
+    in property <string> text;
+    in property <string> kind: "neutral";
+    in property <string> accessible-name: text;
+    private property <color> ink: kind == "success" ? Tokens.success : kind == "warning" ? Tokens.warning : kind == "danger" ? Tokens.danger : kind == "watch" ? Tokens.watch : kind == "brand" ? Tokens.brand : Tokens.text-2;
+    private property <color> fill: kind == "success" ? Tokens.success-bg : kind == "warning" ? Tokens.warning-bg : kind == "danger" ? Tokens.danger-bg : kind == "watch" ? Tokens.watch-bg : kind == "brand" ? Tokens.brand-subtle : Tokens.bg-bar;
+    accessible-role: AccessibleRole.text;
+    accessible-label: accessible-name;
+    Rectangle { background: root.fill; border-radius: Tokens.radius-pill;
+        HorizontalLayout { padding-left: Tokens.space-2; padding-right: Tokens.space-2; padding-top: Tokens.space-1; padding-bottom: Tokens.space-1;
+            Text { text: root.text; color: root.ink; font-size: Tokens.font-13; font-weight: 600; }
+        }
+    }
+}
+
+export component Callout {
+    in property <string> text;
+    in property <string> kind: "info";
+    in property <string> accessible-name: text;
+    private property <color> ink: kind == "success" ? Tokens.success : kind == "warning" ? Tokens.warning : Tokens.brand;
+    private property <color> fill: kind == "success" ? Tokens.success-bg : kind == "warning" ? Tokens.warning-bg : Tokens.brand-subtle;
+    private property <color> stroke: kind == "success" ? Tokens.success-stroke : kind == "warning" ? Tokens.warning-stroke : Tokens.brand-stroke;
+    accessible-role: AccessibleRole.text;
+    accessible-label: accessible-name;
+    Rectangle { background: root.fill; border-color: root.stroke; border-width: Tokens.hairline; border-radius: Tokens.radius-4;
+        HorizontalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2;
+            Text { text: root.text; color: root.ink; font-size: Tokens.font-13; wrap: word-wrap; vertical-alignment: center; }
+        }
+    }
+}
+
+export component Field {
+    in property <string> label;
+    // `accessible-label` is already a built-in property on every element, so
+    // this is named distinctly; it lets a caller give the screen-reader name
+    // its own text without changing the visible `label`.
+    in property <string> input-accessible-label: label;
+    in property <string> placeholder;
+    in property <string> helper-text;
+    in-out property <string> value;
+    in property <bool> password: false;
+    in property <bool> reveal-password: false;
+    in property <bool> multiline: false;
+    in property <bool> monospace: false;
+    in property <int> rows: 1;
+    in property <bool> enabled: true;
+    callback edited(string);
+    callback accepted(string);
+    callback focus-changed(bool);
+    out property <bool> has-focus;
+    min-height: multiline ? rows * Tokens.textarea-row + Tokens.font-13 : Tokens.field-height + Tokens.font-13 + Tokens.space-1;
+    width: 100%;
+    horizontal-stretch: 1;
+    opacity: enabled ? 1 : Tokens.disabled-opacity;
+    VerticalLayout {
+        spacing: Tokens.space-1;
+        Text { text: root.label; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; width: 100%; horizontal-alignment: left; }
+        if !root.helper-text.is-empty: Text { text: root.helper-text; color: Tokens.text-2; font-size: Tokens.font-13; wrap: word-wrap; width: 100%; horizontal-alignment: left; }
+        if !root.multiline: line-frame := Rectangle {
+            min-height: Tokens.field-height;
+            width: 100%;
+            line-input := LineEdit {
+                width: 100%; height: 100%;
+                text <=> root.value; placeholder-text: root.placeholder; enabled: root.enabled;
+                accessible-label: root.input-accessible-label;
+                font-family: root.monospace ? Tokens.mono-font-family : Tokens.font-family;
+                input-type: root.password && !root.reveal-password ? InputType.password : InputType.text;
+                edited(value) => { root.edited(value); }
+                accepted => { root.accepted(self.text); }
+                changed has-focus => { root.has-focus = self.has-focus; root.focus-changed(self.has-focus); }
+            }
+            if line-input.has-focus && root.enabled: Rectangle {
+                x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+                width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring;
+                border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+            }
+            if line-input.has-focus && root.enabled: Rectangle { y: parent.height - Tokens.focus-ring; height: Tokens.focus-ring; background: Tokens.brand; }
+        }
+        if root.multiline: text-frame := Rectangle {
+            min-height: root.rows * Tokens.textarea-row;
+            width: 100%;
+            background: Tokens.bg-surface;
+            border-width: Tokens.hairline;
+            border-color: Tokens.stroke-2;
+            border-radius: Tokens.radius-4;
+            text-input := TextEdit {
+                width: 100%; height: 100%;
+                text <=> root.value; enabled: root.enabled; wrap: word-wrap;
+                accessible-label: root.input-accessible-label;
+                font-family: root.monospace ? Tokens.mono-font-family : Tokens.font-family;
+                edited => { root.edited(self.text); }
+                changed has-focus => { root.has-focus = self.has-focus; root.focus-changed(self.has-focus); }
+            }
+            if text-input.has-focus && root.enabled: Rectangle {
+                x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+                width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring;
+                border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+            }
+            if text-input.has-focus && root.enabled: Rectangle { y: parent.height - Tokens.focus-ring; height: Tokens.focus-ring; background: Tokens.brand; }
+        }
+    }
+}
+
+export component Disclosure {
+    in property <string> title;
+    in-out property <bool> expanded: false;
+    in property <bool> enabled: true;
+    callback toggled(bool);
+    width: 100%;
+    opacity: enabled ? 1 : Tokens.disabled-opacity;
+    VerticalLayout {
+        header := Rectangle {
+            min-height: Tokens.click-min;
+            width: 100%;
+            forward-focus: disclosure-focus;
+            accessible-role: button; accessible-label: root.title; accessible-enabled: root.enabled; accessible-expanded: root.expanded;
+            accessible-action-default => { if root.enabled { root.expanded = !root.expanded; root.toggled(root.expanded); } }
+            HorizontalLayout { alignment: start; spacing: Tokens.space-2;
+                Text { text: root.expanded ? "⌄" : "›"; color: Tokens.text-2; font-size: Tokens.font-16; vertical-alignment: center; }
+                Text { text: root.title; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; vertical-alignment: center; }
+            }
+            TouchArea { enabled: root.enabled; clicked => { disclosure-focus.focus(); root.expanded = !root.expanded; root.toggled(root.expanded); } }
+            disclosure-focus := FocusScope {
+                enabled: root.enabled;
+                key-pressed(event) => {
+                    if event.text == " " || event.text == Key.Return {
+                        root.expanded = !root.expanded; root.toggled(root.expanded); return accept;
+                    }
+                    return reject;
+                }
+            }
+            if disclosure-focus.has-focus && root.enabled: Rectangle {
+                x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+                width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring;
+                border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-4;
+            }
+        }
+        content-clip := Rectangle {
+            width: 100%;
+            height: root.expanded ? content.preferred-height : 0px;
+            clip: true;
+            content := VerticalLayout {
+                width: 100%;
+                y: 0;
+                @children
+            }
+        }
+    }
+}
+
+export component Avatar {
+    in property <string> initials;
+    in property <string> accessible-name;
+    width: Tokens.avatar-size; height: Tokens.avatar-size;
+    accessible-role: image; accessible-label: accessible-name;
+    Rectangle { background: Tokens.brand-subtle; border-radius: Tokens.radius-pill;
+        Text { text: root.initials; color: Tokens.brand; font-size: Tokens.font-13; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+    }
+}
+
+export component ProgressBar {
+    in property <float> value;
+    in property <string> accessible-name;
+    height: Tokens.progress-height;
+    accessible-role: progress-indicator; accessible-label: accessible-name;
+    Rectangle { background: Tokens.stroke-1; border-radius: Tokens.radius-pill;
+        Rectangle { width: max(Tokens.space-1, min(parent.width, parent.width * root.value)); background: Tokens.brand; border-radius: Tokens.radius-pill; }
+    }
+}
+
+export component Checkbox {
+    in property <string> text;
+    in-out property <bool> checked;
+    in property <bool> enabled: true;
+    callback toggled(bool);
+    min-height: Tokens.click-min;
+    opacity: enabled ? 1 : Tokens.disabled-opacity;
+    check := StdCheckBox { text: root.text; accessible-label: root.text; checked <=> root.checked; enabled: root.enabled; toggled => { root.toggled(root.checked); } }
+    if check.has-focus && root.enabled: Rectangle {
+        x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+        width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring;
+        border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+    }
+}
+
+// `choices` carries the "Load models to choose" placeholder prepended as row
+// 0 by the Rust adapter, and `selected-index` is that same display index (0
+// = placeholder/none, 1..n = a real selection). This keeps the ComboBox's
+// own `current-index` always in bounds, so Slint's internal
+// `ComboBoxBase.reset-current()` (which fires on every `changed model` and
+// unconditionally assigns `current-index`, dropping any declarative binding
+// on it) never has to invent a selection: it always clamps to the value we
+// last pushed here via the `changed selected-index` handler below.
+export component ModelPicker {
+    in property <[string]> choices;
+    in-out property <int> selected-index;
+    in-out property <string> selected-value;
+    in property <bool> enabled: true;
+    in property <string> accessible-name;
+    callback selected(string);
+    horizontal-stretch: 1;
+    width: 100%;
+    opacity: enabled ? 1 : Tokens.disabled-opacity;
+    changed selected-index => { picker.current-index = root.selected-index; }
+    picker := ComboBox {
+        width: 100%;
+        model: root.choices;
+        current-index: root.selected-index;
+        current-value: root.selected-value;
+        accessible-label: root.accessible-name;
+        enabled: root.enabled;
+        selected(value) => { root.selected(value); }
+    }
+    if picker.has-focus && root.enabled: Rectangle {
+        x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+        width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring;
+        border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+    }
+}

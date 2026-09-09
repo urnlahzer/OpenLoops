@@ -54,7 +54,7 @@ $expectedOwners = 0..10 | ForEach-Object { 'OWN-{0:D2}' -f $_ }
 $expectedAdrs = @(
     'ADR-001', 'ADR-002', 'ADR-003', 'ADR-PRIV-001', 'ADR-004', 'ADR-005',
     'ADR-006', 'ADR-007', 'ADR-008', 'ADR-009', 'ADR-010', 'ADR-011',
-    'ADR-012', 'ADR-013'
+    'ADR-012', 'ADR-013', 'ADR-014'
 )
 $expectedGates = @(
     'G-ID', 'G-MAIL', 'G-TODO', 'G-CAL', 'G-ADDIN', 'G-STATE', 'G-MODEL',
@@ -69,13 +69,13 @@ $expectedCapabilities = @(
     'shared_project_registration', 'microsoft_hosted_state_adapter'
 )
 $expectedOwnerContracts = [ordered]@{
-    'OWN-00' = @{ status = 'accepted'; adrs = @('ADR-001', 'ADR-002'); gates = @('G-ID', 'G-ADDIN') }
+    'OWN-00' = @{ status = 'accepted'; adrs = @('ADR-001', 'ADR-002', 'ADR-014'); gates = @('G-ID', 'G-ADDIN') }
     'OWN-01' = @{ status = 'accepted'; adrs = @('ADR-001', 'ADR-010', 'ADR-012'); gates = @('G-ADDIN', 'G-RELEASE') }
     'OWN-02' = @{ status = 'accepted'; adrs = @('ADR-002', 'ADR-003'); gates = @('G-ID', 'G-MAIL', 'G-TODO', 'G-CAL', 'G-ADDIN') }
     'OWN-03' = @{ status = 'accepted'; adrs = @('ADR-008', 'ADR-009', 'ADR-011'); gates = @('G-AUTO', 'G-AUTO-FULL') }
     'OWN-04' = @{ status = 'accepted'; adrs = @('ADR-009'); gates = @('G-TODO', 'G-CAL') }
     'OWN-05' = @{ status = 'accepted'; adrs = @('ADR-004', 'ADR-006', 'ADR-009'); gates = @('G-CAL', 'G-MAIL') }
-    'OWN-06' = @{ status = 'accepted_with_security_condition'; adrs = @('ADR-PRIV-001', 'ADR-005'); gates = @('G-STATE', 'G-PRIV', 'G-SEC-AUDIT') }
+    'OWN-06' = @{ status = 'accepted_with_security_condition'; adrs = @('ADR-PRIV-001', 'ADR-005', 'ADR-014'); gates = @('G-STATE', 'G-PRIV', 'G-SEC-AUDIT') }
     'OWN-07' = @{ status = 'accepted'; adrs = @('ADR-PRIV-001', 'ADR-006', 'ADR-009'); gates = @('G-STATE', 'G-PRIV') }
     'OWN-08' = @{ status = 'accepted'; adrs = @('ADR-007'); gates = @('G-MODEL', 'G-PRIV') }
     'OWN-09' = @{ status = 'accepted'; adrs = @('ADR-004'); gates = @('G-MAIL') }
@@ -244,7 +244,7 @@ foreach ($owner in @($registry.owner_decisions)) {
 }
 
 $acceptedAdrs = @($registry.adrs | Where-Object { $_.status -eq 'accepted' } | ForEach-Object { [string]$_.id })
-Test-ExactSet -Actual $acceptedAdrs -Expected @('ADR-001', 'ADR-002', 'ADR-003', 'ADR-004', 'ADR-005', 'ADR-006', 'ADR-007', 'ADR-008', 'ADR-009', 'ADR-010', 'ADR-011', 'ADR-012', 'ADR-013', 'ADR-PRIV-001') -FailureId 'P0-TRACE-001'
+Test-ExactSet -Actual $acceptedAdrs -Expected @('ADR-001', 'ADR-002', 'ADR-003', 'ADR-004', 'ADR-005', 'ADR-006', 'ADR-007', 'ADR-008', 'ADR-009', 'ADR-010', 'ADR-011', 'ADR-012', 'ADR-013', 'ADR-014', 'ADR-PRIV-001') -FailureId 'P0-TRACE-001'
 if (@($registry.adrs | Where-Object { $_.status -notin @('accepted', 'planned') }).Count -gt 0) {
     Add-Failure -Id 'P0-TRACE-001'
 }

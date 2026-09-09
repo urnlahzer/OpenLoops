@@ -1,0 +1,102 @@
+import { Tokens } from "tokens.slint";
+import { TitleBar, NavRail, StatusBar } from "chrome.slint";
+import { SourcesScreen, StatusLine } from "sources.slint";
+export { Tokens } from "tokens.slint";
+export { StatusLine } from "sources.slint";
+
+export component AppWindow inherits Window {
+    title: "OpenLoops";
+    min-width: Tokens.window-min-width;
+    min-height: Tokens.window-min-height;
+    preferred-width: Tokens.window-width;
+    preferred-height: Tokens.window-height;
+    background: Tokens.bg-canvas;
+    default-font-family: Tokens.font-family;
+    default-font-size: Tokens.font-14;
+
+    in-out property <int> active-screen;
+    in property <bool> busy;
+    in property <bool> scanning;
+    in property <string> busy-chip-text;
+    in property <string> review-scan-chip-text;
+    in property <string> account-name;
+    in property <string> account-initials;
+    in property <bool> account-signed-in;
+    in property <int> review-badge;
+    in property <string> provider-name;
+    in property <bool> provider-connected;
+    in property <string> status-left;
+    in property <string> status-center;
+    in property <string> status-right;
+    in property <bool> store-available;
+    in property <string> settings-status;
+    in property <bool> settings-succeeded;
+    in-out property <string> client-id;
+    in-out property <string> groups;
+    in-out property <string> shared-mailboxes;
+    in property <bool> own-inbox-accessible;
+    in property <[StatusLine]> microsoft-lines;
+    in-out property <int> provider-index;
+    in-out property <string> api-key;
+    in-out property <bool> show-key;
+    in property <[string]> models;
+    in-out property <int> model-index;
+    in-out property <string> model-value;
+    in-out property <int> ollama-plan-index;
+    in property <[string]> ollama-plan-options;
+    in-out property <string> openrouter-parallel;
+    in-out property <bool> parallel-field-focused;
+    in property <string> model-status;
+    in property <bool> model-succeeded;
+    in property <string> provider-disclosure;
+    in property <string> key-placeholder;
+    in property <string> load-models-label;
+    in property <bool> can-check-microsoft;
+    in property <bool> can-load-models;
+    in property <bool> can-test-model;
+
+    callback navigate(int);
+    callback save-settings;
+    callback reload-settings;
+    callback forget-settings;
+    callback client-id-edited(string);
+    callback groups-edited(string);
+    callback shared-edited(string);
+    callback check-microsoft;
+    callback provider-selected(int);
+    callback key-edited(string);
+    callback open-entra;
+    callback open-key-page;
+    callback load-models;
+    callback model-selected(string);
+    callback plan-selected(int);
+    callback parallel-committed(string);
+    callback test-model;
+
+    VerticalLayout {
+        spacing: 0px;
+        TitleBar { scanning: root.scanning; scan-text: root.review-scan-chip-text.is-empty ? root.busy-chip-text : root.review-scan-chip-text; account-name: root.account-name; account-initials: root.account-initials; account-signed-in: root.account-signed-in; }
+        HorizontalLayout { spacing: 0px; vertical-stretch: 1;
+            NavRail { selected-index <=> root.active-screen; review-badge: root.review-badge; provider-name: root.provider-name; provider-connected: root.provider-connected; enabled: !root.busy; selected(index) => { root.navigate(index); } }
+            if root.active-screen == 1: SourcesScreen {
+                controls-enabled: !root.busy; store-available: root.store-available; settings-status: root.settings-status; settings-succeeded: root.settings-succeeded;
+                client-id <=> root.client-id; groups <=> root.groups; shared-mailboxes <=> root.shared-mailboxes; own-inbox-accessible: root.own-inbox-accessible; microsoft-lines: root.microsoft-lines;
+                provider-index <=> root.provider-index; api-key <=> root.api-key; show-key <=> root.show-key; models: root.models; model-index <=> root.model-index; model-value <=> root.model-value;
+                ollama-plan-index <=> root.ollama-plan-index; ollama-plan-options: root.ollama-plan-options; openrouter-parallel <=> root.openrouter-parallel;
+                parallel-field-focused <=> root.parallel-field-focused; model-status: root.model-status; model-succeeded: root.model-succeeded;
+                provider-disclosure: root.provider-disclosure; key-placeholder: root.key-placeholder; load-models-label: root.load-models-label;
+                can-check-microsoft: root.can-check-microsoft; can-load-models: root.can-load-models; can-test-model: root.can-test-model;
+                save-settings => { root.save-settings(); } reload-settings => { root.reload-settings(); } forget-settings => { root.forget-settings(); }
+                client-id-edited(value) => { root.client-id-edited(value); } groups-edited(value) => { root.groups-edited(value); } shared-edited(value) => { root.shared-edited(value); }
+                check-microsoft => { root.check-microsoft(); } provider-selected(index) => { root.provider-selected(index); } key-edited(value) => { root.key-edited(value); }
+                open-entra => { root.open-entra(); } open-key-page => { root.open-key-page(); }
+                load-models => { root.load-models(); } model-selected(value) => { root.model-selected(value); } plan-selected(index) => { root.plan-selected(index); }
+                parallel-committed(value) => { root.parallel-committed(value); } test-model => { root.test-model(); }
+            }
+            if root.active-screen == 0: Rectangle { background: Tokens.bg-surface; horizontal-stretch: 1;
+                Text { text: "Review screen arrives in T3"; color: Tokens.text-2; font-size: Tokens.font-16; horizontal-alignment: center; vertical-alignment: center; }
+            }
+        }
+        StatusBar { left-text: root.status-left; center-text: root.status-center; right-text: root.status-right; }
+    }
+}

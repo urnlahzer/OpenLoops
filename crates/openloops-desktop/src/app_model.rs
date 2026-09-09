@@ -1,7 +1,5 @@
 //! Toolkit-free setup/connection state: job start/poll machinery, saved
-//! settings, and provider/account pure logic. No `egui`/`eframe` type may
-//! appear in this file's signatures; drawing lives in `setup_ui.rs`, which
-//! calls into these types and functions.
+//! settings, and provider/account pure logic used by the native adapter.
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, atomic::Ordering};
 use std::time::Instant;
@@ -21,15 +19,17 @@ pub(crate) enum Outcome {
     Models(Result<Vec<String>, ProviderError>),
     ZdrModels(Result<Vec<ModelChoice>, ProviderError>),
     Generation(Result<(), ProviderError>),
+    #[allow(dead_code)]
     Mail(Result<Vec<openloops_graph::live::review::SourceReview>, ConnectionError>),
     Scan(
         Result<crate::review_model::ScanResult, ProviderError>,
         String,
     ),
+    #[allow(dead_code)]
     Reminder([u8; 32], openloops_graph::live::reminders::ReminderOutcome),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Service {
     Microsoft,
     Model,
@@ -42,9 +42,7 @@ pub(crate) struct Status {
     pub(crate) succeeded: bool,
 }
 
-/// Toolkit-free setup/connection/review model. `setup_ui.rs`'s `SetupApp`
-/// wraps one of these alongside its two purely-UI fields (`reveal_key`,
-/// `active_tab`).
+/// Toolkit-free setup/connection/review model used by the native UI adapter.
 pub struct AppModel {
     pub client_id: String,
     pub groups: String,
@@ -73,7 +71,7 @@ pub struct AppModel {
     pub scan_progress: Option<Arc<crate::review_model::ScanProgress>>,
     /// Whether the most recent [`AppModel::reload_settings`] call (including
     /// the one `with_store` runs at construction) found an existing saved
-    /// record. `setup_ui.rs` reads this immediately after each such call,
+    /// record. The native adapter reads this immediately after each such call,
     /// together with [`AppModel::ready_for_review`], to reproduce today's
     /// initial-tab decision without the model owning any UI-nav state.
     pub settings_existed: bool,
@@ -170,7 +168,7 @@ impl AppModel {
     /// Reloads settings from the store, if any, applying them the same way
     /// as today. Returns whether a saved record existed (`false` when there
     /// is no store, the load failed, or no record had been saved yet) --
-    /// see [`AppModel::settings_existed`] for how `setup_ui.rs` uses this
+    /// see [`AppModel::settings_existed`] for how the adapter uses this
     /// alongside [`AppModel::ready_for_review`] to decide the initial/
     /// post-reload tab.
     pub fn reload_settings(&mut self) -> bool {
@@ -484,7 +482,7 @@ impl AppModel {
 
     /// Whether the client ID, active key, and selected model are all
     /// non-empty -- the same three checks that decided today's post-reload
-    /// active tab. Pure so `setup_ui.rs` can reproduce that decision without
+    /// active tab. Pure so the adapter can reproduce that decision without
     /// the model owning any UI-nav state.
     #[must_use]
     pub fn ready_for_review(&self) -> bool {
@@ -568,7 +566,7 @@ pub(crate) fn microsoft_status(result: Result<ConnectionReport, ConnectionError>
     }
 }
 
-/// Returns the throttled busy indicator text without using egui's spinner.
+/// Returns the throttled busy indicator text for the native UI.
 ///
 /// The spinner requests continuous repaints, which can produce black frames on
 /// hybrid-GPU systems. This indicator advances only on the busy view's 250 ms
@@ -589,6 +587,7 @@ pub(crate) fn busy_indicator(elapsed_millis: u128) -> &'static str {
 /// `https://example.invalid/outlook.office.com/`, where the accepted text
 /// appears but not as the scheme+host prefix.
 #[must_use]
+#[allow(dead_code)]
 pub fn is_outlook_link(url: &str) -> bool {
     url.starts_with("https://outlook.office.com/")
         || url.starts_with("https://outlook.office365.com/")
@@ -598,11 +597,7 @@ pub fn is_outlook_link(url: &str) -> bool {
 /// §4.1). Name comes from the Graph identity resolved at sign-in; before
 /// sign-in it shows "Not signed in".
 ///
-/// Not yet wired to any Graph identity -- no adapter in this crate resolves
-/// a display name today. Added ahead of the T2+ title bar that will
-/// construct it; `#[allow(dead_code)]` is scoped to just this type until
-/// that wiring lands.
-#[allow(dead_code)]
+/// No Graph identity is resolved yet, so the title bar uses the default.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountDisplay {
     pub name: String,
@@ -868,5 +863,52 @@ mod tests {
         assert_eq!(extra_whitespace.name, "  Alex   Rivera  ");
         assert_eq!(extra_whitespace.initials, "AR");
         assert!(extra_whitespace.signed_in);
+    }
+
+    #[test]
+    fn app_restores_settings_without_authentication_or_revealing_key_and_forgets_them() {
+        let memory = MemoryStore::default();
+        let mut app = AppModel::with_store(Ok(Some(Box::new(memory.clone()))));
+        app.client_id = "00000000-0000-0000-0000-000000000000".into();
+        app.groups = "one@example.invalid\ntwo@example.invalid\nthree@example.invalid".into();
+        app.shared = "shared@example.invalid".into();
+        app.key = Zeroizing::new("synthetic-key".into());
+        app.selected = "deepseek-v4-flash:0731".into();
+        app.openrouter_key = Zeroizing::new("synthetic-openrouter-key".into());
+        app.openrouter_selected = "vendor/model-1".into();
+        app.ollama_plan = OllamaPlan::Pro;
+        app.openrouter_parallel = 48;
+        app.pending_save = true;
+        assert!(app.persist_changes());
+        drop(app);
+
+        let mut reopened = AppModel::with_store(Ok(Some(Box::new(memory.clone()))));
+        assert_eq!(reopened.groups.lines().count(), 3);
+        assert_eq!(reopened.shared, "shared@example.invalid");
+        assert_eq!(&*reopened.key, "synthetic-key");
+        assert_eq!(reopened.selected, "deepseek-v4-flash:0731");
+        assert_eq!(reopened.provider, Provider::OllamaCloud);
+        assert_eq!(&*reopened.openrouter_key, "synthetic-openrouter-key");
+        assert_eq!(reopened.openrouter_selected, "vendor/model-1");
+        assert_eq!(reopened.ollama_plan, OllamaPlan::Pro);
+        assert_eq!(reopened.openrouter_parallel, 48);
+        assert!(!reopened.microsoft.succeeded);
+        assert!(reopened.pending.is_none());
+        reopened.forget_settings();
+        assert!(memory.saved.borrow().is_none());
+        assert!(reopened.key.is_empty());
+        assert!(reopened.openrouter_key.is_empty());
+        assert!(reopened.groups.is_empty());
+        assert!(!reopened.persist_changes());
+    }
+
+    #[test]
+    fn start_and_poll_still_round_trip_through_a_plain_callback() {
+        let mut app = AppModel::with_store(Ok(None));
+        let (sender, receiver) = mpsc::channel();
+        app.pending = Some(receiver);
+        sender.send(Outcome::Generation(Ok(()))).unwrap();
+        app.poll(|| {});
+        assert!(app.model_status.succeeded);
     }
 }

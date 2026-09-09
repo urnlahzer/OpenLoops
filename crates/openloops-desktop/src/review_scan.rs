@@ -28,11 +28,14 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct ReviewMessage {
     pub input: ConversationMessage,
+    #[allow(dead_code)]
     pub source: String,
     pub id: String,
     pub account: String,
     pub conversation: String,
+    #[allow(dead_code)]
     pub date_label: String,
+    #[allow(dead_code)]
     pub web_link: String,
     /// Lowercase addresses of sender, to, and cc, minus the account's own
     /// addresses, deduplicated and sorted. Used to link conversations that

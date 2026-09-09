@@ -2,8 +2,10 @@
 
 Open `target/debug/openloops-ui.exe` in File Explorer. Connection setup takes
 place in the window; neither credentials nor model selection require a terminal.
-The same native window now includes [conversation review and reviewed To Do
-reminders](inbox-review.md). It is a foreground preview; the Outlook add-in and
+The Slint-based native window has a navigation rail with **Review** and
+**Sources** screens. Review includes [conversation review and reviewed To Do
+reminders](inbox-review.md), while Sources contains Microsoft and model setup.
+It is a foreground preview; the Outlook add-in and
 unattended background service remain on the implementation roadmap.
 
 ## Using the window
@@ -70,7 +72,7 @@ Build the executable once from a development checkout:
 cargo build -p openloops-desktop --bin openloops-ui --features native-ui --locked
 ```
 
-The native window uses eframe with its generic persistence disabled. A narrow
+The native window uses Slint 1.17.1 with the Fluent style and native renderer. A narrow
 `settings.rs` module uses pinned `keyring-core` and `windows-native-keyring-store`
 dependencies to access only the `OpenLoops/Setup/v1` generic credential, with
 credential search disabled. Network requests run on
@@ -81,13 +83,10 @@ The busy indicator updates four times a second by design.
 Serialized settings and API keys use zeroizing buffers without claiming removal
 of all UI, allocator, TLS, or operating-system copies.
 
-For visual checks on empty fields only, `ui-screenshot` builds a noninteractive
-window that saves `openloops-setup-empty.png` in the operating-system temporary
-directory and exits. This uses eframe's screenshot event before buffer swapping.
-The fields cannot be edited in that build, and real settings are never loaded or
-saved. Normal `native-ui` builds do not include screenshot saving. UI unit tests
-also disable the production store; the Windows integration test uses an isolated
-synthetic credential, verifies it from a fresh process, and deletes it afterward.
+The `ui-screenshot` feature remains buildable while its review-preview behavior
+is rebuilt. UI unit tests disable the production store; the Windows integration
+test uses an isolated synthetic credential, verifies it from a fresh process,
+and deletes it afterward.
 
 This optional interface does not pass a release gate or change the existing
 Phase 0 network-dependency restrictions. It is a local development executable,

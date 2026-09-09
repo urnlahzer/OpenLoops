@@ -1,0 +1,117 @@
+import { Tokens } from "tokens.slint";
+import { Avatar, Pill } from "widgets.slint";
+
+export component TitleBar inherits Rectangle {
+    in property <bool> scanning;
+    in property <string> scan-text;
+    in property <string> account-name;
+    in property <string> account-initials;
+    in property <bool> account-signed-in;
+    height: Tokens.title-height;
+    background: Tokens.brand;
+    HorizontalLayout {
+        padding-left: Tokens.space-4; padding-right: Tokens.space-4; spacing: Tokens.space-3;
+        Rectangle { width: Tokens.space-6; height: Tokens.space-6; background: Tokens.bg-surface; border-radius: Tokens.radius-4;
+            Text { text: "O"; color: Tokens.brand; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+        }
+        Text { text: "OpenLoops"; color: Tokens.bg-surface; font-size: Tokens.font-16; font-weight: 600; vertical-alignment: center; }
+        Text { text: "Outlook companion"; color: Tokens.bg-surface; font-size: Tokens.font-13; vertical-alignment: center; }
+        if root.scanning: Pill { text: root.scan-text; kind: "brand"; }
+        Rectangle { horizontal-stretch: 1; background: Tokens.transparent; }
+        if root.account-signed-in: Avatar { initials: root.account-initials; accessible-name: root.account-name; }
+        VerticalLayout { spacing: Tokens.space-1;
+            Text { text: root.account-name; color: Tokens.bg-surface; font-size: Tokens.font-13; font-weight: 600; horizontal-alignment: right; vertical-alignment: center; }
+            if root.account-signed-in: Text { text: "Signed in · Microsoft 365"; color: Tokens.bg-surface; font-size: Tokens.font-13; horizontal-alignment: right; vertical-alignment: center; }
+        }
+    }
+    Rectangle { y: parent.height - Tokens.hairline; height: Tokens.hairline; background: Tokens.stroke-1; }
+}
+
+component NavItem inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <string> accessible-name: label;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    in property <int> badge;
+    callback activated;
+    height: Tokens.nav-item-height;
+    background: selected ? Tokens.nav-selected : Tokens.transparent;
+    border-radius: Tokens.radius-4;
+    forward-focus: nav-focus;
+    accessible-role: button;
+    accessible-label: accessible-name;
+    accessible-enabled: enabled;
+    accessible-action-default => { if root.enabled { root.activated(); } }
+    VerticalLayout {
+        padding-top: Tokens.space-1; padding-bottom: Tokens.space-1; spacing: Tokens.space-1;
+        Text { text: root.icon; color: root.selected ? Tokens.brand : Tokens.text-1; font-size: Tokens.font-16; horizontal-alignment: center; vertical-alignment: center; }
+        Text { text: root.label; color: root.selected ? Tokens.brand : Tokens.text-1; font-size: Tokens.font-11; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+    }
+    if root.badge > 0: Rectangle {
+        x: parent.width - self.width - Tokens.space-1;
+        y: Tokens.space-1;
+        min-width: Tokens.badge-size; height: Tokens.badge-size;
+        background: Tokens.danger; border-radius: Tokens.radius-pill;
+        Text { text: root.badge; color: Tokens.bg-surface; font-size: Tokens.font-11; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+    }
+    TouchArea { enabled: root.enabled; clicked => { nav-focus.focus(); root.activated(); } }
+    nav-focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return { root.activated(); return accept; }
+            return reject;
+        }
+    }
+    if nav-focus.has-focus && root.enabled: Rectangle {
+        x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+        width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring;
+        border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+    }
+}
+
+export component NavRail inherits Rectangle {
+    in-out property <int> selected-index;
+    in property <int> review-badge;
+    in property <string> provider-name;
+    in property <bool> provider-connected;
+    in property <bool> enabled: true;
+    callback selected(int);
+    width: Tokens.nav-width;
+    background: Tokens.bg-canvas;
+    VerticalLayout { padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; padding-left: Tokens.space-2; padding-right: Tokens.space-2; spacing: Tokens.space-2;
+        NavItem {
+            icon: "□"; label: "Review"; selected: root.selected-index == 0; enabled: root.enabled; badge: root.review-badge;
+            accessible-name: root.review-badge > 0 ? "Review, " + root.review-badge + " open" : "Review";
+            activated => { if root.selected-index != 0 { root.selected-index = 0; root.selected(0); } }
+        }
+        NavItem {
+            icon: "◇"; label: "Sources"; selected: root.selected-index == 1; enabled: root.enabled;
+            activated => { if root.selected-index != 1 { root.selected-index = 1; root.selected(1); } }
+        }
+        Rectangle { vertical-stretch: 1; background: Tokens.transparent; }
+        // The provider label spans the whole rail width (outside the layout
+        // padding) so a name such as "OpenRouter" fits on one line at 11 px.
+        Rectangle { height: dot.preferred-height + Tokens.space-1 + name.preferred-height; background: Tokens.transparent;
+            dot := Text { x: -Tokens.space-2; y: 0; width: Tokens.nav-width; text: "●"; color: root.provider-connected ? Tokens.success : Tokens.text-3; font-size: Tokens.font-11; horizontal-alignment: center; }
+            name := Text { x: -Tokens.space-2; y: dot.preferred-height + Tokens.space-1; width: Tokens.nav-width; text: root.provider-name; color: Tokens.text-2; font-size: Tokens.font-11; horizontal-alignment: center; wrap: word-wrap; }
+        }
+    }
+    Rectangle { x: parent.width - Tokens.hairline; width: Tokens.hairline; background: Tokens.stroke-1; }
+}
+
+export component StatusBar inherits Rectangle {
+    in property <string> left-text;
+    in property <string> center-text;
+    in property <string> right-text;
+    height: Tokens.status-height;
+    background: Tokens.bg-bar;
+    Rectangle { height: Tokens.hairline; background: Tokens.stroke-1; }
+    HorizontalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; spacing: Tokens.space-4;
+        Text { text: root.left-text; color: Tokens.text-2; font-size: Tokens.font-13; vertical-alignment: center; }
+        Rectangle { horizontal-stretch: 1; background: Tokens.transparent; }
+        Text { text: root.center-text; color: Tokens.text-2; font-size: Tokens.font-13; horizontal-alignment: center; vertical-alignment: center; }
+        Rectangle { horizontal-stretch: 1; background: Tokens.transparent; }
+        Text { text: root.right-text; color: Tokens.text-2; font-size: Tokens.font-13; vertical-alignment: center; }
+    }
+}

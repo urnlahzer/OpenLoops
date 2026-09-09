@@ -123,6 +123,7 @@ impl Decisions {
 }
 
 impl Decisions {
+    #[allow(dead_code)]
     pub fn begin_reminder(&mut self, key: [u8; 32]) -> Result<(), String> {
         let mut record = self.get(&key);
         if !matches!(record.decision, Decision::Mine | Decision::Watching)
@@ -242,6 +243,7 @@ pub fn now() -> i64 {
     )
     .unwrap_or(i64::MAX)
 }
+#[allow(dead_code)]
 pub fn marker(key: &[u8; 32]) -> String {
     use std::fmt::Write;
     key.iter().fold(String::with_capacity(64), |mut text, b| {

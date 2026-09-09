@@ -1,0 +1,742 @@
+//! Slint adapter for the toolkit-free application model.
+use std::{cell::RefCell, rc::Rc, time::Duration};
+
+use crate::{
+    app_model::{self, AccountDisplay, AppModel, Outcome, Service, Status},
+    review_model::{ReviewState, open_badge_count},
+    settings::{MAX_OPENROUTER_PARALLEL, MIN_OPENROUTER_PARALLEL, OllamaPlan, Provider},
+};
+use openloops_graph::live::{ConnectionConfig, check_connection};
+use openloops_inference::{
+    ollama::{OllamaCloud, available_models},
+    openrouter::{OpenRouter, available_zdr_models},
+};
+use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
+use zeroize::Zeroizing;
+
+slint::include_modules!();
+
+const ENTRA_URL: &str = "https://entra.microsoft.com/";
+const OLLAMA_KEYS_URL: &str = "https://ollama.com/settings/keys";
+const OPENROUTER_KEYS_URL: &str = "https://openrouter.ai/settings/keys";
+
+fn joined_status(status: &Status) -> String {
+    status.lines.join("\n")
+}
+
+/// The label shown for the `ComboBox` row that means "nothing picked yet".
+/// `display_model_values` prepends it as row 0 so the widget's own
+/// `current-index` never has to represent "no selection" (Slint's
+/// `ComboBoxBase.reset-current()` always clamps it to a valid row).
+const LOAD_MODELS_PLACEHOLDER: &str = "Load models to choose";
+
+/// Maps the model's raw selection (`-1` for none, matching `selected_index`)
+/// to the display index of a `ComboBox` whose row 0 is the placeholder.
+fn display_model_index(selected_index: i32) -> i32 {
+    selected_index + 1
+}
+
+/// The inverse of `display_model_index`. Only the index-mapping unit test
+/// below needs this direction; production code never receives a display
+/// index back from Slint (row selection comes back as the row's text).
+#[cfg(test)]
+fn model_index_from_display(display_index: i32) -> i32 {
+    display_index - 1
+}
+
+/// `model_values` with the placeholder prepended as row 0, for the `ComboBox`.
+fn display_model_values(model: &AppModel) -> Vec<String> {
+    let mut values = Vec::with_capacity(model.models.len().max(model.zdr_models.len()) + 1);
+    values.push(LOAD_MODELS_PLACEHOLDER.to_string());
+    values.extend(model_values(model));
+    values
+}
+
+/// `selected_model_value` falling back to the placeholder when nothing is
+/// selected, so the `ComboBox`'s displayed text matches its displayed row.
+fn display_model_value(model: &AppModel) -> String {
+    let selected = selected_model_value(model);
+    if selected.is_empty() {
+        LOAD_MODELS_PLACEHOLDER.to_string()
+    } else {
+        selected
+    }
+}
+
+fn model_values(model: &AppModel) -> Vec<String> {
+    match model.provider {
+        Provider::OllamaCloud => model.models.clone(),
+        Provider::OpenRouter => model
+            .zdr_models
+            .iter()
+            .map(|choice| {
+                if choice.label == choice.id {
+                    choice.id.clone()
+                } else {
+                    format!("{} ({})", choice.label, choice.id)
+                }
+            })
+            .collect(),
+    }
+}
+
+fn selected_model_value(model: &AppModel) -> String {
+    let selected = model.selected_model();
+    if selected.is_empty() {
+        return String::new();
+    }
+    match model.provider {
+        Provider::OllamaCloud => selected.to_owned(),
+        Provider::OpenRouter => model
+            .zdr_models
+            .iter()
+            .find(|choice| choice.id == selected)
+            .map_or_else(
+                || selected.to_owned(),
+                |choice| {
+                    if choice.label == choice.id {
+                        choice.id.clone()
+                    } else {
+                        format!("{} ({})", choice.label, choice.id)
+                    }
+                },
+            ),
+    }
+}
+
+fn selected_index(model: &AppModel) -> i32 {
+    let selected = model.selected_model();
+    match model.provider {
+        Provider::OllamaCloud => model.models.iter().position(|item| item == selected),
+        Provider::OpenRouter => model.zdr_models.iter().position(|item| item.id == selected),
+    }
+    .and_then(|index| i32::try_from(index).ok())
+    .unwrap_or(-1)
+}
+
+fn commit_parallel(value: &str, current: u16) -> u16 {
+    value.parse::<i64>().map_or(current, |value| {
+        value
+            .clamp(
+                i64::from(MIN_OPENROUTER_PARALLEL),
+                i64::from(MAX_OPENROUTER_PARALLEL),
+            )
+            .try_into()
+            .expect("clamped parallel value fits u16")
+    })
+}
+
+fn provider_connected(model: &AppModel) -> bool {
+    !model.selected_model().is_empty() && model.model_status.succeeded
+}
+
+fn status_with_busy(status: &Status, busy: Option<&str>) -> String {
+    let mut lines = status.lines.clone();
+    if let Some(busy) = busy {
+        lines.push(busy.to_owned());
+    }
+    lines.join("\n")
+}
+
+#[allow(clippy::too_many_lines)]
+fn sync(model: &AppModel, window: &AppWindow) {
+    let account = AccountDisplay::default();
+    let cards = model
+        .review
+        .analysis
+        .as_ref()
+        .map(|analysis| model.review.card_contexts(&analysis.items))
+        .unwrap_or_default();
+    let saved = model.review.decisions.records.len();
+    let provider = model.provider.label();
+    let selected = model.selected_model();
+    let busy = model.pending.is_some();
+    let busy_text = busy.then(|| {
+        let elapsed = model.started.elapsed();
+        format!(
+            "{} {} · {}s",
+            app_model::busy_indicator(elapsed.as_millis()),
+            model.progress,
+            elapsed.as_secs()
+        )
+    });
+    window.set_busy(busy);
+    window.set_scanning(busy);
+    window.set_busy_chip_text(busy_text.as_deref().unwrap_or_default().into());
+    // T3 will populate this with "Scanning · Conversation i of n · m / total messages".
+    window.set_review_scan_chip_text("".into());
+    window.set_account_name(account.name.into());
+    window.set_account_initials(account.initials.into());
+    window.set_account_signed_in(account.signed_in);
+    window.set_review_badge(i32::try_from(open_badge_count(&cards)).unwrap_or(i32::MAX));
+    window.set_provider_name(match model.provider {
+        Provider::OllamaCloud => "Ollama".into(),
+        Provider::OpenRouter => "OpenRouter".into(),
+    });
+    window.set_provider_connected(provider_connected(model));
+    window.set_status_left(format!("{saved} saved decisions · Windows Credential Manager").into());
+    window.set_status_center(if selected.is_empty() {
+        "".into()
+    } else {
+        format!("Model: {selected} ({provider})").into()
+    });
+    window.set_status_right("Mail and summaries stay in memory only".into());
+    window.set_store_available(model.store.is_some());
+    window.set_settings_status(joined_status(&model.settings_status).into());
+    window.set_settings_succeeded(model.settings_status.succeeded);
+    window.set_client_id(model.client_id.clone().into());
+    window.set_groups(model.groups.clone().into());
+    window.set_shared_mailboxes(model.shared.clone().into());
+    window.set_own_inbox_accessible(
+        model
+            .microsoft
+            .lines
+            .first()
+            .is_some_and(|line| line == "Personal inbox: access confirmed."),
+    );
+    let mut microsoft_lines = model
+        .microsoft
+        .lines
+        .iter()
+        .map(|line| StatusLine {
+            text: line.clone().into(),
+            succeeded: line.ends_with("access confirmed."),
+        })
+        .collect::<Vec<_>>();
+    if model.pending_service == Service::Microsoft
+        && let Some(busy_text) = &busy_text
+    {
+        microsoft_lines.push(StatusLine {
+            text: busy_text.clone().into(),
+            succeeded: false,
+        });
+    }
+    window.set_microsoft_lines(ModelRc::new(VecModel::from(microsoft_lines)));
+    window.set_provider_index(match model.provider {
+        Provider::OllamaCloud => 0,
+        Provider::OpenRouter => 1,
+    });
+    window.set_api_key(model.active_key().to_string().into());
+    let values = display_model_values(model);
+    window.set_models(ModelRc::new(VecModel::from(
+        values
+            .into_iter()
+            .map(SharedString::from)
+            .collect::<Vec<_>>(),
+    )));
+    window.set_model_index(display_model_index(selected_index(model)));
+    window.set_model_value(display_model_value(model).into());
+    window.set_ollama_plan_index(match model.ollama_plan {
+        OllamaPlan::Free => 0,
+        OllamaPlan::Pro => 1,
+        OllamaPlan::Max => 2,
+    });
+    window.set_ollama_plan_options(ModelRc::new(VecModel::from(
+        [OllamaPlan::Free, OllamaPlan::Pro, OllamaPlan::Max]
+            .map(|plan| SharedString::from(plan.label()))
+            .to_vec(),
+    )));
+    if !window.get_parallel_field_focused() {
+        window.set_openrouter_parallel(model.openrouter_parallel.to_string().into());
+    }
+    let model_busy = if model.pending_service == Service::Model {
+        busy_text.as_deref()
+    } else {
+        None
+    };
+    window.set_model_status(status_with_busy(&model.model_status, model_busy).into());
+    window.set_model_succeeded(model.model_status.succeeded);
+    window.set_provider_disclosure(model.provider_disclosure().into());
+    window.set_key_placeholder(match model.provider {
+        Provider::OllamaCloud => "Paste your Ollama API key".into(),
+        Provider::OpenRouter => "Paste your OpenRouter API key".into(),
+    });
+    window.set_load_models_label(match model.provider {
+        Provider::OllamaCloud => "Load cloud models".into(),
+        Provider::OpenRouter => "Load ZDR models".into(),
+    });
+    window.set_can_check_microsoft(!model.client_id.trim().is_empty());
+    window.set_can_load_models(match model.provider {
+        Provider::OllamaCloud => !model.key.is_empty(),
+        Provider::OpenRouter => true,
+    });
+    window.set_can_test_model(!model.selected_model().is_empty() && !model.active_key().is_empty());
+}
+
+fn finish_edit(model: &mut AppModel) {
+    model.pending_save = true;
+    let _ = model.persist_changes();
+}
+
+fn clear_microsoft_after_edit(model: &mut AppModel) {
+    model.microsoft = Status::default();
+    model.review = ReviewState::default();
+    model.review_status = Status::default();
+    finish_edit(model);
+}
+
+fn refresh(model: &Rc<RefCell<AppModel>>, weak: &slint::Weak<AppWindow>) {
+    if let Some(window) = weak.upgrade() {
+        sync(&model.borrow(), &window);
+    }
+}
+
+fn start_timer(timer: &Rc<Timer>) {
+    timer.restart();
+}
+
+/// Probes the model selected in the saved desktop settings.
+///
+/// # Errors
+///
+/// Returns the same user-facing settings and inference errors as the desktop
+/// command-line probe.
+pub fn probe_saved_model() -> Result<usize, String> {
+    let store = crate::settings::production_store()
+        .map_err(|_| "Saved settings unavailable".to_string())?
+        .ok_or("Saved settings disabled".to_string())?;
+    let settings = store
+        .load()
+        .map_err(|_| "Saved settings could not be loaded".to_string())?
+        .ok_or("No saved settings".to_string())?;
+    crate::review_model::probe(
+        settings.provider,
+        settings.active_key().to_string(),
+        settings.active_model(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Builds and runs the native Slint window.
+///
+/// # Errors
+///
+/// Returns a platform error when Slint cannot create or run the native window.
+#[allow(clippy::too_many_lines)]
+pub fn run() -> Result<(), slint::PlatformError> {
+    let model = Rc::new(RefCell::new(AppModel::new()));
+    let window = AppWindow::new()?;
+    let initial_screen = {
+        let model = model.borrow();
+        i32::from(!(model.settings_existed && model.ready_for_review()))
+    };
+    window.set_active_screen(initial_screen);
+    window.set_show_key(false);
+    sync(&model.borrow(), &window);
+
+    let timer = Rc::new(Timer::default());
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        let timer_weak = Rc::downgrade(&timer);
+        timer.start(TimerMode::Repeated, Duration::from_millis(250), move || {
+            let mut model_ref = model.borrow_mut();
+            model_ref.poll(|| {});
+            let _ = model_ref.persist_changes();
+            drop(model_ref);
+            refresh(&model, &weak);
+            if model.borrow().pending.is_none()
+                && let Some(timer) = timer_weak.upgrade()
+            {
+                timer.stop();
+            }
+        });
+        timer.stop();
+    }
+
+    macro_rules! simple_action {
+        ($setter:ident, $body:expr) => {{
+            let model = Rc::clone(&model);
+            let weak = window.as_weak();
+            window.$setter(move || {
+                $body(&mut model.borrow_mut());
+                refresh(&model, &weak);
+            });
+        }};
+    }
+    simple_action!(on_save_settings, |model: &mut AppModel| model
+        .save_settings());
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_reload_settings(move || {
+            let (succeeded, active) = {
+                let mut model = model.borrow_mut();
+                let existed = model.reload_settings();
+                (
+                    model.settings_status.succeeded,
+                    existed && model.ready_for_review(),
+                )
+            };
+            if let Some(window) = weak.upgrade() {
+                window.set_show_key(false);
+                if succeeded {
+                    window.set_active_screen(i32::from(!active));
+                }
+                sync(&model.borrow(), &window);
+            }
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_forget_settings(move || {
+            model.borrow_mut().forget_settings();
+            if let Some(window) = weak.upgrade() {
+                window.set_show_key(false);
+                sync(&model.borrow(), &window);
+            }
+        });
+    }
+    window.on_navigate({
+        let weak = window.as_weak();
+        move |index| {
+            if let Some(window) = weak.upgrade() {
+                window.set_active_screen(index);
+            }
+        }
+    });
+
+    macro_rules! text_edit {
+        ($setter:ident, $field:ident, $model_ref:ident, $clear:block) => {{
+            let model = Rc::clone(&model);
+            let weak = window.as_weak();
+            window.$setter(move |value| {
+                let mut $model_ref = model.borrow_mut();
+                $model_ref.$field = value.to_string();
+                $clear
+                drop($model_ref);
+                refresh(&model, &weak);
+            });
+        }};
+    }
+    text_edit!(on_client_id_edited, client_id, model_ref, {
+        model_ref.client_id = model_ref.client_id.chars().take(128).collect();
+        clear_microsoft_after_edit(&mut model_ref);
+    });
+    text_edit!(on_groups_edited, groups, model_ref, {
+        clear_microsoft_after_edit(&mut model_ref);
+    });
+    text_edit!(on_shared_edited, shared, model_ref, {
+        clear_microsoft_after_edit(&mut model_ref);
+    });
+
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        let timer = Rc::clone(&timer);
+        window.on_check_microsoft(move || {
+            let config = {
+                let model = model.borrow();
+                ConnectionConfig::new(model.client_id.trim(), Some(&model.shared))
+                    .and_then(|config| config.with_groups(Some(&model.groups)))
+            };
+            match config {
+                Ok(config) => {
+                    let mut model_ref = model.borrow_mut();
+                    model_ref.microsoft = Status::default();
+                    model_ref.start(
+                        Service::Microsoft,
+                        "Complete Microsoft sign-in in your browser",
+                        move || Outcome::Microsoft(check_connection(&config)),
+                        || {},
+                    );
+                    start_timer(&timer);
+                }
+                Err(error) => {
+                    model.borrow_mut().microsoft = Status {
+                        lines: vec![error.to_string()],
+                        succeeded: false,
+                    };
+                }
+            }
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_provider_selected(move |index| {
+            let mut model_ref = model.borrow_mut();
+            let provider = if index == 1 {
+                Provider::OpenRouter
+            } else {
+                Provider::OllamaCloud
+            };
+            if provider == model_ref.provider {
+                return;
+            }
+            model_ref.provider = provider;
+            model_ref.model_status = Status::default();
+            finish_edit(&mut model_ref);
+            drop(model_ref);
+            // The OpenRouter parallel-requests field only exists while
+            // `provider-index == 1` (see sources.slint); switching provider
+            // tears it down without ever firing its `changed has-focus`
+            // handler, which would otherwise clear this latch. Left set, it
+            // would permanently stop `sync` from ever refreshing the field
+            // again (see the `!window.get_parallel_field_focused()` guard
+            // below), even after the field is recreated.
+            if let Some(window) = weak.upgrade() {
+                window.set_parallel_field_focused(false);
+            }
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_key_edited(move |value| {
+            let mut model_ref = model.borrow_mut();
+            match model_ref.provider {
+                Provider::OllamaCloud => {
+                    model_ref.key = Zeroizing::new(value.to_string());
+                    model_ref.models.clear();
+                    model_ref.selected.clear();
+                }
+                Provider::OpenRouter => {
+                    model_ref.openrouter_key = Zeroizing::new(value.to_string());
+                }
+            }
+            model_ref.trim_keys();
+            model_ref.model_status = Status::default();
+            finish_edit(&mut model_ref);
+            drop(model_ref);
+            refresh(&model, &weak);
+        });
+    }
+    window.on_open_entra(|| {
+        let _ = opener::open(ENTRA_URL);
+    });
+    {
+        let model = Rc::clone(&model);
+        window.on_open_key_page(move || {
+            let url = match model.borrow().provider {
+                Provider::OllamaCloud => OLLAMA_KEYS_URL,
+                Provider::OpenRouter => OPENROUTER_KEYS_URL,
+            };
+            let _ = opener::open(url);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        let timer = Rc::clone(&timer);
+        window.on_load_models(move || {
+            let mut model_ref = model.borrow_mut();
+            model_ref.model_status = Status::default();
+            match model_ref.provider {
+                Provider::OllamaCloud => {
+                    let key = model_ref.key.clone();
+                    model_ref.start(
+                        Service::Model,
+                        "Loading Ollama Cloud models",
+                        move || Outcome::Models(available_models(&key)),
+                        || {},
+                    );
+                }
+                Provider::OpenRouter => {
+                    model_ref.start(
+                        Service::Model,
+                        "Loading OpenRouter zero-data-retention models",
+                        || Outcome::ZdrModels(available_zdr_models()),
+                        || {},
+                    );
+                }
+            }
+            drop(model_ref);
+            start_timer(&timer);
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_model_selected(move |value| {
+            if value.as_str() == LOAD_MODELS_PLACEHOLDER {
+                return;
+            }
+            let mut model_ref = model.borrow_mut();
+            let next = match model_ref.provider {
+                Provider::OllamaCloud => Some(value.to_string()),
+                Provider::OpenRouter => model_ref.zdr_models.iter().find_map(|choice| {
+                    (value == choice.id || value == format!("{} ({})", choice.label, choice.id))
+                        .then(|| choice.id.clone())
+                }),
+            };
+            let Some(next) = next else { return };
+            if next == model_ref.selected_model() {
+                return;
+            }
+            match model_ref.provider {
+                Provider::OllamaCloud => model_ref.selected = next,
+                Provider::OpenRouter => model_ref.openrouter_selected = next,
+            }
+            model_ref.model_status = Status::default();
+            finish_edit(&mut model_ref);
+            drop(model_ref);
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_plan_selected(move |index| {
+            let mut model_ref = model.borrow_mut();
+            let plan = match index {
+                1 => OllamaPlan::Pro,
+                2 => OllamaPlan::Max,
+                _ => OllamaPlan::Free,
+            };
+            if plan == model_ref.ollama_plan {
+                return;
+            }
+            model_ref.ollama_plan = plan;
+            finish_edit(&mut model_ref);
+            drop(model_ref);
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_parallel_committed(move |value| {
+            {
+                let mut model_ref = model.borrow_mut();
+                let value = commit_parallel(&value, model_ref.openrouter_parallel);
+                if value != model_ref.openrouter_parallel {
+                    model_ref.openrouter_parallel = value;
+                    finish_edit(&mut model_ref);
+                }
+            }
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        let timer = Rc::clone(&timer);
+        window.on_test_model(move || {
+            let mut model_ref = model.borrow_mut();
+            let key = model_ref.active_key().clone();
+            let selected = model_ref.selected_model().to_owned();
+            let provider = model_ref.provider;
+            model_ref.model_status = Status::default();
+            model_ref.start(
+                Service::Model,
+                "Testing the selected cloud model (up to 150 seconds per request)",
+                move || {
+                    Outcome::Generation(match provider {
+                        Provider::OllamaCloud => OllamaCloud::connect(key.to_string(), &selected)
+                            .and_then(|provider| provider.check_generation()),
+                        Provider::OpenRouter => OpenRouter::connect(key.to_string(), &selected)
+                            .and_then(|provider| provider.check_generation()),
+                    })
+                },
+                || {},
+            );
+            drop(model_ref);
+            start_timer(&timer);
+            refresh(&model, &weak);
+        });
+    }
+
+    window.run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openloops_inference::openrouter::ModelChoice;
+
+    fn model() -> AppModel {
+        AppModel::with_store(Ok(None))
+    }
+
+    #[test]
+    fn parallel_commit_clamps_only_valid_integer_input() {
+        assert_eq!(commit_parallel("", 32), 32);
+        assert_eq!(commit_parallel("not-a-number", 32), 32);
+        assert_eq!(commit_parallel("-5", 32), MIN_OPENROUTER_PARALLEL);
+        assert_eq!(commit_parallel("0", 32), MIN_OPENROUTER_PARALLEL);
+        assert_eq!(commit_parallel("48", 32), 48);
+        assert_eq!(commit_parallel("999", 32), MAX_OPENROUTER_PARALLEL);
+    }
+
+    #[test]
+    fn openrouter_model_value_matches_its_formatted_list_entry() {
+        let mut model = model();
+        model.provider = Provider::OpenRouter;
+        model.zdr_models = vec![
+            ModelChoice {
+                id: "vendor/model-a".into(),
+                label: "Friendly A".into(),
+            },
+            ModelChoice {
+                id: "vendor/model-b".into(),
+                label: "vendor/model-b".into(),
+            },
+        ];
+        model.openrouter_selected = "vendor/model-a".into();
+        assert_eq!(selected_index(&model), 0);
+        assert_eq!(selected_model_value(&model), "Friendly A (vendor/model-a)");
+        assert_eq!(model_values(&model)[0], selected_model_value(&model));
+    }
+
+    #[test]
+    fn no_selected_model_has_an_explicit_negative_index_and_empty_value() {
+        let mut model = model();
+        model.models = vec!["available-model".into()];
+        assert_eq!(selected_index(&model), -1);
+        assert!(selected_model_value(&model).is_empty());
+    }
+
+    #[test]
+    fn provider_dot_requires_a_success_for_a_selected_model() {
+        let mut model = model();
+        model.model_status.succeeded = true;
+        assert!(!provider_connected(&model));
+        model.selected = "selected-model".into();
+        assert!(provider_connected(&model));
+        model.model_status.succeeded = false;
+        assert!(!provider_connected(&model));
+    }
+
+    #[test]
+    fn display_model_index_shifts_by_one_for_the_placeholder_row() {
+        assert_eq!(display_model_index(-1), 0);
+        assert_eq!(display_model_index(0), 1);
+        assert_eq!(display_model_index(4), 5);
+    }
+
+    #[test]
+    fn model_index_from_display_is_the_inverse_of_display_model_index() {
+        for raw in -1..10 {
+            assert_eq!(model_index_from_display(display_model_index(raw)), raw);
+        }
+    }
+
+    #[test]
+    fn display_model_values_prepends_the_placeholder_row() {
+        let mut model = model();
+        model.models = vec!["a".into(), "b".into()];
+        let values = display_model_values(&model);
+        assert_eq!(values[0], LOAD_MODELS_PLACEHOLDER);
+        assert_eq!(values[1..], model_values(&model)[..]);
+    }
+
+    #[test]
+    fn display_model_value_falls_back_to_the_placeholder_when_nothing_is_selected() {
+        let model = model();
+        assert!(selected_model_value(&model).is_empty());
+        assert_eq!(display_model_value(&model), LOAD_MODELS_PLACEHOLDER);
+    }
+
+    #[test]
+    fn display_model_value_matches_the_real_selection_when_one_exists() {
+        let mut model = model();
+        model.models = vec!["available-model".into()];
+        model.selected = "available-model".into();
+        assert_eq!(display_model_value(&model), "available-model");
+    }
+}

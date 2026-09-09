@@ -184,6 +184,7 @@ fn instant_view(resolution: LocalResolution, now: i64, offset_seconds: i32) -> D
     }
 }
 
+#[allow(dead_code)]
 pub fn label(view: &DeadlineView) -> String {
     match view {
         DeadlineView::PastDue {
@@ -243,6 +244,7 @@ pub fn label(view: &DeadlineView) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn format_instant(boundary: i64, offset_seconds: i32) -> String {
     let offset = chrono::FixedOffset::east_opt(offset_seconds);
     match (chrono::DateTime::from_timestamp(boundary, 0), offset) {
@@ -254,6 +256,7 @@ fn format_instant(boundary: i64, offset_seconds: i32) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn format_day(day: i64) -> String {
     day.checked_mul(86_400)
         .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))

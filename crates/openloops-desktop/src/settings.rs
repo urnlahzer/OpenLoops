@@ -53,6 +53,7 @@ pub enum OllamaPlan {
 }
 
 impl OllamaPlan {
+    /// User-facing plan name used by every native selector.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -491,6 +492,9 @@ mod tests {
 
     #[test]
     fn each_plan_and_ceiling_reports_its_own_concurrency() {
+        assert_eq!(OllamaPlan::Free.label(), "Free");
+        assert_eq!(OllamaPlan::Pro.label(), "Pro");
+        assert_eq!(OllamaPlan::Max.label(), "Max/Team");
         assert_eq!(OllamaPlan::Free.slots(), 1);
         assert_eq!(OllamaPlan::Pro.slots(), 3);
         assert_eq!(OllamaPlan::Max.slots(), 10);

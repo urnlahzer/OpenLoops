@@ -1,0 +1,198 @@
+import { Tokens } from "tokens.slint";
+import { PrimaryButton, SecondaryButton, SubtleButton, Segmented, Pill, Field, Disclosure, Checkbox, LinkButton, ModelPicker } from "widgets.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export struct StatusLine { text: string, succeeded: bool }
+
+component StepHeading {
+    in property <string> number;
+    in property <string> title;
+    width: 100%;
+    HorizontalLayout { spacing: Tokens.space-3;
+        Rectangle { width: Tokens.badge-size; height: Tokens.badge-size; background: Tokens.brand; border-radius: Tokens.radius-pill;
+            Text { text: root.number; color: Tokens.bg-surface; font-size: Tokens.font-13; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+        }
+        Text { text: root.title; color: Tokens.text-1; font-size: Tokens.font-16; font-weight: 600; vertical-alignment: center; }
+        @children
+    }
+}
+
+// A bare Text placed directly in a layout keeps its own unwrapped preferred
+// width no matter what width/horizontal-stretch is set on it directly (both
+// were tried and empirically made no difference to the rendered output).
+// Wrapping it in a plain Rectangle — which layouts do size to `width: 100%`
+// — and then sizing the Text to that Rectangle (the same pattern Field's
+// line-frame/text-frame use for LineEdit/TextEdit) is what actually
+// constrains it so `wrap: word-wrap` has a width to wrap within.
+component HelperText {
+    in property <string> text;
+    width: 100%;
+    Rectangle {
+        width: 100%;
+        // A plain Rectangle does not size itself from its children, so its
+        // height is bound explicitly to the (wrap-dependent) preferred
+        // height of the Text once it has its real, layout-assigned width.
+        height: label.preferred-height;
+        label := Text { width: 100%; text: root.text; color: Tokens.text-2; font-size: Tokens.font-13; wrap: word-wrap; horizontal-alignment: left; vertical-alignment: center; }
+    }
+}
+// Card's own Rectangle is not a layout, so a child placed directly on it
+// (via @children) would size to its own natural preferred width and center
+// itself instead of filling the card — wrapping @children in a VerticalLayout
+// gives the caller's content proper cross-axis (width) fill.
+component Card inherits Rectangle { background: Tokens.bg-surface; border-color: Tokens.stroke-1; border-width: Tokens.hairline; border-radius: Tokens.radius-8; VerticalLayout { @children } }
+
+export component SourcesScreen {
+    in property <bool> controls-enabled: true;
+    in property <bool> store-available: true;
+    in property <string> settings-status;
+    in property <bool> settings-succeeded;
+    in-out property <string> client-id;
+    in-out property <string> groups;
+    in-out property <string> shared-mailboxes;
+    in property <bool> own-inbox-accessible;
+    in property <[StatusLine]> microsoft-lines;
+    in-out property <int> provider-index;
+    in-out property <string> api-key;
+    in-out property <bool> show-key;
+    in property <[string]> models;
+    in-out property <int> model-index;
+    in-out property <string> model-value;
+    in-out property <int> ollama-plan-index;
+    in property <[string]> ollama-plan-options;
+    in-out property <string> openrouter-parallel;
+    in-out property <bool> parallel-field-focused;
+    in property <string> model-status;
+    in property <bool> model-succeeded;
+    in property <string> provider-disclosure;
+    in property <string> key-placeholder;
+    in property <string> load-models-label;
+    in property <bool> can-check-microsoft;
+    in property <bool> can-load-models;
+    in property <bool> can-test-model;
+
+    callback save-settings;
+    callback reload-settings;
+    callback forget-settings;
+    callback client-id-edited(string);
+    callback groups-edited(string);
+    callback shared-edited(string);
+    callback check-microsoft;
+    callback provider-selected(int);
+    callback key-edited(string);
+    callback open-entra;
+    callback open-key-page;
+    callback load-models;
+    callback model-selected(string);
+    callback plan-selected(int);
+    callback parallel-committed(string);
+    callback test-model;
+
+    VerticalLayout { spacing: Tokens.space-1;
+        Rectangle { min-height: Tokens.command-height; background: Tokens.bg-bar;
+            HorizontalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-1; padding-bottom: Tokens.space-1; spacing: Tokens.space-2;
+                PrimaryButton { text: "Save settings"; enabled: root.controls-enabled && root.store-available; clicked => { root.save-settings(); } }
+                SubtleButton { text: "Reload saved settings"; enabled: root.controls-enabled && root.store-available; clicked => { root.reload-settings(); } }
+                SubtleButton { text: "Forget saved settings"; enabled: root.controls-enabled && root.store-available; clicked => { root.forget-settings(); } }
+                Rectangle { horizontal-stretch: 1; background: Tokens.transparent; }
+                Text { text: root.settings-status; color: root.settings-succeeded ? Tokens.success : Tokens.warning; font-size: Tokens.font-13; wrap: word-wrap; horizontal-alignment: right; vertical-alignment: center; }
+            }
+            Rectangle { y: parent.height - Tokens.hairline; height: Tokens.hairline; background: Tokens.stroke-1; }
+        }
+        ScrollView {
+            // The Flickable this wraps is not a layout, so without an explicit
+            // width this column would size to its own natural (unwrapped)
+            // preferred width instead of the viewport's width, letting any
+            // unconstrained paragraph balloon the whole page and everything
+            // downstream that shares space with it.
+            VerticalLayout { width: 100%; padding-top: Tokens.pane-gutter-y; padding-bottom: Tokens.space-3; padding-left: Tokens.pane-gutter-x; padding-right: Tokens.pane-gutter-x; spacing: Tokens.space-2;
+                VerticalLayout { spacing: Tokens.space-1;
+                    Text { text: "Sources and model"; color: Tokens.text-1; font-size: Tokens.font-22; font-weight: 600; }
+                    HelperText { text: "Your own Inbox and Sent Items are included automatically. Settings save in Windows Credential Manager on this account."; width: 100%; }
+                }
+                HorizontalLayout { spacing: Tokens.space-5;
+                    Card { min-width: Tokens.card-min; horizontal-stretch: 1;
+                        VerticalLayout { alignment: start; padding-top: Tokens.card-pad-y; padding-bottom: Tokens.card-pad-y; padding-left: Tokens.card-pad-x; padding-right: Tokens.card-pad-x; spacing: Tokens.space-3;
+                            StepHeading { number: "1"; title: "Connect Microsoft";
+                                Rectangle { horizontal-stretch: 1; background: Tokens.transparent; }
+                                if root.own-inbox-accessible: Pill { text: "Personal inbox confirmed"; kind: "success"; }
+                            }
+                            Field { label: "Application (client) ID"; placeholder: "From your Entra app's Overview"; value <=> root.client-id; monospace: true; enabled: root.controls-enabled; edited(value) => { root.client-id-edited(value); } }
+                            LinkButton { text: "Open Microsoft Entra"; width: 100%; enabled: root.controls-enabled; clicked => { root.open-entra(); } }
+                            Field { label: "Outlook Groups"; helper-text: "Addresses shown under Groups in Outlook. One per line or comma-separated."; placeholder: "Enter group email addresses"; value <=> root.groups; multiline: true; rows: 3; enabled: root.controls-enabled; edited(value) => { root.groups-edited(value); } }
+                            Disclosure { title: "Shared mailboxes (optional)"; enabled: root.controls-enabled;
+                                VerticalLayout { spacing: Tokens.space-1;
+                                    HelperText { text: "For mailboxes under Shared with me or Open another mailbox."; width: 100%; }
+                                    Field { label: "Shared mailboxes (optional)"; input-accessible-label: "Shared mailbox addresses"; placeholder: "Enter shared mailbox addresses"; value <=> root.shared-mailboxes; multiline: true; rows: 2; enabled: root.controls-enabled; edited(value) => { root.shared-edited(value); } }
+                                }
+                            }
+                            VerticalLayout { width: 100%; spacing: Tokens.space-1;
+                                PrimaryButton { text: "Sign in & check inboxes"; enabled: root.controls-enabled && root.can-check-microsoft; clicked => { root.check-microsoft(); } }
+                                HelperText { text: "Opens Microsoft sign-in in your browser. Checks access only; stores no mail."; width: 100%; }
+                            }
+                            VerticalLayout { width: 100%; spacing: Tokens.space-1;
+                                for line in root.microsoft-lines: Text { text: line.text; color: line.succeeded ? Tokens.success : Tokens.warning; font-size: Tokens.font-13; wrap: word-wrap; width: 100%; horizontal-alignment: left; horizontal-stretch: 1; }
+                            }
+                        }
+                    }
+                    Card { min-width: Tokens.card-min; horizontal-stretch: 1;
+                        VerticalLayout { alignment: start; padding-top: Tokens.card-pad-y; padding-bottom: Tokens.card-pad-y; padding-left: Tokens.card-pad-x; padding-right: Tokens.card-pad-x; spacing: Tokens.space-2;
+                            StepHeading { number: "2"; title: "Choose your AI model"; }
+                            Text { text: "Provider"; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; width: 100%; horizontal-alignment: left; horizontal-stretch: 1; }
+                            Segmented { options: ["Ollama Cloud", "OpenRouter"]; selected-index <=> root.provider-index; accessible-name: "Provider"; enabled: root.controls-enabled; selected(index) => { root.provider-selected(index); } }
+                            Field { label: "API key"; placeholder: root.key-placeholder; value <=> root.api-key; password: true; reveal-password: root.show-key; monospace: true; enabled: root.controls-enabled; edited(value) => { root.key-edited(value); } }
+                            HorizontalLayout { width: 100%; spacing: Tokens.space-4;
+                                Checkbox { text: "Show key"; checked <=> root.show-key; enabled: root.controls-enabled; }
+                                LinkButton { text: "Create an API key"; enabled: root.controls-enabled; clicked => { root.open-key-page(); } }
+                            }
+                            if root.provider-index == 0: VerticalLayout { width: 100%; spacing: Tokens.space-1;
+                                Text { text: "Ollama plan"; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; width: 100%; horizontal-alignment: left; horizontal-stretch: 1; }
+                                Segmented { options: root.ollama-plan-options; selected-index <=> root.ollama-plan-index; accessible-name: "Ollama plan"; enabled: root.controls-enabled; selected(index) => { root.plan-selected(index); } }
+                                HelperText { text: "Free 1 · Pro 3 · Max/Team 10 concurrent requests"; width: 100%; }
+                            }
+                            if root.provider-index == 1: VerticalLayout { width: 100%; spacing: Tokens.space-1;
+                                parallel-field := Field {
+                                    label: "Parallel requests (max)"; value <=> root.openrouter-parallel; enabled: root.controls-enabled;
+                                    accepted(value) => { root.parallel-committed(value); }
+                                    focus-changed(focused) => {
+                                        root.parallel-field-focused = focused;
+                                        if !focused { root.parallel-committed(root.openrouter-parallel); }
+                                    }
+                                }
+                                HelperText { text: "How many conversations a scan analyzes at once. OpenRouter publishes no concurrency cap for a paid key; a rate-limited conversation is reported as failed and never resent."; width: 100%; }
+                            }
+                            HorizontalLayout { width: 100%; spacing: Tokens.space-3;
+                                VerticalLayout { horizontal-stretch: 1; spacing: Tokens.space-1;
+                                    Text { text: "Model"; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; width: 100%; horizontal-alignment: left; horizontal-stretch: 1; }
+                                    ModelPicker { choices: root.models; selected-index <=> root.model-index; selected-value <=> root.model-value; accessible-name: "Model"; enabled: root.controls-enabled; selected(value) => { root.model-selected(value); } }
+                                }
+                                SecondaryButton { text: root.load-models-label; enabled: root.controls-enabled && root.can-load-models; clicked => { root.load-models(); } }
+                            }
+                            if root.provider-index == 1: HelperText { text: "Only models with a zero-data-retention endpoint are listed, and every request asks OpenRouter to route to those endpoints only. OpenRouter's own retention policy still applies."; width: 100%; }
+                            HorizontalLayout { width: 100%; spacing: Tokens.space-3;
+                                PrimaryButton { text: "Test selected model"; enabled: root.controls-enabled && root.can-test-model; clicked => { root.test-model(); } }
+                                HelperText { text: "Content-free generation check, up to 150 s."; horizontal-stretch: 1; }
+                            }
+                            Text { text: root.model-status; color: root.model-succeeded ? Tokens.success : Tokens.warning; font-size: Tokens.font-13; wrap: word-wrap; width: 100%; horizontal-alignment: left; horizontal-stretch: 1; }
+                            HelperText { text: "This connection test sends no email. Scanning inboxes sends recent message text from your configured inboxes to " + root.provider-disclosure + "."; width: 100%; }
+                        }
+                    }
+                }
+                Card {
+                    VerticalLayout { alignment: start; padding-top: Tokens.card-pad-y; padding-bottom: Tokens.card-pad-y; padding-left: Tokens.card-pad-x; padding-right: Tokens.card-pad-x; spacing: Tokens.space-3;
+                        Text { text: "Scan scope and data sent to the model provider"; color: Tokens.text-1; font-size: Tokens.font-15; font-weight: 600; width: 100%; horizontal-alignment: left; horizontal-stretch: 1; }
+                        HorizontalLayout { width: 100%; spacing: Tokens.space-6;
+                            VerticalLayout { Text { text: "Window"; color: Tokens.text-2; font-size: Tokens.font-13; } Text { text: "Last 30 days"; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; wrap: word-wrap; } }
+                            VerticalLayout { Text { text: "Inbox / Sent Items"; color: Tokens.text-2; font-size: Tokens.font-13; } Text { text: "Up to 100 messages per folder"; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; wrap: word-wrap; } }
+                            VerticalLayout { Text { text: "Groups"; color: Tokens.text-2; font-size: Tokens.font-13; } Text { text: "20 recent threads · 40 posts each"; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; wrap: word-wrap; } }
+                            VerticalLayout { Text { text: "Sources"; color: Tokens.text-2; font-size: Tokens.font-13; } Text { text: "At most 10 configured"; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; wrap: word-wrap; } }
+                        }
+                        HelperText { text: "Subjects, current text, quoted history and participants are sent to " + root.provider-disclosure + ". Attachments, tokens and raw Graph IDs are never sent. Capped sources and conversations over 40 messages are reported as incomplete. Scans run only when you click Scan; this is not an unattended background service."; width: 100%; }
+                    }
+                }
+                HelperText { text: "Settings and abstract loop decisions save in Windows Credential Manager. Mail and descriptions remain in memory; scan to reconstruct them after restart. Reviewed reminders live in Microsoft To Do. Outlook add-in integration is a separate step."; width: 100%; }
+                Text { text: "Made with Slint"; color: Tokens.text-3; font-size: Tokens.font-13; }
+            }
+        }
+    }
+}
