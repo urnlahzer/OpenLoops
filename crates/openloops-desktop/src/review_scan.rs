@@ -850,7 +850,7 @@ fn learn_one_event(message: &ReviewMessage) -> Option<(String, i64, i64, EventSo
     }
     let offset = local_offset_seconds(message.input.timestamp, 0);
     if let Some((start, end, byte_offset)) =
-        prose_event_time(&subject, message.input.timestamp, offset)
+        subject_prose_event_time(&subject, message.input.timestamp)
     {
         let name_end = subject_prose_name_end(&subject, byte_offset);
         let prefix = &subject[..name_end];
@@ -885,6 +885,31 @@ fn learn_one_event(message: &ReviewMessage) -> Option<(String, i64, i64, EventSo
         }
     }
     None
+}
+
+/// Resolves subject-prose dates using the machine-local UTC offset at the
+/// event instant. The first parse only supplies an instant at which to ask
+/// for that offset; reparsing applies the event date's offset to the civil
+/// date/time itself, which matters when the message and event straddle DST.
+fn subject_prose_event_time(text: &str, message_timestamp: i64) -> Option<(i64, i64, usize)> {
+    subject_prose_event_time_with(text, message_timestamp, |timestamp| {
+        local_offset_seconds(timestamp, 0)
+    })
+}
+
+fn subject_prose_event_time_with(
+    text: &str,
+    message_timestamp: i64,
+    mut offset_at: impl FnMut(i64) -> i32,
+) -> Option<(i64, i64, usize)> {
+    let message_offset = offset_at(message_timestamp);
+    let provisional = prose_event_time(text, message_timestamp, message_offset)?;
+    let event_offset = offset_at(provisional.0);
+    if event_offset == message_offset {
+        Some(provisional)
+    } else {
+        prose_event_time(text, message_timestamp, event_offset)
+    }
 }
 
 /// When `byte_offset` (a matched date's start, from [`prose_event_time`])
@@ -1301,9 +1326,10 @@ pub struct ScanResult {
     /// Most entries are per-conversation: one note per conversation that had
     /// a rejection, degraded item, or (for a two-party thread) returned no
     /// expectations at all. A few are aggregate, scan-wide notes pushed by
-    /// the cross-thread closure pass (`scan_closures`) rather than tied to
+    /// the closure pass (`scan_closures`) rather than tied to
     /// any single conversation -- how many expectations it closed, and
-    /// whether its per-scan call cap bound. In-memory UI text only -- built
+    /// whether its shared per-scan provider-call cap bound. In-memory UI text
+    /// only -- built
     /// from message subjects, so it must never be logged, saved, or emitted
     /// by [`probe`].
     pub conversation_notes: Vec<String>,
@@ -1315,13 +1341,13 @@ pub struct ScanResult {
     /// Set when `scan_conversations` stopped early because a conversation's
     /// analysis failed with a transport-class provider error (the same
     /// `matches!` set that stops the main scan). When true, `scan_closures`
-    /// skips the cross-thread closure pass entirely instead of repeating
+    /// skips the closure pass entirely instead of repeating
     /// calls against a provider already known to be unreachable or
     /// unauthorized.
     pub primary_scan_transport_error: bool,
-    /// Content-free diagnostic set when the cross-thread closure pass itself
+    /// Content-free diagnostic set when the closure pass itself
     /// stopped early on a transport-class provider error, e.g.
-    /// `"Cross-thread closure pass stopped: rate limited"`. Kept separate
+    /// `"Closure pass stopped: rate limited"`. Kept separate
     /// from `failures` (which counts unanalyzed conversations) since a
     /// closure-pass failure does not mean any conversation went unanalyzed.
     pub closure_pass_failure: Option<String>,
@@ -2347,25 +2373,36 @@ fn text_matched_event<'a>(
 /// gathering in its own conversation. Event nouns are matched as whole
 /// alphanumeric tokens; the timing phrases are intentionally narrow.
 fn has_scoped_event_language(item: &Expectation) -> bool {
+    const EVENT_NOUN_FOLLOWERS: &[&str] = &[
+        "notes",
+        "minutes",
+        "recording",
+        "summary",
+        "agenda",
+        "invite",
+        "link",
+    ];
     [&item.action, &item.evidence.quote].iter().any(|text| {
         let lower = text.to_lowercase();
         let words: Vec<&str> = lower
             .split(|c: char| !c.is_alphanumeric())
             .filter(|word| !word.is_empty())
             .collect();
-        words.iter().any(|word| {
-            EVENT_GENERIC_NOUNS.contains(word)
-                || ["arrive", "arriving", "attend", "attending", "bring"].contains(word)
-        }) || words
-            .windows(2)
-            .any(|pair| matches!(pair, ["before", "the"] | ["prior", "to"] | ["ahead", "of"]))
+        words.iter().enumerate().any(|(index, word)| {
+            ["arrive", "arriving", "attend", "attending", "bring"].contains(word)
+                || (EVENT_GENERIC_NOUNS.contains(word)
+                    && words
+                        .get(index + 1)
+                        .is_none_or(|next| !EVENT_NOUN_FOLLOWERS.contains(next)))
+        })
     })
 }
 
 /// Finds deterministic event evidence scoped to the expectation's source:
-/// first an event learned from the evidence message itself, otherwise an
-/// event in the same conversation when the request uses event-shaped
-/// language. Body-prose events are deliberately excluded from both rules.
+/// first an event learned from the evidence message itself, otherwise the
+/// sole qualifying event in the same conversation when the request uses
+/// event-shaped language. Body-prose events are deliberately excluded from
+/// both rules; ambiguity between two conversation events leaves the item open.
 fn scoped_event<'a>(
     item: &Expectation,
     source: &ReviewMessage,
@@ -2382,20 +2419,40 @@ fn scoped_event<'a>(
         .filter(qualifying)
         .find(|event| event.message_handle == item.evidence.message)
         .or_else(|| {
-            has_scoped_event_language(item).then(|| {
-                index
-                    .iter()
-                    .filter(qualifying)
-                    .filter(|event| event.conversation == source.conversation)
-                    .min_by_key(|event| (event.start, &event.message_handle))
-            })?
+            let mut events = index
+                .iter()
+                .filter(qualifying)
+                .filter(|event| event.conversation == source.conversation);
+            has_scoped_event_language(item)
+                .then(|| events.next().filter(|_| events.next().is_none()))?
         })
+}
+
+fn deadline_boundary(item: &Expectation, messages: &[ReviewMessage], now: i64) -> Option<i64> {
+    let deadline = item.deadline.as_ref()?;
+    let message = messages
+        .iter()
+        .find(|message| message.input.handle == deadline.message)?;
+    let offset = local_offset_seconds(message.input.timestamp, 0);
+    match classify(&deadline.quote, message.input.timestamp, now, offset) {
+        DeadlineView::PastDue { boundary, .. }
+        | DeadlineView::Due { boundary, .. }
+        | DeadlineView::DueDate { boundary, .. }
+        | DeadlineView::DueBusinessDay { boundary, .. }
+        | DeadlineView::DueRange { boundary, .. } => Some(boundary),
+        DeadlineView::EventTied | DeadlineView::Soft | DeadlineView::Unknown => None,
+    }
 }
 
 /// Closes `item` against `event` when `event` has already ended. Returns
 /// whether it closed.
-fn close_from_index(item: &mut Expectation, event: &EventRef, now: i64) -> bool {
-    if event.end >= now {
+fn close_from_index(
+    item: &mut Expectation,
+    event: &EventRef,
+    messages: &[ReviewMessage],
+    now: i64,
+) -> bool {
+    if event.end >= now || deadline_boundary(item, messages, now).is_some_and(|d| d > event.end) {
         return false;
     }
     item.event_passed = Some(EventPassed {
@@ -2437,6 +2494,9 @@ fn close_from_stated_time(
     let Some(end) = past_due_boundary(&view) else {
         return false;
     };
+    if deadline_boundary(item, messages, now).is_some_and(|deadline| deadline > end) {
+        return false;
+    }
     item.event_passed = Some(EventPassed {
         name: name.to_string(),
         end,
@@ -2452,9 +2512,6 @@ fn close_from_stated_time(
 /// Closes any open, unresolved expectation whose event has already ended,
 /// via four independent sources of evidence, tried in order for each item:
 ///
-/// - a structured or subject-prose event learned from the evidence message
-///   itself, or from its conversation when the request uses generic event
-///   language ([`scoped_event`]);
 /// - the learned event index, matched against the expectation's own named
 ///   event ([`named_event_phrase`]) with [`match_event`] -- when the index
 ///   has a match, it alone decides this item, whether or not it closes;
@@ -2463,6 +2520,10 @@ fn close_from_stated_time(
 ///   in the conversation -- classified directly ([`close_from_stated_time`]);
 ///   only ever consulted for an item that named an event in the first
 ///   place;
+/// - when no named index event matched, a structured or subject-prose event
+///   learned from the evidence message itself, or the sole qualifying event
+///   in its conversation when the request uses event language
+///   ([`scoped_event`]);
 /// - for an item that named no event at all, the index again, but matched
 ///   against the item's own `action`/`evidence.quote` text instead
 ///   ([`text_matched_event`]), at a much stronger bar so an unrelated
@@ -2494,22 +2555,15 @@ pub fn close_passed_events(result: &mut ScanResult, messages: &[ReviewMessage], 
         let offset = local_offset_seconds(source.input.timestamp, 0);
         timed += usize::from(item.event_time.is_some());
 
-        if let Some(event) = scoped_event(item, source, &index) {
-            scoped += 1;
-            if close_from_index(item, event, now) {
-                closed_from_index += 1;
-                result.event_closures += 1;
-            }
-            continue;
-        }
-
-        if let Some(phrase) = named_event_phrase(item, source.input.timestamp, now, offset) {
+        let named_phrase =
+            named_event_phrase(item, source.input.timestamp, now, offset).map(str::to_string);
+        let named_phrase_present = named_phrase.is_some();
+        if let Some(phrase) = named_phrase {
             named += 1;
-            let phrase = phrase.to_string();
             let event_match = match_event(&phrase, source.input.timestamp, &index);
             matched += usize::from(event_match.is_some());
             if let Some(event) = event_match {
-                if close_from_index(item, event, now) {
+                if close_from_index(item, event, messages, now) {
                     closed_from_index += 1;
                     result.event_closures += 1;
                 }
@@ -2518,13 +2572,22 @@ pub fn close_passed_events(result: &mut ScanResult, messages: &[ReviewMessage], 
             if close_from_stated_time(item, messages, now, &phrase) {
                 closed_from_stated_time += 1;
                 result.event_closures += 1;
+                continue;
+            }
+        }
+
+        if let Some(event) = scoped_event(item, source, &index) {
+            scoped += 1;
+            if close_from_index(item, event, messages, now) {
+                closed_from_index += 1;
+                result.event_closures += 1;
             }
             continue;
         }
 
-        if let Some(event) = text_matched_event(item, source, &index) {
+        if !named_phrase_present && let Some(event) = text_matched_event(item, source, &index) {
             matched_by_text += 1;
-            if close_from_index(item, event, now) {
+            if close_from_index(item, event, messages, now) {
                 closed_from_index += 1;
                 result.event_closures += 1;
             }
@@ -2556,8 +2619,8 @@ pub fn close_passed_events(result: &mut ScanResult, messages: &[ReviewMessage], 
     ));
 }
 
-/// Hard cap on how many `closure()` provider calls one scan makes, however
-/// many open requests are eligible: a large mailbox could otherwise turn
+/// Hard cap on how many `closure()` provider calls one scan makes across
+/// same-thread and cross-thread checks. A large mailbox could otherwise turn
 /// into dozens of extra model calls in a single scan.
 const MAX_CLOSURE_CALLS: usize = 40;
 
@@ -2756,7 +2819,7 @@ fn scan_closures(
     }
     if state.capped.load(Ordering::Relaxed) {
         result.conversation_notes.push(format!(
-            "Cross-thread closure checks were capped at {MAX_CLOSURE_CALLS} open requests this scan."
+            "Closure checks were capped at {MAX_CLOSURE_CALLS} provider calls shared by same-thread and cross-thread checks this scan."
         ));
     }
 }
@@ -2788,16 +2851,14 @@ fn merge_closures(
             JobOutcome::Completed(Err(ProviderError::RateLimited)) => rate_limited += 1,
             JobOutcome::Completed(Err(error)) if is_stop_error(error) => {
                 if result.closure_pass_failure.is_none() {
-                    result.closure_pass_failure =
-                        Some(format!("Cross-thread closure pass stopped: {error}"));
+                    result.closure_pass_failure = Some(format!("Closure pass stopped: {error}"));
                 }
             }
             // No closing evidence, a skipped item, or a failure about this
             // one item: the expectation simply stays open.
             JobOutcome::Panicked => {
                 if result.closure_pass_failure.is_none() {
-                    result.closure_pass_failure =
-                        Some("Cross-thread closure pass failed unexpectedly.".into());
+                    result.closure_pass_failure = Some("Closure pass failed unexpectedly.".into());
                 }
             }
             JobOutcome::Completed(Ok(None) | Err(_)) | JobOutcome::NotStarted => {}
@@ -2805,7 +2866,7 @@ fn merge_closures(
     }
     if rate_limited > 0 {
         result.conversation_notes.push(format!(
-            "{rate_limited} cross-thread closure check(s) were rate-limited; they were not resent."
+            "{rate_limited} closure provider call(s) were rate-limited; they were not resent."
         ));
     }
     same_thread_closures
@@ -4279,6 +4340,29 @@ mod tests {
         assert_eq!(index.len(), 1);
         assert_eq!(index[0].name, "spring estate planning workshop");
         assert_eq!(index[0].source, EventSource::SubjectProse);
+    }
+
+    #[test]
+    fn subject_prose_event_time_looks_up_the_offset_at_the_event_instant() {
+        let message = timestamp("2026-01-15T12:00:00Z");
+        let provisional_event = timestamp("2026-07-01T22:00:00Z");
+        let lookups = std::cell::RefCell::new(Vec::new());
+        let (start, _, _) = subject_prose_event_time_with(
+            "Product Launch - July 1, 2026 2pm",
+            message,
+            |instant| {
+                lookups.borrow_mut().push(instant);
+                if instant == message {
+                    -8 * 3600
+                } else {
+                    -7 * 3600
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(*lookups.borrow(), vec![message, provisional_event]);
+        assert_eq!(start, timestamp("2026-07-01T21:00:00Z"));
     }
 
     /// The live finding this task fixes: the date and its time range sit
@@ -5836,7 +5920,7 @@ at the downtown courthouse. Let me know if that works.",
         );
         assert!(
             result.conversation_notes.iter().any(|note| note
-                == "6 cross-thread closure check(s) were rate-limited; they were not resent."),
+                == "6 closure provider call(s) were rate-limited; they were not resent."),
             "notes: {:?}",
             result.conversation_notes
         );
@@ -5844,10 +5928,16 @@ at the downtown courthouse. Let me know if that works.",
     }
 
     #[test]
-    fn same_thread_agreement_closes_before_cross_thread_and_is_counted_separately() {
-        let (mut all, item) = closure_test_messages();
+    fn same_thread_closure_agreement_precedes_cross_thread_and_is_counted_separately() {
+        let (mut all, mut item) = closure_test_messages();
+        all[0].input.message.body_blocks =
+            vec![CanonicalBlock::new("Can we move the call to 3pm?").unwrap()];
+        item.action = "Decide whether to move the call to 3pm".into();
+        item.action_phrase = "move the call to 3pm".into();
+        item.evidence.quote = "Can we move the call to 3pm?".into();
+        item.evidence.context = "Can we move the call to 3pm?".into();
         let mut reply = reply_to("sam@example.invalid", "rep-1", "c1", "acct", "Fee");
-        reply.body = "Yes, works for me.".into();
+        reply.body = "Yes, 3pm works for me".into();
         all.push(prepare(&reply, "Sent", 1).unwrap());
         let reply_handle = all[1].input.handle.clone();
         let mut result = closure_result(vec![item]);
@@ -5860,12 +5950,16 @@ at the downtown courthouse. Let me know if that works.",
             &|_, _, candidates| {
                 assert_eq!(candidates.len(), 1);
                 assert_eq!(candidates[0].handle, reply_handle);
+                assert_eq!(
+                    candidates[0].message.body_blocks[0].as_string(),
+                    "Yes, 3pm works for me"
+                );
                 Ok(Some((
                     Anchor {
                         message: candidates[0].handle.clone(),
                         block: 0,
-                        quote: "Yes, works for me.".into(),
-                        context: "Yes, works for me.".into(),
+                        quote: "Yes, 3pm works for me".into(),
+                        context: "Yes, 3pm works for me".into(),
                     },
                     ResolutionKind::Agreed,
                 )))
@@ -5885,9 +5979,16 @@ at the downtown courthouse. Let me know if that works.",
     }
 
     #[test]
-    fn same_thread_acknowledgement_that_returns_null_stays_open() {
-        let (mut all, item) = closure_test_messages();
-        let reply = reply_to("sam@example.invalid", "rep-1", "c1", "acct", "Fee");
+    fn same_thread_closure_acknowledgement_that_returns_null_stays_open() {
+        let (mut all, mut item) = closure_test_messages();
+        all[0].input.message.body_blocks =
+            vec![CanonicalBlock::new("Please send the report.").unwrap()];
+        item.action = "Send the report".into();
+        item.action_phrase = "send the report".into();
+        item.evidence.quote = "Please send the report.".into();
+        item.evidence.context = "Please send the report.".into();
+        let mut reply = reply_to("sam@example.invalid", "rep-1", "c1", "acct", "Fee");
+        reply.body = "Thanks, got it".into();
         all.push(prepare(&reply, "Sent", 1).unwrap());
         let calls = AtomicUsize::new(0);
         let mut result = closure_result(vec![item]);
@@ -5897,8 +5998,13 @@ at the downtown courthouse. Let me know if that works.",
             &ScanProgress::default(),
             &mut result,
             &ParallelPass::new(1),
-            &|_, _, _| {
+            &|_, _, candidates| {
                 calls.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(candidates.len(), 1);
+                assert_eq!(
+                    candidates[0].message.body_blocks[0].as_string(),
+                    "Thanks, got it"
+                );
                 Ok(None)
             },
         );
@@ -5906,6 +6012,38 @@ at the downtown courthouse. Let me know if that works.",
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(result.analysis.items[0].resolution.is_none());
         assert!(result.conversation_notes.is_empty());
+    }
+
+    #[test]
+    fn same_thread_closure_correction_leaves_the_action_owed_and_open() {
+        let (mut all, mut item) = closure_test_messages();
+        all[0].input.message.body_blocks =
+            vec![CanonicalBlock::new("Please pay the 359 fee.").unwrap()];
+        item.action = "Pay the 350 fee".into();
+        item.action_phrase = "pay the 359 fee".into();
+        item.evidence.quote = "Please pay the 359 fee.".into();
+        item.evidence.context = "Please pay the 359 fee.".into();
+        let mut reply = reply_to("sam@example.invalid", "rep-1", "c1", "acct", "Fee");
+        reply.body = "The fee is 350, not 359".into();
+        all.push(prepare(&reply, "Sent", 1).unwrap());
+        let mut result = closure_result(vec![item]);
+
+        super::scan_closures(
+            &all,
+            &ScanProgress::default(),
+            &mut result,
+            &ParallelPass::new(1),
+            &|_, _, candidates| {
+                assert_eq!(
+                    candidates[0].message.body_blocks[0].as_string(),
+                    "The fee is 350, not 359"
+                );
+                Ok(None)
+            },
+        );
+
+        assert_eq!(result.analysis.items[0].action, "Pay the 350 fee");
+        assert!(result.analysis.items[0].resolution.is_none());
     }
 
     #[test]
@@ -6031,6 +6169,61 @@ at the downtown courthouse. Let me know if that works.",
     }
 
     #[test]
+    fn scoped_subject_event_closure_keeps_an_invoice_with_a_later_deadline_open() {
+        let mut mail = synthetic(
+            "Install the tool before arriving. Claim the free month. Send me the invoice next Friday.",
+            0,
+            "workshop-thread",
+        );
+        mail.received = "2026-08-24T12:00:00Z".into();
+        mail.subject =
+            "Spring Planning Workshop checklist (Tuesday, August 25 - 2:00-5:30pm)".into();
+        let event_message = prepare(&mail, "Inbox", 0).unwrap();
+        let event_end = build_event_index(std::slice::from_ref(&event_message))[0].end;
+        let (_, template) = closure_test_messages();
+        let handle = &event_message.input.handle;
+        let install = scoped_event_expectation(
+            &template,
+            handle,
+            "Install the tool before arriving",
+            "Install the tool before arriving.",
+        );
+        let claim = scoped_event_expectation(
+            &template,
+            handle,
+            "Claim the free month",
+            "Claim the free month.",
+        );
+        let mut invoice = scoped_event_expectation(
+            &template,
+            handle,
+            "Send the invoice",
+            "Send me the invoice next Friday.",
+        );
+        invoice.deadline = Some(Anchor {
+            message: handle.clone(),
+            block: 0,
+            quote: "Friday".into(),
+            context: "Send me the invoice next Friday.".into(),
+        });
+        let mut result = closure_result(vec![install, claim, invoice]);
+
+        close_passed_events(
+            &mut result,
+            std::slice::from_ref(&event_message),
+            timestamp("2026-09-01T00:00:00Z"),
+        );
+
+        assert!(result.analysis.items[0].event_passed.is_some());
+        assert!(result.analysis.items[1].event_passed.is_some());
+        assert!(result.analysis.items[2].event_passed.is_none());
+        assert!(
+            deadline_boundary(&result.analysis.items[2], &[event_message], event_end + 1)
+                .is_some_and(|deadline| deadline > event_end)
+        );
+    }
+
+    #[test]
     fn event_worded_request_in_the_same_conversation_uses_the_scoped_event() {
         let event_message = scoped_event_message();
         let event_end = build_event_index(std::slice::from_ref(&event_message))[0].end;
@@ -6059,6 +6252,97 @@ at the downtown courthouse. Let me know if that works.",
             event_end + 1,
         );
         assert!(scoped_result.analysis.items[0].event_passed.is_some());
+    }
+
+    #[test]
+    fn named_event_closure_precedes_conversation_fallback_with_multiple_events() {
+        let mut workshop_mail = synthetic("Calendar invitation.", 0, "event-thread");
+        workshop_mail.received = "2026-08-01T10:00:00Z".into();
+        workshop_mail.subject =
+            "Invitation: Planning Workshop @ Fri Aug 21, 2026 11am - 12pm (UTC)".into();
+        let workshop = prepare(&workshop_mail, "Inbox", 0).unwrap();
+        let mut launch_mail = synthetic("Calendar invitation.", 1, "event-thread");
+        launch_mail.received = "2026-08-01T11:00:00Z".into();
+        launch_mail.subject =
+            "Invitation: Product Launch @ Fri Sep 25, 2026 11am - 12pm (UTC)".into();
+        let launch = prepare(&launch_mail, "Inbox", 1).unwrap();
+        let mut request_mail =
+            synthetic("Bring the deck to the Product Launch.", 2, "event-thread");
+        request_mail.received = "2026-08-01T12:00:00Z".into();
+        let request = prepare(&request_mail, "Inbox", 2).unwrap();
+        let (_, template) = closure_test_messages();
+        let mut item = scoped_event_expectation(
+            &template,
+            &request.input.handle,
+            "Bring the deck to the Product Launch",
+            "Bring the deck to the Product Launch.",
+        );
+        item.event = Some(Anchor {
+            message: request.input.handle.clone(),
+            block: 0,
+            quote: "the Product Launch".into(),
+            context: "Bring the deck to the Product Launch.".into(),
+        });
+        let mut result = closure_result(vec![item]);
+
+        close_passed_events(
+            &mut result,
+            &[workshop, launch, request],
+            timestamp("2026-08-22T00:00:00Z"),
+        );
+
+        assert!(result.analysis.items[0].event_passed.is_none());
+    }
+
+    #[test]
+    fn conversation_event_closure_fallback_skips_multiple_qualifying_events() {
+        let mut workshop_mail = synthetic("Calendar invitation.", 0, "event-thread");
+        workshop_mail.subject =
+            "Invitation: Planning Workshop @ Fri Aug 21, 2026 11am - 12pm (UTC)".into();
+        let workshop = prepare(&workshop_mail, "Inbox", 0).unwrap();
+        let mut launch_mail = synthetic("Calendar invitation.", 1, "event-thread");
+        launch_mail.subject =
+            "Invitation: Product Launch @ Fri Aug 28, 2026 11am - 12pm (UTC)".into();
+        let launch = prepare(&launch_mail, "Inbox", 1).unwrap();
+        let request =
+            prepare(&synthetic("Bring the deck.", 2, "event-thread"), "Inbox", 2).unwrap();
+        let (_, template) = closure_test_messages();
+        let item = scoped_event_expectation(
+            &template,
+            &request.input.handle,
+            "Bring the deck",
+            "Bring the deck.",
+        );
+        let mut result = closure_result(vec![item]);
+
+        close_passed_events(
+            &mut result,
+            &[workshop, launch, request],
+            timestamp("2026-09-01T00:00:00Z"),
+        );
+
+        assert!(result.analysis.items[0].event_passed.is_none());
+    }
+
+    #[test]
+    fn conversation_event_closure_ignores_event_noun_followed_by_notes() {
+        let event_message = scoped_event_message();
+        let event_end = build_event_index(std::slice::from_ref(&event_message))[0].end;
+        let mut request_mail = synthetic("Send the meeting notes by Friday.", 1, "workshop-thread");
+        request_mail.received = "2026-08-02T12:00:00Z".into();
+        let request = prepare(&request_mail, "Inbox", 1).unwrap();
+        let (_, template) = closure_test_messages();
+        let item = scoped_event_expectation(
+            &template,
+            &request.input.handle,
+            "Send the meeting notes by Friday",
+            "Send the meeting notes by Friday.",
+        );
+        let mut result = closure_result(vec![item]);
+
+        close_passed_events(&mut result, &[event_message, request], event_end + 1);
+
+        assert!(result.analysis.items[0].event_passed.is_none());
     }
 
     #[test]
@@ -6777,7 +7061,7 @@ at the downtown courthouse. Let me know if that works.",
             result
                 .closure_pass_failure
                 .as_deref()
-                .is_some_and(|f| f.starts_with("Cross-thread closure pass stopped: ")),
+                .is_some_and(|f| f.starts_with("Closure pass stopped: ")),
             "closure_pass_failure: {:?}",
             result.closure_pass_failure
         );
@@ -6898,7 +7182,7 @@ at the downtown courthouse. Let me know if that works.",
             "the cap must bind at MAX_CLOSURE_CALLS"
         );
         let expected_note = format!(
-            "Cross-thread closure checks were capped at {MAX_CLOSURE_CALLS} open requests this scan."
+            "Closure checks were capped at {MAX_CLOSURE_CALLS} provider calls shared by same-thread and cross-thread checks this scan."
         );
         assert!(result.conversation_notes.contains(&expected_note));
     }

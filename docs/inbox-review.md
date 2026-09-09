@@ -22,9 +22,11 @@ in the normal application.
    the card marks these "evidence in another conversation." Expectations tied
    to a passed event also close automatically; event times come from Graph
    meeting messages, calendar-invite subject lines, or a date or time stated
-   in an email body. Requests in an event-bearing message, and event-worded
-   requests elsewhere in that conversation, are tied to that scoped event
-   without relying on a model-supplied event anchor. Corrections that
+   in an email body. Requests in a meeting-metadata or subject event message,
+   and event-worded requests elsewhere in a conversation containing exactly
+   one such event, are tied to that scoped event without relying on a
+   model-supplied event anchor; body-prose events are excluded. A request with
+   its own stated deadline later than the event end stays open. Corrections that
    leave the action owed keep the card open with updated terms. If a quoted deadline or
    completion could not be validated against the mail, the card says so and
    keeps the item open.

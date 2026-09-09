@@ -126,10 +126,10 @@ pub fn expectations(
     parse(answer.as_bytes(), messages)
 }
 
-/// Best-effort cross-thread closure pass: given one open expectation
-/// and candidate later messages the signed-in user sent to the
-/// waiting party in OTHER conversations, asks whether any of them
-/// shows the action is no longer owed. `evidence_timestamp` is the
+/// Best-effort closure pass: given one open expectation and candidate later
+/// messages the signed-in user sent, either in the same thread or to the
+/// waiting party in other conversations, asks whether any of them shows the
+/// action is no longer owed. `evidence_timestamp` is the
 /// original request's timestamp; only a candidate strictly later than
 /// it, sent by the signed-in user, is accepted as closure evidence —
 /// re-checked here even though callers are expected to have already
