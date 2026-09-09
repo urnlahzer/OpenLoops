@@ -77,6 +77,7 @@ credential search disabled. Network requests run on
 a background thread, inputs are disabled while a request is pending, and the
 window remains responsive with elapsed-time feedback. Settings operations are
 serialized on the UI thread. No setup values or provider responses are logged.
+The busy indicator updates four times a second by design.
 Serialized settings and API keys use zeroizing buffers without claiming removal
 of all UI, allocator, TLS, or operating-system copies.
 
