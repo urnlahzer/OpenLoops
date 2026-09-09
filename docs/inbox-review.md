@@ -15,12 +15,16 @@ in the normal application.
    due, a date range, tied to an event, or soft urgency); past-due open items
    sort first. Expand evidence to inspect original quotations and later
    replies. Resolved requests are closed and hidden by default; the show
-   toggle reveals them with the closing evidence. Closing evidence can also
+   toggle reveals them with the closing evidence. Every open request is
+   rechecked against later replies you sent in the same thread before any
+   cross-thread search. Closing evidence can also
    come from a reply you sent the same person in a different conversation;
    the card marks these "evidence in another conversation." Expectations tied
    to a passed event also close automatically; event times come from Graph
    meeting messages, calendar-invite subject lines, or a date or time stated
-   in an email body. Corrections that
+   in an email body. Requests in an event-bearing message, and event-worded
+   requests elsewhere in that conversation, are tied to that scoped event
+   without relying on a model-supplied event anchor. Corrections that
    leave the action owed keep the card open with updated terms. If a quoted deadline or
    completion could not be validated against the mail, the card says so and
    keeps the item open.
@@ -83,11 +87,11 @@ affected conversation. Other conversation failures remain visible while the
 scan continues. There are no automatic request retries or silent model
 substitutions.
 
-After the per-conversation pass, a bounded cross-thread closure pass sends
-each remaining open request, together with the user's later messages to the
-same person from other conversations (up to 8, newest first, at most 40
-requests per scan), to the model to check for completion evidence; this is
-the only place two conversations share one model request.
+After the per-conversation pass, a bounded closure pass checks each remaining
+open request against up to 8 newest later same-thread replies before checking
+still-open requests against later messages to the same person from other
+conversations; across both stages it makes at most 40 model calls per scan,
+and only the second stage shares conversations in one model request.
 
 ## Saved decisions and reminders
 
