@@ -52,11 +52,19 @@ error rather than truncating settings.
 
 The Microsoft check still discards its token and sign-in is required again; access
 check results and the Show key toggle are not saved. The separate
-[Review inboxes tab](inbox-review.md) automatically analyzes recent mail from
+[Review screen](inbox-review.md) automatically analyzes recent mail from
 configured inboxes when the user clicks Scan inboxes.
-Reminder scheduling and task creation remain unimplemented. The Ollama
+**Set To Do reminder…** on a reviewed card opens an editable draft (title,
+local reminder time, quick picks) and, on confirmation, creates one task in
+the signed-in account's default personal Tasks list; a missing or uncertain
+write is never retried automatically and instead waits for the user to
+reconcile it ("I checked: the task exists" / "I checked: no task was
+created") against Microsoft To Do directly. The Ollama
 test sends a fixed content-free request. Successful generation confirms that
 request's validity, not a model's extraction quality.
+
+The title bar shows "Not signed in" until the Graph layer exposes a display
+name; `ConnectionReport` carries no account identifiers by design.
 
 The app registration is still a developer setup prerequisite. Ordinary user
 onboarding will need a publisher-owned multitenant registration configured in

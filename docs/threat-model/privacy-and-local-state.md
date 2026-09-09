@@ -27,9 +27,14 @@ post-decryption controls below can be implemented or claimed.
 The desktop window (`openloops-desktop`, `native-ui`) renders with Slint's
 native Windows backend; there is no embedded webview or browser engine, so
 mail content and the provider API key never pass through DOM state, a
-JavaScript heap, or any process boundary a web renderer would add. The key
-field lives in a Slint password input backed by a Rust `Zeroizing<String>`
-and is never logged. Links the window can open are limited to fixed provider
+JavaScript heap, or any process boundary a web renderer would add. The key is
+held in a Rust `Zeroizing<String>` and mirrored into the Slint password
+field's text property only while the Sources screen is the active screen; it
+is plain in that field's own memory while mirrored (masked on screen unless
+"Show key" is on), is never written to disk or logs, and is cleared from the
+field on Forget/Reload or when Sources is not the active screen -- the key
+does not stay confined to the `Zeroizing` buffer for its whole lifetime.
+Links the window can open are limited to fixed provider
 and Microsoft URLs (Entra, the Ollama/OpenRouter key pages, To Do) and,
 for a message deep link, `https://outlook.office.com/...` or
 `https://outlook.office365.com/...` specifically; every other URL is rejected

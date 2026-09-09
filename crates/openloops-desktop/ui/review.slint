@@ -16,7 +16,6 @@ export struct ReviewRow {
     date: string,
 }
 
-export struct ReviewGroup { title: string, kind: string, count: int }
 export struct MetaCell { label: string, value: string }
 export struct ReviewPill { text: string, kind: string }
 export struct EvidenceCard { label: string, sender: string, time: string, quote: string, context: string, subject-note: string, url: string }
@@ -132,12 +131,12 @@ export component ReviewScreen {
     callback open-external(string);
 
     VerticalLayout { spacing: 0px;
-        Rectangle { height: Tokens.command-height; background: Tokens.bg-bar; border-color: Tokens.stroke-1; border-width: Tokens.hairline;
+        Rectangle { height: Tokens.command-height; background: Tokens.bg-bar;
             HorizontalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-2;
-                if root.review-scanning: HorizontalLayout { spacing: Tokens.space-1; alignment: start;
-                    Text { text: "■"; color: Tokens.danger; font-size: Tokens.font-13; vertical-alignment: center; }
-                    SecondaryButton { text: "Stop scan"; accessible-name: "Stop scan"; clicked => { root.stop-scan(); } }
-                }
+                // N1: the glyph lives inside the button's own label text, not
+                // as a sibling Text sitting outside the clickable/focusable
+                // area.
+                if root.review-scanning: SecondaryButton { text: "■ Stop scan"; accessible-name: "Stop scan"; clicked => { root.stop-scan(); } }
                 if !root.review-scanning: PrimaryButton { text: "Scan inboxes"; enabled: root.can-scan; clicked => { root.scan-inboxes(); } }
                 SubtleButton { text: "Rescan loaded mail"; enabled: root.can-rescan; clicked => { root.rescan(); } }
                 SubtleButton { text: "Clear results and mail"; enabled: !root.busy; clicked => { root.clear-results(); } }
@@ -145,29 +144,35 @@ export component ReviewScreen {
                 Segmented { width: Tokens.review-filter-width; options: ["All", "Mine", "Team"]; selected-index <=> root.filter-index; accessible-name: "Review filter"; enabled: !root.busy; selected(index) => { root.filter-selected(index); } }
                 Checkbox { text: root.show-handled-label; checked <=> root.show-handled; enabled: !root.busy; toggled(value) => { root.show-handled-toggled(value); } }
             }
+            // N3: one bottom hairline, not a four-side border.
+            Rectangle { y: parent.height - Tokens.hairline; height: Tokens.hairline; background: Tokens.stroke-1; }
         }
 
         if root.scan-strip.state == "scanning": Rectangle { background: Tokens.brand-subtle; height: scanning-strip.preferred-height;
             scanning-strip := VerticalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-1;
+                // X8: phase/conversation/messages/elapsed share one row; the
+                // provider disclosure sentence gets its own row beneath so it
+                // wraps at the strip's own width instead of first laying out
+                // at its unwrapped natural width alongside the counters.
                 HorizontalLayout { spacing: Tokens.space-4;
                     Text { text: root.scan-strip.title; color: Tokens.brand; font-size: Tokens.font-13; font-weight: 600; }
                     Text { text: root.scan-strip.conversation; color: Tokens.text-1; font-size: Tokens.font-13; }
                     Text { text: root.scan-strip.messages; color: Tokens.text-2; font-size: Tokens.font-13; }
                     Text { text: root.scan-strip.elapsed; color: Tokens.text-2; font-size: Tokens.font-13; }
                     Rectangle { horizontal-stretch: 1; }
-                    Text { text: "Message text and participants go to your chosen model at " + root.scan-strip.provider + ". Attachments are not sent."; color: Tokens.text-2; font-size: Tokens.font-11; }
                 }
+                WrappedText { text: "Message text and participants go to your chosen model at " + root.scan-strip.provider + ". Attachments are not sent."; color: Tokens.text-2; size: Tokens.font-11; }
                 ProgressBar { value: root.scan-strip.progress; accessible-name: root.scan-strip.messages; }
                 if !root.scan-strip.summary.is-empty: WrappedText { text: root.scan-strip.summary; color: Tokens.warning; size: Tokens.font-11; }
             }
         }
-        if root.scan-strip.state == "finished": Rectangle { background: Tokens.bg-surface; border-color: Tokens.stroke-1; border-width: Tokens.hairline; height: finished-strip.preferred-height;
+        if root.scan-strip.state == "finished": Rectangle { background: Tokens.bg-surface; height: finished-strip.preferred-height;
             finished-strip := VerticalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-2;
                 HorizontalLayout { spacing: Tokens.space-2;
                     GroupDot { kind: root.scan-strip.incomplete ? "warning" : "success"; }
                     Text { text: root.scan-strip.title; color: root.scan-strip.incomplete ? Tokens.warning : Tokens.success; font-size: Tokens.font-13; font-weight: 600; vertical-alignment: center; }
                     Rectangle { horizontal-stretch: 1; }
-                    LinkButton { text: root.scan-strip.coverage-label; clicked => { root.coverage-open = !root.coverage-open; root.coverage-toggled(root.coverage-open); } }
+                    LinkButton { text: root.scan-strip.coverage-label; enabled: !root.busy; clicked => { root.coverage-open = !root.coverage-open; root.coverage-toggled(root.coverage-open); } }
                 }
                 // On its own row (the VerticalLayout's cross-axis width, not a
                 // HorizontalLayout main-axis share) so it wraps at the strip's
@@ -176,8 +181,10 @@ export component ReviewScreen {
                 WrappedText { text: root.scan-strip.summary; color: Tokens.text-2; }
                 if root.coverage-open: Callout { kind: "warning"; text: root.scan-strip.coverage-notes; }
             }
+            // N3: one bottom hairline, not a four-side border.
+            Rectangle { y: parent.height - Tokens.hairline; height: Tokens.hairline; background: Tokens.stroke-1; }
         }
-        if root.scan-strip.state == "warning": Rectangle { background: Tokens.warning-bg; border-color: Tokens.warning-stroke; border-width: Tokens.hairline; height: warning-strip.preferred-height;
+        if root.scan-strip.state == "warning": Rectangle { background: Tokens.warning-bg; height: warning-strip.preferred-height;
             warning-strip := VerticalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-2;
                 HorizontalLayout { spacing: Tokens.space-2; alignment: start;
                     GroupDot { kind: "warning"; }
@@ -185,33 +192,40 @@ export component ReviewScreen {
                 }
                 WrappedText { text: root.scan-strip.summary; color: Tokens.warning; }
             }
+            // N3: one bottom hairline, not a four-side border.
+            Rectangle { y: parent.height - Tokens.hairline; height: Tokens.hairline; background: Tokens.warning-stroke; }
         }
-        if root.scan-strip.state == "idle": Rectangle { background: Tokens.bg-surface; border-color: Tokens.stroke-1; border-width: Tokens.hairline; height: idle-strip.preferred-height;
+        if root.scan-strip.state == "idle": Rectangle { background: Tokens.bg-surface; height: idle-strip.preferred-height;
             idle-strip := VerticalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-1;
                 WrappedText { text: "Scan the last 30 days of Inbox and Sent Items, plus configured Groups and shared mailboxes. Each conversation is checked for expectations and later replies."; color: Tokens.text-1; }
                 WrappedText { text: "Message text and participants go to your chosen model at " + root.scan-strip.provider + ". Attachments are not sent."; }
-                LinkButton { text: "Scan scope and data sent to the model provider"; clicked => { root.sources-link(); } }
+                LinkButton { text: "Scan scope and data sent to the model provider"; enabled: !root.busy; clicked => { root.sources-link(); } }
             }
+            // N3: one bottom hairline, not a four-side border.
+            Rectangle { y: parent.height - Tokens.hairline; height: Tokens.hairline; background: Tokens.stroke-1; }
         }
 
         HorizontalLayout { spacing: 0px; vertical-stretch: 1;
-            Rectangle { width: Tokens.review-list-width; background: Tokens.bg-list; border-color: Tokens.stroke-1; border-width: Tokens.hairline;
+            Rectangle { width: Tokens.review-list-width; background: Tokens.bg-list;
                 VerticalLayout { spacing: 0px;
-                    Rectangle { min-height: Tokens.command-height; border-color: Tokens.stroke-1; border-width: Tokens.hairline;
+                    Rectangle { min-height: Tokens.command-height;
                         HorizontalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; spacing: Tokens.space-2;
                             Text { text: "Who is waiting on you · " + root.open-count + " open"; color: Tokens.text-1; font-size: Tokens.font-16; font-weight: 600; vertical-alignment: center; }
                             Rectangle { horizontal-stretch: 1; }
                         }
+                        // N3: one bottom hairline, not a four-side border.
+                        Rectangle { y: parent.height - Tokens.hairline; height: Tokens.hairline; background: Tokens.stroke-1; }
                     }
                     list-focus := FocusScope {
                         vertical-stretch: 1; accessible-role: list; accessible-label: "Review expectations"; accessible-item-count: root.rows.length;
                         key-pressed(event) => {
+                            if root.busy { return reject; }
                             if event.text == Key.UpArrow { root.move-selection(-1); return accept; }
                             if event.text == Key.DownArrow { root.move-selection(1); return accept; }
                             if event.text == Key.Return { root.list-primary-action(); return accept; }
                             return reject;
                         }
-                        ScrollView { width: 100%; height: 100%;
+                        ScrollView { width: 100%; height: 100%; viewport-width: self.visible-width;
                             VerticalLayout { width: 100%; spacing: 0px; alignment: start;
                                 for row[row-index] in root.rows: VerticalLayout { width: 100%; spacing: 0px;
                                     if row.first-in-group: Rectangle { min-height: Tokens.click-min;
@@ -253,7 +267,7 @@ export component ReviewScreen {
                                                 WrappedText { text: row.aging-status; color: row.aging-kind == "danger" ? Tokens.danger : Tokens.text-2; size: Tokens.font-11; }
                                             }
                                         }
-                                        mouse := TouchArea { clicked => { list-focus.focus(); root.select-row(row.handle); } }
+                                        mouse := TouchArea { enabled: !root.busy; clicked => { list-focus.focus(); root.select-row(row.handle); } }
                                     }
                                 }
                                 if root.rows.length == 0: Rectangle { min-height: Tokens.review-row-min-height * 3;
@@ -264,6 +278,9 @@ export component ReviewScreen {
                         if list-focus.has-focus: Rectangle { x: -Tokens.focus-ring; y: -Tokens.focus-ring; width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring; border-width: Tokens.focus-ring; border-color: Tokens.brand; }
                     }
                 }
+                // N3: the meaningful edge here is the divider against the reading
+                // pane, so one right-edge hairline rather than a four-side border.
+                Rectangle { x: parent.width - Tokens.hairline; width: Tokens.hairline; background: Tokens.stroke-1; }
             }
 
             Rectangle { background: Tokens.bg-surface; horizontal-stretch: 1;
@@ -273,12 +290,23 @@ export component ReviewScreen {
                             VerticalLayout { width: 100%; spacing: Tokens.review-section-gap; alignment: start;
                                 if root.no-usable-items: WrappedText { text: root.no-usable-text; color: Tokens.text-2; size: Tokens.font-14; }
                                 if root.has-analysis && !root.no-usable-items && !root.has-selection: WrappedText { text: "No open expectations match this filter. Missing replies in the scanned folders never prove work is finished."; color: Tokens.text-2; size: Tokens.font-14; }
+                                // X2: the reading pane has no selected-card branch to host
+                                // `action-status` once results are cleared (no analysis, no
+                                // selection), so a status set outside a decision -- "Results and
+                                // mail cleared from memory..." -- would otherwise never render.
+                                // Same colour rule as the selected-card copy below.
+                                if !root.has-selection && !root.action-status.is-empty: WrappedText { text: root.action-status; color: root.action-status-succeeded ? Tokens.success : Tokens.warning; size: Tokens.font-13; }
                                 if root.has-selection: VerticalLayout { width: 100%; spacing: Tokens.review-section-gap; alignment: start;
-                                    HorizontalLayout { width: 100%; spacing: Tokens.space-2; alignment: start; for pill in root.pills: Pill { text: pill.text; kind: pill.kind; } Rectangle { horizontal-stretch: 1; } }
+                                    HorizontalLayout { width: 100%; spacing: Tokens.space-2; alignment: start; for pill in root.pills: Pill { text: pill.text; kind: pill.kind; } }
                                     WrappedText { text: root.title; color: Tokens.text-1; size: Tokens.font-22; weight: 600; }
-                                    Rectangle { background: Tokens.bg-bar; border-radius: Tokens.radius-6;
+                                    meta-card := Rectangle { background: Tokens.bg-bar; border-radius: Tokens.radius-6;
+                                        // X9: column count follows the reading column's own width
+                                        // (stable regardless of the grid's own content) rather than a
+                                        // fixed 2, so the card uses the width it actually has -- one
+                                        // column when squeezed, up to four when there is room.
+                                        private property <int> cols: max(1, min(4, floor(reading-column.width / Tokens.meta-col-min)));
                                         GridLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-3; padding-bottom: Tokens.space-3; spacing: Tokens.space-3;
-                                            for cell[index] in root.meta: MetaBlock { row: index / 2; col: mod(index, 2); cell: cell; }
+                                            for cell[index] in root.meta: MetaBlock { row: index / meta-card.cols; col: mod(index, meta-card.cols); cell: cell; }
                                         }
                                     }
                                     if !root.uncertainty.is-empty: Rectangle { width: 100%; background: Tokens.warning-bg; border-color: Tokens.warning-stroke; border-width: Tokens.hairline; border-radius: Tokens.radius-4; accessible-role: AccessibleRole.text; accessible-label: "Uncertainty: " + root.uncertainty;
@@ -298,19 +326,23 @@ export component ReviewScreen {
                                         if root.selected-open && (root.can-track || root.can-watch): HorizontalLayout { width: 100%; spacing: Tokens.space-2; alignment: start;
                                             if root.can-track: PrimaryButton { text: "Track — this is mine"; enabled: !root.busy; clicked => { root.decision(1); } }
                                             if root.can-watch: SecondaryButton { text: "Keep an eye on this"; enabled: !root.busy; clicked => { root.decision(4); } }
-                                            Rectangle { horizontal-stretch: 1; }
                                         }
                                         if root.selected-open: HorizontalLayout { width: 100%; spacing: Tokens.space-2; alignment: start;
                                             SecondaryButton { text: "Handled"; enabled: !root.busy; clicked => { root.decision(2); } }
                                             SecondaryButton { text: "Not mine / dismiss"; enabled: !root.busy; clicked => { root.decision(3); } }
                                             SecondaryButton { text: "No longer relevant"; enabled: !root.busy; clicked => { root.decision(5); } }
-                                            Rectangle { horizontal-stretch: 1; }
                                         }
                                         if root.selected-open: HorizontalLayout { width: 100%; Rectangle { horizontal-stretch: 1; } OutlineButton { text: "Set To Do reminder…"; enabled: root.can-remind; clicked => { root.open-reminder(); } } }
+                                        // X3 (replaces the earlier egui-parity plan, S5): §4.5 and the
+                                        // Companion show both actions on every closed card --
+                                        // terminal (Handled/Dismissed/No longer relevant) and
+                                        // auto-resolved alike -- not "Reopen" only for terminal
+                                        // decisions and "Still open" only for the rest. Recorded as a
+                                        // deliberate widening of the old egui behaviour in
+                                        // docs/inbox-review.md.
                                         if !root.selected-open: HorizontalLayout { width: 100%; spacing: Tokens.space-2; alignment: start;
-                                            if root.selected-terminal: PrimaryButton { text: "Reopen for review"; enabled: !root.busy; clicked => { root.decision(0); } }
-                                            if !root.selected-terminal: SecondaryButton { text: "Still open — track it"; enabled: !root.busy; clicked => { root.decision(1); } }
-                                            Rectangle { horizontal-stretch: 1; }
+                                            PrimaryButton { text: "Reopen for review"; enabled: !root.busy; clicked => { root.decision(0); } }
+                                            SecondaryButton { text: "Still open — track it"; enabled: !root.busy; clicked => { root.decision(1); } }
                                         }
                                     }
                                     if !root.action-status.is-empty: WrappedText { text: root.action-status; color: root.action-status-succeeded ? Tokens.success : Tokens.warning; size: Tokens.font-13; }
@@ -350,7 +382,7 @@ export component ReviewScreen {
                                         }
                                     }
                                     if root.reminder-state.state == "attempted": Callout { kind: "warning"; text: root.reminder-state.text; accessible-name: root.reminder-state.text;
-                                        Text { text: root.reminder-state.marker; color: Tokens.warning; font-family: Tokens.mono-font-family; font-size: Tokens.font-13; }
+                                        Text { text: root.reminder-state.marker; color: Tokens.warning; font-family: Tokens.mono-font-family; font-size: Tokens.font-13; wrap: char-wrap; width: 100%; }
                                         HorizontalLayout { spacing: Tokens.space-2;
                                             Rectangle { horizontal-stretch: 1; }
                                             LinkButton { text: "Inspect Microsoft To Do"; enabled: !root.busy; clicked => { root.open-external(root.todo-url); } }
@@ -387,7 +419,10 @@ export component ReviewScreen {
                                         }
                                     }
                                     VerticalLayout { width: 100%; spacing: Tokens.space-2; alignment: start;
-                                        WrappedText { text: "Possible later completion"; color: Tokens.text-1; size: Tokens.font-16; weight: 600; }
+                                        // N2: the heading names the card below it; with no card
+                                        // (`state != "evidence"`) the grey note stands alone rather
+                                        // than being introduced by a heading with nothing under it.
+                                        if root.completion-card.state == "evidence": WrappedText { text: "Possible later completion"; color: Tokens.text-1; size: Tokens.font-16; weight: 600; }
                                         if root.completion-card.state == "evidence": Rectangle { width: 100%; background: Tokens.success-bg; border-color: Tokens.success-stroke; border-width: Tokens.hairline; border-radius: Tokens.radius-6; clip: true;
                                             VerticalLayout { spacing: 0px; alignment: start;
                                                 Rectangle { background: Tokens.bg-bar;
@@ -415,7 +450,7 @@ export component ReviewScreen {
                                         }
                                         if root.completion-card.state != "evidence": WrappedText { text: root.completion-card.label; color: Tokens.text-3; size: Tokens.font-13; }
                                     }
-                                    Disclosure { title: root.conversation-title; expanded: root.conversation-expanded-default;
+                                    Disclosure { title: root.conversation-title; expanded: root.conversation-expanded-default; enabled: !root.busy;
                                         VerticalLayout { width: 100%; spacing: Tokens.space-3; alignment: start;
                                             for message in root.conversation-rows: Rectangle { width: 100%; background: message.sent ? Tokens.brand-panel : Tokens.bg-surface; border-color: Tokens.stroke-1; border-width: Tokens.hairline; border-radius: Tokens.radius-4;
                                                 HorizontalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-3; padding-bottom: Tokens.space-3; spacing: Tokens.space-3;
@@ -424,7 +459,7 @@ export component ReviewScreen {
                                                         WrappedText { text: message.sender; color: Tokens.text-1; weight: 600; }
                                                         WrappedText { text: message.meta; color: Tokens.text-2; size: Tokens.font-11; }
                                                         WrappedText { text: message.body; color: Tokens.text-1; }
-                                                        if !message.quoted-history.is-empty: Disclosure { title: "Quoted history";
+                                                        if !message.quoted-history.is-empty: Disclosure { title: "Quoted history"; enabled: !root.busy;
                                                             WrappedText { text: message.quoted-history; color: Tokens.text-2; size: Tokens.font-13; }
                                                         }
                                                     }

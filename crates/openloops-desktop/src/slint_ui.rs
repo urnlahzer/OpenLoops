@@ -227,7 +227,19 @@ fn sync(model: &AppModel, window: &AppWindow) {
         Provider::OllamaCloud => 0,
         Provider::OpenRouter => 1,
     });
-    window.set_api_key(model.active_key().to_string().into());
+    // X6 / threat-model S6: the Rust-owned key only ever reaches the Slint
+    // text property while the Sources screen can show it, and is mirrored on
+    // change rather than copied every `sync` tick (this runs up to 4x/sec
+    // while a job is busy). `Forget`/`Reload` clear it immediately in their
+    // own handlers rather than waiting for the next tick to notice.
+    let desired_api_key = if window.get_active_screen() == 1 {
+        model.active_key().to_string()
+    } else {
+        String::new()
+    };
+    if window.get_api_key().as_str() != desired_api_key {
+        window.set_api_key(desired_api_key.into());
+    }
     let values = display_model_values(model);
     window.set_models(ModelRc::new(VecModel::from(
         values
@@ -346,6 +358,11 @@ pub fn run() -> Result<(), slint::PlatformError> {
     #[cfg(feature = "ui-screenshot")]
     if preview_review {
         initial_model.review = crate::review_model::layout_fixture();
+        // N4: the old egui fixture also seeded a provider and selected model
+        // so the status bar's centre text ("Model: ... (...)") was not blank
+        // in the screenshot; match that here.
+        initial_model.provider = Provider::OllamaCloud;
+        initial_model.selected = "Synthetic layout check".into();
     }
     let model = Rc::new(RefCell::new(initial_model));
     let window = AppWindow::new()?;
@@ -416,6 +433,10 @@ pub fn run() -> Result<(), slint::PlatformError> {
             };
             if let Some(window) = weak.upgrade() {
                 window.set_show_key(false);
+                // X6: never let a stale key sit in the Slint text property
+                // across a reload; `sync` below repopulates it only if the
+                // Sources screen is (still) active.
+                window.set_api_key("".into());
                 if succeeded {
                     window.set_active_screen(i32::from(!active));
                 }
@@ -430,15 +451,31 @@ pub fn run() -> Result<(), slint::PlatformError> {
             model.borrow_mut().forget_settings();
             if let Some(window) = weak.upgrade() {
                 window.set_show_key(false);
+                // X6: the key is gone from the model; clear it from the
+                // mirrored property immediately rather than waiting on
+                // `sync`'s diff (which would happen to agree here anyway,
+                // since the forgotten key is now empty).
+                window.set_api_key("".into());
                 sync(&model.borrow(), &window);
             }
         });
     }
     window.on_navigate({
+        let model = Rc::clone(&model);
         let weak = window.as_weak();
         move |index| {
             if let Some(window) = weak.upgrade() {
                 window.set_active_screen(index);
+                // X6: clear the mirrored key the moment Sources stops being
+                // the active screen, rather than leaving it in the Slint
+                // property until the next unrelated `sync` tick notices; a
+                // full `sync` (rather than only the key) also repopulates it
+                // promptly when navigating back to Sources.
+                if index == 1 {
+                    sync(&model.borrow(), &window);
+                } else {
+                    window.set_api_key("".into());
+                }
             }
         }
     });
@@ -525,6 +562,10 @@ pub fn run() -> Result<(), slint::PlatformError> {
             // below), even after the field is recreated.
             if let Some(window) = weak.upgrade() {
                 window.set_parallel_field_focused(false);
+                // N5: each provider keeps its own key; revealing one
+                // provider's key must not leave the other provider's key
+                // shown in the clear the moment the switch lands.
+                window.set_show_key(false);
             }
             refresh(&model, &weak);
         });
@@ -534,14 +575,18 @@ pub fn run() -> Result<(), slint::PlatformError> {
         let weak = window.as_weak();
         window.on_key_edited(move |value| {
             let mut model_ref = model.borrow_mut();
+            // X5: the egui build's key fields enforced `char_limit(4096)`
+            // (`setup_ui.rs` at 69235c1, lines 257-259 and 365-367); truncate
+            // here the same way `client-id-edited` already truncates to 128.
+            let value: Zeroizing<String> = Zeroizing::new(value.chars().take(4096).collect());
             match model_ref.provider {
                 Provider::OllamaCloud => {
-                    model_ref.key = Zeroizing::new(value.to_string());
+                    model_ref.key = value;
                     model_ref.models.clear();
                     model_ref.selected.clear();
                 }
                 Provider::OpenRouter => {
-                    model_ref.openrouter_key = Zeroizing::new(value.to_string());
+                    model_ref.openrouter_key = value;
                 }
             }
             model_ref.trim_keys();

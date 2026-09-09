@@ -26,6 +26,10 @@ export global Tokens {
     out property <color> watch-bg: #EEEFFC;
     out property <color> nav-selected: stroke-1;
     out property <color> transparent: #00000000;
+    // White at 16% alpha (N1/X11): the title-bar busy chip's own background,
+    // distinct from `brand-subtle` (which reads as a near-invisible tint
+    // against the title bar's own `brand` background).
+    out property <color> chip-bg: #FFFFFF29;
     out property <length> font-11: 11px;
     out property <length> font-13: 13px;
     out property <length> font-14: 14px;
@@ -53,17 +57,28 @@ export global Tokens {
     out property <length> focus-ring: 2px;
     out property <length> hairline: 1px;
     out property <length> badge-size: 18px;
+    // X12: the Companion draws the nav rail's open-count badge at 16px, one
+    // size step below the generic `badge-size` (18px) `StepHeading` still
+    // uses on the Sources screen -- kept as a separate token so the two
+    // don't drift together by accident.
+    out property <length> nav-badge-size: 16px;
     out property <length> nav-item-height: 48px;
     out property <length> progress-height: 4px;
     out property <length> title-height: 48px;
     out property <length> nav-width: 72px;
     out property <length> status-height: 26px;
+    // X8: caps the status bar's centre ("Model: ... (...)") text so a long
+    // model id elides instead of pushing the right-hand text off the bar.
+    out property <length> status-center-max-width: 320px;
     out property <length> command-height: 44px;
     out property <length> review-list-width: 380px;
     out property <length> review-row-min-height: 56px;
     out property <length> review-reading-max-width: 860px;
     out property <length> review-section-gap: 20px;
     out property <length> review-meta-min-width: 180px;
+    // X9: the meta grid's own column-count threshold, distinct from
+    // `review-meta-min-width` (each `MetaBlock`'s own minimum width).
+    out property <length> meta-col-min: 180px;
     out property <length> review-row-bar-width: 3px;
     out property <length> review-row-date-max-inline: 120px;
     out property <length> group-dot-size: 8px;

@@ -299,7 +299,12 @@ impl ReviewState {
         let saved = self.decisions.update(r);
         self.action_status_succeeded = saved.is_ok();
         self.action_status = match &saved {
-            Ok(()) => "Decision saved on this Windows account.".into(),
+            // X4: the second sentence is the Companion's own confirmation
+            // (docs/design/OpenLoops Companion.dc.html, `setDecision`),
+            // quoted verbatim onto the existing status sentence.
+            Ok(()) => {
+                "Decision saved on this Windows account. No mail text or names were stored.".into()
+            }
             Err(e) => e.clone(),
         };
         if saved.is_ok()
@@ -1948,8 +1953,9 @@ mod tests {
             "Other participant"
         );
     }
-}
-#[test]
-fn show_handled_label_matches_the_review_spec() {
-    assert_eq!(SHOW_HANDLED_LABEL, "Show resolved, handled and dismissed");
+
+    #[test]
+    fn show_handled_label_matches_the_review_spec() {
+        assert_eq!(SHOW_HANDLED_LABEL, "Show resolved, handled and dismissed");
+    }
 }

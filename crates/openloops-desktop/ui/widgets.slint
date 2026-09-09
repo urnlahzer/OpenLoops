@@ -70,9 +70,94 @@ export component PrimaryButton {
         border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
     }
 }
+// `ButtonBase`'s std `Button` (Fluent's own "standard" style) already renders
+// white-on-`stroke-2` for a non-primary, non-checked button, which is exactly
+// S4's Secondary spec -- so Secondary keeps that widget unchanged.
 export component SecondaryButton inherits ButtonBase { }
-export component SubtleButton inherits ButtonBase { }
-export component OutlineButton inherits ButtonBase { }
+
+// Subtle (transparent, no border, `text-1` ink, `bg-canvas` on hover) and
+// Outline (white, `brand` border and ink) have no equivalent state in the std
+// `Button` -- it only ever paints `control-background`/`control-border` for a
+// non-primary button (see `i-slint-compiler`'s `widgets/fluent/button.slint`)
+// -- so both are hand-rolled the same way `PrimaryButton`/`LinkButton` are.
+export component SubtleButton {
+    in property <string> text;
+    in property <string> accessible-name: text;
+    in property <bool> enabled: true;
+    callback clicked;
+    min-width: max(Tokens.click-min, label.preferred-width + 2 * Tokens.button-pad-x);
+    min-height: Tokens.click-min;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    opacity: enabled ? 1 : Tokens.disabled-opacity;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    Rectangle {
+        background: touch.has-hover ? Tokens.bg-canvas : Tokens.transparent;
+        border-radius: Tokens.radius-4;
+        HorizontalLayout {
+            padding-left: Tokens.button-pad-x; padding-right: Tokens.button-pad-x;
+            padding-top: Tokens.button-pad-y; padding-bottom: Tokens.button-pad-y;
+            alignment: center;
+            label := Text { text: root.text; color: Tokens.text-1; font-size: Tokens.font-14; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+        }
+    }
+    touch := TouchArea { enabled: root.enabled; clicked => { subtle-focus.focus(); root.clicked(); } }
+    subtle-focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    if subtle-focus.has-focus && root.enabled: Rectangle {
+        x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+        width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring;
+        border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+    }
+}
+
+export component OutlineButton {
+    in property <string> text;
+    in property <string> accessible-name: text;
+    in property <bool> enabled: true;
+    callback clicked;
+    min-width: max(Tokens.click-min, label.preferred-width + 2 * Tokens.button-pad-x);
+    min-height: Tokens.click-min;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    opacity: enabled ? 1 : Tokens.disabled-opacity;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    Rectangle {
+        background: Tokens.bg-surface;
+        border-width: Tokens.hairline; border-color: Tokens.brand;
+        border-radius: Tokens.radius-4;
+        HorizontalLayout {
+            padding-left: Tokens.button-pad-x; padding-right: Tokens.button-pad-x;
+            padding-top: Tokens.button-pad-y; padding-bottom: Tokens.button-pad-y;
+            alignment: center;
+            label := Text { text: root.text; color: Tokens.brand; font-size: Tokens.font-14; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+        }
+    }
+    TouchArea { enabled: root.enabled; clicked => { outline-focus.focus(); root.clicked(); } }
+    outline-focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    if outline-focus.has-focus && root.enabled: Rectangle {
+        x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+        width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring;
+        border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+    }
+}
 
 export component LinkButton {
     in property <string> text;
@@ -350,6 +435,11 @@ export component Disclosure {
             content := VerticalLayout {
                 width: 100%;
                 y: 0;
+                // N7: zero height alone still leaves collapsed fields and
+                // rows in the focus/accessibility tree; `visible` (which
+                // does not itself affect layout -- see the Slint facts in
+                // the brief) removes them from both while collapsed.
+                visible: root.expanded;
                 @children
             }
         }

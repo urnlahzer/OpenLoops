@@ -17,7 +17,9 @@ The Sources screen includes a visible “Made with Slint” attribution. Slint i
 
 ## Consequences
 
-The UI compiles from checked-in `.slint` files at build time and keeps the existing Rust worker/channel model. Generated Slint Rust requires a package-local `unsafe_code` lint exception; hand-written executable and build-script code continue to forbid unsafe code.
+The UI compiles from checked-in `.slint` files at build time and keeps the existing Rust worker/channel model. Generated Slint Rust requires a package-local `unsafe_code` lint exception; hand-written executable and build-script code continue to forbid unsafe code. A unit test reads every hand-written `src/**/*.rs` file in the crate at test time and fails if the token `unsafe` appears outside a comment or string literal, so that package-level allowance stays confined to the generated Slint module rather than spreading into hand-written code.
+
+The title bar shows "Not signed in" until the Graph layer exposes a display name; `ConnectionReport` carries no account identifiers by design, so `AccountDisplay::signed_in` exists and is tested but is not yet reachable from the live connection.
 
 ## Rejected alternative
 

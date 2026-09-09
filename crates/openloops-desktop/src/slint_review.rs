@@ -482,21 +482,31 @@ fn owner_label(item: &Expectation, decision: Decision) -> &'static str {
 }
 
 fn status_pill(item: &Expectation, card: &CardContext) -> PillView {
-    let (text, kind) = match card.record.decision {
-        Decision::Done => ("Handled", "neutral"),
-        Decision::Dismissed => ("Dismissed – not mine", "neutral"),
-        Decision::Moot => ("No longer relevant", "neutral"),
-        Decision::Mine => ("Tracking", "success"),
-        Decision::Watching => ("Watching team follow-up", "watch"),
-        Decision::Review if item.resolution.is_some() || item.event_passed.is_some() => {
-            ("Resolved — later reply found", "success")
+    let (text, kind): (String, &'static str) = match card.record.decision {
+        Decision::Done => ("Handled".into(), "neutral"),
+        Decision::Dismissed => ("Dismissed – not mine".into(), "neutral"),
+        Decision::Moot => ("No longer relevant".into(), "neutral"),
+        Decision::Mine => ("Tracking".into(), "success"),
+        Decision::Watching => ("Watching team follow-up".into(), "watch"),
+        // A resolution keeps the spec's own pill text, with the model's
+        // cross-thread suffix appended when it applies -- see
+        // `status_shows_cross_thread`.
+        Decision::Review if item.resolution.is_some() => {
+            let text = status_label(
+                "Resolved — later reply found",
+                status_shows_cross_thread(card.record.decision, true, item.cross_thread),
+            );
+            (text, "success")
         }
-        Decision::Review => ("Needs your review", "brand"),
+        // An event-passed closure has no spec pill text of its own; use the
+        // model's own status label (e.g. "Closed: event passed (…)") rather
+        // than collapsing it into the resolution wording above.
+        Decision::Review if item.event_passed.is_some() => {
+            (status_base_label(card.record.decision, item), "neutral")
+        }
+        Decision::Review => ("Needs your review".into(), "brand"),
     };
-    PillView {
-        text: text.into(),
-        kind,
-    }
+    PillView { text, kind }
 }
 
 fn pills_for(item: &Expectation, card: &CardContext) -> Vec<PillView> {
@@ -970,8 +980,8 @@ fn sync_review_inner(
         window.set_review_uncertainty(selected.uncertainty.into());
         window.set_selected_open(selected.open);
         window.set_selected_terminal(selected.terminal);
-        window.set_can_track(selected.can_track);
-        window.set_can_watch(selected.can_watch);
+        window.set_can_track(selected.can_track && !busy);
+        window.set_can_watch(selected.can_watch && !busy);
         window.set_can_remind(selected.can_remind && !busy);
         if let Some(draft) = selected.draft {
             window.set_draft_open(true);
@@ -1082,10 +1092,10 @@ pub(crate) fn sync_review(
 
 /// Applies a "the task exists" / "no task was created" reconcile answer for
 /// the record at `key`, matching `apply_decision_change`'s own reminder
-/// state to it. Only replaces `apply_decision_change`'s own status text (and
-/// marks it a success) when that change actually saved; a failure (e.g. the
-/// saved-decision storage bound) must keep its error text and
-/// `succeeded = false` rather than being papered over here. Factored out of
+/// state to it. The status text shown afterward is whatever
+/// `apply_decision_change` itself sets (e.g. "Decision saved on this Windows
+/// account.", or its own error text on a storage failure) -- no invented
+/// "Recorded: ..." wording is layered on top of it (S8). Factored out of
 /// `on_reconcile_reminder` so both outcomes are directly testable without a
 /// live `AppWindow`.
 fn apply_reconcile(review: &mut ReviewState, key: [u8; 32], exists: bool) {
@@ -1096,14 +1106,6 @@ fn apply_reconcile(review: &mut ReviewState, key: [u8; 32], exists: bool) {
         Reminder::None
     };
     review.apply_decision_change(key, record.decision, reminder);
-    if review.action_status_succeeded {
-        review.action_status = if exists {
-            "Recorded: the To Do task exists. Manage it in Microsoft To Do."
-        } else {
-            "Recorded: no task was created. You can set a reminder again."
-        }
-        .into();
-    }
 }
 
 fn dispatch_pending_reminder(model: &mut AppModel) -> bool {
@@ -1362,12 +1364,14 @@ pub(crate) fn register_callbacks(
     }
     {
         // Spec §7: Enter on the list opens the selected card's primary
-        // action -- Track for an open card, Reopen for a closed one --
-        // reusing `on_review_decision`'s own logic (via the generated
-        // `invoke_*` call) rather than duplicating it, so the two can never
-        // drift apart. A no-op when the primary action for the current
-        // selection is not actually available (e.g. an open Team card with
-        // no `Track` button), same as pressing nothing at all.
+        // action -- Track for an open card, Reopen for review for a closed
+        // one (terminal or auto-resolved alike; X3 shows "Reopen for review"
+        // on every closed card, not just terminal decisions) -- reusing
+        // `on_review_decision`'s own logic (via the generated `invoke_*`
+        // call) rather than duplicating it, so the two can never drift
+        // apart. A no-op when the primary action for the current selection
+        // is not actually available (e.g. an open Team card with no `Track`
+        // button), same as pressing nothing at all.
         let weak = window.as_weak();
         window.on_list_primary_action(move || {
             let Some(window) = weak.upgrade() else {
@@ -1377,7 +1381,7 @@ pub(crate) fn register_callbacks(
                 if window.get_can_track() {
                     window.invoke_review_decision(DECISION_MINE);
                 }
-            } else if window.get_selected_terminal() {
+            } else {
                 window.invoke_review_decision(DECISION_REVIEW);
             }
         });
@@ -1388,20 +1392,31 @@ pub(crate) fn register_callbacks(
         window.on_open_reminder(move || {
             let selected = REVIEW_UI.with(|state| state.borrow().selected);
             let mut model_ref = model.borrow_mut();
-            let Some(analysis) = &model_ref.review.analysis else { return };
+            let Some(analysis) = &model_ref.review.analysis else {
+                return;
+            };
             let cards = model_ref.review.card_contexts(&analysis.items);
             let Some(index) = selected.and_then(|selected| {
                 cards.iter().position(|card| {
                     card.as_ref()
                         .is_some_and(|card| card.record.key == selected)
                 })
-            }) else { return };
-            let Some(item) = analysis.items.get(index) else { return };
-            let Some(source) = source_message(&model_ref.review, item) else { return };
+            }) else {
+                return;
+            };
+            let Some(item) = analysis.items.get(index) else {
+                return;
+            };
+            let Some(source) = source_message(&model_ref.review, item) else {
+                return;
+            };
             let account = source.account.clone();
             let source_id = source.id.clone();
             let action_phrase = item.action_phrase.clone();
-            let key = model_ref.review.decisions.fingerprint(&account, &source_id, &action_phrase);
+            let key = model_ref
+                .review
+                .decisions
+                .fingerprint(&account, &source_id, &action_phrase);
             let record = model_ref.review.decisions.get(&key);
             let draft_open_for_this_card = model_ref
                 .review
@@ -1411,7 +1426,9 @@ pub(crate) fn register_callbacks(
             if reminder_button_enabled(record.reminder, draft_open_for_this_card) {
                 let next = decision_after_setting_reminder(record.decision);
                 let title = reminder_title(record.decision, &item.action);
-                model_ref.review.apply_decision_change(key, next, record.reminder);
+                model_ref
+                    .review
+                    .apply_decision_change(key, next, record.reminder);
                 model_ref.review.draft = Some(ReminderDraft {
                     key,
                     account,
@@ -1420,10 +1437,9 @@ pub(crate) fn register_callbacks(
                     error: String::new(),
                     prior_decision: record.decision,
                 });
-                if record.decision == Decision::Review {
-                    model_ref.review.action_status = "Opening a reminder draft tracks this as yours. Cancel restores the previous decision.".into();
-                    model_ref.review.action_status_succeeded = true;
-                }
+                // `apply_decision_change` above already set `action_status` /
+                // `action_status_succeeded` for this save (S8: no invented
+                // status text layered on top of it here).
             }
             drop(model_ref);
             refresh(&model, &weak);
@@ -1659,6 +1675,68 @@ mod tests {
         assert!(!selected.can_track && !selected.can_watch && !selected.can_remind);
     }
 
+    // Regression for B1: Enter/click could write a Track or Watch decision
+    // while a scan or another action was in flight, because `can-track` and
+    // `can-watch` were pushed to the window without the `!busy` guard
+    // `can-remind` already had. Exercises the real `sync_review` write path
+    // (not just the model-level `SelectedView`) so a future regression that
+    // drops the guard at the call site is caught here.
+    #[test]
+    fn can_track_and_can_watch_are_disabled_while_busy() {
+        let window = AppWindow::new().expect("create AppWindow for test");
+        let mut model = model();
+        model.review = crate::review_model::layout_fixture();
+        let key = model
+            .review
+            .card_contexts(&model.review.analysis.as_ref().unwrap().items)[0]
+            .as_ref()
+            .unwrap()
+            .record
+            .key;
+        // Card 0 in the fixture carries its own resolution evidence; clearing
+        // it (as `selected_view_covers_deadline_metadata_and_actions` above
+        // also does) keeps the card open under a plain `Review` decision
+        // instead of auto-resolving it, so it stays first in the visible
+        // list this test's `sync_review` call selects from.
+        model.review.analysis.as_mut().unwrap().items[0].resolution = None;
+        {
+            let record = model
+                .review
+                .decisions
+                .records
+                .iter_mut()
+                .find(|record| record.key == key)
+                .unwrap();
+            record.decision = Decision::Review;
+            record.reminder = Reminder::None;
+        }
+        let cards = model
+            .review
+            .card_contexts(&model.review.analysis.as_ref().unwrap().items);
+
+        sync_review(
+            &model,
+            &window,
+            &cards,
+            false,
+            false,
+            ScanStripModel::default(),
+        );
+        assert!(window.get_can_track());
+        assert!(!window.get_can_watch());
+
+        sync_review(
+            &model,
+            &window,
+            &cards,
+            true,
+            false,
+            ScanStripModel::default(),
+        );
+        assert!(!window.get_can_track());
+        assert!(!window.get_can_watch());
+    }
+
     #[test]
     fn owner_and_source_labels_cover_all_branches() {
         let mut review = crate::review_model::layout_fixture();
@@ -1709,6 +1787,9 @@ mod tests {
             assert_eq!(status_pill(&item, &card).text, text);
         }
         item.resolution = item.deadline.clone();
+        // This fixture item defaults to `cross_thread: true`; the suffix it
+        // adds is covered separately below, not here.
+        item.cross_thread = false;
         let resolved = CardContext {
             closed: true,
             ..base
@@ -1719,6 +1800,68 @@ mod tests {
                 text: "Resolved — later reply found".into(),
                 kind: "success"
             }
+        );
+    }
+
+    #[test]
+    fn status_pill_uses_the_model_label_for_an_event_passed_closure() {
+        let review = crate::review_model::layout_fixture();
+        let mut item = review.analysis.as_ref().unwrap().items[0].clone();
+        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0].unwrap();
+        let card = CardContext {
+            record: Record {
+                decision: Decision::Review,
+                reminder: Reminder::None,
+                ..base.record
+            },
+            closed: true,
+            ..base
+        };
+        item.resolution = None;
+        item.event_passed = Some(EventPassed {
+            name: "planning meeting".into(),
+            end: 1,
+            message_handle: "m0".into(),
+            from_subject: true,
+        });
+        assert_eq!(
+            status_pill(&item, &card),
+            PillView {
+                text: crate::review_model::status_base_label(Decision::Review, &item),
+                kind: "neutral",
+            }
+        );
+        assert!(
+            status_pill(&item, &card)
+                .text
+                .starts_with("Closed: event passed (")
+        );
+    }
+
+    #[test]
+    fn status_pill_appends_the_cross_thread_suffix_only_when_the_model_sets_it() {
+        let review = crate::review_model::layout_fixture();
+        let mut item = review.analysis.as_ref().unwrap().items[0].clone();
+        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0].unwrap();
+        let card = CardContext {
+            record: Record {
+                decision: Decision::Review,
+                reminder: Reminder::None,
+                ..base.record
+            },
+            closed: true,
+            ..base
+        };
+        item.resolution = item.deadline.clone();
+        item.cross_thread = true;
+        assert_eq!(
+            status_pill(&item, &card).text,
+            "Resolved — later reply found (evidence in another conversation)"
+        );
+        item.cross_thread = false;
+        assert_eq!(
+            status_pill(&item, &card).text,
+            "Resolved — later reply found"
         );
     }
 
@@ -1754,7 +1897,7 @@ mod tests {
             deadline: Some(past),
             ..base
         };
-        assert_ne!(pills_for(item, &closed)[1].kind, "danger");
+        assert_eq!(pills_for(item, &closed)[1].kind, "brand");
     }
 
     #[test]
@@ -2168,7 +2311,7 @@ mod tests {
         assert!(review.action_status_succeeded);
         assert_eq!(
             review.action_status,
-            "Recorded: the To Do task exists. Manage it in Microsoft To Do."
+            "Decision saved on this Windows account. No mail text or names were stored."
         );
         assert_eq!(review.decisions.get(&key).reminder, Reminder::Created);
         let before_rejected_call = review.decisions.get(&key);

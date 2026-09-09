@@ -92,7 +92,7 @@ export component SourcesScreen {
         Rectangle { min-height: Tokens.command-height; background: Tokens.bg-bar;
             HorizontalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-1; padding-bottom: Tokens.space-1; spacing: Tokens.space-2;
                 PrimaryButton { text: "Save settings"; enabled: root.controls-enabled && root.store-available; clicked => { root.save-settings(); } }
-                SubtleButton { text: "Reload saved settings"; enabled: root.controls-enabled && root.store-available; clicked => { root.reload-settings(); } }
+                SecondaryButton { text: "Reload saved settings"; enabled: root.controls-enabled && root.store-available; clicked => { root.reload-settings(); } }
                 SubtleButton { text: "Forget saved settings"; enabled: root.controls-enabled && root.store-available; clicked => { root.forget-settings(); } }
                 Rectangle { horizontal-stretch: 1; background: Tokens.transparent; }
                 Text { text: root.settings-status; color: root.settings-succeeded ? Tokens.success : Tokens.warning; font-size: Tokens.font-13; wrap: word-wrap; horizontal-alignment: right; vertical-alignment: center; }
@@ -100,6 +100,7 @@ export component SourcesScreen {
             Rectangle { y: parent.height - Tokens.hairline; height: Tokens.hairline; background: Tokens.stroke-1; }
         }
         ScrollView {
+            viewport-width: self.visible-width;
             // The Flickable this wraps is not a layout, so without an explicit
             // width this column would size to its own natural (unwrapped)
             // preferred width instead of the viewport's width, letting any
@@ -187,7 +188,11 @@ export component SourcesScreen {
                             VerticalLayout { Text { text: "Groups"; color: Tokens.text-2; font-size: Tokens.font-13; } Text { text: "20 recent threads · 40 posts each"; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; wrap: word-wrap; } }
                             VerticalLayout { Text { text: "Sources"; color: Tokens.text-2; font-size: Tokens.font-13; } Text { text: "At most 10 configured"; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; wrap: word-wrap; } }
                         }
-                        HelperText { text: "Subjects, current text, quoted history and participants are sent to " + root.provider-disclosure + ". Attachments, tokens and raw Graph IDs are never sent. Capped sources and conversations over 40 messages are reported as incomplete. Scans run only when you click Scan; this is not an unattended background service."; width: 100%; }
+                        // B2: both sentences are the old egui build's wording verbatim
+                        // (`setup_ui.rs` at 69235c1, `review_card`), not a paraphrase --
+                        // only the Companion's title and four-cell grid above are new.
+                        HelperText { text: "The last 30 days of Inbox and Sent Items: up to 100 messages per folder. Groups: up to 20 recent threads and 40 posts per thread, including earlier thread context. At most 10 configured sources. Capped sources and large conversations are reported as incomplete."; width: 100%; }
+                        HelperText { text: "Subjects, current text, quoted history and participants are sent to the selected provider (" + root.provider-disclosure + "). Attachments are not sent. Scans run when you click Scan; this preview is not an unattended background service."; width: 100%; }
                     }
                 }
                 HelperText { text: "Settings and abstract loop decisions save in Windows Credential Manager. Mail and descriptions remain in memory; scan to reconstruct them after restart. Reviewed reminders live in Microsoft To Do. Outlook add-in integration is a separate step."; width: 100%; }

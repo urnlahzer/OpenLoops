@@ -27,7 +27,7 @@ attempted case); one evidence card per anchor; the possible-later-completion
 card or note; and the collapsed "Full scanned conversation" disclosure with
 one row per message.
 
-Open the native app and choose **Review inboxes**. Saved connections restore
+Open the native app and select **Review**. Saved connections restore
 automatically. This is a real Microsoft/Ollama flow; no synthetic cards appear
 in the normal application.
 
@@ -65,10 +65,14 @@ in the normal application.
    cancelling that draft restores the decision to what it was before the
    draft opened, unless you have changed the decision since (an action
    button, or a rescan closing the card by later evidence), in which case
-   the draft simply closes and the changed decision stands. The checkbox
-   **Show resolved, handled, dismissed, and
-   no-longer-relevant items** reveals closed cards. Model summaries and
-   source text are not saved locally.
+   the draft simply closes and the changed decision stands. Every closed card
+   -- terminal (Handled/Dismissed/No longer relevant) or auto-resolved alike
+   -- shows both **Reopen for review** and **Still open — track it**,
+   widening the old egui build's terminal-only "Reopen"/auto-resolved-only
+   "Still open" split to match spec §4.5 and the Companion; Enter on a
+   selected closed card runs **Reopen for review**. The checkbox
+   **Show resolved, handled and dismissed** reveals closed cards. Model
+   summaries and source text are not saved locally.
 4. **Set To Do reminder** is available on any open card and does not require
    tracking or watching it first; setting a reminder on a card still under
    review implies tracking it (a card already being watched stays watched).
@@ -108,7 +112,7 @@ review. Missing replies in these configured folders/window never prove that
 work is unfinished. No reminders are created by scanning or inference alone.
 Conversations are analyzed in parallel, up to the concurrency the selected
 provider allows (the Ollama plan's slots, or the OpenRouter parallel ceiling on
-the Connections tab), and the busy view shows how many are done and how many
+the Sources screen), and the busy view shows how many are done and how many
 are in flight; the merged result is identical to analyzing them one at a time.
 Authentication, network, timeout, and HTTP server failures stop later requests.
 Rate limiting and quota instead narrow the concurrency, failing only the
