@@ -13,7 +13,7 @@ use openloops_inference::{
     message::CanonicalMessage,
     ollama::OllamaCloud,
     openrouter::OpenRouter,
-    provider::{ModelClient, ProviderError},
+    provider::{MAX_PARALLEL_REQUESTS, ModelClient, ProviderError},
     reply_history::{
         REPLY_HISTORY_CHUNK_MAX_CHARS, chunk_reply_history, is_underscore_separator,
         starts_with_ascii_ci,
@@ -22,6 +22,8 @@ use openloops_inference::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct ReviewMessage {
@@ -1217,17 +1219,22 @@ pub struct ScanProgress {
     pub processed: AtomicUsize,
     pub total: AtomicUsize,
     pub cancel: AtomicBool,
-    /// 1-based position of the conversation (in `scan_conversations`) or
-    /// eligible item (in `scan_closures`) currently in flight; 0 before
-    /// that pass starts and again once it ends.
+    /// How many conversations (in `scan_conversations`) or eligible items
+    /// (in `scan_closures`) the current pass has STARTED; 0 before that
+    /// pass starts and again once it ends. With several requests in flight
+    /// this is a high-water mark, not a position: subtract
+    /// [`ScanProgress::in_flight`] for the number actually finished.
     pub conversation_index: AtomicUsize,
     /// Total conversations `scan_conversations` will analyze, or total
     /// eligible items `scan_closures` will attempt -- whichever pass is
     /// currently running.
     pub conversation_total: AtomicUsize,
-    /// Unix seconds the current model request was sent, or 0 when no
-    /// request is in flight. Drives the desktop's "elapsed on this
-    /// request" display.
+    /// Model requests currently in flight across the running pass's
+    /// workers. 0 between passes and once the scan ends.
+    pub in_flight: AtomicUsize,
+    /// Unix seconds the OLDEST model request still in flight was sent, or
+    /// 0 when nothing is in flight. Drives the desktop's "elapsed on the
+    /// oldest request" display.
     pub request_started_unix: AtomicI64,
     /// Set once `scan_closures` starts (and left set for the rest of the
     /// scan): tells the desktop to label `conversation_index`/
@@ -1594,28 +1601,47 @@ fn other_addresses(item: &MailItem) -> Vec<String> {
 /// and confirm the exact model before any message text is transmitted.
 /// # Errors
 /// Returns the adapter's fixed provider error; no upstream text escapes.
+/// Connects the selected provider, telling the client how many requests
+/// the caller may keep in flight: the Ollama Cloud plan's concurrent
+/// slots, or the `OpenRouter` ceiling from the Connections tab.
 fn connect(
     provider: Provider,
     key: String,
     model: &str,
+    parallel: usize,
 ) -> Result<Box<dyn ModelClient>, ProviderError> {
     Ok(match provider {
-        Provider::OllamaCloud => Box::new(OllamaCloud::connect(key, model)?),
-        Provider::OpenRouter => Box::new(OpenRouter::connect(key, model)?),
+        Provider::OllamaCloud => {
+            Box::new(OllamaCloud::connect(key, model)?.with_max_parallel(parallel))
+        }
+        Provider::OpenRouter => {
+            Box::new(OpenRouter::connect(key, model)?.with_max_parallel(parallel))
+        }
     })
 }
 
+/// Analyzes `messages`, running up to `parallel` model requests at once.
+///
+/// Conversations are independent of one another and so are the closure
+/// pass's eligible items, so both passes fan out across a worker pool
+/// bounded by what the provider allows. Concurrency adapts downward when
+/// the provider rate-limits and back up as requests succeed; a
+/// rate-limited request is reported as a failed conversation and never
+/// resent, because `network_policy.retries` forbids automatically
+/// retrying a request that already carried content.
 pub fn scan(
     provider: Provider,
     key: String,
     model: &str,
+    parallel: usize,
     messages: &[ReviewMessage],
     progress: &ScanProgress,
 ) -> Result<ScanResult, ProviderError> {
     progress.total.store(messages.len(), Ordering::Relaxed);
-    let client = connect(provider, key, model)?;
+    let client = connect(provider, key, model, parallel)?;
     let client = client.as_ref();
-    let mut result = scan_conversations(messages, progress, |conversation| {
+    let pass = ParallelPass::new(client.max_parallel(), client.request_budget());
+    let mut result = scan_conversations(messages, progress, &pass, &|conversation| {
         expectations_pass(client, conversation, Some(&progress.cancel))
     });
     close_passed_events(&mut result, messages, chrono::Utc::now().timestamp());
@@ -1623,7 +1649,8 @@ pub fn scan(
         messages,
         progress,
         &mut result,
-        |item, evidence_timestamp, candidates| {
+        &pass,
+        &|item, evidence_timestamp, candidates| {
             closure_pass(
                 client,
                 item,
@@ -1756,12 +1783,302 @@ fn is_transport_error(error: ProviderError) -> bool {
     )
 }
 
-fn scan_conversations(
-    messages: &[ReviewMessage],
+/// Consecutive completed requests a pass must see before the adaptive
+/// limiter widens the allowed concurrency again.
+const RAISE_AFTER_SUCCESSES: usize = 8;
+
+/// How long a worker parked above the current allowed concurrency sleeps
+/// before re-checking. Short enough to pick up a widening promptly, long
+/// enough not to spin a core.
+const PARK_INTERVAL: Duration = Duration::from_millis(25);
+
+/// What one finished job tells the pool's limiter to do next.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum JobSignal {
+    /// The provider answered. Whether that answer was usable says nothing
+    /// about provider health, so a rejected analysis counts here too.
+    Ok,
+    /// Rate limited or out of quota: narrow the concurrency and pace new
+    /// dispatches. The request is NOT resent -- `network_policy.retries`
+    /// forbids automatically retrying any request that carried content --
+    /// so the conversation is reported as failed instead.
+    Backoff,
+    /// The provider is unreachable or unusable, or the caller cancelled:
+    /// stop dispatching new jobs. Requests already in flight still finish.
+    Stop,
+}
+
+/// Shared state for one parallel pass: the job cursor every worker draws
+/// from, the adaptive concurrency limit, and the stop flag.
+///
+/// The cursor hands jobs out lowest-index-first, so jobs START in the
+/// sequential order; [`run_jobs`] sorts the answers back into that order,
+/// which is what keeps `conversation_notes`, failure numbering, and
+/// `analysis.items` identical to the sequential scan for a deterministic
+/// provider.
+struct ParallelPass {
+    cursor: AtomicUsize,
+    /// How many workers may currently run: starts at `max`, halves (never
+    /// below 1) on a rate-limit or quota answer, and widens by a quarter
+    /// after [`RAISE_AFTER_SUCCESSES`] consecutive completed requests.
+    /// Workers whose index is at or above this park until it rises.
+    allowed: AtomicUsize,
+    max: usize,
+    successes: AtomicUsize,
+    stop: AtomicBool,
+    /// The provider's published per-interval request budget, when it
+    /// publishes one; used to sleep-spread dispatches after a rate limit.
+    budget: Option<(u32, Duration)>,
+    /// `None` until the first rate-limit answer arms the spread; then the
+    /// earliest instant the next request may be dispatched, advanced by
+    /// one budget slot per dispatch.
+    next_dispatch: Mutex<Option<Instant>>,
+}
+
+impl ParallelPass {
+    fn new(max: usize, budget: Option<(u32, Duration)>) -> Self {
+        let max = max.clamp(1, MAX_PARALLEL_REQUESTS);
+        Self {
+            cursor: AtomicUsize::new(0),
+            allowed: AtomicUsize::new(max),
+            max,
+            successes: AtomicUsize::new(0),
+            stop: AtomicBool::new(false),
+            budget,
+            next_dispatch: Mutex::new(None),
+        }
+    }
+
+    /// Readies the same pool for a second pass, keeping the concurrency
+    /// and pacing it already learned from the provider.
+    fn restart(&self) {
+        self.cursor.store(0, Ordering::Relaxed);
+        self.stop.store(false, Ordering::Relaxed);
+    }
+
+    fn lock_dispatch(&self) -> std::sync::MutexGuard<'_, Option<Instant>> {
+        self.next_dispatch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Blocks until this worker is inside the allowed concurrency.
+    /// `false` when the pass stopped, the caller cancelled, or every job
+    /// has already been handed out while this worker was parked -- a
+    /// worker narrowed out of its slot must not wait for a widening that
+    /// no longer has any work behind it. The stop and cancel checks here
+    /// are also the ones made before taking any job.
+    fn wait_for_slot(&self, worker: usize, jobs: usize, cancel: &AtomicBool) -> bool {
+        loop {
+            if self.stop.load(Ordering::Relaxed)
+                || cancel.load(Ordering::Relaxed)
+                || self.cursor.load(Ordering::Relaxed) >= jobs
+            {
+                return false;
+            }
+            if worker < self.allowed.load(Ordering::Relaxed) {
+                return true;
+            }
+            std::thread::sleep(PARK_INTERVAL);
+        }
+    }
+
+    /// The next job index, or `None` once the jobs run out or the pass
+    /// stopped between the slot check and here.
+    fn next_job(&self, jobs: usize) -> Option<usize> {
+        if self.stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        let index = self.cursor.fetch_add(1, Ordering::Relaxed);
+        (index < jobs).then_some(index)
+    }
+
+    /// Sleeps until the provider's published budget allows another
+    /// request. Does nothing until a rate-limit answer has armed the
+    /// spread, so an untroubled scan pays nothing for this.
+    fn throttle(&self) {
+        let Some((requests, interval)) = self.budget else {
+            return;
+        };
+        let spacing = interval / requests.max(1);
+        let mut slot = self.lock_dispatch();
+        let Some(next) = *slot else {
+            return;
+        };
+        let now = Instant::now();
+        let at = next.max(now);
+        *slot = Some(at + spacing);
+        drop(slot);
+        let wait = at.saturating_duration_since(now);
+        if !wait.is_zero() {
+            std::thread::sleep(wait);
+        }
+    }
+
+    fn on_success(&self) {
+        if self.successes.fetch_add(1, Ordering::Relaxed) + 1 < RAISE_AFTER_SUCCESSES {
+            return;
+        }
+        self.successes.store(0, Ordering::Relaxed);
+        let _ = self
+            .allowed
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |allowed| {
+                (allowed < self.max).then(|| (allowed + (allowed / 4).max(1)).min(self.max))
+            });
+    }
+
+    fn on_backoff(&self) {
+        self.successes.store(0, Ordering::Relaxed);
+        let _ = self
+            .allowed
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |allowed| {
+                Some((allowed / 2).max(1))
+            });
+        if self.budget.is_some() {
+            let mut slot = self.lock_dispatch();
+            if slot.is_none() {
+                *slot = Some(Instant::now());
+            }
+        }
+    }
+}
+
+/// How one finished job's answer steers the limiter. Rate limiting and
+/// quota narrow the pass; the other transport-class errors stop it; a
+/// cancelled request stops it too (the caller's flag is normally already
+/// set, but a provider may answer `Cancelled` on its own).
+fn job_signal<T>(outcome: &Result<T, ProviderError>) -> JobSignal {
+    let Err(error) = outcome else {
+        return JobSignal::Ok;
+    };
+    match *error {
+        ProviderError::RateLimited | ProviderError::Quota => JobSignal::Backoff,
+        ProviderError::Cancelled => JobSignal::Stop,
+        error if is_transport_error(error) => JobSignal::Stop,
+        // Any other failure is about this one request, not the provider:
+        // the round trip completed and the next one may well succeed.
+        _ => JobSignal::Ok,
+    }
+}
+
+/// The transport-class errors that stop a pass dispatching new jobs.
+/// Rate limiting and quota are excluded: the provider is answering, just
+/// not this fast, so the pass narrows instead of giving up. Nothing is
+/// ever resent either way.
+fn is_stop_error(error: ProviderError) -> bool {
+    is_transport_error(error) && !matches!(error, ProviderError::RateLimited | ProviderError::Quota)
+}
+
+/// One more request in flight. The first concurrent request records the
+/// instant the busy view ages against, so that display tracks the oldest
+/// request still running rather than flickering to whichever started last.
+fn start_request(progress: &ScanProgress) {
+    progress.in_flight.fetch_add(1, Ordering::Relaxed);
+    arm_request_clock(progress);
+}
+
+fn arm_request_clock(progress: &ScanProgress) {
+    let _ = progress.request_started_unix.compare_exchange(
+        0,
+        chrono::Utc::now().timestamp(),
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    );
+}
+
+/// One fewer request in flight; the clock stops once none are left. A
+/// worker that started a request between the decrement and the clear
+/// would have found the clock still armed, so it is re-armed here rather
+/// than left at zero while requests are running.
+fn finish_request(progress: &ScanProgress) {
+    if progress.in_flight.fetch_sub(1, Ordering::Relaxed) == 1 {
+        progress.request_started_unix.store(0, Ordering::Relaxed);
+        if progress.in_flight.load(Ordering::Relaxed) > 0 {
+            arm_request_clock(progress);
+        }
+    }
+}
+
+/// Answers for one pass's jobs, keyed by job index.
+type JobResults<T> = Vec<(usize, Result<T, ProviderError>)>;
+
+/// Runs jobs `0..jobs` across `pass.max` scoped worker threads and returns
+/// every completed job's answer sorted by job index, so the caller merges
+/// them in exactly the order the sequential loop produced them.
+///
+/// Jobs that were never dispatched -- because the pass stopped or the
+/// caller cancelled -- are simply absent.
+fn run_jobs<T: Send>(
+    jobs: usize,
+    pass: &ParallelPass,
     progress: &ScanProgress,
-    mut analyze: impl FnMut(&[ConversationMessage]) -> Result<Expectations, ProviderError>,
-) -> ScanResult {
-    let mut result = ScanResult {
+    job: &(dyn Fn(usize) -> Result<T, ProviderError> + Sync),
+) -> JobResults<T> {
+    let done: Mutex<JobResults<T>> = Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for worker in 0..pass.max {
+            let done = &done;
+            scope.spawn(move || run_worker(worker, jobs, pass, progress, job, done));
+        }
+    });
+    let mut done = done.into_inner().unwrap_or_else(PoisonError::into_inner);
+    done.sort_by_key(|(index, _)| *index);
+    done
+}
+
+/// One worker's whole life: park until it is inside the allowed
+/// concurrency, take the next job, pace it against any armed budget, run
+/// it, and report what its answer means for the limiter.
+fn run_worker<T: Send>(
+    worker: usize,
+    jobs: usize,
+    pass: &ParallelPass,
+    progress: &ScanProgress,
+    job: &(dyn Fn(usize) -> Result<T, ProviderError> + Sync),
+    done: &Mutex<JobResults<T>>,
+) {
+    while pass.wait_for_slot(worker, jobs, &progress.cancel) {
+        let Some(index) = pass.next_job(jobs) else {
+            return;
+        };
+        pass.throttle();
+        progress.conversation_index.fetch_add(1, Ordering::Relaxed);
+        start_request(progress);
+        let outcome = job(index);
+        finish_request(progress);
+        match job_signal(&outcome) {
+            JobSignal::Ok => pass.on_success(),
+            JobSignal::Backoff => pass.on_backoff(),
+            JobSignal::Stop => pass.stop.store(true, Ordering::Relaxed),
+        }
+        done.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((index, outcome));
+    }
+}
+
+/// The one-line diagnostic for a conversation the model could not
+/// analyze. A rate-limited request says so plainly and says it was not
+/// resent, because `network_policy.retries` forbids automatically
+/// retrying any request that already carried content: the conversation is
+/// simply unanalyzed for this scan.
+fn failure_line(index: usize, conversation: &[&ReviewMessage], error: ProviderError) -> String {
+    let head = format!(
+        "Conversation {} ({} messages; subject: {})",
+        index + 1,
+        conversation.len(),
+        subject_snippet(conversation),
+    );
+    match error {
+        ProviderError::RateLimited => {
+            format!("{head}: The provider rate-limited this request; it was not resent.")
+        }
+        error => format!("{head}: {error}"),
+    }
+}
+
+fn empty_result(total: usize) -> ScanResult {
+    ScanResult {
         analysis: Expectations {
             items: vec![],
             rejected: 0,
@@ -1770,68 +2087,93 @@ fn scan_conversations(
         },
         failures: vec![],
         analyzed: 0,
-        total: messages.len(),
+        total,
         cancelled: false,
         conversation_notes: vec![],
         cross_thread_closures: 0,
         event_closures: 0,
         primary_scan_transport_error: false,
         closure_pass_failure: None,
-    };
-    let ordered = conversations_by_size(messages);
+    }
+}
+
+/// Folds one conversation's answer into `result`, exactly as the
+/// sequential loop did: `conversation` is the analyzed conversation and
+/// `index` its 0-based position in the smallest-first ordering, so
+/// notes, failure numbering, and item order do not depend on which worker
+/// happened to run it.
+fn merge_conversation(
+    result: &mut ScanResult,
+    progress: &ScanProgress,
+    index: usize,
+    conversation: &[&ReviewMessage],
+    outcome: Result<Expectations, ProviderError>,
+) {
+    match outcome {
+        Ok(analysis) => {
+            result.analyzed += conversation.len();
+            if let Some(note) = conversation_note(index, conversation, &analysis) {
+                result.conversation_notes.push(note);
+            }
+            result.analysis.items.extend(analysis.items);
+            result.analysis.rejected += analysis.rejected;
+            result.analysis.degraded += analysis.degraded;
+            result
+                .analysis
+                .rejection_reasons
+                .extend(analysis.rejection_reasons);
+            progress
+                .processed
+                .fetch_add(conversation.len(), Ordering::Relaxed);
+        }
+        Err(ProviderError::Cancelled) => result.cancelled = true,
+        Err(error) => {
+            result
+                .failures
+                .push(failure_line(index, conversation, error));
+            if is_stop_error(error) {
+                result.primary_scan_transport_error = true;
+            } else {
+                progress
+                    .processed
+                    .fetch_add(conversation.len(), Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// Analyzes every conversation in `messages`, up to `pass.max` of them at
+/// once. Conversations are independent, so running several concurrently
+/// changes only when each answer arrives; the answers are merged in the
+/// smallest-first job order [`conversations_by_size`] produced, so the
+/// result is identical to analyzing them one at a time.
+fn scan_conversations(
+    messages: &[ReviewMessage],
+    progress: &ScanProgress,
+    pass: &ParallelPass,
+    analyze: &(dyn Fn(&[ConversationMessage]) -> Result<Expectations, ProviderError> + Sync),
+) -> ScanResult {
+    let mut result = empty_result(messages.len());
+    let ordered: Vec<Vec<&ReviewMessage>> = conversations_by_size(messages)
+        .into_iter()
+        .map(|mut conversation| {
+            conversation.sort_by_key(|m| m.input.timestamp);
+            conversation
+        })
+        .collect();
     progress
         .conversation_total
         .store(ordered.len(), Ordering::Relaxed);
-    for (index, mut conversation) in ordered.into_iter().enumerate() {
-        if progress.cancel.load(Ordering::Relaxed) {
-            result.cancelled = true;
-            break;
-        }
-        progress
-            .conversation_index
-            .store(index + 1, Ordering::Relaxed);
-        conversation.sort_by_key(|m| m.input.timestamp);
+    let outcomes = run_jobs(ordered.len(), pass, progress, &|index| {
         let inputs: Vec<ConversationMessage> =
-            conversation.iter().map(|m| m.input.clone()).collect();
-        progress
-            .request_started_unix
-            .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
-        let outcome = analyze(&inputs);
-        progress.request_started_unix.store(0, Ordering::Relaxed);
-        match outcome {
-            Ok(analysis) => {
-                result.analyzed += conversation.len();
-                if let Some(note) = conversation_note(index, &conversation, &analysis) {
-                    result.conversation_notes.push(note);
-                }
-                result.analysis.items.extend(analysis.items);
-                result.analysis.rejected += analysis.rejected;
-                result.analysis.degraded += analysis.degraded;
-                result
-                    .analysis
-                    .rejection_reasons
-                    .extend(analysis.rejection_reasons);
-            }
-            Err(ProviderError::Cancelled) => {
-                result.cancelled = true;
-                break;
-            }
-            Err(e) => {
-                result.failures.push(format!(
-                    "Conversation {} ({} messages; subject: {}): {e}",
-                    index + 1,
-                    conversation.len(),
-                    subject_snippet(&conversation),
-                ));
-                if is_transport_error(e) {
-                    result.primary_scan_transport_error = true;
-                    break;
-                }
-            }
-        }
-        progress
-            .processed
-            .fetch_add(conversation.len(), Ordering::Relaxed);
+            ordered[index].iter().map(|m| m.input.clone()).collect();
+        analyze(&inputs)
+    });
+    for (index, outcome) in outcomes {
+        merge_conversation(&mut result, progress, index, &ordered[index], outcome);
+    }
+    if progress.cancel.load(Ordering::Relaxed) {
+        result.cancelled = true;
     }
     // Idle once this pass ends, same as `scan_closures`.
     progress.conversation_index.store(0, Ordering::Relaxed);
@@ -2057,64 +2399,68 @@ pub fn close_passed_events(result: &mut ScanResult, messages: &[ReviewMessage], 
 /// into dozens of extra model calls in a single scan.
 const MAX_CLOSURE_CALLS: usize = 40;
 
-/// What [`attempt_closure`] did with one eligible item: nothing worth
-/// recording in [`ScanResult`] (no candidates, a shared-mailbox address,
-/// the [`MAX_CLOSURE_CALLS`] cap, or a `None`/non-transport-class answer),
-/// a resolution to apply to the item, or a reason the whole pass must stop.
-enum ClosureAttempt {
-    Skipped,
-    Resolved(Anchor, ResolutionKind),
-    Cancelled,
-    TransportFailure(ProviderError),
-}
-
 /// The signature every `scan_closures` caller's `closure()` callback takes:
 /// the open expectation, its evidence timestamp, and the candidate later
-/// messages, answering with resolution evidence when found.
-type ClosureCall<'a> = dyn FnMut(
+/// messages, answering with resolution evidence when found. `Sync` because
+/// one callback serves every worker of the parallel closure pass.
+type ClosureCall<'a> = dyn Fn(
         &Expectation,
         i64,
         &[ConversationMessage],
     ) -> Result<Option<(Anchor, ResolutionKind)>, ProviderError>
+    + Sync
     + 'a;
 
-/// State [`attempt_closure`] threads across every item in one
+/// State [`attempt_closure`] shares across every item in one
 /// `scan_closures` pass: the account/address grouping
 /// [`is_shared_mailbox_address`] needs (computed once up front, since it
 /// depends on every message, not just the current item) and the
 /// [`MAX_CLOSURE_CALLS`] budget shared by every item's provider call.
 /// Bundled into one struct, rather than four separate parameters, so
 /// `attempt_closure` stays under the pedantic argument-count lint without
-/// an `allow`.
+/// an `allow`. The budget counters are atomic because the pass's workers
+/// draw on the same budget concurrently.
 struct ClosurePassState<'a> {
     groups_per_account: GroupsPerAccount<'a>,
     address_group_counts: AddressGroupCounts<'a>,
-    calls_made: usize,
-    capped: bool,
+    calls_made: AtomicUsize,
+    capped: AtomicBool,
 }
 
-/// The per-item body of `scan_closures`'s loop, factored out to keep that
+impl ClosurePassState<'_> {
+    /// Claims one of the [`MAX_CLOSURE_CALLS`] provider calls this scan
+    /// allows, or records that the cap bound and refuses.
+    fn claim_call(&self) -> bool {
+        if self.calls_made.fetch_add(1, Ordering::Relaxed) < MAX_CLOSURE_CALLS {
+            return true;
+        }
+        self.calls_made.fetch_sub(1, Ordering::Relaxed);
+        self.capped.store(true, Ordering::Relaxed);
+        false
+    }
+}
+
+/// The per-item body of `scan_closures`'s pass, factored out to keep that
 /// function under the line-count lint: looks up `item`'s evidence message
 /// and waiting-party address, skips a shared-mailbox/list address (see
 /// [`is_shared_mailbox_address`]) or an item with no closure candidates,
-/// applies the [`MAX_CLOSURE_CALLS`] cap, and otherwise calls `closure`,
-/// timing it in `progress.request_started_unix` exactly like
-/// `scan_conversations` times its own provider call.
+/// applies the [`MAX_CLOSURE_CALLS`] cap, and otherwise calls `closure`.
+/// Every skip answers `Ok(None)`, exactly like a call that found no
+/// closing evidence; the caller cannot and need not tell them apart.
 fn attempt_closure(
     item: &Expectation,
     messages: &[ReviewMessage],
-    progress: &ScanProgress,
-    state: &mut ClosurePassState<'_>,
-    closure: &mut ClosureCall<'_>,
-) -> ClosureAttempt {
+    state: &ClosurePassState<'_>,
+    closure: &ClosureCall<'_>,
+) -> Result<Option<(Anchor, ResolutionKind)>, ProviderError> {
     let Some(source) = messages
         .iter()
         .find(|m| m.input.handle == item.evidence.message)
     else {
-        return ClosureAttempt::Skipped;
+        return Ok(None);
     };
     let Some(address) = waiting_party_address(&item.waiting_party) else {
-        return ClosureAttempt::Skipped;
+        return Ok(None);
     };
     if is_shared_mailbox_address(
         &source.account,
@@ -2122,7 +2468,7 @@ fn attempt_closure(
         &state.groups_per_account,
         &state.address_group_counts,
     ) {
-        return ClosureAttempt::Skipped;
+        return Ok(None);
     }
     let candidates = closure_candidates(
         item,
@@ -2131,26 +2477,11 @@ fn attempt_closure(
         &source.conversation,
         source.input.timestamp,
     );
-    if candidates.is_empty() {
-        return ClosureAttempt::Skipped;
-    }
-    if state.calls_made >= MAX_CLOSURE_CALLS {
-        state.capped = true;
-        return ClosureAttempt::Skipped;
+    if candidates.is_empty() || !state.claim_call() {
+        return Ok(None);
     }
     let inputs: Vec<ConversationMessage> = candidates.iter().map(|m| m.input.clone()).collect();
-    state.calls_made += 1;
-    progress
-        .request_started_unix
-        .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
-    let outcome = closure(item, source.input.timestamp, &inputs);
-    progress.request_started_unix.store(0, Ordering::Relaxed);
-    match outcome {
-        Ok(Some((anchor, kind))) => ClosureAttempt::Resolved(anchor, kind),
-        Err(ProviderError::Cancelled) => ClosureAttempt::Cancelled,
-        Err(e) if is_transport_error(e) => ClosureAttempt::TransportFailure(e),
-        Ok(None) | Err(_) => ClosureAttempt::Skipped,
-    }
+    closure(item, source.input.timestamp, &inputs)
 }
 
 /// After the primary per-conversation scan, attempts to close any
@@ -2183,89 +2514,101 @@ fn scan_closures(
     messages: &[ReviewMessage],
     progress: &ScanProgress,
     result: &mut ScanResult,
-    mut closure: impl FnMut(
-        &Expectation,
-        i64,
-        &[ConversationMessage],
-    ) -> Result<Option<(Anchor, ResolutionKind)>, ProviderError>,
+    pass: &ParallelPass,
+    closure: &ClosureCall<'_>,
 ) {
     if result.primary_scan_transport_error {
         return;
     }
-    let eligible = result
+    let eligible: Vec<usize> = result
         .analysis
         .items
         .iter()
-        .filter(|item| {
+        .enumerate()
+        .filter(|(_, item)| {
             item.resolution.is_none()
                 && item.event_passed.is_none()
                 && item.kind == "request"
                 && item.owner == Owner::You
         })
-        .count();
-    progress.total.fetch_add(eligible, Ordering::Relaxed);
+        .map(|(index, _)| index)
+        .collect();
+    progress.total.fetch_add(eligible.len(), Ordering::Relaxed);
     progress
         .conversation_total
-        .store(eligible, Ordering::Relaxed);
+        .store(eligible.len(), Ordering::Relaxed);
     // Left set for the rest of the scan: tells the desktop to label
     // `conversation_index`/`conversation_total` as this pass rather than
     // the primary per-conversation one.
     progress.closure_phase.store(true, Ordering::Relaxed);
     let (groups_per_account, address_group_counts) = conversation_group_address_counts(messages);
-    let mut state = ClosurePassState {
+    let state = ClosurePassState {
         groups_per_account,
         address_group_counts,
-        calls_made: 0,
-        capped: false,
+        calls_made: AtomicUsize::new(0),
+        capped: AtomicBool::new(false),
     };
-    let mut item_number = 0usize;
-    for item in &mut result.analysis.items {
-        if progress.cancel.load(Ordering::Relaxed) {
-            result.cancelled = true;
-            break;
-        }
-        if item.resolution.is_some()
-            || item.event_passed.is_some()
-            || item.kind != "request"
-            || item.owner != Owner::You
-        {
-            continue;
-        }
-        item_number += 1;
-        progress
-            .conversation_index
-            .store(item_number, Ordering::Relaxed);
-        progress.processed.fetch_add(1, Ordering::Relaxed);
-        match attempt_closure(item, messages, progress, &mut state, &mut closure) {
-            ClosureAttempt::Resolved(anchor, kind) => {
-                item.resolution = Some(anchor);
-                item.resolution_kind = Some(kind);
-                item.cross_thread = true;
-                result.cross_thread_closures += 1;
-            }
-            ClosureAttempt::Skipped => {}
-            ClosureAttempt::Cancelled => {
-                result.cancelled = true;
-                break;
-            }
-            ClosureAttempt::TransportFailure(e) => {
-                result.closure_pass_failure =
-                    Some(format!("Cross-thread closure pass stopped: {e}"));
-                break;
-            }
-        }
-    }
+    pass.restart();
+    let outcomes = {
+        let items = &result.analysis.items;
+        run_jobs(eligible.len(), pass, progress, &|slot| {
+            progress.processed.fetch_add(1, Ordering::Relaxed);
+            attempt_closure(&items[eligible[slot]], messages, &state, closure)
+        })
+    };
+    merge_closures(result, &eligible, outcomes);
     // Idle once this pass ends, same as `scan_conversations`.
     progress.conversation_index.store(0, Ordering::Relaxed);
+    if progress.cancel.load(Ordering::Relaxed) {
+        result.cancelled = true;
+    }
     if result.cross_thread_closures > 0 {
         result.conversation_notes.push(format!(
             "Closing evidence found in another conversation for {} expectation(s).",
             result.cross_thread_closures
         ));
     }
-    if state.capped {
+    if state.capped.load(Ordering::Relaxed) {
         result.conversation_notes.push(format!(
             "Cross-thread closure checks were capped at {MAX_CLOSURE_CALLS} open requests this scan."
+        ));
+    }
+}
+
+/// Applies the closure pass's answers to `result`, in item order, so the
+/// outcome does not depend on which worker finished first. `eligible` maps
+/// a job slot to the index of the item it examined.
+fn merge_closures(
+    result: &mut ScanResult,
+    eligible: &[usize],
+    outcomes: JobResults<Option<(Anchor, ResolutionKind)>>,
+) {
+    let mut rate_limited = 0usize;
+    for (slot, outcome) in outcomes {
+        match outcome {
+            Ok(Some((anchor, kind))) => {
+                let item = &mut result.analysis.items[eligible[slot]];
+                item.resolution = Some(anchor);
+                item.resolution_kind = Some(kind);
+                item.cross_thread = true;
+                result.cross_thread_closures += 1;
+            }
+            Err(ProviderError::Cancelled) => result.cancelled = true,
+            Err(ProviderError::RateLimited | ProviderError::Quota) => rate_limited += 1,
+            Err(error) if is_stop_error(error) => {
+                if result.closure_pass_failure.is_none() {
+                    result.closure_pass_failure =
+                        Some(format!("Cross-thread closure pass stopped: {error}"));
+                }
+            }
+            // No closing evidence, a skipped item, or a failure about this
+            // one item: the expectation simply stays open.
+            Ok(None) | Err(_) => {}
+        }
+    }
+    if rate_limited > 0 {
+        result.conversation_notes.push(format!(
+            "{rate_limited} cross-thread closure check(s) were rate-limited; they were not resent."
         ));
     }
 }
@@ -2900,8 +3243,11 @@ fn resolution_kind_name(kind: Option<ResolutionKind>) -> &'static str {
         Some(ResolutionKind::Agreed) => "agreed",
     }
 }
+/// Runs the fixed synthetic probe cases one at a time. The probe measures
+/// whether a model understands the cases at all, so it stays sequential:
+/// concurrency would only change how fast a diagnostic finishes.
 pub fn probe(provider: Provider, key: String, model: &str) -> Result<usize, ProviderError> {
-    let client = connect(provider, key, model)?;
+    let client = connect(provider, key, model, 1)?;
     let client = client.as_ref();
     let mut passed = 0;
     for (body, from_user, to_user, team, expected) in SEMANTIC_CASES {
@@ -3164,6 +3510,63 @@ fn synthetic(body: &str, index: usize, conversation: &str) -> MailItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs the primary pass with a single worker and an `FnMut` callback:
+    /// the shape the pass had before it was parallelized. Most tests here
+    /// assert per-call bookkeeping and read best with a callback that owns
+    /// mutable state, and a one-worker pool is exactly the sequential loop.
+    fn scan_conversations(
+        messages: &[ReviewMessage],
+        progress: &ScanProgress,
+        analyze: impl FnMut(&[ConversationMessage]) -> Result<Expectations, ProviderError> + Send,
+    ) -> ScanResult {
+        sequential_conversations(messages, progress, analyze)
+    }
+
+    fn sequential_conversations(
+        messages: &[ReviewMessage],
+        progress: &ScanProgress,
+        analyze: impl FnMut(&[ConversationMessage]) -> Result<Expectations, ProviderError> + Send,
+    ) -> ScanResult {
+        let analyze = Mutex::new(analyze);
+        super::scan_conversations(
+            messages,
+            progress,
+            &ParallelPass::new(1, None),
+            &|conversation| {
+                (analyze.lock().unwrap_or_else(PoisonError::into_inner))(conversation)
+            },
+        )
+    }
+
+    /// The closure-pass counterpart of [`scan_conversations`].
+    fn scan_closures(
+        messages: &[ReviewMessage],
+        progress: &ScanProgress,
+        result: &mut ScanResult,
+        closure: impl FnMut(
+            &Expectation,
+            i64,
+            &[ConversationMessage],
+        ) -> Result<Option<(Anchor, ResolutionKind)>, ProviderError>
+        + Send,
+    ) {
+        let closure = Mutex::new(closure);
+        super::scan_closures(
+            messages,
+            progress,
+            result,
+            &ParallelPass::new(1, None),
+            &|item, evidence_timestamp, candidates| {
+                (closure.lock().unwrap_or_else(PoisonError::into_inner))(
+                    item,
+                    evidence_timestamp,
+                    candidates,
+                )
+            },
+        );
+    }
+
     fn timestamp(value: &str) -> i64 {
         chrono::DateTime::parse_from_rfc3339(value)
             .unwrap()
@@ -4320,6 +4723,349 @@ at the downtown courthouse. Let me know if that works.",
             assert!(block.as_string().chars().count() <= 4096);
         }
     }
+    /// One conversation per subject, sized so `conversations_by_size` keeps
+    /// them in the order they are built (every conversation is a single
+    /// message, and the grouping key is the conversation name).
+    fn parallel_corpus(count: usize) -> Vec<ReviewMessage> {
+        (0..count)
+            .map(|index| {
+                // synthetic() only spells single-digit days; the id and the
+                // conversation name carry the index instead.
+                let mut item =
+                    synthetic("Please send the draft.", index % 9, &format!("c{index:02}"));
+                item.id = format!("synthetic-{index}");
+                prepare(&item, "Inbox", index).unwrap()
+            })
+            .collect()
+    }
+
+    /// Maps each corpus message's handle to its position, so a fake
+    /// provider can answer deterministically per conversation without
+    /// depending on how a handle is spelled.
+    fn handle_positions(messages: &[ReviewMessage]) -> BTreeMap<String, usize> {
+        messages
+            .iter()
+            .enumerate()
+            .map(|(index, m)| (m.input.handle.clone(), index))
+            .collect()
+    }
+
+    fn no_expectations() -> Expectations {
+        Expectations {
+            items: vec![],
+            rejected: 0,
+            rejection_reasons: vec![],
+            degraded: 0,
+        }
+    }
+
+    /// One expectation naming `handle`, so a merged `analysis.items` list
+    /// records exactly which conversations contributed and in what order.
+    fn expectation_for(handle: &str) -> Expectation {
+        Expectation {
+            action: "Send the draft".into(),
+            action_phrase: "send the draft".into(),
+            owner: Owner::You,
+            waiting_party: "Other <sam@example.invalid>".into(),
+            kind: "request".into(),
+            evidence: Anchor {
+                message: handle.to_owned(),
+                block: 0,
+                quote: "Please send the draft.".into(),
+                context: "Please send the draft.".into(),
+            },
+            deadline: None,
+            event: None,
+            event_time: None,
+            resolution: None,
+            resolution_kind: None,
+            uncertainty: String::new(),
+            unverified_deadline: false,
+            unverified_resolution: false,
+            cross_thread: false,
+            event_passed: None,
+        }
+    }
+
+    /// Tracks how many jobs a pass ever had running at the same time.
+    #[derive(Default)]
+    struct Concurrency {
+        running: AtomicUsize,
+        peak: AtomicUsize,
+    }
+
+    impl Concurrency {
+        fn enter(&self) {
+            let running = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(running, Ordering::SeqCst);
+        }
+
+        fn leave(&self) {
+            self.running.fetch_sub(1, Ordering::SeqCst);
+        }
+
+        fn peak(&self) -> usize {
+            self.peak.load(Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn conversations_run_in_parallel_up_to_the_clients_reported_ceiling() {
+        // Eight conversations, each held for one delay, across four
+        // workers: two sequential rounds rather than eight.
+        const DELAY: Duration = Duration::from_millis(120);
+        let messages = parallel_corpus(8);
+        let seen = Concurrency::default();
+        let progress = ScanProgress::default();
+        let started = Instant::now();
+        let result = super::scan_conversations(
+            &messages,
+            &progress,
+            &ParallelPass::new(4, None),
+            &|_| {
+                seen.enter();
+                std::thread::sleep(DELAY);
+                seen.leave();
+                Ok(no_expectations())
+            },
+        );
+        let elapsed = started.elapsed();
+        assert_eq!(result.analyzed, 8);
+        assert_eq!(seen.peak(), 4, "four workers must run at once");
+        assert!(
+            elapsed < DELAY * 5,
+            "eight 120ms conversations across four workers took {elapsed:?}"
+        );
+        assert_eq!(progress.processed.load(Ordering::Relaxed), 8);
+        assert_eq!(progress.in_flight.load(Ordering::Relaxed), 0);
+        assert_eq!(progress.conversation_index.load(Ordering::Relaxed), 0);
+        assert_eq!(progress.request_started_unix.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_parallel_scan_produces_exactly_the_sequential_result() {
+        let messages = parallel_corpus(12);
+        // Deterministic and content-derived: the answer depends only on the
+        // conversation, never on which worker ran it or when.
+        let positions = handle_positions(&messages);
+        let analyze = |conversation: &[ConversationMessage]| {
+            let handle = conversation[0].handle.clone();
+            let position = positions[&handle];
+            if position == 3 {
+                return Err(ProviderError::InvalidJson);
+            }
+            Ok(Expectations {
+                items: vec![expectation_for(&handle)],
+                rejected: usize::from(position == 5),
+                rejection_reasons: vec![],
+                degraded: 0,
+            })
+        };
+        let sequential = super::scan_conversations(
+            &messages,
+            &ScanProgress::default(),
+            &ParallelPass::new(1, None),
+            &analyze,
+        );
+        let parallel = super::scan_conversations(
+            &messages,
+            &ScanProgress::default(),
+            &ParallelPass::new(8, None),
+            &analyze,
+        );
+        let handles = |result: &ScanResult| -> Vec<String> {
+            result
+                .analysis
+                .items
+                .iter()
+                .map(|item| item.evidence.message.clone())
+                .collect()
+        };
+        assert_eq!(handles(&parallel), handles(&sequential));
+        assert_eq!(parallel.failures, sequential.failures);
+        assert_eq!(parallel.conversation_notes, sequential.conversation_notes);
+        assert_eq!(parallel.analyzed, sequential.analyzed);
+        assert_eq!(parallel.analysis.rejected, sequential.analysis.rejected);
+        assert_eq!(parallel.analysis.items.len(), 11);
+        assert_eq!(parallel.failures.len(), 1);
+    }
+
+    #[test]
+    fn a_rate_limit_halves_concurrency_and_the_request_is_never_resent() {
+        let messages = parallel_corpus(24);
+        let positions = handle_positions(&messages);
+        let calls: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
+        let seen = Concurrency::default();
+        let pass = ParallelPass::new(8, None);
+        let result = super::scan_conversations(&messages, &ScanProgress::default(), &pass, &|c| {
+            *calls
+                .lock()
+                .unwrap()
+                .entry(c[0].handle.clone())
+                .or_default() += 1;
+            seen.enter();
+            std::thread::sleep(Duration::from_millis(20));
+            seen.leave();
+            if positions[&c[0].handle] % 12 == 1 {
+                return Err(ProviderError::RateLimited);
+            }
+            Ok(no_expectations())
+        });
+        let calls = calls.into_inner().unwrap();
+        assert_eq!(calls.len(), 24);
+        assert!(
+            calls.values().all(|count| *count == 1),
+            "a rate-limited request is never resent: {calls:?}"
+        );
+        // Two of the 24 conversations rate-limit, so two fail and
+        // the allowed concurrency halves twice (8 -> 4 -> 2) unless eight
+        // straight successes widened it back first; either way it narrowed.
+        assert_eq!(result.failures.len(), 2);
+        assert!(
+            result.failures.iter().all(|line| line
+                .ends_with("The provider rate-limited this request; it was not resent.")),
+            "{:?}",
+            result.failures
+        );
+        assert!(!result.primary_scan_transport_error);
+        assert!(!result.cancelled);
+        assert_eq!(result.analyzed, 22);
+        let allowed = pass.allowed.load(Ordering::Relaxed);
+        assert!(
+            (1..=8).contains(&allowed),
+            "allowed concurrency stays inside 1..=max: {allowed}"
+        );
+    }
+
+    #[test]
+    fn halving_never_falls_below_one_worker_and_widening_never_passes_the_ceiling() {
+        let pass = ParallelPass::new(8, None);
+        for expected in [4, 2, 1, 1, 1] {
+            pass.on_backoff();
+            assert_eq!(pass.allowed.load(Ordering::Relaxed), expected);
+        }
+        // Eight consecutive completed requests widen it, by at least one.
+        for _ in 0..RAISE_AFTER_SUCCESSES {
+            pass.on_success();
+        }
+        assert_eq!(pass.allowed.load(Ordering::Relaxed), 2);
+        for _ in 0..RAISE_AFTER_SUCCESSES * 40 {
+            pass.on_success();
+        }
+        assert_eq!(pass.allowed.load(Ordering::Relaxed), 8);
+        // A rate limit resets the success streak, so the very next success
+        // cannot widen what the backoff just narrowed.
+        for _ in 0..RAISE_AFTER_SUCCESSES - 1 {
+            pass.on_success();
+        }
+        pass.on_backoff();
+        pass.on_success();
+        assert_eq!(pass.allowed.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn a_published_budget_spreads_dispatch_only_after_a_rate_limit() {
+        let budget = Some((10, Duration::from_secs(1)));
+        let pass = ParallelPass::new(4, budget);
+        let started = Instant::now();
+        for _ in 0..4 {
+            pass.throttle();
+        }
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "an untroubled pass pays nothing for pacing"
+        );
+        pass.on_backoff();
+        let started = Instant::now();
+        for _ in 0..4 {
+            pass.throttle();
+        }
+        // 10 requests per second is one every 100ms; three of the four
+        // dispatches wait for their slot.
+        assert!(
+            started.elapsed() >= Duration::from_millis(250),
+            "paced dispatch took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn cancelling_stops_dispatch_and_in_flight_requests_answer_cancelled() {
+        let messages = parallel_corpus(20);
+        let progress = ScanProgress::default();
+        let started = AtomicUsize::new(0);
+        let result =
+            super::scan_conversations(&messages, &progress, &ParallelPass::new(4, None), &|_| {
+                started.fetch_add(1, Ordering::SeqCst);
+                progress.cancel.store(true, Ordering::SeqCst);
+                // Every worker sees the flag the same way a real request
+                // does: the request in flight is abandoned, not completed.
+                Err(ProviderError::Cancelled)
+            });
+        let started = started.load(Ordering::SeqCst);
+        assert!(
+            started <= 4,
+            "no job starts after the cancel flag is set: {started}"
+        );
+        assert!(result.cancelled);
+        assert!(
+            result.failures.is_empty(),
+            "a stopped request is not a failure: {:?}",
+            result.failures
+        );
+        assert!(!result.primary_scan_transport_error);
+        assert_eq!(progress.in_flight.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_transport_failure_stops_dispatch_while_in_flight_requests_finish() {
+        let messages = parallel_corpus(20);
+        let progress = ScanProgress::default();
+        let started = AtomicUsize::new(0);
+        let result =
+            super::scan_conversations(&messages, &progress, &ParallelPass::new(4, None), &|_| {
+                started.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(20));
+                Err(ProviderError::Network)
+            });
+        let started = started.load(Ordering::SeqCst);
+        assert!(
+            started <= 8,
+            "dispatch stops once the provider is unreachable: {started}"
+        );
+        assert!(result.primary_scan_transport_error);
+        assert_eq!(result.failures.len(), started);
+        assert!(!result.cancelled);
+        assert_eq!(progress.in_flight.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn the_in_flight_counter_and_request_clock_track_the_running_workers() {
+        let messages = parallel_corpus(4);
+        let progress = ScanProgress::default();
+        let observed = Mutex::new(Vec::new());
+        super::scan_conversations(&messages, &progress, &ParallelPass::new(4, None), &|_| {
+            std::thread::sleep(Duration::from_millis(60));
+            observed.lock().unwrap().push((
+                progress.in_flight.load(Ordering::Relaxed),
+                progress.request_started_unix.load(Ordering::Relaxed),
+            ));
+            Ok(no_expectations())
+        });
+        let observed = observed.into_inner().unwrap();
+        assert_eq!(observed.len(), 4);
+        assert!(
+            observed.iter().any(|(in_flight, _)| *in_flight > 1),
+            "several requests must be in flight at once: {observed:?}"
+        );
+        assert!(
+            observed.iter().all(|(_, clock)| *clock != 0),
+            "the request clock is armed while requests run: {observed:?}"
+        );
+        assert_eq!(progress.in_flight.load(Ordering::Relaxed), 0);
+        assert_eq!(progress.request_started_unix.load(Ordering::Relaxed), 0);
+    }
+
     #[test]
     fn cancellation_and_provider_failure_do_not_start_more_conversations() {
         let a = prepare(&synthetic("Please send the draft.", 0, "a"), "Inbox", 0).unwrap();
@@ -4339,11 +5085,41 @@ at the downtown courthouse. Let me know if that works.",
         let mut calls = 0;
         let result = scan_conversations(&[a, b], &ScanProgress::default(), |_| {
             calls += 1;
-            Err(ProviderError::RateLimited)
+            Err(ProviderError::Network)
         });
         assert_eq!(calls, 1);
         assert_eq!(result.analyzed, 0);
         assert_eq!(result.failures.len(), 1);
+        assert!(result.primary_scan_transport_error);
+    }
+
+    #[test]
+    fn a_rate_limited_conversation_fails_visibly_without_stopping_the_scan() {
+        // The provider is answering, just not this fast, so the remaining
+        // conversations are still worth analyzing -- but the rate-limited
+        // one is never resent, and says so.
+        let a = prepare(&synthetic("Please send the draft.", 0, "a"), "Inbox", 0).unwrap();
+        let b = prepare(&synthetic("Please send the agenda.", 1, "b"), "Inbox", 1).unwrap();
+        let mut calls: Vec<String> = vec![];
+        let result = scan_conversations(&[a, b], &ScanProgress::default(), |messages| {
+            calls.push(messages[0].handle.clone());
+            Err(ProviderError::RateLimited)
+        });
+        assert_eq!(calls.len(), 2, "every conversation is still attempted");
+        assert_eq!(
+            calls.iter().collect::<BTreeSet<_>>().len(),
+            2,
+            "no conversation is resent: {calls:?}"
+        );
+        assert_eq!(result.failures.len(), 2);
+        assert!(
+            result.failures.iter().all(|line| line
+                .ends_with("The provider rate-limited this request; it was not resent.")),
+            "failure lines: {:?}",
+            result.failures
+        );
+        assert!(!result.primary_scan_transport_error);
+        assert!(!result.cancelled);
     }
 
     #[test]
@@ -4598,6 +5374,170 @@ at the downtown courthouse. Let me know if that works.",
             event_passed: None,
         };
         (all, item)
+    }
+
+    /// `count` open requests, each with a later reply in a different
+    /// conversation, so every one of them is eligible for the closure pass.
+    fn parallel_closure_fixture(count: usize) -> (Vec<ReviewMessage>, Vec<Expectation>) {
+        let mut all = Vec::new();
+        let mut items = Vec::new();
+        for index in 0..count {
+            let address = format!("sam{index}@example.invalid");
+            let request = request_from(
+                &address,
+                &format!("req-{index}"),
+                &format!("r{index}"),
+                "acct",
+                "Fee",
+            );
+            all.push(prepare(&request, "Inbox", all.len()).unwrap());
+            let evidence = all.last().unwrap().input.handle.clone();
+            let reply = reply_to(
+                &address,
+                &format!("rep-{index}"),
+                &format!("v{index}"),
+                "acct",
+                "Fee",
+            );
+            all.push(prepare(&reply, "Sent", all.len()).unwrap());
+            let (_, template) = closure_test_messages();
+            items.push(Expectation {
+                waiting_party: format!("Other <{address}>"),
+                evidence: Anchor {
+                    message: evidence,
+                    ..template.evidence
+                },
+                ..template
+            });
+        }
+        (all, items)
+    }
+
+    fn closure_result(items: Vec<Expectation>) -> ScanResult {
+        let mut result = empty_result(items.len());
+        result.analyzed = items.len();
+        result.analysis.items = items;
+        result
+    }
+
+    #[test]
+    fn the_closure_pass_runs_in_parallel_and_resolves_the_same_items_as_one_worker() {
+        const DELAY: Duration = Duration::from_millis(80);
+        let (all, items) = parallel_closure_fixture(8);
+        // Deterministic per item: only the even-numbered waiting parties
+        // have closing evidence.
+        let closure = |item: &Expectation,
+                       _: i64,
+                       candidates: &[ConversationMessage]|
+         -> Result<Option<(Anchor, ResolutionKind)>, ProviderError> {
+            let closed = item
+                .waiting_party
+                .chars()
+                .rfind(char::is_ascii_digit)
+                .and_then(|c| c.to_digit(10))
+                .is_some_and(|digit| digit % 2 == 0);
+            Ok(closed.then(|| {
+                (
+                    Anchor {
+                        message: candidates[0].handle.clone(),
+                        block: 0,
+                        quote: "Sure, let's do it.".into(),
+                        context: "Sure, let's do it.".into(),
+                    },
+                    ResolutionKind::Completed,
+                )
+            }))
+        };
+
+        let mut sequential = closure_result(items.clone());
+        super::scan_closures(
+            &all,
+            &ScanProgress::default(),
+            &mut sequential,
+            &ParallelPass::new(1, None),
+            &closure,
+        );
+
+        let seen = Concurrency::default();
+        let progress = ScanProgress::default();
+        let mut parallel = closure_result(items);
+        let started = Instant::now();
+        super::scan_closures(
+            &all,
+            &progress,
+            &mut parallel,
+            &ParallelPass::new(4, None),
+            &|item, evidence_timestamp, candidates| {
+                seen.enter();
+                std::thread::sleep(DELAY);
+                seen.leave();
+                closure(item, evidence_timestamp, candidates)
+            },
+        );
+        let elapsed = started.elapsed();
+
+        assert_eq!(sequential.cross_thread_closures, 4);
+        assert_eq!(parallel.cross_thread_closures, 4);
+        assert_eq!(seen.peak(), 4, "four closure checks must run at once");
+        assert!(
+            elapsed < DELAY * 5,
+            "eight 80ms closure checks across four workers took {elapsed:?}"
+        );
+        let resolved = |result: &ScanResult| -> Vec<bool> {
+            result
+                .analysis
+                .items
+                .iter()
+                .map(|item| item.resolution.is_some())
+                .collect()
+        };
+        assert_eq!(resolved(&parallel), resolved(&sequential));
+        assert_eq!(parallel.conversation_notes, sequential.conversation_notes);
+        assert!(
+            parallel
+                .analysis
+                .items
+                .iter()
+                .filter(|item| item.resolution.is_some())
+                .all(|item| item.cross_thread)
+        );
+        assert_eq!(progress.processed.load(Ordering::Relaxed), 8);
+        assert_eq!(progress.in_flight.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn rate_limited_closure_checks_are_reported_and_never_resent() {
+        let (all, items) = parallel_closure_fixture(6);
+        let calls = AtomicUsize::new(0);
+        let mut result = closure_result(items);
+        super::scan_closures(
+            &all,
+            &ScanProgress::default(),
+            &mut result,
+            &ParallelPass::new(4, None),
+            &|_, _, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err(ProviderError::RateLimited)
+            },
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            6,
+            "every eligible item is attempted exactly once"
+        );
+        assert_eq!(result.cross_thread_closures, 0);
+        assert!(
+            result.closure_pass_failure.is_none(),
+            "rate limiting narrows the pass, it does not stop it: {:?}",
+            result.closure_pass_failure
+        );
+        assert!(
+            result.conversation_notes.iter().any(|note| note
+                == "6 cross-thread closure check(s) were rate-limited; they were not resent."),
+            "notes: {:?}",
+            result.conversation_notes
+        );
+        assert!(!result.cancelled);
     }
 
     #[test]
@@ -5260,7 +6200,7 @@ at the downtown courthouse. Let me know if that works.",
             closure_pass_failure: None,
         };
         scan_closures(&all, &ScanProgress::default(), &mut result, |_, _, _| {
-            Err(ProviderError::RateLimited)
+            Err(ProviderError::Network)
         });
         // A closure-pass failure is content-free diagnostic text, kept apart
         // from `failures` (which counts unanalyzed conversations -- no
