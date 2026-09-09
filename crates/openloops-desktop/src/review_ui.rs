@@ -1830,9 +1830,7 @@ mod tests {
                 cross_thread_closures: 0,
                 event_closures: 0,
                 primary_scan_transport_error: false,
-                closure_pass_failure: Some(
-                    "Cross-thread closure pass stopped: rate limited".into(),
-                ),
+                closure_pass_failure: Some("Closure pass stopped: rate limited".into()),
             },
             "model".into(),
         );
@@ -1841,7 +1839,7 @@ mod tests {
             state
                 .scan_errors
                 .iter()
-                .any(|e| e == "Cross-thread closure pass stopped: rate limited")
+                .any(|e| e == "Closure pass stopped: rate limited")
         );
     }
 
