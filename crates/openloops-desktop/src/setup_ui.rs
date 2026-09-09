@@ -938,6 +938,20 @@ fn status(ui: &mut egui::Ui, status: &Status) {
     }
 }
 
+/// Returns the throttled busy indicator text without using egui's spinner.
+///
+/// The spinner requests continuous repaints, which can produce black frames on
+/// hybrid-GPU systems. This indicator advances only on the busy view's 250 ms
+/// repaint schedule.
+fn busy_indicator(elapsed_millis: u128) -> &'static str {
+    match (elapsed_millis / 250) % 3 {
+        0 => "·",
+        1 => "··",
+        2 => "···",
+        _ => unreachable!(),
+    }
+}
+
 impl eframe::App for SetupApp {
     #[cfg(feature = "ui-screenshot")]
     fn raw_input_hook(&mut self, _ctx: &egui::Context, input: &mut egui::RawInput) {
@@ -974,7 +988,11 @@ impl eframe::App for SetupApp {
                 });
                 ui.add_space(18.0);
                 if busy {
-                    ui.horizontal(|ui| { ui.spinner(); ui.label(format!("{} · {}s", self.progress, self.started.elapsed().as_secs())); });
+                    let elapsed = self.started.elapsed();
+                    ui.horizontal(|ui| {
+                        ui.label(busy_indicator(elapsed.as_millis()));
+                        ui.label(format!("{} · {}s", self.progress, elapsed.as_secs()));
+                    });
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
                     if let Some(progress) = &self.scan_progress {
                         ui.label(format!("{} / {} messages processed", progress.processed.load(Ordering::Relaxed), progress.total.load(Ordering::Relaxed)));
@@ -1060,6 +1078,17 @@ mod tests {
             *self.saved.borrow_mut() = None;
             Ok(())
         }
+    }
+
+    #[test]
+    fn busy_indicator_advances_every_250_milliseconds_and_wraps() {
+        assert_eq!(busy_indicator(0), "·");
+        assert_eq!(busy_indicator(249), "·");
+        assert_eq!(busy_indicator(250), "··");
+        assert_eq!(busy_indicator(499), "··");
+        assert_eq!(busy_indicator(500), "···");
+        assert_eq!(busy_indicator(749), "···");
+        assert_eq!(busy_indicator(750), "·");
     }
 
     #[test]
