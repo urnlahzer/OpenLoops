@@ -45,7 +45,7 @@ in the normal application.
    Microsoft To Do owns notification delivery, including when OpenLoops closes.
    This requires delegated Tasks.ReadWrite and a separate browser sign-in.
 5. **Rescan loaded mail** uses current in-memory mail without another Graph
-   read. **Stop scan** stops after the current model request. **Clear results
+   read. **Stop scan** stops dispatching and abandons the requests in flight. **Clear results
    and mail** removes memory content, preserving saved decisions and To Do tasks.
 
 ## Coverage and interpretation
@@ -73,9 +73,15 @@ exist, and possible resolution must be later than the original expectation.
 Structural evidence checks do not prove semantic correctness. Suggestions need
 review. Missing replies in these configured folders/window never prove that
 work is unfinished. No reminders are created by scanning or inference alone.
-Authentication, quota, throttling, and provider transport failures stop later
-requests. Other conversation failures remain visible while the scan continues.
-There are no automatic request retries or silent model substitutions.
+Conversations are analyzed in parallel, up to the concurrency the selected
+provider allows (the Ollama plan's slots, or the OpenRouter parallel ceiling on
+the Connections tab), and the busy view shows how many are done and how many
+are in flight; the merged result is identical to analyzing them one at a time.
+Authentication, network, timeout, and HTTP server failures stop later requests.
+Rate limiting and quota instead narrow the concurrency, failing only the
+affected conversation. Other conversation failures remain visible while the
+scan continues. There are no automatic request retries or silent model
+substitutions.
 
 After the per-conversation pass, a bounded cross-thread closure pass sends
 each remaining open request, together with the user's later messages to the
