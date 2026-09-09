@@ -10,9 +10,9 @@ use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use crate::provider::{
-    MAX_REQUEST, MAX_RESPONSE, ModelClient, ProviderError, RequestControl, https_client,
-    json_document, parse_error, read_body, send_with_control, status_error, valid_key,
-    valid_model_name,
+    MAX_PARALLEL_REQUESTS, MAX_REQUEST, MAX_RESPONSE, ModelClient, ProviderError, RequestControl,
+    https_client, json_document, parse_error, read_body, send_with_control, status_error,
+    valid_key, valid_model_name,
 };
 
 const AUTHORITY: &str = "https://openrouter.ai";
@@ -37,6 +37,9 @@ pub struct OpenRouter {
     client: Client,
     key: Zeroizing<String>,
     model: String,
+    /// Caller-chosen dispatch ceiling; see
+    /// [`OpenRouter::with_max_parallel`].
+    parallel: usize,
 }
 
 impl OpenRouter {
@@ -63,7 +66,20 @@ impl OpenRouter {
             client,
             key,
             model: model.to_owned(),
+            parallel: 1,
         })
+    }
+
+    /// Records how many requests this client may keep in flight.
+    /// `OpenRouter` publishes no concurrency cap for a paid key, so this
+    /// is the caller's own ceiling rather than a provider-imposed one;
+    /// upstream providers may still answer 429 under load, which the
+    /// caller backs off from rather than resending. Defaults to 1.
+    /// Clamped to 1..=[`MAX_PARALLEL_REQUESTS`].
+    #[must_use]
+    pub fn with_max_parallel(mut self, parallel: usize) -> Self {
+        self.parallel = parallel.clamp(1, MAX_PARALLEL_REQUESTS);
+        self
     }
 
     /// Exercises generation with a fixed content-free request. No mailbox is accessed.
@@ -114,6 +130,10 @@ impl OpenRouter {
 impl ModelClient for OpenRouter {
     fn model(&self) -> &str {
         &self.model
+    }
+
+    fn max_parallel(&self) -> usize {
+        self.parallel
     }
 
     fn complete(
@@ -405,6 +425,7 @@ mod tests {
             client: Client::builder().no_proxy().build().unwrap(),
             key: Zeroizing::new("synthetic-key".into()),
             model: MODEL.to_owned(),
+            parallel: 1,
         }
     }
 
@@ -614,6 +635,23 @@ mod tests {
                 MODEL
             ),
             Err(ProviderError::InvalidResponse)
+        );
+    }
+
+    #[test]
+    fn the_parallel_ceiling_is_clamped_and_defaults_to_one() {
+        let provider = synthetic_provider();
+        assert_eq!(provider.max_parallel(), 1);
+        assert_eq!(synthetic_provider().with_max_parallel(0).max_parallel(), 1);
+        assert_eq!(
+            synthetic_provider().with_max_parallel(32).max_parallel(),
+            32
+        );
+        assert_eq!(
+            synthetic_provider()
+                .with_max_parallel(usize::MAX)
+                .max_parallel(),
+            MAX_PARALLEL_REQUESTS
         );
     }
 

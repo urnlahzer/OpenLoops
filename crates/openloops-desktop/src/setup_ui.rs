@@ -4,7 +4,10 @@ use std::sync::{Arc, atomic::Ordering};
 use std::time::Instant;
 
 use crate::review_ui::ReviewState;
-use crate::settings::{Provider, Settings, SettingsError, SettingsStore, production_store};
+use crate::settings::{
+    MAX_OPENROUTER_PARALLEL, MIN_OPENROUTER_PARALLEL, OllamaPlan, Provider, Settings,
+    SettingsError, SettingsStore, max_parallel, production_store,
+};
 use eframe::egui::{self, Color32, RichText};
 use openloops_graph::live::{
     ConnectionConfig, ConnectionError, ConnectionReport, check_connection,
@@ -56,9 +59,11 @@ pub struct SetupApp {
     models: Vec<String>,
     selected: String,
     provider: Provider,
+    ollama_plan: OllamaPlan,
     openrouter_key: Zeroizing<String>,
     zdr_models: Vec<ModelChoice>,
     openrouter_selected: String,
+    openrouter_parallel: u16,
     microsoft: Status,
     model_status: Status,
     pending: Option<Receiver<Outcome>>,
@@ -105,9 +110,11 @@ impl SetupApp {
             models: vec![],
             selected: String::new(),
             provider: Provider::default(),
+            ollama_plan: OllamaPlan::default(),
             openrouter_key: Zeroizing::new(String::new()),
             zdr_models: vec![],
             openrouter_selected: String::new(),
+            openrouter_parallel: crate::settings::DEFAULT_OPENROUTER_PARALLEL,
             microsoft: Status::default(),
             model_status: Status::default(),
             pending: None,
@@ -166,6 +173,8 @@ impl SetupApp {
             vec![self.selected.clone()]
         };
         self.provider = settings.provider;
+        self.ollama_plan = settings.ollama_plan;
+        self.openrouter_parallel = settings.openrouter_parallel;
         self.openrouter_key = settings.openrouter_key;
         self.openrouter_selected = settings.openrouter_selected;
         self.zdr_models = if self.openrouter_selected.is_empty() {
@@ -237,6 +246,8 @@ impl SetupApp {
             provider: self.provider,
             openrouter_key: self.openrouter_key.clone(),
             openrouter_selected: self.openrouter_selected.clone(),
+            ollama_plan: self.ollama_plan,
+            openrouter_parallel: self.openrouter_parallel,
         };
         match store.save(&settings) {
             Ok(()) => {
@@ -490,6 +501,12 @@ impl SetupApp {
         }
     }
 
+    /// How many model requests a scan may keep in flight for the selected
+    /// provider; see [`crate::settings::max_parallel`].
+    fn max_parallel(&self) -> usize {
+        max_parallel(self.provider, self.ollama_plan, self.openrouter_parallel)
+    }
+
     /// The model chosen for the selected provider.
     fn selected_model(&self) -> &str {
         match self.provider {
@@ -503,6 +520,7 @@ impl SetupApp {
         let key = self.active_key().clone();
         let model = self.selected_model().to_owned();
         let provider = self.provider;
+        let parallel = self.max_parallel();
         let progress = Arc::new(crate::review_ui::ScanProgress::default());
         progress.total.store(messages.len(), Ordering::Relaxed);
         self.scan_progress = Some(progress.clone());
@@ -519,7 +537,14 @@ impl SetupApp {
             },
             move || {
                 Outcome::Scan(
-                    crate::review_ui::scan(provider, key.to_string(), &model, &messages, &progress),
+                    crate::review_ui::scan(
+                        provider,
+                        key.to_string(),
+                        &model,
+                        parallel,
+                        &messages,
+                        &progress,
+                    ),
                     model,
                 )
             },
@@ -691,6 +716,7 @@ impl SetupApp {
             ui.checkbox(&mut self.reveal_key, "Show key");
             ui.hyperlink_to("Create an API key", "https://ollama.com/settings/keys");
         });
+        self.ollama_plan_selector(ui);
         if ui
             .add_enabled(!self.key.is_empty(), egui::Button::new("Load cloud models"))
             .clicked()
@@ -725,6 +751,53 @@ impl SetupApp {
         }
     }
 
+    /// Ollama Cloud allots concurrent request slots per plan, so a scan can
+    /// only run as many requests at once as the account's plan allows;
+    /// beyond that Ollama queues and then rejects them. Defaults to Free
+    /// because it is the only plan safe to assume.
+    fn ollama_plan_selector(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.label(RichText::new("Ollama plan").strong());
+        let before = self.ollama_plan;
+        ui.horizontal(|ui| {
+            for plan in [OllamaPlan::Free, OllamaPlan::Pro, OllamaPlan::Max] {
+                ui.selectable_value(&mut self.ollama_plan, plan, plan.label());
+            }
+        });
+        ui.label(
+            RichText::new("Free 1 \u{b7} Pro 3 \u{b7} Max/Team 10 concurrent requests")
+                .small()
+                .color(MUTED),
+        );
+        if before != self.ollama_plan {
+            self.pending_save = true;
+        }
+    }
+
+    /// `OpenRouter` publishes no concurrency cap for a paid key, so this
+    /// ceiling is the user's own. A scan backs off on its own when an
+    /// upstream provider answers 429.
+    fn openrouter_parallel_input(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.label(RichText::new("Parallel requests (max)").strong());
+        let before = self.openrouter_parallel;
+        ui.add(
+            egui::DragValue::new(&mut self.openrouter_parallel)
+                .speed(1.0)
+                .range(MIN_OPENROUTER_PARALLEL..=MAX_OPENROUTER_PARALLEL),
+        );
+        ui.label(
+            RichText::new(
+                "How many conversations a scan analyzes at once. OpenRouter publishes no concurrency cap for a paid key; a rate-limited conversation is reported as failed and never resent.",
+            )
+            .small()
+            .color(MUTED),
+        );
+        if before != self.openrouter_parallel {
+            self.pending_save = true;
+        }
+    }
+
     fn openrouter_inputs(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("API key").strong());
         if ui
@@ -745,6 +818,7 @@ impl SetupApp {
             ui.checkbox(&mut self.reveal_key, "Show key");
             ui.hyperlink_to("Create an API key", "https://openrouter.ai/settings/keys");
         });
+        self.openrouter_parallel_input(ui);
         // The listing is public, so it loads without a key and sends none.
         if ui.button("Load ZDR models").clicked() {
             self.model_status = Status::default();
@@ -996,13 +1070,15 @@ impl eframe::App for SetupApp {
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
                     if let Some(progress) = &self.scan_progress {
                         ui.label(format!("{} / {} messages processed", progress.processed.load(Ordering::Relaxed), progress.total.load(Ordering::Relaxed)));
-                        let started = progress.request_started_unix.load(Ordering::Relaxed);
+                        let snapshot = progress.snapshot();
+                        let started = snapshot.request_started_unix;
                         if started != 0 {
                             let elapsed = (chrono::Utc::now().timestamp() - started).max(0);
                             let label = if progress.closure_phase.load(Ordering::Relaxed) { "Closure check" } else { "Conversation" };
+                            let in_flight = snapshot.in_flight;
+                            let done = snapshot.conversation_index.saturating_sub(in_flight);
                             ui.label(format!(
-                                "{label} {} of {} · {elapsed}s on this request",
-                                progress.conversation_index.load(Ordering::Relaxed),
+                                "{label} {done} of {} done · {in_flight} in flight · {elapsed}s on the oldest request",
                                 progress.conversation_total.load(Ordering::Relaxed),
                             ));
                         }
@@ -1105,6 +1181,8 @@ mod tests {
         app.selected = "deepseek-v4-flash:0731".into();
         app.openrouter_key = Zeroizing::new("synthetic-openrouter-key".into());
         app.openrouter_selected = "vendor/model-1".into();
+        app.ollama_plan = OllamaPlan::Pro;
+        app.openrouter_parallel = 48;
         app.reveal_key = true;
         app.pending_save = true;
         assert!(app.persist_changes());
@@ -1120,6 +1198,8 @@ mod tests {
         assert_eq!(reopened.provider, Provider::OllamaCloud);
         assert_eq!(&*reopened.openrouter_key, "synthetic-openrouter-key");
         assert_eq!(reopened.openrouter_selected, "vendor/model-1");
+        assert_eq!(reopened.ollama_plan, OllamaPlan::Pro);
+        assert_eq!(reopened.openrouter_parallel, 48);
         assert!(!reopened.reveal_key);
         assert!(!reopened.microsoft.succeeded);
         assert!(reopened.pending.is_none());

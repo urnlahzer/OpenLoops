@@ -36,6 +36,29 @@ live contract returns action summaries and exact source quotations resolved
 locally, rather than model-supplied character offsets. Scanning requires no
 manual message selection. Attachments are not sent by this path.
 
+## Plan and concurrent requests
+
+Ollama Cloud allots concurrent request slots per plan: Free 1, Pro 3, Max/Team
+10. Requests past your plan's allotment are queued on Ollama's side and then
+rejected once that queue fills, so OpenLoops never dispatches more at once
+than the plan allows.
+
+Set **Ollama plan** on the Connections tab, under the API key. It defaults to
+**Free**, which means one request at a time — the same sequential behaviour
+OpenLoops had before this setting existed, and the only assumption that is
+safe without knowing your account. Saved settings written before the plan
+selector existed load as Free. Raise it only to the plan you actually have:
+choosing a higher plan than your account holds does not buy more slots, it
+just makes Ollama queue and then reject the extra requests, and each rejected
+conversation is reported as failed for that scan.
+
+A rate-limited request is never resent. `network_policy.retries` in
+`contracts/model/provider-boundary.json` forbids automatically retrying any
+request that already carried message content, so the affected conversation is
+reported as a failed conversation for that scan and the remaining
+conversations continue. OpenLoops also halves how many requests it keeps in
+flight each time it is rate-limited, and widens back up as requests succeed.
+
 The command-line checker does not persist credentials, payloads, or outputs. The
 native setup window stores its key and settings in Windows Credential Manager;
 it does not save provider payloads or outputs. The launcher restores
@@ -43,7 +66,8 @@ its process environment after exit. The key and raw response buffers are held
 in zeroizing wrappers, without claiming removal of every allocator, TLS, OS, or
 provider copy. Requests use fixed HTTPS endpoints, disabled redirects/proxies,
 a 5-second connection timeout and a 60-second per-read idle timeout, no tools,
-no automatic retries, and bounded request/response sizes. Model names are
+no automatic retries, bounded request/response sizes, and at most the plan's
+concurrent requests in flight. Model names are
 validated before display.
 Responses must match the selected model, complete normally, and contain no tool
 calls or generated images/audio. Duplicate JSON members are rejected at every

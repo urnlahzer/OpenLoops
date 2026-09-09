@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use crate::provider::{
-    MAX_REQUEST, ModelClient, RequestControl, https_client, json_document, parse_error, read_body,
-    send_with_control, status_error, valid_key, valid_model_name,
+    MAX_PARALLEL_REQUESTS, MAX_REQUEST, ModelClient, RequestControl, https_client, json_document,
+    parse_error, read_body, send_with_control, status_error, valid_key, valid_model_name,
 };
 use crate::validation::{AnalysisResult, ParticipantSlot, SuppliedContext, validate};
 
@@ -28,6 +28,9 @@ pub struct OllamaCloud {
     client: Client,
     key: Zeroizing<String>,
     model: String,
+    /// Concurrent request slots the account's plan allots; see
+    /// [`OllamaCloud::with_max_parallel`].
+    parallel: usize,
 }
 
 /// A review card contains only locally resolved source evidence, never invented model prose.
@@ -64,6 +67,7 @@ impl OllamaCloud {
             client,
             key,
             model: model.to_owned(),
+            parallel: 1,
         };
         let started = Instant::now();
         let control = RequestControl::new(started);
@@ -78,6 +82,19 @@ impl OllamaCloud {
             return Err(ProviderError::ModelUnavailable);
         }
         Ok(provider)
+    }
+
+    /// Records how many requests this client may keep in flight, which on
+    /// Ollama Cloud is fixed by the account's plan (Free 1, Pro 3,
+    /// Max/Team 10 concurrent requests). Requests past the plan's slots
+    /// are queued server-side and rejected once that queue fills, so the
+    /// caller must not exceed the number it sets here. Defaults to 1 --
+    /// the Free plan, and the only value safe to assume without asking.
+    /// Clamped to 1..=[`MAX_PARALLEL_REQUESTS`].
+    #[must_use]
+    pub fn with_max_parallel(mut self, parallel: usize) -> Self {
+        self.parallel = parallel.clamp(1, MAX_PARALLEL_REQUESTS);
+        self
     }
 
     /// Sends only the supplied canonical projections and validates returned evidence locally.
@@ -150,6 +167,10 @@ impl OllamaCloud {
 impl ModelClient for OllamaCloud {
     fn model(&self) -> &str {
         &self.model
+    }
+
+    fn max_parallel(&self) -> usize {
+        self.parallel
     }
 
     fn complete(
@@ -401,6 +422,33 @@ fn participant_projections(context: &SuppliedContext<'_>) -> Result<Vec<Value>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn synthetic_provider() -> OllamaCloud {
+        OllamaCloud {
+            client: Client::builder().no_proxy().build().unwrap(),
+            key: Zeroizing::new("synthetic-key".into()),
+            model: DEFAULT_MODEL.to_owned(),
+            parallel: 1,
+        }
+    }
+
+    #[test]
+    fn the_plan_slot_count_is_clamped_and_defaults_to_the_free_plan() {
+        // Free is the only plan safe to assume: one concurrent request.
+        assert_eq!(synthetic_provider().max_parallel(), 1);
+        for (slots, expected) in [(0, 1), (1, 1), (3, 3), (10, 10)] {
+            assert_eq!(
+                synthetic_provider().with_max_parallel(slots).max_parallel(),
+                expected
+            );
+        }
+        assert_eq!(
+            synthetic_provider()
+                .with_max_parallel(usize::MAX)
+                .max_parallel(),
+            MAX_PARALLEL_REQUESTS
+        );
+    }
 
     #[test]
     fn markdown_wrapping_does_not_relax_json_or_schema_validation() {

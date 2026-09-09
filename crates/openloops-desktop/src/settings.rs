@@ -39,7 +39,66 @@ impl Provider {
     }
 }
 
-#[derive(Default, Clone)]
+/// The Ollama Cloud plan the account is on, which fixes how many model
+/// requests may be in flight at once. Ollama Cloud allots concurrent
+/// request slots per plan; requests past the allotment are queued
+/// server-side and rejected once that queue fills, so a scan never
+/// dispatches more than the plan allows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OllamaPlan {
+    #[default]
+    Free,
+    Pro,
+    Max,
+}
+
+impl OllamaPlan {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Free => "Free",
+            Self::Pro => "Pro",
+            Self::Max => "Max/Team",
+        }
+    }
+
+    /// Concurrent request slots the plan allots.
+    #[must_use]
+    pub const fn slots(self) -> usize {
+        match self {
+            Self::Free => 1,
+            Self::Pro => 3,
+            Self::Max => 10,
+        }
+    }
+
+    const fn tag(self) -> &'static str {
+        match self {
+            Self::Free => "free",
+            Self::Pro => "pro",
+            Self::Max => "max",
+        }
+    }
+
+    fn parse(tag: &str) -> Result<Self, SettingsError> {
+        match tag {
+            "free" => Ok(Self::Free),
+            "pro" => Ok(Self::Pro),
+            "max" => Ok(Self::Max),
+            _ => Err(SettingsError::Invalid),
+        }
+    }
+}
+
+/// `OpenRouter` publishes no concurrency cap for a paid key, so the
+/// parallel-request setting is the user's own ceiling rather than a
+/// provider-imposed one. These bound what the Connections tab accepts and
+/// what a saved record may decode to.
+pub const MIN_OPENROUTER_PARALLEL: u16 = 1;
+pub const MAX_OPENROUTER_PARALLEL: u16 = 100;
+pub const DEFAULT_OPENROUTER_PARALLEL: u16 = 32;
+
+#[derive(Clone)]
 pub struct Settings {
     pub client_id: String,
     pub groups: String,
@@ -49,6 +108,27 @@ pub struct Settings {
     pub provider: Provider,
     pub openrouter_key: Zeroizing<String>,
     pub openrouter_selected: String,
+    pub ollama_plan: OllamaPlan,
+    /// How many `OpenRouter` requests a scan may keep in flight, within
+    /// [`MIN_OPENROUTER_PARALLEL`]..=[`MAX_OPENROUTER_PARALLEL`].
+    pub openrouter_parallel: u16,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            client_id: String::new(),
+            groups: String::new(),
+            shared: String::new(),
+            key: Zeroizing::new(String::new()),
+            selected: String::new(),
+            provider: Provider::default(),
+            openrouter_key: Zeroizing::new(String::new()),
+            openrouter_selected: String::new(),
+            ollama_plan: OllamaPlan::default(),
+            openrouter_parallel: DEFAULT_OPENROUTER_PARALLEL,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +145,21 @@ impl std::fmt::Display for SettingsError {
             Self::Invalid => "Saved settings could not be read. Automatic saving is paused to preserve them. Use Reload saved settings to retry, or Save settings to replace them with these inputs.",
             Self::TooLarge => "Settings exceed Windows Credential Manager's 2,560-byte limit. Shorten the inbox list before saving. Previous saved settings are unchanged.",
         })
+    }
+}
+
+/// How many model requests a scan may keep in flight for `provider`: the
+/// Ollama Cloud plan's concurrent slots, or the `OpenRouter` ceiling the
+/// user chose. The ceiling is clamped, so neither a record written by a
+/// future build nor an out-of-range input can widen it past
+/// [`MAX_OPENROUTER_PARALLEL`].
+#[must_use]
+pub fn max_parallel(provider: Provider, plan: OllamaPlan, openrouter_parallel: u16) -> usize {
+    match provider {
+        Provider::OllamaCloud => plan.slots(),
+        Provider::OpenRouter => openrouter_parallel
+            .clamp(MIN_OPENROUTER_PARALLEL, MAX_OPENROUTER_PARALLEL)
+            .into(),
     }
 }
 
@@ -94,6 +189,7 @@ impl Settings {
     }
 
     fn encode(&self) -> Result<Zeroizing<Vec<u8>>, SettingsError> {
+        let parallel = self.openrouter_parallel.to_string();
         let fields = [
             self.client_id.as_str(),
             self.groups.as_str(),
@@ -103,6 +199,8 @@ impl Settings {
             self.provider.tag(),
             self.openrouter_key.as_str(),
             self.openrouter_selected.as_str(),
+            self.ollama_plan.tag(),
+            parallel.as_str(),
         ];
         let size = fields
             .iter()
@@ -123,6 +221,10 @@ impl Settings {
 
     /// Records written before the provider selection existed end after the
     /// fifth field; they load as Ollama Cloud with no `OpenRouter` inputs.
+    /// Records written before the concurrency settings existed end after
+    /// the eighth; they load with the Free Ollama plan (one concurrent
+    /// request, so those scans stay sequential exactly as they were) and
+    /// the default `OpenRouter` parallel ceiling.
     fn decode(bytes: &[u8]) -> Result<Self, SettingsError> {
         if bytes.len() > MAX_BYTES {
             return Err(SettingsError::Invalid);
@@ -142,10 +244,25 @@ impl Settings {
             settings.openrouter_selected = next(&mut remaining)?;
         }
         if !remaining.is_empty() {
+            settings.ollama_plan = OllamaPlan::parse(&next(&mut remaining)?)?;
+            settings.openrouter_parallel = parse_parallel(&next(&mut remaining)?)?;
+        }
+        if !remaining.is_empty() {
             return Err(SettingsError::Invalid);
         }
         Ok(settings)
     }
+}
+
+/// A saved `OpenRouter` parallel ceiling: plain decimal digits inside the
+/// accepted range. Anything else rejects the whole record rather than
+/// silently substituting a different concurrency than the one saved.
+fn parse_parallel(field: &str) -> Result<u16, SettingsError> {
+    field
+        .parse::<u16>()
+        .ok()
+        .filter(|value| (MIN_OPENROUTER_PARALLEL..=MAX_OPENROUTER_PARALLEL).contains(value))
+        .ok_or(SettingsError::Invalid)
 }
 
 fn next(remaining: &mut &[u8]) -> Result<String, SettingsError> {
@@ -238,6 +355,8 @@ mod tests {
             provider: Provider::OpenRouter,
             openrouter_key: Zeroizing::new("synthetic-openrouter-key".into()),
             openrouter_selected: "vendor/model-1".into(),
+            ollama_plan: OllamaPlan::Max,
+            openrouter_parallel: 64,
         }
     }
 
@@ -257,21 +376,36 @@ mod tests {
         bytes
     }
 
+    /// Byte offset one past the field-framed prefix of `fields`, which is
+    /// exactly where a record written before the following fields existed
+    /// ends.
+    fn boundary(fields: &[&str]) -> usize {
+        MAGIC.len() + fields.iter().map(|field| 4 + field.len()).sum::<usize>()
+    }
+
     #[test]
     fn versioned_encoding_rejects_truncation_trailing_data_and_unknown_version() {
         let encoded = synthetic().encode().unwrap();
         let settings = synthetic();
-        let legacy_end = MAGIC.len()
-            + [
-                settings.client_id.as_str(),
-                settings.groups.as_str(),
-                settings.shared.as_str(),
-                settings.key.as_str(),
-                settings.selected.as_str(),
+        let legacy = [
+            settings.client_id.as_str(),
+            settings.groups.as_str(),
+            settings.shared.as_str(),
+            settings.key.as_str(),
+            settings.selected.as_str(),
+        ];
+        let legacy_end = boundary(&legacy);
+        let provider_end = boundary(
+            &[
+                legacy.as_slice(),
+                &[
+                    settings.provider.tag(),
+                    settings.openrouter_key.as_str(),
+                    settings.openrouter_selected.as_str(),
+                ],
             ]
-            .iter()
-            .map(|field| 4 + field.len())
-            .sum::<usize>();
+            .concat(),
+        );
         for length in 0..encoded.len() {
             if length == legacy_end {
                 // A record truncated exactly at the pre-provider boundary is
@@ -280,6 +414,14 @@ mod tests {
                 let truncated = Settings::decode(&encoded[..length]).unwrap();
                 assert_eq!(truncated.provider, Provider::OllamaCloud);
                 assert!(truncated.openrouter_key.is_empty());
+                continue;
+            }
+            if length == provider_end {
+                // Likewise for the boundary before the concurrency fields.
+                let truncated = Settings::decode(&encoded[..length]).unwrap();
+                assert_eq!(truncated.provider, Provider::OpenRouter);
+                assert_eq!(truncated.ollama_plan, OllamaPlan::Free);
+                assert_eq!(truncated.openrouter_parallel, DEFAULT_OPENROUTER_PARALLEL);
                 continue;
             }
             assert!(Settings::decode(&encoded[..length]).is_err());
@@ -296,6 +438,91 @@ mod tests {
         assert_eq!(decoded.provider, Provider::OpenRouter);
         assert_eq!(&*decoded.openrouter_key, "synthetic-openrouter-key");
         assert_eq!(decoded.openrouter_selected, "vendor/model-1");
+        assert_eq!(decoded.ollama_plan, OllamaPlan::Max);
+        assert_eq!(decoded.openrouter_parallel, 64);
+    }
+
+    #[test]
+    fn records_written_before_the_concurrency_settings_load_sequentially() {
+        // Every plan-aware field is absent, so the record must decode to the
+        // conservative Free plan: one concurrent Ollama request, i.e. the
+        // sequential behavior the record was written under.
+        let decoded = Settings::decode(&legacy_record()).unwrap();
+        assert_eq!(decoded.ollama_plan, OllamaPlan::Free);
+        assert_eq!(decoded.ollama_plan.slots(), 1);
+        assert_eq!(
+            max_parallel(
+                decoded.provider,
+                decoded.ollama_plan,
+                decoded.openrouter_parallel
+            ),
+            1
+        );
+        assert_eq!(decoded.openrouter_parallel, DEFAULT_OPENROUTER_PARALLEL);
+        // Re-saving upgrades the record without changing what it means.
+        let upgraded = Settings::decode(&decoded.encode().unwrap()).unwrap();
+        assert_eq!(upgraded.ollama_plan, OllamaPlan::Free);
+        assert_eq!(upgraded.openrouter_parallel, DEFAULT_OPENROUTER_PARALLEL);
+    }
+
+    #[test]
+    fn concurrency_settings_round_trip_and_reject_out_of_range_values() {
+        for plan in [OllamaPlan::Free, OllamaPlan::Pro, OllamaPlan::Max] {
+            for parallel in [
+                MIN_OPENROUTER_PARALLEL,
+                DEFAULT_OPENROUTER_PARALLEL,
+                MAX_OPENROUTER_PARALLEL,
+            ] {
+                let settings = Settings {
+                    ollama_plan: plan,
+                    openrouter_parallel: parallel,
+                    ..synthetic()
+                };
+                let decoded = Settings::decode(&settings.encode().unwrap()).unwrap();
+                assert_eq!(decoded.ollama_plan, plan);
+                assert_eq!(decoded.openrouter_parallel, parallel);
+            }
+        }
+        for field in ["0", "101", "", "3.5", "-1", " 4", "0x10", "synthetic"] {
+            assert_eq!(parse_parallel(field), Err(SettingsError::Invalid));
+        }
+        assert!(OllamaPlan::parse("synthetic_plan").is_err());
+    }
+
+    #[test]
+    fn each_plan_and_ceiling_reports_its_own_concurrency() {
+        assert_eq!(OllamaPlan::Free.slots(), 1);
+        assert_eq!(OllamaPlan::Pro.slots(), 3);
+        assert_eq!(OllamaPlan::Max.slots(), 10);
+        assert_eq!(OllamaPlan::default(), OllamaPlan::Free);
+        let defaults = Settings::default();
+        assert_eq!(
+            max_parallel(
+                defaults.provider,
+                defaults.ollama_plan,
+                defaults.openrouter_parallel
+            ),
+            1
+        );
+        for (plan, slots) in [
+            (OllamaPlan::Free, 1),
+            (OllamaPlan::Pro, 3),
+            (OllamaPlan::Max, 10),
+        ] {
+            // The OpenRouter ceiling never leaks into an Ollama scan.
+            assert_eq!(max_parallel(Provider::OllamaCloud, plan, 77), slots);
+        }
+        assert_eq!(max_parallel(Provider::OpenRouter, OllamaPlan::Max, 77), 77);
+        // Neither an out-of-range input nor a record from a future build
+        // can widen the ceiling.
+        assert_eq!(
+            max_parallel(Provider::OpenRouter, OllamaPlan::Free, u16::MAX),
+            usize::from(MAX_OPENROUTER_PARALLEL)
+        );
+        assert_eq!(
+            max_parallel(Provider::OpenRouter, OllamaPlan::Free, 0),
+            usize::from(MIN_OPENROUTER_PARALLEL)
+        );
     }
 
     #[test]
