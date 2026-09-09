@@ -168,6 +168,9 @@ fn sync(model: &AppModel, window: &AppWindow) {
     });
     window.set_busy(busy);
     let review_scanning = model.scan_progress.is_some();
+    // Spec §6: the title-bar chip shows for any running job (§3 describes
+    // its Review-scan text; other jobs show their label and elapsed time).
+    // The window picks the Review text when `review-scan-chip-text` is set.
     window.set_scanning(busy);
     window.set_busy_chip_text(busy_text.as_deref().unwrap_or_default().into());
     let strip = scan_strip(model.scan_progress.as_deref(), &model.review);
@@ -331,6 +334,15 @@ pub fn run() -> Result<(), slint::PlatformError> {
     let preview_review = std::env::args().any(|arg| arg == "--preview-review");
     #[cfg(not(feature = "ui-screenshot"))]
     let preview_review = false;
+    // `--preview-review` alone saves a PNG of the fixture and exits (see
+    // `save_preview_snapshot`); `--stay` keeps the old behaviour of just
+    // showing the window, for the interactive shot2.ps1 capture loop
+    // documented in `docs/native-setup.md`. Only bound under `ui-screenshot`:
+    // every use site is already `#[cfg]`-gated the same way, so an unused
+    // binding in the plain `native-ui` build would otherwise be the only
+    // reason to have it there at all.
+    #[cfg(feature = "ui-screenshot")]
+    let preview_stay = std::env::args().any(|arg| arg == "--stay");
     #[cfg(feature = "ui-screenshot")]
     if preview_review {
         initial_model.review = crate::review_model::layout_fixture();
@@ -677,7 +689,70 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     crate::slint_review::register_callbacks(&window, &model, &timer);
 
+    #[cfg(feature = "ui-screenshot")]
+    if preview_review && !preview_stay {
+        // The window needs at least one real paint before a snapshot means
+        // anything; requesting a redraw now and running briefly through the
+        // normal event loop (this is exactly what `window.run()` below
+        // does) before snapshotting and quitting from a one-shot timer is
+        // simpler and more reliable than trying to force a single render
+        // pass by hand. On a session with no real interactive desktop
+        // attached, `take_snapshot` still returns `Ok` here but the buffer
+        // it reads back can come back uniformly blank rather than erroring
+        // -- the same underlying limitation as ordinary screen capture
+        // returning black in that situation. This has no graceful detection
+        // short of inspecting pixel content, so it is not handled specially;
+        // an interactive desktop session does not hit it.
+        window.window().request_redraw();
+        let weak = window.as_weak();
+        Timer::single_shot(Duration::from_millis(800), move || {
+            if let Some(window) = weak.upgrade() {
+                save_preview_snapshot(&window);
+            }
+            let _ = slint::quit_event_loop();
+        });
+    }
+
     window.run()
+}
+
+/// Saves `--preview-review`'s fixture window to
+/// `<temp dir>/openloops-review-preview.png` via `slint::Window::take_snapshot`,
+/// which the femtovg renderer this binary already builds with (`native-ui`'s
+/// `renderer-femtovg` feature) implements directly -- no separate software
+/// renderer needed. Reports and skips the PNG rather than failing the
+/// process when the renderer cannot produce a snapshot; the fixture window
+/// is still shown up to that point either way.
+#[cfg(feature = "ui-screenshot")]
+fn save_preview_snapshot(window: &AppWindow) {
+    match window.window().take_snapshot() {
+        Ok(buffer) => {
+            let path = std::env::temp_dir().join("openloops-review-preview.png");
+            match image::RgbaImage::from_raw(
+                buffer.width(),
+                buffer.height(),
+                buffer.as_bytes().to_vec(),
+            ) {
+                Some(rgba) => match rgba.save(&path) {
+                    Ok(()) => println!("Preview snapshot saved to {}", path.display()),
+                    Err(error) => {
+                        eprintln!(
+                            "Preview snapshot: could not save {}: {error}",
+                            path.display()
+                        );
+                    }
+                },
+                None => eprintln!(
+                    "Preview snapshot: the captured buffer did not match its own dimensions"
+                ),
+            }
+        }
+        Err(error) => {
+            eprintln!(
+                "Preview snapshot unavailable ({error}); the fixture was shown but no PNG was saved."
+            );
+        }
+    }
 }
 
 #[cfg(test)]

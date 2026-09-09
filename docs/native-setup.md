@@ -83,10 +83,19 @@ The busy indicator updates four times a second by design.
 Serialized settings and API keys use zeroizing buffers without claiming removal
 of all UI, allocator, TLS, or operating-system copies.
 
-The `ui-screenshot` feature remains buildable while its review-preview behavior
-is rebuilt. UI unit tests disable the production store; the Windows integration
-test uses an isolated synthetic credential, verifies it from a fresh process,
-and deletes it afterward.
+The `ui-screenshot` feature (`cargo build -p openloops-desktop --bin openloops-ui
+--features ui-screenshot`) adds a `--preview-review` flag that loads the Review
+screen's synthetic layout fixture (`review_model::layout_fixture`) instead of a
+real scan, with its "Full scanned conversation" disclosure expanded by default.
+Used alone, `--preview-review` shows the fixture briefly, saves a screenshot to
+`<temp dir>/openloops-review-preview.png` via `slint::Window::take_snapshot`,
+and exits; a renderer that cannot produce a snapshot is reported on stderr and
+the PNG step is skipped without failing the process. `--preview-review --stay`
+instead leaves the fixture window open indefinitely, for driving an external
+window-capture tool against a real, visible window handle. UI unit tests
+disable the production store; the Windows integration test uses
+an isolated synthetic credential, verifies it from a fresh process, and
+deletes it afterward.
 
 This optional interface does not pass a release gate or change the existing
 Phase 0 network-dependency restrictions. It is a local development executable,

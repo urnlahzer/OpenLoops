@@ -24,7 +24,52 @@ component ButtonBase {
     }
 }
 
-export component PrimaryButton inherits ButtonBase { primary: true; }
+// Not built on `ButtonBase`/the std `Button`: that widget's own `disabled`
+// state recolours a primary button's background to a neutral grey (see
+// `i-slint-compiler`'s `widgets/fluent/button.slint`), which combined with
+// `ButtonBase`'s opacity wrapper reads as washed-out grey rather than the
+// spec's "primary buttons keep colour at 50% opacity" (§6). This hand-rolled
+// button keeps `Tokens.brand` as its background regardless of `enabled` and
+// leaves dimming entirely to `opacity`, the same recipe `LinkButton`,
+// `Segmented` and `NavItem` in this file already use for the same reason.
+export component PrimaryButton {
+    in property <string> text;
+    in property <string> accessible-name: text;
+    in property <bool> enabled: true;
+    callback clicked;
+    min-width: max(Tokens.click-min, label.preferred-width + 2 * Tokens.button-pad-x);
+    min-height: Tokens.click-min;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    opacity: enabled ? 1 : Tokens.disabled-opacity;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    Rectangle {
+        background: Tokens.brand;
+        border-radius: Tokens.radius-4;
+        HorizontalLayout {
+            padding-left: Tokens.button-pad-x; padding-right: Tokens.button-pad-x;
+            padding-top: Tokens.button-pad-y; padding-bottom: Tokens.button-pad-y;
+            alignment: center;
+            label := Text { text: root.text; color: Tokens.bg-surface; font-size: Tokens.font-14; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+        }
+    }
+    TouchArea { enabled: root.enabled; clicked => { primary-focus.focus(); root.clicked(); } }
+    primary-focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    if primary-focus.has-focus && root.enabled: Rectangle {
+        x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+        width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring;
+        border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+    }
+}
 export component SecondaryButton inherits ButtonBase { }
 export component SubtleButton inherits ButtonBase { }
 export component OutlineButton inherits ButtonBase { }
@@ -267,7 +312,19 @@ export component Disclosure {
             accessible-role: button; accessible-label: root.title; accessible-enabled: root.enabled; accessible-expanded: root.expanded;
             accessible-action-default => { if root.enabled { root.expanded = !root.expanded; root.toggled(root.expanded); } }
             HorizontalLayout { alignment: start; spacing: Tokens.space-2;
-                Text { text: root.expanded ? "⌄" : "›"; color: Tokens.text-2; font-size: Tokens.font-16; vertical-alignment: center; }
+                // Neither "⌄" (U+2304) nor "▾" (U+25BE) is in whatever font
+                // actually backs Segoe UI Variable here -- both drew as a
+                // tofu box in the `--preview-review` screenshot loop, while
+                // "›" (used for the collapsed state below) does render.
+                // Rotating that same confirmed-good glyph 90° clockwise for
+                // the expanded state, rather than gambling on yet another
+                // codepoint, is exactly the fix the T5 brief calls out.
+                Text {
+                    text: "›";
+                    color: Tokens.text-2; font-size: Tokens.font-16; vertical-alignment: center; horizontal-alignment: center;
+                    transform-rotation: root.expanded ? 90deg : 0deg;
+                    transform-origin: { x: self.width / 2, y: self.height / 2 };
+                }
                 Text { text: root.title; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; vertical-alignment: center; }
             }
             TouchArea { enabled: root.enabled; clicked => { disclosure-focus.focus(); root.expanded = !root.expanded; root.toggled(root.expanded); } }

@@ -817,6 +817,33 @@ pub(crate) fn scan_strip_view(
     }
 }
 
+/// Overlays a failed `review_status` onto `strip` when the failure is not
+/// already represented there (spec §6: a worker disconnect, or a provider/
+/// transport error during a scan, switches the strip to its `warning` state
+/// with that text -- even on a rescan, when a *previous* scan's completed
+/// conversations are still shown in the list). Leaves a `Scanning` strip
+/// alone, and never fires for the ordinary "Scan incomplete" summary an
+/// actually-completed (if partial) scan already produced: `scan_failed` is
+/// false in that case, since [`crate::review_model::ReviewState::set_scan`]
+/// always clears it first.
+pub(crate) fn apply_scan_failure(
+    mut strip: ScanStripModel,
+    review_status: &Status,
+    scan_failed: bool,
+) -> ScanStripModel {
+    if scan_failed
+        && strip.state != "scanning"
+        && !review_status.succeeded
+        && !review_status.lines.is_empty()
+    {
+        strip.state = "warning".into();
+        strip.title = "Scan incomplete".into();
+        strip.summary = review_status.lines.join("\n").into();
+        strip.incomplete = true;
+    }
+    strip
+}
+
 #[allow(clippy::too_many_lines)]
 fn sync_review_inner(
     model: &AppModel,
@@ -842,15 +869,7 @@ fn sync_review_inner(
     });
     window.set_show_handled(model.review.show_handled);
     window.set_show_handled_label(SHOW_HANDLED_LABEL.into());
-    if model.review.analysis.is_none()
-        && !model.review_status.succeeded
-        && !model.review_status.lines.is_empty()
-    {
-        strip.state = "warning".into();
-        strip.title = "Scan incomplete".into();
-        strip.summary = model.review_status.lines.join("\n").into();
-        strip.incomplete = true;
-    }
+    strip = apply_scan_failure(strip, &model.review_status, model.review.scan_failed);
     window.set_scan_strip(strip);
     window.set_coverage_open(review_ui.coverage_open);
     window.set_review_has_analysis(model.review.analysis.is_some());
@@ -1339,6 +1358,28 @@ pub(crate) fn register_callbacks(
                 .apply_decision_change(key, decision, reminder);
             drop(model_ref);
             refresh(&model, &weak);
+        });
+    }
+    {
+        // Spec §7: Enter on the list opens the selected card's primary
+        // action -- Track for an open card, Reopen for a closed one --
+        // reusing `on_review_decision`'s own logic (via the generated
+        // `invoke_*` call) rather than duplicating it, so the two can never
+        // drift apart. A no-op when the primary action for the current
+        // selection is not actually available (e.g. an open Team card with
+        // no `Track` button), same as pressing nothing at all.
+        let weak = window.as_weak();
+        window.on_list_primary_action(move || {
+            let Some(window) = weak.upgrade() else {
+                return;
+            };
+            if window.get_selected_open() {
+                if window.get_can_track() {
+                    window.invoke_review_decision(DECISION_MINE);
+                }
+            } else if window.get_selected_terminal() {
+                window.invoke_review_decision(DECISION_REVIEW);
+            }
         });
     }
     {
@@ -1836,6 +1877,58 @@ mod tests {
             "Coverage: 1 source incomplete"
         );
         assert!(finished.summary.contains("Reviewed 4 of 4 loaded messages"));
+    }
+
+    #[test]
+    fn scan_failure_overrides_a_finished_strip_but_never_a_scanning_one() {
+        // Spec §6: a provider/transport error (or a disconnected worker)
+        // during a scan switches the strip to `warning` with that text --
+        // even on a rescan, where `analysis` still holds a *previous*
+        // successful scan's results, which must stay listed rather than
+        // disappear. `apply_scan_failure` never touches `analysis`/the row
+        // list itself, so "stay listed" is simply "this function doesn't
+        // clear them" -- verified separately by `set_scan`'s own tests never
+        // being reached on this path.
+        let failed = Status {
+            lines: vec!["Ollama Cloud rejected the request; sign in again.".into()],
+            succeeded: false,
+        };
+        let finished = ScanStripModel {
+            state: "finished".into(),
+            title: "Scan finished".into(),
+            ..ScanStripModel::default()
+        };
+        let overridden = apply_scan_failure(finished.clone(), &failed, true);
+        assert_eq!(overridden.state.as_str(), "warning");
+        assert_eq!(overridden.title.as_str(), "Scan incomplete");
+        assert_eq!(
+            overridden.summary.as_str(),
+            "Ollama Cloud rejected the request; sign in again."
+        );
+        assert!(overridden.incomplete);
+
+        // An ordinary "scan incomplete" result already carries its own
+        // warning-tinted `Finished` presentation and clears `scan_failed`,
+        // so it must not also trip this override.
+        let untouched = apply_scan_failure(finished.clone(), &failed, false);
+        assert_eq!(untouched, finished);
+
+        // A scan in progress is never overridden, even if a stale failure
+        // from before the rescan started is still sitting in `review_status`.
+        let scanning = ScanStripModel {
+            state: "scanning".into(),
+            ..ScanStripModel::default()
+        };
+        assert_eq!(
+            apply_scan_failure(scanning.clone(), &failed, true),
+            scanning
+        );
+
+        // No failure recorded at all (the common case): unchanged.
+        assert_eq!(
+            apply_scan_failure(finished.clone(), &Status::default(), false),
+            finished
+        );
     }
 
     #[test]

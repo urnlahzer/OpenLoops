@@ -120,6 +120,7 @@ export component AppWindow inherits Window {
     callback coverage-toggled(bool);
     callback select-review-row(int);
     callback move-review-selection(int);
+    callback list-primary-action;
     callback review-decision(int);
     callback open-reminder;
     callback draft-title-edited(string);
@@ -166,6 +167,7 @@ export component AppWindow inherits Window {
                 filter-selected(index) => { root.review-filter-selected(index); } show-handled-toggled(value) => { root.show-handled-toggled(value); }
                 coverage-toggled(value) => { root.coverage-toggled(value); } sources-link => { root.navigate(1); root.active-screen = 1; }
                 select-row(handle) => { root.select-review-row(handle); } move-selection(delta) => { root.move-review-selection(delta); }
+                list-primary-action => { root.list-primary-action(); }
                 decision(value) => { root.review-decision(value); } open-reminder => { root.open-reminder(); }
                 draft-title-edited(value) => { root.draft-title-edited(value); } draft-when-edited(value) => { root.draft-when-edited(value); }
                 draft-in-hour => { root.draft-in-hour(); } draft-tomorrow => { root.draft-tomorrow(); } create-reminder => { root.create-reminder(); } cancel-reminder => { root.cancel-reminder(); }

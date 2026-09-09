@@ -24,6 +24,17 @@ post-decryption controls below can be implemented or claimed.
 | Diagnostics | Error handling leaks content, identifiers, prompts, or secrets | Empty diagnostic-event allowlist until separate content-free contract and gates | No diagnostic export |
 | Secret material | Credentials enter the database or plaintext fallback | OS-protected secret store or memory only; ADR-005/ADR-010 | Capability disabled |
 
+The desktop window (`openloops-desktop`, `native-ui`) renders with Slint's
+native Windows backend; there is no embedded webview or browser engine, so
+mail content and the provider API key never pass through DOM state, a
+JavaScript heap, or any process boundary a web renderer would add. The key
+field lives in a Slint password input backed by a Rust `Zeroizing<String>`
+and is never logged. Links the window can open are limited to fixed provider
+and Microsoft URLs (Entra, the Ollama/OpenRouter key pages, To Do) and,
+for a message deep link, `https://outlook.office.com/...` or
+`https://outlook.office365.com/...` specifically; every other URL is rejected
+before the `opener` crate is invoked.
+
 Application-level authenticated encryption cannot prevent disclosure to a
 compromised same-user process, administrator, dependency, or endpoint. It also
 does not promise physical erasure from media, backups, snapshots, paging, or

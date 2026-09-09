@@ -99,6 +99,16 @@ pub struct ReviewState {
     /// tracking" is also the safer default of the two silent outcomes.
     pub(crate) draft: Option<ReminderDraft>,
     pub(crate) show_handled: bool,
+    /// Set when the most recent scan/mail-load attempt failed outright
+    /// (a worker disconnect, or a `ProviderError`/`ConnectionError` from
+    /// `Outcome::Mail`/`Outcome::Scan`) rather than completing -- even
+    /// partially -- with `set_scan`. Distinguishes that case from an
+    /// ordinary "scan incomplete" result (which already carries its own
+    /// warning-tinted `Finished` strip) so a rescan's outright failure
+    /// still surfaces as the strip's `warning` state (spec §6) even though
+    /// `analysis` still holds a previous, unrelated successful scan's
+    /// results -- which stay listed, exactly as that section requires.
+    pub(crate) scan_failed: bool,
 }
 
 impl ReviewState {
@@ -155,6 +165,7 @@ impl ReviewState {
         state
     }
     pub fn set_scan(&mut self, result: ScanResult, model: String) {
+        self.scan_failed = false;
         self.scan_summary = format!(
             "Reviewed {} of {} loaded messages in their conversations. {} conversations could not be analyzed{}.",
             result.analyzed,

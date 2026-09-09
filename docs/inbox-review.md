@@ -1,5 +1,32 @@
 # Live expectation review
 
+## Screen layout
+
+The nav rail on the left switches between **Review** and **Sources**; its
+Review icon carries a badge of how many open loops are `Review`, `Mine`, or
+`Watching` and not yet auto-resolved, hidden at zero. The Review screen's
+command bar holds **Scan inboxes** (becomes **Stop scan** while a scan runs),
+**Rescan loaded mail**, **Clear results and mail**, an **All / Mine / Team**
+filter, and the **Show resolved, handled and dismissed** checkbox. Directly
+under it, the scan strip shows one of three states: scanning (phase, "Conversation
+i of n", "m / total messages", elapsed time, and a progress bar), finished
+(a summary line, and expanding "Coverage details" into the incomplete-source
+notices), or idle (the scan-scope disclosure). The list pane groups open
+rows as Past due, Due, and No fixed deadline (dot colour and order match
+`ListGroup`/`DeadlineView`), with a fourth Resolved/handled/dismissed group
+appearing only when the checkbox above is on.
+
+The reading pane, top to bottom, shows: status/aging/reminder pills; the
+action-phrase title; a meta grid (Responsible, Waiting on this, Deadline
+stated in email, Source); an uncertainty callout when the model reported one;
+the decision buttons for the selected card; the action-status line; an inline
+reminder-draft panel when one is open (task title, remind-at time, quick
+picks, the scheduled-instant line, and the disclosure copy below); the
+reminder's own state (created or attempted, with reconcile buttons in the
+attempted case); one evidence card per anchor; the possible-later-completion
+card or note; and the collapsed "Full scanned conversation" disclosure with
+one row per message.
+
 Open the native app and choose **Review inboxes**. Saved connections restore
 automatically. This is a real Microsoft/Ollama flow; no synthetic cards appear
 in the normal application.

@@ -191,7 +191,11 @@ export component SourcesScreen {
                     }
                 }
                 HelperText { text: "Settings and abstract loop decisions save in Windows Credential Manager. Mail and descriptions remain in memory; scan to reconstruct them after restart. Reviewed reminders live in Microsoft To Do. Outlook add-in integration is a separate step."; width: 100%; }
-                Text { text: "Made with Slint"; color: Tokens.text-3; font-size: Tokens.font-13; }
+                // `Tokens.text-2`: this line sits on the window's own
+                // `bg-canvas` (the scroll body sets no opaque background of
+                // its own), where `text-3` falls to 4.35:1 -- below the
+                // 4.5:1 §7 requires (see the T5 contrast audit).
+                Text { text: "Made with Slint"; color: Tokens.text-2; font-size: Tokens.font-13; }
             }
         }
     }

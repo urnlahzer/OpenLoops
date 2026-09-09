@@ -119,6 +119,7 @@ export component ReviewScreen {
     callback sources-link;
     callback select-row(int);
     callback move-selection(int);
+    callback list-primary-action;
     callback decision(int);
     callback open-reminder;
     callback draft-title-edited(string);
@@ -139,7 +140,7 @@ export component ReviewScreen {
                 }
                 if !root.review-scanning: PrimaryButton { text: "Scan inboxes"; enabled: root.can-scan; clicked => { root.scan-inboxes(); } }
                 SubtleButton { text: "Rescan loaded mail"; enabled: root.can-rescan; clicked => { root.rescan(); } }
-                SubtleButton { text: "Clear results and mail"; clicked => { root.clear-results(); } }
+                SubtleButton { text: "Clear results and mail"; enabled: !root.busy; clicked => { root.clear-results(); } }
                 Rectangle { horizontal-stretch: 1; }
                 Segmented { width: Tokens.review-filter-width; options: ["All", "Mine", "Team"]; selected-index <=> root.filter-index; accessible-name: "Review filter"; enabled: !root.busy; selected(index) => { root.filter-selected(index); } }
                 Checkbox { text: root.show-handled-label; checked <=> root.show-handled; enabled: !root.busy; toggled(value) => { root.show-handled-toggled(value); } }
@@ -203,15 +204,16 @@ export component ReviewScreen {
                         }
                     }
                     list-focus := FocusScope {
-                        vertical-stretch: 1; accessible-role: list; accessible-label: "Review expectations";
+                        vertical-stretch: 1; accessible-role: list; accessible-label: "Review expectations"; accessible-item-count: root.rows.length;
                         key-pressed(event) => {
                             if event.text == Key.UpArrow { root.move-selection(-1); return accept; }
                             if event.text == Key.DownArrow { root.move-selection(1); return accept; }
+                            if event.text == Key.Return { root.list-primary-action(); return accept; }
                             return reject;
                         }
                         ScrollView { width: 100%; height: 100%;
                             VerticalLayout { width: 100%; spacing: 0px; alignment: start;
-                                for row in root.rows: VerticalLayout { width: 100%; spacing: 0px;
+                                for row[row-index] in root.rows: VerticalLayout { width: 100%; spacing: 0px;
                                     if row.first-in-group: Rectangle { min-height: Tokens.click-min;
                                         HorizontalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; spacing: Tokens.space-2;
                                             GroupDot { kind: row.group-kind; }
@@ -220,22 +222,35 @@ export component ReviewScreen {
                                             Text { text: row.group-count; color: Tokens.text-3; font-size: Tokens.font-11; vertical-alignment: center; }
                                         }
                                     }
-                                    item := Rectangle { min-height: Tokens.review-row-min-height; background: row.selected ? Tokens.brand-subtle : mouse.has-hover ? Tokens.bg-canvas : Tokens.transparent; accessible-role: list-item; accessible-label: row.action;
+                                    // Explicit `height` (not `min-height`) bound to
+                                    // `row-content`'s own preferred height: `item` is a
+                                    // plain Rectangle inside a VerticalLayout with
+                                    // `alignment: start`, so without this it renders at
+                                    // exactly `review-row-min-height` regardless of
+                                    // content, clipping the bottom padding whenever
+                                    // "Waiting: …" wraps to two lines.
+                                    item := Rectangle { height: max(Tokens.review-row-min-height, row-content.preferred-height); background: row.selected ? Tokens.brand-subtle : mouse.has-hover ? Tokens.bg-canvas : Tokens.transparent; accessible-role: list-item; accessible-label: row.action; accessible-item-selectable: true; accessible-item-selected: row.selected; accessible-item-index: row-index;
                                         // Measured off-layout (explicit x/y excludes it from the row's
                                         // HorizontalLayout) purely to decide whether the date fits beside
                                         // the title on one line or needs its own row above it.
                                         date-probe := Text { x: 0px; y: 0px; visible: false; text: row.date; font-size: Tokens.font-11; }
                                         private property <bool> date-fits-inline: date-probe.preferred-width <= Tokens.review-row-date-max-inline;
                                         Rectangle { x: 0px; y: 0px; width: Tokens.review-row-bar-width; height: parent.height; background: row.selected ? Tokens.brand : row.aging-kind == "danger" ? Tokens.danger : row.aging-kind == "brand" ? Tokens.brand : row.aging-kind == "success" ? Tokens.success : Tokens.text-3; }
-                                        HorizontalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-2;
+                                        // `Tokens.text-2`, not `text-3`, for this row's own date/aging
+                                        // text: this row can sit on the hover tint `Tokens.bg-canvas`
+                                        // (spec §4.3's row hover colour), where `text-3` falls to
+                                        // 4.35:1 -- below the 4.5:1 §7 requires -- while `text-2` clears
+                                        // it on every row background this list uses (see the T5
+                                        // contrast audit in the branch's task report).
+                                        row-content := HorizontalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-2;
                                             VerticalLayout { horizontal-stretch: 1; spacing: Tokens.space-1; alignment: start;
-                                                if !item.date-fits-inline: Text { text: row.date; color: Tokens.text-3; font-size: Tokens.font-11; horizontal-alignment: right; width: 100%; wrap: no-wrap; }
+                                                if !item.date-fits-inline: Text { text: row.date; color: Tokens.text-2; font-size: Tokens.font-11; horizontal-alignment: right; width: 100%; wrap: no-wrap; }
                                                 HorizontalLayout { width: 100%; spacing: Tokens.space-2;
                                                     WrappedText { text: row.action; color: Tokens.text-1; weight: 600; horizontal-stretch: 1; width: 100%; }
-                                                    if item.date-fits-inline: Text { text: row.date; color: Tokens.text-3; font-size: Tokens.font-11; horizontal-alignment: right; horizontal-stretch: 0; wrap: no-wrap; }
+                                                    if item.date-fits-inline: Text { text: row.date; color: Tokens.text-2; font-size: Tokens.font-11; horizontal-alignment: right; horizontal-stretch: 0; wrap: no-wrap; }
                                                 }
                                                 WrappedText { text: row.waiting-source; }
-                                                WrappedText { text: row.aging-status; color: row.aging-kind == "danger" ? Tokens.danger : Tokens.text-3; size: Tokens.font-11; }
+                                                WrappedText { text: row.aging-status; color: row.aging-kind == "danger" ? Tokens.danger : Tokens.text-2; size: Tokens.font-11; }
                                             }
                                         }
                                         mouse := TouchArea { clicked => { list-focus.focus(); root.select-row(row.handle); } }

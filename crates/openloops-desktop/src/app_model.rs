@@ -294,7 +294,10 @@ impl AppModel {
                 match self.pending_service {
                     Service::Microsoft => self.microsoft = status,
                     Service::Model => self.model_status = status,
-                    Service::Review => self.review_status = status,
+                    Service::Review => {
+                        self.review_status = status;
+                        self.review.scan_failed = true;
+                    }
                 }
                 return;
             }
@@ -335,6 +338,7 @@ impl AppModel {
                 }
             }
             Outcome::Mail(Err(error)) => {
+                self.review.scan_failed = true;
                 self.review_status = Status {
                     lines: vec![error.to_string()],
                     succeeded: false,
@@ -348,6 +352,7 @@ impl AppModel {
                         self.review_status = Status { lines: vec![if self.review.scan_incomplete { "Scan incomplete. Results from completed batches are shown below; check scan coverage and errors." } else { "Scan finished. Review the open loops and their evidence below." }.into()], succeeded: !self.review.scan_incomplete };
                     }
                     Err(error) => {
+                        self.review.scan_failed = true;
                         self.review_status = Status {
                             lines: vec![error.to_string()],
                             succeeded: false,

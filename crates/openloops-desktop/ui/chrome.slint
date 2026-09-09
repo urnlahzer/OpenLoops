@@ -97,7 +97,11 @@ export component NavRail inherits Rectangle {
         // The provider label spans the whole rail width (outside the layout
         // padding) so a name such as "OpenRouter" fits on one line at 11 px.
         Rectangle { height: dot.preferred-height + Tokens.space-1 + name.preferred-height; background: Tokens.transparent;
-            dot := Text { x: -Tokens.space-2; y: 0; width: Tokens.nav-width; text: "●"; color: root.provider-connected ? Tokens.success : Tokens.text-3; font-size: Tokens.font-11; horizontal-alignment: center; }
+            // `Tokens.text-2`, not `text-3`, here: this dot sits over the nav
+        // rail's `bg-canvas`, where `text-3` falls to 4.35:1 (below the
+        // 4.5:1 the spec's own §7 requires for text) -- see the T5 contrast
+        // audit in the branch's task report.
+        dot := Text { x: -Tokens.space-2; y: 0; width: Tokens.nav-width; text: "●"; color: root.provider-connected ? Tokens.success : Tokens.text-2; font-size: Tokens.font-11; horizontal-alignment: center; }
             name := Text { x: -Tokens.space-2; y: dot.preferred-height + Tokens.space-1; width: Tokens.nav-width; text: root.provider-name; color: Tokens.text-2; font-size: Tokens.font-11; horizontal-alignment: center; wrap: word-wrap; }
         }
     }
