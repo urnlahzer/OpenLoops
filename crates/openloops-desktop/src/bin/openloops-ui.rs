@@ -1,10 +1,14 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+#[path = "../app_model.rs"]
+mod app_model;
 #[path = "../deadline_view.rs"]
 mod deadline_view;
 #[path = "../loop_state.rs"]
 mod loop_state;
+#[path = "../review_model.rs"]
+mod review_model;
 #[path = "../review_ui.rs"]
 mod review_ui;
 #[path = "../settings.rs"]
@@ -22,7 +26,7 @@ fn main() {
                 .load()
                 .map_err(|_| "Saved settings could not be loaded".to_string())?
                 .ok_or("No saved settings".to_string())?;
-            review_ui::probe(
+            review_model::probe(
                 settings.provider,
                 settings.active_key().to_string(),
                 settings.active_model(),
