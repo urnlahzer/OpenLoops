@@ -26,7 +26,16 @@ in the normal application.
    and event-worded requests elsewhere in a conversation containing exactly
    one such event, are tied to that scoped event without relying on a
    model-supplied event anchor; body-prose events are excluded. A request with
-   its own stated deadline later than the event end stays open. Corrections that
+   its own stated deadline later than the event end stays open. An event can
+   only close a request if the event had not yet ended when the request's own
+   message was sent, and a request found only in an event-bearing message
+   closes with that event only when it is itself worded about the event (or
+   carries a deadline tied to it) — so a meeting recap's unrelated action
+   items are never closed just because the meeting is over. Emails from
+   meeting-recap and call-transcription services (Fathom, Otter, Fireflies,
+   Read.ai, tl;dv, Grain, Avoma, Gong, Chorus, and notetaker bots on Zoom,
+   Teams, or Meet) are treated as records of a past meeting: their action
+   items still become loops, but their meetings never close loops. Corrections that
    leave the action owed keep the card open with updated terms. If a quoted deadline or
    completion could not be validated against the mail, the card says so and
    keeps the item open.
