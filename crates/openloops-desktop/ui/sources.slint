@@ -1,5 +1,5 @@
 import { Tokens } from "tokens.slint";
-import { PrimaryButton, SecondaryButton, SubtleButton, Segmented, Pill, Field, Disclosure, Checkbox, LinkButton, ModelPicker } from "widgets.slint";
+import { PrimaryButton, SecondaryButton, SubtleButton, Segmented, Pill, Field, Disclosure, Checkbox, LinkButton, ModelPicker, WrappedText } from "widgets.slint";
 import { ScrollView } from "std-widgets.slint";
 
 export struct StatusLine { text: string, succeeded: bool }
@@ -17,24 +17,19 @@ component StepHeading {
     }
 }
 
-// A bare Text placed directly in a layout keeps its own unwrapped preferred
-// width no matter what width/horizontal-stretch is set on it directly (both
-// were tried and empirically made no difference to the rendered output).
-// Wrapping it in a plain Rectangle — which layouts do size to `width: 100%`
-// — and then sizing the Text to that Rectangle (the same pattern Field's
-// line-frame/text-frame use for LineEdit/TextEdit) is what actually
-// constrains it so `wrap: word-wrap` has a width to wrap within.
-component HelperText {
+// Thin wrapper over the shared `WrappedText` (see `widgets.slint`) with this
+// screen's own helper colours; kept as its own name since every Sources
+// helper-line call site already reads as `HelperText { text: "..."; }`.
+// R2: `inherits Rectangle` with `height:` bound to the named `WrappedText`
+// child -- the same fix `WrappedText` itself needed. Without it, this
+// component's own root (what a caller's `VerticalLayout` measures) reported
+// no height at all, so a 2-line helper (e.g. "Parallel requests (max)")
+// still overlapped whatever followed it even after `WrappedText` was fixed.
+component HelperText inherits Rectangle {
     in property <string> text;
     width: 100%;
-    Rectangle {
-        width: 100%;
-        // A plain Rectangle does not size itself from its children, so its
-        // height is bound explicitly to the (wrap-dependent) preferred
-        // height of the Text once it has its real, layout-assigned width.
-        height: label.preferred-height;
-        label := Text { width: 100%; text: root.text; color: Tokens.text-2; font-size: Tokens.font-13; wrap: word-wrap; horizontal-alignment: left; vertical-alignment: center; }
-    }
+    height: wrapped.preferred-height;
+    wrapped := WrappedText { text: root.text; }
 }
 // Card's own Rectangle is not a layout, so a child placed directly on it
 // (via @children) would size to its own natural preferred width and center
@@ -92,10 +87,13 @@ export component SourcesScreen {
         Rectangle { min-height: Tokens.command-height; background: Tokens.bg-bar;
             HorizontalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-1; padding-bottom: Tokens.space-1; spacing: Tokens.space-2;
                 PrimaryButton { text: "Save settings"; enabled: root.controls-enabled && root.store-available; clicked => { root.save-settings(); } }
-                SecondaryButton { text: "Reload saved settings"; enabled: root.controls-enabled && root.store-available; clicked => { root.reload-settings(); } }
+                // T6 (brief §2): the Companion's command-bar buttons besides
+                // "Save settings" are all subtle (transparent, regular
+                // weight) -- "Reload saved settings" was rendered Secondary.
+                SubtleButton { text: "Reload saved settings"; enabled: root.controls-enabled && root.store-available; clicked => { root.reload-settings(); } }
                 SubtleButton { text: "Forget saved settings"; enabled: root.controls-enabled && root.store-available; clicked => { root.forget-settings(); } }
                 Rectangle { horizontal-stretch: 1; background: Tokens.transparent; }
-                Text { text: root.settings-status; color: root.settings-succeeded ? Tokens.success : Tokens.warning; font-size: Tokens.font-13; wrap: word-wrap; horizontal-alignment: right; vertical-alignment: center; }
+                WrappedText { text: root.settings-status; text-color: root.settings-succeeded ? Tokens.success : Tokens.warning; horizontal-alignment: right; }
             }
             Rectangle { y: parent.height - Tokens.hairline; height: Tokens.hairline; background: Tokens.stroke-1; }
         }
@@ -132,14 +130,14 @@ export component SourcesScreen {
                                 HelperText { text: "Opens Microsoft sign-in in your browser. Checks access only; stores no mail."; width: 100%; }
                             }
                             VerticalLayout { width: 100%; spacing: Tokens.space-1;
-                                for line in root.microsoft-lines: Text { text: line.text; color: line.succeeded ? Tokens.success : Tokens.warning; font-size: Tokens.font-13; wrap: word-wrap; width: 100%; horizontal-alignment: left; horizontal-stretch: 1; }
+                                for line in root.microsoft-lines: WrappedText { text: line.text; text-color: line.succeeded ? Tokens.success : Tokens.warning; horizontal-stretch: 1; }
                             }
                         }
                     }
                     Card { min-width: Tokens.card-min; horizontal-stretch: 1;
                         VerticalLayout { alignment: start; padding-top: Tokens.card-pad-y; padding-bottom: Tokens.card-pad-y; padding-left: Tokens.card-pad-x; padding-right: Tokens.card-pad-x; spacing: Tokens.space-2;
                             StepHeading { number: "2"; title: "Choose your AI model"; }
-                            Text { text: "Provider"; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; width: 100%; horizontal-alignment: left; horizontal-stretch: 1; }
+                            Text { text: "Provider"; color: Tokens.text-1; font-size: Tokens.font-14; font-weight: 600; width: 100%; horizontal-alignment: left; horizontal-stretch: 1; }
                             Segmented { options: ["Ollama Cloud", "OpenRouter"]; selected-index <=> root.provider-index; accessible-name: "Provider"; enabled: root.controls-enabled; selected(index) => { root.provider-selected(index); } }
                             Field { label: "API key"; placeholder: root.key-placeholder; value <=> root.api-key; password: true; reveal-password: root.show-key; monospace: true; enabled: root.controls-enabled; edited(value) => { root.key-edited(value); } }
                             HorizontalLayout { width: 100%; spacing: Tokens.space-4;
@@ -147,7 +145,7 @@ export component SourcesScreen {
                                 LinkButton { text: "Create an API key"; enabled: root.controls-enabled; clicked => { root.open-key-page(); } }
                             }
                             if root.provider-index == 0: VerticalLayout { width: 100%; spacing: Tokens.space-1;
-                                Text { text: "Ollama plan"; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; width: 100%; horizontal-alignment: left; horizontal-stretch: 1; }
+                                Text { text: "Ollama plan"; color: Tokens.text-1; font-size: Tokens.font-14; font-weight: 600; width: 100%; horizontal-alignment: left; horizontal-stretch: 1; }
                                 Segmented { options: root.ollama-plan-options; selected-index <=> root.ollama-plan-index; accessible-name: "Ollama plan"; enabled: root.controls-enabled; selected(index) => { root.plan-selected(index); } }
                                 HelperText { text: "Free 1 · Pro 3 · Max/Team 10 concurrent requests"; width: 100%; }
                             }
@@ -164,7 +162,7 @@ export component SourcesScreen {
                             }
                             HorizontalLayout { width: 100%; spacing: Tokens.space-3;
                                 VerticalLayout { horizontal-stretch: 1; spacing: Tokens.space-1;
-                                    Text { text: "Model"; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; width: 100%; horizontal-alignment: left; horizontal-stretch: 1; }
+                                    Text { text: "Model"; color: Tokens.text-1; font-size: Tokens.font-14; font-weight: 600; width: 100%; horizontal-alignment: left; horizontal-stretch: 1; }
                                     ModelPicker { choices: root.models; selected-index <=> root.model-index; selected-value <=> root.model-value; accessible-name: "Model"; enabled: root.controls-enabled; selected(value) => { root.model-selected(value); } }
                                 }
                                 SecondaryButton { text: root.load-models-label; enabled: root.controls-enabled && root.can-load-models; clicked => { root.load-models(); } }
@@ -174,7 +172,7 @@ export component SourcesScreen {
                                 PrimaryButton { text: "Test selected model"; enabled: root.controls-enabled && root.can-test-model; clicked => { root.test-model(); } }
                                 HelperText { text: "Content-free generation check, up to 150 s."; horizontal-stretch: 1; }
                             }
-                            Text { text: root.model-status; color: root.model-succeeded ? Tokens.success : Tokens.warning; font-size: Tokens.font-13; wrap: word-wrap; width: 100%; horizontal-alignment: left; horizontal-stretch: 1; }
+                            WrappedText { text: root.model-status; text-color: root.model-succeeded ? Tokens.success : Tokens.warning; horizontal-stretch: 1; }
                             HelperText { text: "This connection test sends no email. Scanning inboxes sends recent message text from your configured inboxes to " + root.provider-disclosure + "."; width: 100%; }
                         }
                     }
@@ -183,10 +181,10 @@ export component SourcesScreen {
                     VerticalLayout { alignment: start; padding-top: Tokens.card-pad-y; padding-bottom: Tokens.card-pad-y; padding-left: Tokens.card-pad-x; padding-right: Tokens.card-pad-x; spacing: Tokens.space-3;
                         Text { text: "Scan scope and data sent to the model provider"; color: Tokens.text-1; font-size: Tokens.font-15; font-weight: 600; width: 100%; horizontal-alignment: left; horizontal-stretch: 1; }
                         HorizontalLayout { width: 100%; spacing: Tokens.space-6;
-                            VerticalLayout { Text { text: "Window"; color: Tokens.text-2; font-size: Tokens.font-13; } Text { text: "Last 30 days"; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; wrap: word-wrap; } }
-                            VerticalLayout { Text { text: "Inbox / Sent Items"; color: Tokens.text-2; font-size: Tokens.font-13; } Text { text: "Up to 100 messages per folder"; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; wrap: word-wrap; } }
-                            VerticalLayout { Text { text: "Groups"; color: Tokens.text-2; font-size: Tokens.font-13; } Text { text: "20 recent threads · 40 posts each"; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; wrap: word-wrap; } }
-                            VerticalLayout { Text { text: "Sources"; color: Tokens.text-2; font-size: Tokens.font-13; } Text { text: "At most 10 configured"; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; wrap: word-wrap; } }
+                            VerticalLayout { horizontal-stretch: 1; Text { text: "Window"; color: Tokens.text-2; font-size: Tokens.font-13; } WrappedText { text: "Last 30 days"; text-color: Tokens.text-1; weight: 600; } }
+                            VerticalLayout { horizontal-stretch: 1; Text { text: "Inbox / Sent Items"; color: Tokens.text-2; font-size: Tokens.font-13; } WrappedText { text: "Up to 100 messages per folder"; text-color: Tokens.text-1; weight: 600; } }
+                            VerticalLayout { horizontal-stretch: 1; Text { text: "Groups"; color: Tokens.text-2; font-size: Tokens.font-13; } WrappedText { text: "20 recent threads · 40 posts each"; text-color: Tokens.text-1; weight: 600; } }
+                            VerticalLayout { horizontal-stretch: 1; Text { text: "Sources"; color: Tokens.text-2; font-size: Tokens.font-13; } WrappedText { text: "At most 10 configured"; text-color: Tokens.text-1; weight: 600; } }
                         }
                         // B2: both sentences are the old egui build's wording verbatim
                         // (`setup_ui.rs` at 69235c1, `review_card`), not a paraphrase --

@@ -364,6 +364,24 @@ pub fn run() -> Result<(), slint::PlatformError> {
         initial_model.provider = Provider::OllamaCloud;
         initial_model.selected = "Synthetic layout check".into();
     }
+    // T7 (brief §5): seeds the Sources screen with OpenRouter selected, a
+    // parallel-requests value and a long zero-data-retention model label, so
+    // the visual loop's `-Out sources.png` shot exercises the same overlap
+    // case the owner's OpenRouter screenshot showed -- independent of
+    // `--preview-review`, since a fresh run with no saved settings already
+    // lands on Sources (spec §3's "Startup screen" rule).
+    #[cfg(feature = "ui-screenshot")]
+    if std::env::var("OPENLOOPS_PREVIEW_PROVIDER").as_deref() == Ok("openrouter") {
+        initial_model.provider = Provider::OpenRouter;
+        initial_model.openrouter_parallel = 32;
+        let model_id = "anthropic/claude-sonnet-4.6";
+        initial_model.zdr_models = vec![openloops_inference::openrouter::ModelChoice {
+            id: model_id.into(),
+            label: "Anthropic: Claude Sonnet 4.6 (zero-data-retention endpoint, extended thinking)"
+                .into(),
+        }];
+        initial_model.openrouter_selected = model_id.into();
+    }
     let model = Rc::new(RefCell::new(initial_model));
     let window = AppWindow::new()?;
     let initial_screen = {

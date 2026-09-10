@@ -59,19 +59,24 @@ component NavItem inherits Rectangle {
     accessible-action-default => { if root.enabled { root.activated(); } }
     VerticalLayout {
         padding-top: Tokens.space-1; padding-bottom: Tokens.space-1; spacing: Tokens.space-1;
-        Text { text: root.icon; color: root.selected ? Tokens.brand : Tokens.text-1; font-size: Tokens.font-16; horizontal-alignment: center; vertical-alignment: center; }
-        Text { text: root.label; color: root.selected ? Tokens.brand : Tokens.text-1; font-size: Tokens.font-11; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+        // S7: unselected nav ink is `text-nav` (#424242), a distinct step
+        // between `text-1` (selected) and `text-2` -- see the Companion's
+        // nav rail, where "Sources" reads visibly lighter than a selected
+        // "Review".
+        Text { text: root.icon; color: root.selected ? Tokens.brand : Tokens.text-nav; font-size: Tokens.font-16; horizontal-alignment: center; vertical-alignment: center; }
+        Text { text: root.label; color: root.selected ? Tokens.brand : Tokens.text-nav; font-size: Tokens.font-11; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
     }
     if root.badge > 0: Rectangle {
-        // Anchored to the item's top-right corner and pushed outward by the
-        // item's own padding (space-1) rather than inset by it, so the badge
-        // sits clear of the centered icon glyph instead of sitting on top of
-        // it, however many digits the count grows to.
-        x: parent.width - self.width + Tokens.space-1;
-        y: -Tokens.space-1;
+        // R2: raised a full half badge-height above the item's own top edge
+        // (not just `space-1`/4px) and pulled in from the item's right edge
+        // by `space-1` rather than overhanging past it, so the badge clears
+        // the centered icon glyph's box entirely instead of touching it,
+        // however many digits the count grows to.
+        x: parent.width - self.width - Tokens.space-1;
+        y: -Tokens.nav-badge-size / 2;
         width: max(Tokens.nav-badge-size, badge-text.preferred-width + 2 * Tokens.space-1); height: Tokens.nav-badge-size;
         background: Tokens.danger; border-radius: Tokens.radius-pill;
-        badge-text := Text { text: root.badge; color: Tokens.bg-surface; font-size: Tokens.font-11; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+        badge-text := Text { text: root.badge; color: Tokens.bg-surface; font-size: Tokens.font-10; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
     }
     TouchArea { enabled: root.enabled; clicked => { nav-focus.focus(); root.activated(); } }
     nav-focus := FocusScope {

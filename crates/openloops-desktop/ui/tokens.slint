@@ -25,17 +25,24 @@ export global Tokens {
     out property <color> watch: #4F52B2;
     out property <color> watch-bg: #EEEFFC;
     out property <color> nav-selected: stroke-1;
+    // X13: the Companion's unselected nav-rail ink (#424242) sits between
+    // `text-1` (#242424, too dark -- that's the *selected* ink) and `text-2`
+    // (#616161, too light) -- a distinct token rather than overloading
+    // either existing one.
+    out property <color> text-nav: #424242;
     out property <color> transparent: #00000000;
     // White at 16% alpha (N1/X11): the title-bar busy chip's own background,
     // distinct from `brand-subtle` (which reads as a near-invisible tint
     // against the title bar's own `brand` background).
     out property <color> chip-bg: #FFFFFF29;
+    out property <length> font-10: 10px;
     out property <length> font-11: 11px;
     out property <length> font-13: 13px;
     out property <length> font-14: 14px;
     out property <length> font-15: 15px;
     out property <length> font-16: 16px;
     out property <length> font-22: 22px;
+    out property <length> radius-3: 3px;
     out property <length> radius-4: 4px;
     out property <length> radius-6: 6px;
     out property <length> radius-8: 8px;
@@ -92,9 +99,19 @@ export global Tokens {
     out property <length> textarea-row: 24px;
     out property <length> avatar-size: 28px;
     out property <length> segment-min-width: 72px;
+    // T-poll: the Companion's segmented track has 2px of inner padding
+    // around its pills; kept as its own token rather than reusing a
+    // 4-px spacing step that would visibly loosen the track.
+    out property <length> segment-track-pad: 2px;
     out property <float> disabled-opacity: 0.5;
-    out property <string> font-family: "Segoe UI Variable";
-    out property <string> font-family-fallback: "Segoe UI";
-    out property <string> mono-font-family: "Cascadia Mono";
-    out property <string> mono-font-family-fallback: "Consolas";
+    // "Segoe UI Variable" is installed on this machine only as the variable
+    // font file (SegUIVar.ttf); the FemtoVG/fontdb renderer this build uses
+    // does not drive its weight axis reliably, so a 600-weight request can
+    // fall back to a synthetic or plain-regular face. The static family's
+    // own Semibold face is installed, so weight 600 always resolves to a
+    // real face -- see docs/native-setup.md and ADR-014.
+    out property <string> font-family: "Segoe UI";
+    // Likewise "Cascadia Mono" is not installed on this machine (only
+    // Consolas is); Slint takes a single family name with no fallback list.
+    out property <string> mono-font-family: "Consolas";
 }

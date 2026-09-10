@@ -91,6 +91,16 @@ The busy indicator updates four times a second by design.
 Serialized settings and API keys use zeroizing buffers without claiming removal
 of all UI, allocator, TLS, or operating-system copies.
 
+The UI's `font-family` token is the static `"Segoe UI"`, not `"Segoe UI
+Variable"`: the variable family is installed on this machine only as the
+variable font file (`SegUIVar.ttf`), and this build's FemtoVG/fontdb renderer
+does not drive that file's weight axis reliably, so a requested weight of 600
+can render as a synthetic or plain-regular face. The static family's own
+Semibold face is installed, so weight 600 always resolves correctly (see
+ADR-014). `mono-font-family` is likewise the static `"Consolas"` rather than
+`"Cascadia Mono"`, which is not installed on this machine; Slint takes a
+single family name with no fallback list.
+
 The `ui-screenshot` feature (`cargo build -p openloops-desktop --bin openloops-ui
 --features ui-screenshot`) adds a `--preview-review` flag that loads the Review
 screen's synthetic layout fixture (`review_model::layout_fixture`) instead of a
@@ -100,7 +110,11 @@ Used alone, `--preview-review` shows the fixture briefly, saves a screenshot to
 and exits; a renderer that cannot produce a snapshot is reported on stderr and
 the PNG step is skipped without failing the process. `--preview-review --stay`
 instead leaves the fixture window open indefinitely, for driving an external
-window-capture tool against a real, visible window handle. UI unit tests
+window-capture tool against a real, visible window handle. Independent of
+`--preview-review`, setting `OPENLOOPS_PREVIEW_PROVIDER=openrouter` seeds a
+fresh run's Sources screen with OpenRouter selected, a parallel-requests
+value, and a long zero-data-retention model label, for capturing that
+screen's own layout without any saved settings. UI unit tests
 disable the production store; the Windows integration test uses
 an isolated synthetic credential, verifies it from a fresh process, and
 deletes it afterward.

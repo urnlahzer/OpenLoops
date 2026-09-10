@@ -716,14 +716,22 @@ pub fn layout_fixture() -> ReviewState {
         (
             "Quarterly planning",
             body,
-            "Alex <alex@example.invalid>",
-            "alex@example.invalid",
+            // T7 (brief §5): a long display name + address, both here and on
+            // `waiting_party`/`evidence` below, so the preview at 1100 px
+            // exercises the same sender-name wrap the "sender with a long
+            // name" fixture requirement calls for.
+            "Alexandra Priyanka Featherington-Vandermeer <alexandra.featherington-vandermeer@example-subdomain-name.invalid>",
+            "alexandra.featherington-vandermeer@example-subdomain-name.invalid",
             "Personal mailbox / Inbox",
             "synthetic-thread",
         ),
         (
             "Quarterly planning",
-            "I sent the draft budget this morning.\n-----Original Message-----\nPlease send the draft budget by Friday.",
+            // T7: a ~4-line body ahead of the reply marker (the marker and
+            // quoted text after it are untouched, so
+            // `conversation_rows_mark_sent_mail_and_keep_quote_nested` still
+            // sees the same quoted-history split).
+            "I sent the draft budget this morning after folding in the finance team's revisions from yesterday's review call, including the updated headcount assumptions, the vendor renewal figures Priya flagged on Tuesday, and the revised travel contingency line that Legal asked us to break out separately this quarter.\n-----Original Message-----\nPlease send the draft budget by Friday.",
             "Synthetic User <user@example.invalid>",
             "user@example.invalid",
             "Group: planning@example.invalid",
@@ -770,16 +778,26 @@ pub fn layout_fixture() -> ReviewState {
         // Card 1: tracked by you, a reminder already created, and completion
         // evidence found in another conversation (m2).
         Expectation {
-            action: "Send the draft budget to Alex".into(),
+            // T7 (brief §5): ~140 characters, long enough to wrap at 1100 px
+            // in both the list row and the reading-pane title. `action_phrase`
+            // (below) is untouched -- it feeds the decision-record
+            // fingerprint several tests and `first_key` just below key on
+            // verbatim, unlike this display-only field.
+            action: "Send Alexandra the finalized draft budget, including the updated headcount assumptions and the vendor renewal figures Priya flagged, before Friday's sign-off meeting".into(),
             action_phrase: "send the draft budget".into(),
             owner: Owner::You,
-            waiting_party: "Alex <alex@example.invalid>".into(),
+            // T7: a long display name + address, matching m0's sender above.
+            waiting_party: "Alexandra Priyanka Featherington-Vandermeer <alexandra.featherington-vandermeer@example-subdomain-name.invalid>".into(),
             kind: "request".into(),
             evidence: Anchor {
                 message: "m0".into(),
                 block: 0,
-                quote: body.into(),
-                context: body.into(),
+                // T7: a 3-line quote and a 3-line context, independent of
+                // `deadline` below (its own quote must stay "Friday" verbatim
+                // -- `selected_view_covers_deadline_metadata_and_actions`
+                // asserts the meta grid's quoted deadline text).
+                quote: "Could you send over the finalized draft budget before Thursday's sign-off meeting? I need to fold in the updated headcount numbers and the vendor renewal figures before we present it to the executive committee on Friday morning.".into(),
+                context: "Addressed to you directly in the Inbox thread that also carries the Group's own budget follow-up message; the deadline is resolved from the Thursday meeting mentioned in the same paragraph, one day before the Friday executive review.".into(),
             },
             deadline: Some(Anchor {
                 message: "m0".into(),
@@ -796,7 +814,8 @@ pub fn layout_fixture() -> ReviewState {
                 context: "I sent the draft budget this morning.".into(),
             }),
             resolution_kind: Some(ResolutionKind::Completed),
-            uncertainty: String::new(),
+            // T7: 2 lines in the warning callout at 1100 px.
+            uncertainty: "The deadline references Thursday's meeting only by day of week, and the message does not state whether the executive review the following day counts as the operative deadline instead.".into(),
             unverified_deadline: false,
             unverified_resolution: false,
             cross_thread: true,
@@ -867,6 +886,12 @@ pub fn layout_fixture() -> ReviewState {
             event_passed: None,
         },
     ];
+    // T7 (brief §5): `source_failures` must be set before `set_scan` runs --
+    // it reads `self.source_failures > 0` to derive `scan_incomplete`, and
+    // `scan_strip` (§4) needs `incomplete: true` and a coverage count of 5 to
+    // exercise the finished strip's warning line and "Coverage: 5 sources
+    // incomplete" link at 1100 px.
+    state.source_failures = 5;
     state.set_scan(
         ScanResult {
             analysis: Expectations {
@@ -885,7 +910,9 @@ pub fn layout_fixture() -> ReviewState {
             primary_scan_transport_error: false,
             closure_pass_failure: None,
         },
-        "Synthetic layout check".into(),
+        // T7: a long model id so the finished strip's summary line (ending
+        // "... · {model}") wraps at 1100 px.
+        "anthropic/claude-sonnet-4.6-20260315:extended-thinking-zero-data-retention".into(),
     );
     let first_key =
         state

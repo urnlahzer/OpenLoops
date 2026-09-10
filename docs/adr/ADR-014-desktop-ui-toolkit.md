@@ -21,6 +21,8 @@ The UI compiles from checked-in `.slint` files at build time and keeps the exist
 
 The title bar shows "Not signed in" until the Graph layer exposes a display name; `ConnectionReport` carries no account identifiers by design, so `AccountDisplay::signed_in` exists and is tested but is not yet reachable from the live connection.
 
+`Tokens.font-family` is the static `"Segoe UI"`, not `"Segoe UI Variable"`. The variable family is installed on Windows only as its variable font file; this build's FemtoVG/fontdb renderer does not drive that file's weight axis reliably, so a 600-weight request against it can render as a synthetic or plain-regular face instead of the installed Semibold. The static family's own Semibold face is always used for weight 600. `Tokens.mono-font-family` is likewise the static `"Consolas"` rather than `"Cascadia Mono"`, which is not installed on every Windows machine this app targets; Slint resolves one family name with no fallback list, so the token holds exactly the face that is actually present.
+
 ## Rejected alternative
 
 Dioxus with WebView2 would port the HTML reference closely, but it adds a browser-engine process boundary and the risk of placing credentials in DOM or JavaScript state. That broader secret-handling and rendering surface is unnecessary for this native companion.

@@ -747,6 +747,7 @@ pub(crate) fn scan_strip_view(
                         ""
                     }
                     .into(),
+                    coverage_warning: "".into(),
                     coverage_label: "".into(),
                     coverage_notes: "".into(),
                     progress: f32::from(*percent) / 100.0,
@@ -774,12 +775,14 @@ pub(crate) fn scan_strip_view(
             } else {
                 format!("{scan_summary} {expectations}")
             };
-            let summary = if *incomplete {
-                format!(
-                    "{summary} Partial coverage. These results cannot establish that all outstanding work has been found."
-                )
+            // T3 (brief §4): kept as its own field (`coverage_warning`)
+            // rather than appended onto `summary` -- `review.slint` renders
+            // it on its own line in `Tokens.warning`, not glued after the
+            // model id that ends `summary`.
+            let coverage_warning = if *incomplete {
+                "Partial coverage. These results cannot establish that all outstanding work has been found."
             } else {
-                summary
+                ""
             };
             let coverage_label = match model.review.source_failures {
                 0 => "Coverage details".to_string(),
@@ -800,6 +803,7 @@ pub(crate) fn scan_strip_view(
                     elapsed: "".into(),
                     provider: model.provider_disclosure().into(),
                     summary: summary.into(),
+                    coverage_warning: coverage_warning.into(),
                     coverage_label: coverage_label.into(),
                     coverage_notes: coverage_notes.join("\n").into(),
                     progress: 1.0,
@@ -817,6 +821,7 @@ pub(crate) fn scan_strip_view(
                 elapsed: "".into(),
                 provider: model.provider_disclosure().into(),
                 summary: "".into(),
+                coverage_warning: "".into(),
                 coverage_label: "".into(),
                 coverage_notes: "".into(),
                 progress: 0.0,
@@ -2005,8 +2010,15 @@ mod tests {
         assert_eq!(chip, "Scanning · Conversation 3 of 9 · 11 / 42 messages");
 
         let (finished, chip) = scan_strip_view(&scan_strip(None, &app.review), &app, &cards);
-        assert_eq!(finished.title.as_str(), "Scan finished");
+        // T7: the fixture now seeds `source_failures = 5` (brief §5), so a
+        // fresh `layout_fixture()` is already an incomplete scan.
+        assert_eq!(finished.title.as_str(), "Scan incomplete");
         assert!(finished.summary.contains("3 expectations"));
+        assert!(!finished.coverage_warning.is_empty());
+        assert_eq!(
+            finished.coverage_label.as_str(),
+            "Coverage: 5 sources incomplete"
+        );
         assert!(chip.is_empty());
 
         let (idle, chip) = scan_strip_view(&ScanStrip::Idle, &model(), &[]);

@@ -1,5 +1,5 @@
 import { Tokens } from "tokens.slint";
-import { PrimaryButton, SecondaryButton, SubtleButton, OutlineButton, LinkButton, Segmented, Pill, Callout, Field, Disclosure, Avatar, ProgressBar, Checkbox } from "widgets.slint";
+import { PrimaryButton, SecondaryButton, SubtleButton, OutlineButton, LinkButton, Segmented, Pill, Callout, Field, Disclosure, Avatar, ProgressBar, Checkbox, WrappedText } from "widgets.slint";
 import { ScrollView } from "std-widgets.slint";
 
 export struct ReviewRow {
@@ -30,21 +30,15 @@ export struct ScanStripModel {
     elapsed: string,
     provider: string,
     summary: string,
+    // X8/T3: the "Partial coverage..." sentence is a separate field so it
+    // renders on its own line in `Tokens.warning`, never glued onto the end
+    // of `summary` (which ends in the model id) -- see the "Scan incomplete"
+    // screenshot this task's brief points at.
+    coverage-warning: string,
     coverage-label: string,
     coverage-notes: string,
     progress: float,
     incomplete: bool,
-}
-
-component WrappedText {
-    in property <string> text;
-    in property <color> color: Tokens.text-2;
-    in property <length> size: Tokens.font-13;
-    in property <int> weight: 400;
-    width: 100%;
-    Rectangle { width: 100%; height: label.preferred-height;
-        label := Text { width: 100%; text: root.text; color: root.color; font-size: root.size; font-weight: root.weight; wrap: word-wrap; }
-    }
 }
 
 component GroupDot inherits Rectangle { in property <string> kind;
@@ -57,9 +51,14 @@ component MetaBlock {
     in property <MetaCell> cell;
     min-width: Tokens.review-meta-min-width;
     horizontal-stretch: 1;
-    VerticalLayout { spacing: Tokens.space-1;
-        Text { text: root.cell.label; color: Tokens.text-2; font-size: Tokens.font-13; }
-        WrappedText { text: root.cell.value; color: Tokens.text-1; weight: 600; }
+    vertical-stretch: 0;
+    // R2: `alignment: start` keeps a short cell's content pinned to the top
+    // of its `GridLayout` row instead of the `GridLayout` centering it
+    // against a neighbouring cell whose own wrapped value runs to several
+    // lines (e.g. "You (confirmed)" next to a five-line address).
+    VerticalLayout { spacing: Tokens.space-1; alignment: start;
+        Text { text: root.cell.label; color: Tokens.text-2; font-size: Tokens.font-14; font-weight: 600; }
+        WrappedText { text: root.cell.value; text-color: Tokens.text-1; size: Tokens.font-14; weight: 600; }
     }
 }
 
@@ -155,15 +154,15 @@ export component ReviewScreen {
                 // wraps at the strip's own width instead of first laying out
                 // at its unwrapped natural width alongside the counters.
                 HorizontalLayout { spacing: Tokens.space-4;
-                    Text { text: root.scan-strip.title; color: Tokens.brand; font-size: Tokens.font-13; font-weight: 600; }
+                    Text { text: root.scan-strip.title; color: Tokens.brand-label; font-size: Tokens.font-13; font-weight: 600; }
                     Text { text: root.scan-strip.conversation; color: Tokens.text-1; font-size: Tokens.font-13; }
                     Text { text: root.scan-strip.messages; color: Tokens.text-2; font-size: Tokens.font-13; }
                     Text { text: root.scan-strip.elapsed; color: Tokens.text-2; font-size: Tokens.font-13; }
                     Rectangle { horizontal-stretch: 1; }
                 }
-                WrappedText { text: "Message text and participants go to your chosen model at " + root.scan-strip.provider + ". Attachments are not sent."; color: Tokens.text-2; size: Tokens.font-11; }
+                WrappedText { text: "Message text and participants go to your chosen model at " + root.scan-strip.provider + ". Attachments are not sent."; text-color: Tokens.text-2; size: Tokens.font-11; }
                 ProgressBar { value: root.scan-strip.progress; accessible-name: root.scan-strip.messages; }
-                if !root.scan-strip.summary.is-empty: WrappedText { text: root.scan-strip.summary; color: Tokens.warning; size: Tokens.font-11; }
+                if !root.scan-strip.summary.is-empty: WrappedText { text: root.scan-strip.summary; text-color: Tokens.warning; size: Tokens.font-11; }
             }
         }
         if root.scan-strip.state == "finished": Rectangle { background: Tokens.bg-surface; height: finished-strip.preferred-height;
@@ -178,7 +177,8 @@ export component ReviewScreen {
                 // HorizontalLayout main-axis share) so it wraps at the strip's
                 // own inner edge instead of first laying out at its unwrapped
                 // natural width alongside the title and link button.
-                WrappedText { text: root.scan-strip.summary; color: Tokens.text-2; }
+                WrappedText { text: root.scan-strip.summary; text-color: Tokens.text-2; }
+                if !root.scan-strip.coverage-warning.is-empty: WrappedText { text: root.scan-strip.coverage-warning; text-color: Tokens.warning; }
                 if root.coverage-open: Callout { kind: "warning"; text: root.scan-strip.coverage-notes; }
             }
             // N3: one bottom hairline, not a four-side border.
@@ -190,14 +190,14 @@ export component ReviewScreen {
                     GroupDot { kind: "warning"; }
                     Text { text: root.scan-strip.title; color: Tokens.warning; font-size: Tokens.font-13; font-weight: 600; vertical-alignment: center; }
                 }
-                WrappedText { text: root.scan-strip.summary; color: Tokens.warning; }
+                WrappedText { text: root.scan-strip.summary; text-color: Tokens.warning; }
             }
             // N3: one bottom hairline, not a four-side border.
             Rectangle { y: parent.height - Tokens.hairline; height: Tokens.hairline; background: Tokens.warning-stroke; }
         }
         if root.scan-strip.state == "idle": Rectangle { background: Tokens.bg-surface; height: idle-strip.preferred-height;
             idle-strip := VerticalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-1;
-                WrappedText { text: "Scan the last 30 days of Inbox and Sent Items, plus configured Groups and shared mailboxes. Each conversation is checked for expectations and later replies."; color: Tokens.text-1; }
+                WrappedText { text: "Scan the last 30 days of Inbox and Sent Items, plus configured Groups and shared mailboxes. Each conversation is checked for expectations and later replies."; text-color: Tokens.text-1; size: Tokens.font-14; }
                 WrappedText { text: "Message text and participants go to your chosen model at " + root.scan-strip.provider + ". Attachments are not sent."; }
                 LinkButton { text: "Scan scope and data sent to the model provider"; enabled: !root.busy; clicked => { root.sources-link(); } }
             }
@@ -260,11 +260,11 @@ export component ReviewScreen {
                                             VerticalLayout { horizontal-stretch: 1; spacing: Tokens.space-1; alignment: start;
                                                 if !item.date-fits-inline: Text { text: row.date; color: Tokens.text-2; font-size: Tokens.font-11; horizontal-alignment: right; width: 100%; wrap: no-wrap; }
                                                 HorizontalLayout { width: 100%; spacing: Tokens.space-2;
-                                                    WrappedText { text: row.action; color: Tokens.text-1; weight: 600; horizontal-stretch: 1; width: 100%; }
+                                                    WrappedText { text: row.action; text-color: Tokens.text-1; weight: 600; horizontal-stretch: 1; width: 100%; }
                                                     if item.date-fits-inline: Text { text: row.date; color: Tokens.text-2; font-size: Tokens.font-11; horizontal-alignment: right; horizontal-stretch: 0; wrap: no-wrap; }
                                                 }
                                                 WrappedText { text: row.waiting-source; }
-                                                WrappedText { text: row.aging-status; color: row.aging-kind == "danger" ? Tokens.danger : Tokens.text-2; size: Tokens.font-11; }
+                                                WrappedText { text: row.aging-status; text-color: row.aging-kind == "danger" ? Tokens.danger : Tokens.text-2; size: Tokens.font-11; }
                                             }
                                         }
                                         mouse := TouchArea { enabled: !root.busy; clicked => { list-focus.focus(); root.select-row(row.handle); } }
@@ -288,17 +288,17 @@ export component ReviewScreen {
                     VerticalLayout { width: 100%; padding-left: Tokens.pane-gutter-x; padding-right: Tokens.pane-gutter-x; padding-top: Tokens.pane-gutter-y; padding-bottom: Tokens.pane-gutter-y; spacing: Tokens.review-section-gap; alignment: start;
                         reading-column := Rectangle { horizontal-stretch: 1; max-width: Tokens.review-reading-max-width;
                             VerticalLayout { width: 100%; spacing: Tokens.review-section-gap; alignment: start;
-                                if root.no-usable-items: WrappedText { text: root.no-usable-text; color: Tokens.text-2; size: Tokens.font-14; }
-                                if root.has-analysis && !root.no-usable-items && !root.has-selection: WrappedText { text: "No open expectations match this filter. Missing replies in the scanned folders never prove work is finished."; color: Tokens.text-2; size: Tokens.font-14; }
+                                if root.no-usable-items: WrappedText { text: root.no-usable-text; text-color: Tokens.text-2; size: Tokens.font-14; }
+                                if root.has-analysis && !root.no-usable-items && !root.has-selection: WrappedText { text: "No open expectations match this filter. Missing replies in the scanned folders never prove work is finished."; text-color: Tokens.text-2; size: Tokens.font-14; }
                                 // X2: the reading pane has no selected-card branch to host
                                 // `action-status` once results are cleared (no analysis, no
                                 // selection), so a status set outside a decision -- "Results and
                                 // mail cleared from memory..." -- would otherwise never render.
                                 // Same colour rule as the selected-card copy below.
-                                if !root.has-selection && !root.action-status.is-empty: WrappedText { text: root.action-status; color: root.action-status-succeeded ? Tokens.success : Tokens.warning; size: Tokens.font-13; }
+                                if !root.has-selection && !root.action-status.is-empty: WrappedText { text: root.action-status; text-color: root.action-status-succeeded ? Tokens.success : Tokens.warning; size: Tokens.font-13; }
                                 if root.has-selection: VerticalLayout { width: 100%; spacing: Tokens.review-section-gap; alignment: start;
                                     HorizontalLayout { width: 100%; spacing: Tokens.space-2; alignment: start; for pill in root.pills: Pill { text: pill.text; kind: pill.kind; } }
-                                    WrappedText { text: root.title; color: Tokens.text-1; size: Tokens.font-22; weight: 600; }
+                                    WrappedText { text: root.title; text-color: Tokens.text-1; size: Tokens.font-22; weight: 600; }
                                     meta-card := Rectangle { background: Tokens.bg-bar; border-radius: Tokens.radius-6;
                                         // X9: column count follows the reading column's own width
                                         // (stable regardless of the grid's own content) rather than a
@@ -309,10 +309,13 @@ export component ReviewScreen {
                                             for cell[index] in root.meta: MetaBlock { row: index / meta-card.cols; col: mod(index, meta-card.cols); cell: cell; }
                                         }
                                     }
-                                    if !root.uncertainty.is-empty: Rectangle { width: 100%; background: Tokens.warning-bg; border-color: Tokens.warning-stroke; border-width: Tokens.hairline; border-radius: Tokens.radius-4; accessible-role: AccessibleRole.text; accessible-label: "Uncertainty: " + root.uncertainty;
-                                        VerticalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-1; alignment: start;
+                                    // R2: `height:` bound explicitly to the named inner layout's
+                                    // preferred height (not left implicit) -- the second line of a
+                                    // 2-line uncertainty sentence was drawn on the box's own border.
+                                    if !root.uncertainty.is-empty: Rectangle { width: 100%; height: uncertainty-layout.preferred-height; background: Tokens.warning-bg; border-color: Tokens.warning-stroke; border-width: Tokens.hairline; border-radius: Tokens.radius-4; accessible-role: AccessibleRole.text; accessible-label: "Uncertainty: " + root.uncertainty;
+                                        uncertainty-layout := VerticalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-1; alignment: start;
                                             Text { text: "Uncertainty:"; color: Tokens.warning; font-size: Tokens.font-13; font-weight: 600; }
-                                            WrappedText { text: root.uncertainty; color: Tokens.warning; }
+                                            WrappedText { text: root.uncertainty; text-color: Tokens.warning; }
                                         }
                                     }
                                     VerticalLayout { width: 100%; spacing: Tokens.space-2; alignment: start;
@@ -323,16 +326,28 @@ export component ReviewScreen {
                                         // unconditionally (row one hidden when neither applies) keeps this
                                         // from ever silently overflowing regardless of which combination
                                         // of can-track/can-watch is in play.
-                                        if root.selected-open && (root.can-track || root.can-watch): HorizontalLayout { width: 100%; spacing: Tokens.space-2; alignment: start;
+                                        // T5 (brief §4, decision actions): row 1 is Track/Watch (whichever
+                                        // applies) plus, right-aligned via a stretch spacer, "Set To Do
+                                        // reminder…" -- always on the same row as Track/Watch rather than
+                                        // alone on a row of its own, so no row is ever a single lone
+                                        // button.
+                                        // R2: no `alignment` on this row -- per the Slint facts in this
+                                        // task's brief, layout stretch only takes effect without an
+                                        // `alignment` set, and `alignment: start` here was packing every
+                                        // child (including the stretch spacer) at the left edge, leaving
+                                        // "Set To Do reminder…" undocked from the right when Track/Watch
+                                        // were both absent.
+                                        if root.selected-open: HorizontalLayout { width: 100%; spacing: Tokens.space-2;
                                             if root.can-track: PrimaryButton { text: "Track — this is mine"; enabled: !root.busy; clicked => { root.decision(1); } }
                                             if root.can-watch: SecondaryButton { text: "Keep an eye on this"; enabled: !root.busy; clicked => { root.decision(4); } }
+                                            Rectangle { horizontal-stretch: 1; }
+                                            OutlineButton { text: "Set To Do reminder…"; enabled: root.can-remind; clicked => { root.open-reminder(); } }
                                         }
                                         if root.selected-open: HorizontalLayout { width: 100%; spacing: Tokens.space-2; alignment: start;
                                             SecondaryButton { text: "Handled"; enabled: !root.busy; clicked => { root.decision(2); } }
                                             SecondaryButton { text: "Not mine / dismiss"; enabled: !root.busy; clicked => { root.decision(3); } }
                                             SecondaryButton { text: "No longer relevant"; enabled: !root.busy; clicked => { root.decision(5); } }
                                         }
-                                        if root.selected-open: HorizontalLayout { width: 100%; Rectangle { horizontal-stretch: 1; } OutlineButton { text: "Set To Do reminder…"; enabled: root.can-remind; clicked => { root.open-reminder(); } } }
                                         // X3 (replaces the earlier egui-parity plan, S5): §4.5 and the
                                         // Companion show both actions on every closed card --
                                         // terminal (Handled/Dismissed/No longer relevant) and
@@ -345,14 +360,14 @@ export component ReviewScreen {
                                             SecondaryButton { text: "Still open — track it"; enabled: !root.busy; clicked => { root.decision(1); } }
                                         }
                                     }
-                                    if !root.action-status.is-empty: WrappedText { text: root.action-status; color: root.action-status-succeeded ? Tokens.success : Tokens.warning; size: Tokens.font-13; }
+                                    if !root.action-status.is-empty: WrappedText { text: root.action-status; text-color: root.action-status-succeeded ? Tokens.success : Tokens.warning; size: Tokens.font-13; }
                                     if root.draft-open: draft-focus := FocusScope {
                                         width: 100%;
                                         init => { self.focus(); }
                                         key-pressed(event) => { if event.text == Key.Escape { root.cancel-reminder(); return accept; } return reject; }
                                         Rectangle { width: 100%; height: draft-body.preferred-height; background: Tokens.brand-panel; border-color: Tokens.brand-stroke; border-width: Tokens.hairline; border-radius: Tokens.radius-6;
                                             draft-body := VerticalLayout { padding-left: Tokens.card-pad-x; padding-right: Tokens.card-pad-x; padding-top: Tokens.space-4; padding-bottom: Tokens.space-4; spacing: Tokens.space-3; alignment: start;
-                                                WrappedText { text: "Review your Microsoft To Do reminder"; color: Tokens.text-1; size: Tokens.font-16; weight: 600; }
+                                                WrappedText { text: "Review your Microsoft To Do reminder"; text-color: Tokens.text-1; size: Tokens.font-15; weight: 600; }
                                                 WrappedText { text: "Creates one task in your personal default Tasks list. Only the title, reminder time, and an opaque OpenLoops reference are sent to Microsoft. This requires delegated Tasks.ReadWrite and a separate browser sign-in."; }
                                                 if reading-column.width >= Tokens.review-reading-max-width: HorizontalLayout { spacing: Tokens.space-3;
                                                     Field { label: "Task title"; value <=> root.draft-title; enabled: !root.busy; horizontal-stretch: 2; edited(value) => { root.draft-title-edited(value); } }
@@ -365,7 +380,7 @@ export component ReviewScreen {
                                                 HorizontalLayout { spacing: Tokens.space-2;
                                                     SecondaryButton { text: "In one hour"; enabled: !root.busy; clicked => { root.draft-in-hour(); } }
                                                     SecondaryButton { text: "Tomorrow at 9 am"; enabled: !root.busy; clicked => { root.draft-tomorrow(); } }
-                                                    Text { text: root.draft-scheduled-line; color: root.draft-valid ? Tokens.text-2 : Tokens.danger; font-size: Tokens.font-13; horizontal-stretch: 1; wrap: word-wrap; vertical-alignment: center; }
+                                                    WrappedText { text: root.draft-scheduled-line; text-color: root.draft-valid ? Tokens.text-2 : Tokens.danger; horizontal-stretch: 1; }
                                                 }
                                                 WrappedText { text: "This time is your choice, separate from the email deadline. Microsoft To Do controls alert delivery, including when OpenLoops is closed. A failed or uncertain write is never retried automatically."; }
                                                 HorizontalLayout { spacing: Tokens.space-2; alignment: start;
@@ -382,7 +397,13 @@ export component ReviewScreen {
                                         }
                                     }
                                     if root.reminder-state.state == "attempted": Callout { kind: "warning"; text: root.reminder-state.text; accessible-name: root.reminder-state.text;
-                                        Text { text: root.reminder-state.marker; color: Tokens.warning; font-family: Tokens.mono-font-family; font-size: Tokens.font-13; wrap: char-wrap; width: 100%; }
+                                        // Same one-line-preferred-height hazard as `WrappedText` fixes for
+                                        // `word-wrap` also applies to `char-wrap`; this marker is opaque
+                                        // and may contain no spaces at all, so it keeps `char-wrap` rather
+                                        // than switching to `WrappedText` (which is always `word-wrap`).
+                                        Rectangle { width: 100%; height: marker-label.preferred-height;
+                                            marker-label := Text { text: root.reminder-state.marker; color: Tokens.warning; font-family: Tokens.mono-font-family; font-size: Tokens.font-13; wrap: char-wrap; width: 100%; }
+                                        }
                                         HorizontalLayout { spacing: Tokens.space-2;
                                             Rectangle { horizontal-stretch: 1; }
                                             LinkButton { text: "Inspect Microsoft To Do"; enabled: !root.busy; clicked => { root.open-external(root.todo-url); } }
@@ -393,27 +414,91 @@ export component ReviewScreen {
                                         }
                                     }
                                     VerticalLayout { width: 100%; spacing: Tokens.space-3; alignment: start;
-                                        HorizontalLayout { spacing: Tokens.space-2;
-                                            Text { text: "Why this was suggested"; color: Tokens.text-1; font-size: Tokens.font-16; font-weight: 600; vertical-alignment: center; }
-                                            Text { text: "Exact quotations resolved against the source mail. Quoted history is context, not evidence."; color: Tokens.text-2; font-size: Tokens.font-13; horizontal-stretch: 1; wrap: word-wrap; vertical-alignment: center; }
+                                        VerticalLayout { spacing: Tokens.space-1;
+                                            Text { text: "Why this was suggested"; color: Tokens.text-1; font-size: Tokens.font-15; font-weight: 600; }
+                                            // R2: on its own row (width 100% of the reading column,
+                                            // not sharing a `HorizontalLayout` main-axis with the
+                                            // heading) -- alongside the heading it had no bounded
+                                            // width to wrap within and clipped at the right edge.
+                                            WrappedText { text: "Exact quotations resolved against the source mail. Quoted history is context, not evidence."; }
                                         }
-                                        for evidence in root.evidence-cards: Rectangle { width: 100%; background: Tokens.bg-surface; border-color: Tokens.stroke-1; border-width: Tokens.hairline; border-radius: Tokens.radius-6; clip: true;
-                                            VerticalLayout { spacing: 0px; alignment: start;
+                                        // T8: this card `Rectangle` relied on the implicit "a
+                                        // Rectangle with one layout child sizes itself to that
+                                        // layout's preferred size" rule; that implicit sizing did
+                                        // not pick up a 3+-line quote's real height (drawing the
+                                        // context line over the quote's last line -- this task's
+                                        // brief's Review screenshot), the same way the list row's
+                                        // `item := Rectangle { height: max(..., row-content.
+                                        // preferred-height); ... }` explicit binding does not miss
+                                        // it. Naming `card-layout` and binding `height:` to it
+                                        // explicitly applies that same proven-correct pattern here.
+                                        for evidence in root.evidence-cards: Rectangle { width: 100%; height: card-layout.preferred-height; background: Tokens.bg-surface; border-color: Tokens.stroke-1; border-width: Tokens.hairline; border-radius: Tokens.radius-6; clip: true;
+                                            card-layout := VerticalLayout { spacing: 0px; alignment: start;
                                                 Rectangle { background: Tokens.bg-bar;
-                                                    HorizontalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-2;
-                                                        Text { text: evidence.label; color: Tokens.brand-label; font-size: Tokens.font-13; font-weight: 600; }
-                                                        Text { text: "· " + evidence.sender + " · " + evidence.time; color: Tokens.text-2; font-size: Tokens.font-13; horizontal-stretch: 1; wrap: word-wrap; }
-                                                        if !evidence.url.is-empty: LinkButton { text: "Open message in Outlook"; enabled: !root.busy; clicked => { root.open-external(evidence.url); } }
+                                                    // T4 (brief §4, evidence card header): a `Text` with
+                                                    // `wrap: word-wrap` placed directly in a `HorizontalLayout`
+                                                    // reports a one-line preferred height, so a long sender
+                                                    // address wrapped this header to two lines while the
+                                                    // `bg-bar` `Rectangle` stayed sized for one, drawing the
+                                                    // quote block below over the header's own second line
+                                                    // (the "Original expectation" overlap in this task's
+                                                    // brief's Review screenshot). Label/sender/time now share
+                                                    // one `WrappedText` line; the link moves to its own row
+                                                    // underneath instead of racing that text for width.
+                                                    VerticalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-1;
+                                                        // R2: `HorizontalLayout` stretch gave `sender-text` a
+                                                        // few px less than the padded row's real width
+                                                        // (clipping "...-07:0" at the right edge). Its width
+                                                        // is now the row's own known width minus the label's
+                                                        // exact preferred width, computed directly rather than
+                                                        // negotiated by layout stretch.
+                                                        Rectangle { width: 100%; height: max(evidence-label-text.preferred-height, evidence-sender-text.preferred-height);
+                                                            evidence-label-text := Text { x: 0; y: 0; text: evidence.label; color: Tokens.brand-label; font-size: Tokens.font-13; font-weight: 600; }
+                                                            evidence-sender-text := Text {
+                                                                x: evidence-label-text.preferred-width + Tokens.space-2; y: 0;
+                                                                width: parent.width - evidence-label-text.preferred-width - Tokens.space-2;
+                                                                text: "· " + evidence.sender + " · " + evidence.time; color: Tokens.text-2; font-size: Tokens.font-13; wrap: word-wrap;
+                                                            }
+                                                        }
+                                                        if !evidence.url.is-empty: HorizontalLayout { Rectangle { horizontal-stretch: 1; } LinkButton { text: "Open message in Outlook"; enabled: !root.busy; clicked => { root.open-external(evidence.url); } } }
                                                     }
                                                 }
                                                 Rectangle { height: Tokens.hairline; background: Tokens.stroke-1; }
                                                 VerticalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-3; padding-bottom: Tokens.space-3; spacing: Tokens.space-2; alignment: start;
-                                                    if !evidence.subject-note.is-empty: WrappedText { text: evidence.subject-note; color: Tokens.text-2; size: Tokens.font-11; }
-                                                    if !evidence.quote.is-empty: HorizontalLayout { width: 100%; spacing: Tokens.space-3;
-                                                        Rectangle { width: Tokens.review-row-bar-width; background: Tokens.brand; }
-                                                        WrappedText { text: evidence.quote; color: Tokens.text-1; size: Tokens.font-15; horizontal-stretch: 1; }
+                                                    if !evidence.subject-note.is-empty: WrappedText { text: evidence.subject-note; text-color: Tokens.text-2; size: Tokens.font-11; }
+                                                    // T8: a `VerticalLayout` stacking a wrapped, multi-line
+                                                    // quote directly above another wrapped text did not
+                                                    // reserve the quote's real height -- the context line
+                                                    // was drawn over the quote's last line (this task's
+                                                    // brief's Review screenshot) regardless of whether the
+                                                    // quote was a bare `WrappedText`, one wrapped in a
+                                                    // `HorizontalLayout` with a side-bar, or one positioned
+                                                    // by explicit arithmetic; every variant under-reserved
+                                                    // the same way. Stacking the two by explicit `y` --
+                                                    // reading each `Text`'s own `preferred-height` directly,
+                                                    // with no intermediate layout asked to stack wrapped
+                                                    // items itself -- sidesteps whatever in that stacking
+                                                    // path was the actual bug. The brand side-bar is
+                                                    // positioned the same way, spanning only the quote's
+                                                    // own height.
+                                                    if !evidence.quote.is-empty || !evidence.context.is-empty: Rectangle {
+                                                        width: 100%;
+                                                        height: (evidence.quote.is-empty ? 0px : quote-text.preferred-height + (evidence.context.is-empty ? 0px : Tokens.space-2))
+                                                            + (evidence.context.is-empty ? 0px : context-text.preferred-height);
+                                                        if !evidence.quote.is-empty: Rectangle { x: 0; y: 0; width: Tokens.review-row-bar-width; height: quote-text.preferred-height; background: Tokens.brand; }
+                                                        quote-text := Text {
+                                                            visible: !evidence.quote.is-empty;
+                                                            x: Tokens.review-row-bar-width + Tokens.space-3; y: 0;
+                                                            width: parent.width - Tokens.review-row-bar-width - Tokens.space-3;
+                                                            text: evidence.quote; color: Tokens.text-1; font-size: Tokens.font-15; wrap: word-wrap;
+                                                        }
+                                                        context-text := Text {
+                                                            visible: !evidence.context.is-empty;
+                                                            x: 0; y: evidence.quote.is-empty ? 0px : quote-text.preferred-height + Tokens.space-2;
+                                                            width: 100%;
+                                                            text: evidence.context; color: Tokens.text-2; font-size: Tokens.font-13; wrap: word-wrap;
+                                                        }
                                                     }
-                                                    if !evidence.context.is-empty: WrappedText { text: evidence.context; color: Tokens.text-2; size: Tokens.font-13; }
                                                 }
                                             }
                                         }
@@ -422,14 +507,19 @@ export component ReviewScreen {
                                         // N2: the heading names the card below it; with no card
                                         // (`state != "evidence"`) the grey note stands alone rather
                                         // than being introduced by a heading with nothing under it.
-                                        if root.completion-card.state == "evidence": WrappedText { text: "Possible later completion"; color: Tokens.text-1; size: Tokens.font-16; weight: 600; }
-                                        if root.completion-card.state == "evidence": Rectangle { width: 100%; background: Tokens.success-bg; border-color: Tokens.success-stroke; border-width: Tokens.hairline; border-radius: Tokens.radius-6; clip: true;
-                                            VerticalLayout { spacing: 0px; alignment: start;
+                                        if root.completion-card.state == "evidence": WrappedText { text: "Possible later completion"; text-color: Tokens.text-1; size: Tokens.font-16; weight: 600; }
+                                        if root.completion-card.state == "evidence": Rectangle { width: 100%; height: completion-card-layout.preferred-height; background: Tokens.success-bg; border-color: Tokens.success-stroke; border-width: Tokens.hairline; border-radius: Tokens.radius-6; clip: true;
+                                            completion-card-layout := VerticalLayout { spacing: 0px; alignment: start;
                                                 Rectangle { background: Tokens.bg-bar;
+                                                    // T4/R2: same header-wrap fix as the evidence card above.
                                                     VerticalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-1; alignment: start;
-                                                        HorizontalLayout { spacing: Tokens.space-2;
-                                                            Text { text: root.completion-card.label; color: Tokens.success; font-size: Tokens.font-13; font-weight: 600; }
-                                                            Text { text: "· " + root.completion-card.sender + " · " + root.completion-card.time; color: Tokens.text-2; font-size: Tokens.font-13; horizontal-stretch: 1; wrap: word-wrap; }
+                                                        Rectangle { width: 100%; height: max(completion-label-text.preferred-height, completion-sender-text.preferred-height);
+                                                            completion-label-text := Text { x: 0; y: 0; text: root.completion-card.label; color: Tokens.success; font-size: Tokens.font-13; font-weight: 600; }
+                                                            completion-sender-text := Text {
+                                                                x: completion-label-text.preferred-width + Tokens.space-2; y: 0;
+                                                                width: parent.width - completion-label-text.preferred-width - Tokens.space-2;
+                                                                text: "· " + root.completion-card.sender + " · " + root.completion-card.time; color: Tokens.text-2; font-size: Tokens.font-13; wrap: word-wrap;
+                                                            }
                                                         }
                                                         HorizontalLayout { spacing: Tokens.space-2;
                                                             Rectangle { horizontal-stretch: 1; }
@@ -440,15 +530,30 @@ export component ReviewScreen {
                                                 }
                                                 Rectangle { height: Tokens.hairline; background: Tokens.stroke-1; }
                                                 VerticalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-3; padding-bottom: Tokens.space-3; spacing: Tokens.space-2; alignment: start;
-                                                    HorizontalLayout { width: 100%; spacing: Tokens.space-3;
-                                                        Rectangle { width: Tokens.review-row-bar-width; background: Tokens.success; }
-                                                        WrappedText { text: root.completion-card.quote; color: Tokens.text-1; size: Tokens.font-15; horizontal-stretch: 1; }
+                                                    // T8: same explicit-`y` quote/follow-up stacking fix as
+                                                    // the evidence card above -- a `VerticalLayout` stacking
+                                                    // a wrapped quote directly above another wrapped line
+                                                    // does not reserve the quote's real (multi-line) height.
+                                                    Rectangle {
+                                                        width: 100%;
+                                                        height: completion-quote-text.preferred-height + Tokens.space-2 + completion-footer-text.preferred-height;
+                                                        Rectangle { x: 0; y: 0; width: Tokens.review-row-bar-width; height: completion-quote-text.preferred-height; background: Tokens.success; }
+                                                        completion-quote-text := Text {
+                                                            x: Tokens.review-row-bar-width + Tokens.space-3; y: 0;
+                                                            width: parent.width - Tokens.review-row-bar-width - Tokens.space-3;
+                                                            text: root.completion-card.quote; color: Tokens.text-1; font-size: Tokens.font-15; wrap: word-wrap;
+                                                        }
+                                                        completion-footer-text := Text {
+                                                            x: 0; y: completion-quote-text.preferred-height + Tokens.space-2;
+                                                            width: 100%;
+                                                            text: "Completion is a hypothesis for you to confirm; it is never treated as final.";
+                                                            color: Tokens.text-2; font-size: Tokens.font-11; wrap: word-wrap;
+                                                        }
                                                     }
-                                                    WrappedText { text: "Completion is a hypothesis for you to confirm; it is never treated as final."; color: Tokens.text-2; size: Tokens.font-11; }
                                                 }
                                             }
                                         }
-                                        if root.completion-card.state != "evidence": WrappedText { text: root.completion-card.label; color: Tokens.text-3; size: Tokens.font-13; }
+                                        if root.completion-card.state != "evidence": WrappedText { text: root.completion-card.label; text-color: Tokens.text-3; size: Tokens.font-13; }
                                     }
                                     Disclosure { title: root.conversation-title; expanded: root.conversation-expanded-default; enabled: !root.busy;
                                         VerticalLayout { width: 100%; spacing: Tokens.space-3; alignment: start;
@@ -456,11 +561,11 @@ export component ReviewScreen {
                                                 HorizontalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-3; padding-bottom: Tokens.space-3; spacing: Tokens.space-3;
                                                     Avatar { initials: message.initials; accessible-name: message.sender; }
                                                     VerticalLayout { horizontal-stretch: 1; spacing: Tokens.space-1; alignment: start;
-                                                        WrappedText { text: message.sender; color: Tokens.text-1; weight: 600; }
-                                                        WrappedText { text: message.meta; color: Tokens.text-2; size: Tokens.font-11; }
-                                                        WrappedText { text: message.body; color: Tokens.text-1; }
+                                                        WrappedText { text: message.sender; text-color: Tokens.text-1; weight: 600; }
+                                                        WrappedText { text: message.meta; text-color: Tokens.text-2; size: Tokens.font-11; }
+                                                        WrappedText { text: message.body; text-color: Tokens.text-1; size: Tokens.font-14; }
                                                         if !message.quoted-history.is-empty: Disclosure { title: "Quoted history"; enabled: !root.busy;
-                                                            WrappedText { text: message.quoted-history; color: Tokens.text-2; size: Tokens.font-13; }
+                                                            WrappedText { text: message.quoted-history; text-color: Tokens.text-2; size: Tokens.font-13; }
                                                         }
                                                     }
                                                 }

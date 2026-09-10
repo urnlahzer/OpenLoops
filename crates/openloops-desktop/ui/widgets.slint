@@ -1,6 +1,36 @@
 import { Tokens } from "tokens.slint";
 import { Button, CheckBox as StdCheckBox, ComboBox, LineEdit, TextEdit } from "std-widgets.slint";
 
+// T1 (was `review.slint`'s private `WrappedText`, now the one shared copy):
+// a `Text` with `wrap: word-wrap` placed directly in a layout (or given only
+// `width: 100%`) reports a one-line preferred height and then renders
+// several lines over whatever follows it. R2: the previous version hosted
+// `label` in an INNER `Rectangle` whose own `height` was bound to `label`'s
+// `preferred-height` -- but that inner `Rectangle` was never itself given a
+// height, so `WrappedText`'s own ROOT (what the surrounding layout actually
+// measures) still reported no height at all. `inherits Rectangle` puts both
+// `height` and `min-height` directly on the root, bound to `label`'s
+// `preferred-height`, so the wrapped height is a real layout constraint of
+// the element every caller places. Every wrapping `Text` in the five
+// `.slint` files goes through this one component so this fix (and any
+// future one) lives in exactly one place.
+export component WrappedText inherits Rectangle {
+    in property <string> text;
+    // Named `text-color`, not `color`: `Rectangle` already defines `color`
+    // as a deprecated alias for `background`, and Slint refuses to override
+    // an inherited property with a different type/meaning.
+    in property <color> text-color: Tokens.text-2;
+    in property <length> size: Tokens.font-13;
+    in property <int> weight: 400;
+    in property <TextHorizontalAlignment> horizontal-alignment: left;
+    width: 100%;
+    // Slint rejects setting both `height` and `min-height` on one element;
+    // `height` alone already fixes this element's size to the wrapped
+    // text's real height, which is what a caller's layout measures.
+    height: label.preferred-height;
+    label := Text { width: 100%; text: root.text; color: root.text-color; font-size: root.size; font-weight: root.weight; horizontal-alignment: root.horizontal-alignment; wrap: word-wrap; }
+}
+
 component ButtonBase {
     in property <string> text;
     in property <string> accessible-name: text;
@@ -101,7 +131,7 @@ export component SubtleButton {
             padding-left: Tokens.button-pad-x; padding-right: Tokens.button-pad-x;
             padding-top: Tokens.button-pad-y; padding-bottom: Tokens.button-pad-y;
             alignment: center;
-            label := Text { text: root.text; color: Tokens.text-1; font-size: Tokens.font-14; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+            label := Text { text: root.text; color: Tokens.text-1; font-size: Tokens.font-14; font-weight: 400; horizontal-alignment: center; vertical-alignment: center; }
         }
     }
     touch := TouchArea { enabled: root.enabled; clicked => { subtle-focus.focus(); root.clicked(); } }
@@ -201,35 +231,43 @@ export component Segmented {
     opacity: enabled ? 1 : Tokens.disabled-opacity;
     accessible-role: groupbox;
     accessible-label: accessible-name;
-    HorizontalLayout {
-        spacing: Tokens.space-2;
-        for option[index] in root.options: segment := Rectangle {
-            min-width: Tokens.segment-min-width;
-            min-height: Tokens.click-min;
-            horizontal-stretch: 1;
-            background: index == root.selected-index ? Tokens.brand : Tokens.bg-surface;
-            border-width: Tokens.hairline;
-            border-color: index == root.selected-index ? Tokens.brand : Tokens.stroke-2;
-            border-radius: Tokens.radius-4;
-            forward-focus: segment-focus;
-            accessible-role: button;
-            accessible-label: option;
-            accessible-enabled: root.enabled;
-            accessible-checkable: true;
-            accessible-checked: index == root.selected-index;
-            accessible-action-default => {
-                if root.enabled && index != root.selected-index {
-                    root.selected-index = index;
-                    root.selected(index);
+    // S6: the Companion's `seg()` track is the control's own `bg-bar`
+    // background with the *selected* segment painted white (`bg-surface`)
+    // and unselected segments left transparent so the track shows through
+    // -- never a brand-filled block, which reads as a stray blue button
+    // (see the Sources/OpenRouter screenshot this task's brief points at).
+    // Ink stays `text-1` either way; only the background toggles.
+    track := Rectangle {
+        background: Tokens.bg-bar;
+        border-radius: Tokens.radius-6;
+        HorizontalLayout {
+            padding: Tokens.segment-track-pad;
+            spacing: Tokens.space-1;
+            for option[index] in root.options: segment := Rectangle {
+                min-width: Tokens.segment-min-width;
+                min-height: Tokens.click-min - 2 * Tokens.segment-track-pad;
+                horizontal-stretch: 1;
+                background: index == root.selected-index ? Tokens.bg-surface : Tokens.transparent;
+                border-radius: Tokens.radius-3;
+                forward-focus: segment-focus;
+                accessible-role: button;
+                accessible-label: option;
+                accessible-enabled: root.enabled;
+                accessible-checkable: true;
+                accessible-checked: index == root.selected-index;
+                accessible-action-default => {
+                    if root.enabled && index != root.selected-index {
+                        root.selected-index = index;
+                        root.selected(index);
+                    }
                 }
-            }
-            Text {
-                text: option;
-                color: index == root.selected-index ? Tokens.bg-surface : Tokens.text-1;
-                font-size: Tokens.font-13; font-weight: 600;
-                horizontal-alignment: center; vertical-alignment: center;
-            }
-            TouchArea {
+                Text {
+                    text: option;
+                    color: Tokens.text-1;
+                    font-size: Tokens.font-13; font-weight: 600;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+                TouchArea {
                 enabled: root.enabled;
                 clicked => {
                     segment-focus.focus();
@@ -270,6 +308,7 @@ export component Segmented {
                 height: parent.height + 2 * Tokens.focus-ring;
                 border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
             }
+            }
         }
     }
 }
@@ -302,15 +341,24 @@ export component Callout {
     width: 100%;
     accessible-role: AccessibleRole.text;
     accessible-label: accessible-name;
-    Rectangle { background: root.fill; border-color: root.stroke; border-width: Tokens.hairline; border-radius: Tokens.radius-4;
-        VerticalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-2; alignment: start;
-            if !root.text.is-empty: Text { text: root.text; color: root.ink; font-size: Tokens.font-13; wrap: word-wrap; width: 100%; }
+    // R2: bound explicitly to the named inner layout's own preferred height
+    // (rather than relying on the implicit "one layout child" auto-sizing),
+    // matching the pattern proven for the evidence card's quote/context
+    // stack -- a fixed/min height cut the wrapped text's last line.
+    Rectangle { height: inner.preferred-height; background: root.fill; border-color: root.stroke; border-width: Tokens.hairline; border-radius: Tokens.radius-4;
+        inner := VerticalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-2; alignment: start;
+            if !root.text.is-empty: WrappedText { text: root.text; text-color: root.ink; size: Tokens.font-13; }
             @children
         }
     }
 }
 
-export component Field {
+// R2: `inherits Rectangle` -- without a real base, the `height:` binding
+// below was on a root with no genuine layout-measurable size (the same bug
+// `WrappedText` and `HelperText` had), so a caller's `VerticalLayout` could
+// still under-reserve a multi-line helper's real height (e.g. "Outlook
+// Groups").
+export component Field inherits Rectangle {
     in property <string> label;
     // `accessible-label` is already a built-in property on every element, so
     // this is named distinctly; it lets a caller give the screen-reader name
@@ -329,14 +377,22 @@ export component Field {
     callback accepted(string);
     callback focus-changed(bool);
     out property <bool> has-focus;
-    min-height: multiline ? rows * Tokens.textarea-row + Tokens.font-13 : Tokens.field-height + Tokens.font-13 + Tokens.space-1;
+    // T2 (brief §1): the old `min-height` arithmetic assumed the helper text
+    // is always exactly one line, so a helper sentence that actually wraps
+    // to two or three lines (e.g. the OpenRouter "Parallel requests" field)
+    // rendered at a fixed one-line height and overlapped whatever followed
+    // it -- the "Model" label overlap in the Sources screenshot this task's
+    // brief points at. `layout` below is the field's real content (label +
+    // optional wrapped helper text + input), so its own `preferred-height`
+    // already accounts for however many lines the helper text needs.
+    height: layout.preferred-height;
     width: 100%;
     horizontal-stretch: 1;
     opacity: enabled ? 1 : Tokens.disabled-opacity;
-    VerticalLayout {
+    layout := VerticalLayout {
         spacing: Tokens.space-1;
-        Text { text: root.label; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; width: 100%; horizontal-alignment: left; }
-        if !root.helper-text.is-empty: Text { text: root.helper-text; color: Tokens.text-2; font-size: Tokens.font-13; wrap: word-wrap; width: 100%; horizontal-alignment: left; }
+        Text { text: root.label; color: Tokens.text-1; font-size: Tokens.font-14; font-weight: 600; width: 100%; horizontal-alignment: left; }
+        if !root.helper-text.is-empty: WrappedText { text: root.helper-text; }
         if !root.multiline: line-frame := Rectangle {
             min-height: Tokens.field-height;
             width: 100%;
