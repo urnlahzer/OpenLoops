@@ -12,6 +12,26 @@ pub(crate) use scanning::{ReviewMessage, ScanProgress, ScanResult, probe, scan};
 
 pub(crate) const SHOW_HANDLED_LABEL: &str = "Show resolved, handled and dismissed";
 
+// Test-only call counter for [`ReviewState::card_contexts`] -- the per-card
+// HMAC fingerprint pass the perf fix (owner round 3, 2026-09-10) moved out of
+// the 250 ms busy tick. `sync_busy` in `slint_ui.rs` must never call it; see
+// `card_contexts_call_count`/`reset_card_contexts_call_count` and their use
+// in `slint_ui.rs`'s test module.
+#[cfg(test)]
+thread_local! {
+    static CARD_CONTEXTS_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn card_contexts_call_count() -> usize {
+    CARD_CONTEXTS_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_card_contexts_call_count() {
+    CARD_CONTEXTS_CALLS.with(|calls| calls.set(0));
+}
+
 pub(crate) struct ReminderDraft {
     pub(crate) key: [u8; 32],
     pub(crate) account: String,
@@ -265,6 +285,8 @@ impl ReviewState {
     }
 
     pub(crate) fn card_contexts(&self, items: &[Expectation]) -> Vec<Option<CardContext>> {
+        #[cfg(test)]
+        CARD_CONTEXTS_CALLS.with(|calls| calls.set(calls.get() + 1));
         let clock = chrono::Local::now();
         items
             .iter()

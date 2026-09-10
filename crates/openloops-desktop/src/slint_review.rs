@@ -13,7 +13,8 @@ use crate::{
     },
     slint_ui::{
         AppWindow, CompletionCard, ConversationRow, EvidenceCard, MetaCell, ReminderStateView,
-        ReviewPill, ReviewRow, ScanStripModel, refresh, start_timer,
+        ReviewPill, ReviewRow, ScanStripModel, refresh, start_timer, sync_list_cached,
+        sync_value_cached,
     },
 };
 use openloops_graph::live::{ConnectionConfig, review::load_recent};
@@ -21,7 +22,7 @@ use openloops_inference::{
     blocks::CanonicalBlock,
     expectations::{Anchor, EventPassed, Expectation, Owner},
 };
-use slint::{ComponentHandle, ModelRc, Timer, VecModel};
+use slint::{ComponentHandle, Timer};
 
 // Review decision callback codes used by `ui/review.slint`.
 const DECISION_REVIEW: i32 = 0;
@@ -398,10 +399,27 @@ fn conversation_rows(
         .collect()
 }
 
+/// The last projected `Vec<T>`/value actually pushed to each of
+/// `sync_review`'s Slint list/struct properties, so a resync that produces
+/// the same content can leave the existing model in place (see
+/// [`sync_list_cached`]/[`sync_value_cached`]) instead of forcing every
+/// bound `Repeater`/`ListView` to rebuild and re-layout (perf fix, owner
+/// round 3, 2026-09-10).
+#[derive(Default)]
+struct ProjectionCache {
+    rows: Vec<ReviewRow>,
+    pills: Vec<ReviewPill>,
+    meta: Vec<MetaCell>,
+    evidence: Vec<EvidenceCard>,
+    completion: Option<CompletionCard>,
+    conversation: Vec<ConversationRow>,
+}
+
 struct ReviewUiState {
     selected: Option<[u8; 32]>,
     filter: Filter,
     coverage_open: bool,
+    cache: ProjectionCache,
 }
 
 impl Default for ReviewUiState {
@@ -410,6 +428,7 @@ impl Default for ReviewUiState {
             selected: None,
             filter: Filter::All,
             coverage_open: false,
+            cache: ProjectionCache::default(),
         }
     }
 }
@@ -964,7 +983,9 @@ fn sync_review_inner(
             date: row.date.into(),
         })
         .collect::<Vec<_>>();
-    window.set_review_rows(ModelRc::new(VecModel::from(rows)));
+    sync_list_cached(&mut review_ui.cache.rows, rows, |m| {
+        window.set_review_rows(m);
+    });
     window.set_review_open_count(i32::try_from(open_badge_count(cards)).unwrap_or(i32::MAX));
     let (no_usable, no_usable_text) =
         model
@@ -983,26 +1004,28 @@ fn sync_review_inner(
     if let Some(selected) = selected_view(&model.review, review_ui.selected, cards) {
         window.set_review_has_selection(true);
         window.set_review_title(selected.title.into());
-        window.set_review_meta(ModelRc::new(VecModel::from(
-            selected
-                .meta
-                .into_iter()
-                .map(|(label, value)| MetaCell {
-                    label: label.into(),
-                    value: value.into(),
-                })
-                .collect::<Vec<_>>(),
-        )));
-        window.set_review_pills(ModelRc::new(VecModel::from(
-            selected
-                .pills
-                .into_iter()
-                .map(|pill| ReviewPill {
-                    text: pill.text.into(),
-                    kind: pill.kind.into(),
-                })
-                .collect::<Vec<_>>(),
-        )));
+        let meta = selected
+            .meta
+            .into_iter()
+            .map(|(label, value)| MetaCell {
+                label: label.into(),
+                value: value.into(),
+            })
+            .collect::<Vec<_>>();
+        sync_list_cached(&mut review_ui.cache.meta, meta, |m| {
+            window.set_review_meta(m);
+        });
+        let pills = selected
+            .pills
+            .into_iter()
+            .map(|pill| ReviewPill {
+                text: pill.text.into(),
+                kind: pill.kind.into(),
+            })
+            .collect::<Vec<_>>();
+        sync_list_cached(&mut review_ui.cache.pills, pills, |m| {
+            window.set_review_pills(m);
+        });
         window.set_review_uncertainty(selected.uncertainty.into());
         window.set_selected_open(selected.open);
         window.set_selected_terminal(selected.terminal);
@@ -1027,22 +1050,23 @@ fn sync_review_inner(
             text: selected.reminder.text.into(),
             marker: selected.reminder.marker.into(),
         });
-        window.set_evidence_cards(ModelRc::new(VecModel::from(
-            selected
-                .evidence
-                .into_iter()
-                .map(|evidence| EvidenceCard {
-                    label: evidence.label.into(),
-                    sender: evidence.sender.into(),
-                    time: evidence.time.into(),
-                    quote: evidence.quote.into(),
-                    context: evidence.context.into(),
-                    subject_note: evidence.subject_note.into(),
-                    url: evidence.url.into(),
-                })
-                .collect::<Vec<_>>(),
-        )));
-        window.set_completion_card(CompletionCard {
+        let evidence = selected
+            .evidence
+            .into_iter()
+            .map(|evidence| EvidenceCard {
+                label: evidence.label.into(),
+                sender: evidence.sender.into(),
+                time: evidence.time.into(),
+                quote: evidence.quote.into(),
+                context: evidence.context.into(),
+                subject_note: evidence.subject_note.into(),
+                url: evidence.url.into(),
+            })
+            .collect::<Vec<_>>();
+        sync_list_cached(&mut review_ui.cache.evidence, evidence, |m| {
+            window.set_evidence_cards(m);
+        });
+        let completion = CompletionCard {
             state: selected.completion.state.into(),
             label: selected.completion.label.into(),
             sender: selected.completion.sender.into(),
@@ -1050,27 +1074,35 @@ fn sync_review_inner(
             quote: selected.completion.quote.into(),
             cross_thread: selected.completion.cross_thread,
             url: selected.completion.url.into(),
+        };
+        sync_value_cached(&mut review_ui.cache.completion, completion, |c| {
+            window.set_completion_card(c);
         });
         window.set_conversation_title(selected.conversation_title.into());
-        window.set_conversation_rows(ModelRc::new(VecModel::from(
-            selected
-                .conversation
-                .into_iter()
-                .map(|message| ConversationRow {
-                    initials: message.initials.into(),
-                    sender: message.sender.into(),
-                    meta: message.meta.into(),
-                    body: message.body.into(),
-                    sent: message.sent,
-                    quoted_history: message.quoted_history.into(),
-                })
-                .collect::<Vec<_>>(),
-        )));
+        let conversation = selected
+            .conversation
+            .into_iter()
+            .map(|message| ConversationRow {
+                initials: message.initials.into(),
+                sender: message.sender.into(),
+                meta: message.meta.into(),
+                body: message.body.into(),
+                sent: message.sent,
+                quoted_history: message.quoted_history.into(),
+            })
+            .collect::<Vec<_>>();
+        sync_list_cached(&mut review_ui.cache.conversation, conversation, |m| {
+            window.set_conversation_rows(m);
+        });
     } else {
         window.set_review_has_selection(false);
         window.set_review_title("".into());
-        window.set_review_meta(ModelRc::default());
-        window.set_review_pills(ModelRc::default());
+        sync_list_cached(&mut review_ui.cache.meta, Vec::new(), |m| {
+            window.set_review_meta(m);
+        });
+        sync_list_cached(&mut review_ui.cache.pills, Vec::new(), |m| {
+            window.set_review_pills(m);
+        });
         window.set_review_uncertainty("".into());
         window.set_selected_open(false);
         window.set_selected_terminal(false);
@@ -1083,10 +1115,20 @@ fn sync_review_inner(
         window.set_draft_scheduled_line("".into());
         window.set_draft_valid(false);
         window.set_reminder_state(ReminderStateView::default());
-        window.set_evidence_cards(ModelRc::default());
-        window.set_completion_card(CompletionCard::default());
+        sync_list_cached(&mut review_ui.cache.evidence, Vec::new(), |m| {
+            window.set_evidence_cards(m);
+        });
+        sync_value_cached(
+            &mut review_ui.cache.completion,
+            CompletionCard::default(),
+            |c| {
+                window.set_completion_card(c);
+            },
+        );
         window.set_conversation_title("".into());
-        window.set_conversation_rows(ModelRc::default());
+        sync_list_cached(&mut review_ui.cache.conversation, Vec::new(), |m| {
+            window.set_conversation_rows(m);
+        });
     }
     let decision_error = model.review.decisions.error.as_deref();
     window.set_review_action_status(decision_error.unwrap_or(&model.review.action_status).into());
@@ -1701,14 +1743,19 @@ mod tests {
         assert!(!selected.can_track && !selected.can_watch && !selected.can_remind);
     }
 
-    // Regression for B1: Enter/click could write a Track or Watch decision
-    // while a scan or another action was in flight, because `can-track` and
-    // `can-watch` were pushed to the window without the `!busy` guard
-    // `can-remind` already had. Exercises the real `sync_review` write path
-    // (not just the model-level `SelectedView`) so a future regression that
-    // drops the guard at the call site is caught here.
+    // Every test in this crate that needs a real `AppWindow` lives in this
+    // one function. Slint's `backend-winit` platform is process-global (see
+    // `i-slint-core`'s `GLOBAL_CONTEXT`/`with_event_loop_proxy`): once one
+    // OS thread has created a window, any *other* thread calling
+    // `AppWindow::new()` fails with `PlatformError::SetPlatformError(
+    // AlreadySet)` -- "The Slint platform was initialized in another
+    // thread" -- even after the first thread has already finished, and
+    // `cargo test` gives every `#[test]` fn its own thread regardless of
+    // `--test-threads`. So every window-backed assertion has to share this
+    // single test rather than each living in its own `#[test]`.
     #[test]
-    fn can_track_and_can_watch_are_disabled_while_busy() {
+    #[allow(clippy::too_many_lines)]
+    fn a_single_native_window_covers_busy_guards_projection_cache_and_sync_busy() {
         let window = AppWindow::new().expect("create AppWindow for test");
         let mut model = model();
         model.review = crate::review_model::layout_fixture();
@@ -1740,6 +1787,13 @@ mod tests {
             .review
             .card_contexts(&model.review.analysis.as_ref().unwrap().items);
 
+        // Regression for B1: Enter/click could write a Track or Watch
+        // decision while a scan or another action was in flight, because
+        // `can-track` and `can-watch` were pushed to the window without the
+        // `!busy` guard `can-remind` already had. Exercises the real
+        // `sync_review` write path (not just the model-level
+        // `SelectedView`) so a future regression that drops the guard at
+        // the call site is caught here.
         sync_review(
             &model,
             &window,
@@ -1761,6 +1815,109 @@ mod tests {
         );
         assert!(!window.get_can_track());
         assert!(!window.get_can_watch());
+
+        // Requirement 6b (perf fix, owner round 3): a `sync_review` re-run
+        // over unchanged content must leave every projected list model in
+        // place rather than replacing it -- `ModelRc`'s own `PartialEq`
+        // compares the backing pointer (see `i-slint-core`'s `model.rs`),
+        // so equality here proves the *same* model object survived, not
+        // merely equal content. A real content change (a new decision)
+        // must still replace the affected models.
+        sync_review(
+            &model,
+            &window,
+            &cards,
+            false,
+            false,
+            ScanStripModel::default(),
+        );
+        let rows_before = window.get_review_rows();
+        let pills_before = window.get_review_pills();
+        let meta_before = window.get_review_meta();
+        let evidence_before = window.get_evidence_cards();
+        let conversation_before = window.get_conversation_rows();
+
+        sync_review(
+            &model,
+            &window,
+            &cards,
+            false,
+            false,
+            ScanStripModel::default(),
+        );
+        assert_eq!(window.get_review_rows(), rows_before);
+        assert_eq!(window.get_review_pills(), pills_before);
+        assert_eq!(window.get_review_meta(), meta_before);
+        assert_eq!(window.get_evidence_cards(), evidence_before);
+        assert_eq!(window.get_conversation_rows(), conversation_before);
+
+        model
+            .review
+            .apply_decision_change(key, Decision::Done, Reminder::None);
+        let cards = model
+            .review
+            .card_contexts(model.review.analysis.as_ref().map_or(&[], |a| &a.items));
+        sync_review(
+            &model,
+            &window,
+            &cards,
+            false,
+            false,
+            ScanStripModel::default(),
+        );
+        // Card 0 (the previously selected, now-hidden card) drops out of the
+        // list entirely, so the row list is guaranteed to differ -- proving
+        // the cache replaces the model on real content changes. (Pills are
+        // not asserted here: the newly selected card can legitimately show
+        // textually identical pills to the old selection, in which case
+        // leaving the existing model in place is the *correct* behaviour,
+        // not a caching bug.)
+        assert_ne!(window.get_review_rows(), rows_before);
+
+        // Requirement 6a: `sync_busy` never calls the per-card review
+        // projection (`ReviewState::card_contexts`, an HMAC fingerprint per
+        // card) -- neither idle on `scan_progress` (a Microsoft/model job)
+        // nor while a Review scan is actively running (a `Scanning` strip,
+        // the one shape that touches the scan strip at all).
+        let mut busy_model = crate::app_model::AppModel::with_store(Ok(None));
+        busy_model.review = crate::review_model::layout_fixture();
+        busy_model.pending_service = crate::app_model::Service::Model;
+        busy_model.progress = "Testing the selected cloud model (up to 150 seconds per request)";
+        crate::review_model::reset_card_contexts_call_count();
+        crate::slint_ui::sync_busy(&busy_model, &window);
+        assert_eq!(crate::review_model::card_contexts_call_count(), 0);
+        assert!(window.get_busy());
+        assert!(window.get_scanning());
+        assert!(
+            window
+                .get_model_busy_line()
+                .as_str()
+                .contains("Testing the selected")
+        );
+
+        let progress = std::sync::Arc::new(crate::review_model::ScanProgress::default());
+        progress
+            .total
+            .store(10, std::sync::atomic::Ordering::Relaxed);
+        progress
+            .processed
+            .store(3, std::sync::atomic::Ordering::Relaxed);
+        progress
+            .conversation_total
+            .store(4, std::sync::atomic::Ordering::Relaxed);
+        busy_model.pending_service = crate::app_model::Service::Review;
+        busy_model.progress = "Finding open loops with Ollama Cloud";
+        busy_model.scan_progress = Some(progress);
+        crate::review_model::reset_card_contexts_call_count();
+        crate::slint_ui::sync_busy(&busy_model, &window);
+        assert_eq!(crate::review_model::card_contexts_call_count(), 0);
+        assert!(
+            window
+                .get_review_scan_chip_text()
+                .as_str()
+                .starts_with("Scanning")
+        );
+        assert_eq!(window.get_scan_strip().state.as_str(), "scanning");
     }
 
     #[test]

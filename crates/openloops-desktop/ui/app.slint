@@ -41,6 +41,7 @@ export component AppWindow inherits Window {
     in-out property <string> shared-mailboxes;
     in property <bool> own-inbox-accessible;
     in property <[StatusLine]> microsoft-lines;
+    in property <string> microsoft-busy-line;
     in-out property <int> provider-index;
     in-out property <string> api-key;
     in-out property <bool> show-key;
@@ -53,6 +54,7 @@ export component AppWindow inherits Window {
     in-out property <bool> parallel-field-focused;
     in property <string> model-status;
     in property <bool> model-succeeded;
+    in property <string> model-busy-line;
     in property <string> provider-disclosure;
     in property <string> key-placeholder;
     in property <string> load-models-label;
@@ -143,9 +145,10 @@ export component AppWindow inherits Window {
             if root.active-screen == 1: SourcesScreen {
                 controls-enabled: !root.busy; store-available: root.store-available; settings-status: root.settings-status; settings-succeeded: root.settings-succeeded;
                 client-id <=> root.client-id; groups <=> root.groups; shared-mailboxes <=> root.shared-mailboxes; own-inbox-accessible: root.own-inbox-accessible; microsoft-lines: root.microsoft-lines;
+                microsoft-busy-line: root.microsoft-busy-line;
                 provider-index <=> root.provider-index; api-key <=> root.api-key; show-key <=> root.show-key; models: root.models; model-index <=> root.model-index; model-value <=> root.model-value;
                 ollama-plan-index <=> root.ollama-plan-index; ollama-plan-options: root.ollama-plan-options; openrouter-parallel <=> root.openrouter-parallel;
-                parallel-field-focused <=> root.parallel-field-focused; model-status: root.model-status; model-succeeded: root.model-succeeded;
+                parallel-field-focused <=> root.parallel-field-focused; model-status: root.model-status; model-succeeded: root.model-succeeded; model-busy-line: root.model-busy-line;
                 provider-disclosure: root.provider-disclosure; key-placeholder: root.key-placeholder; load-models-label: root.load-models-label;
                 can-check-microsoft: root.can-check-microsoft; can-load-models: root.can-load-models; can-test-model: root.can-test-model;
                 save-settings => { root.save-settings(); } reload-settings => { root.reload-settings(); } forget-settings => { root.forget-settings(); }

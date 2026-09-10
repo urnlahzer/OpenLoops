@@ -278,13 +278,19 @@ impl AppModel {
         });
     }
 
-    pub fn poll(&mut self, respawn: impl Fn() + Send + Clone + 'static) {
+    /// Polls the pending job's channel, if any, applying its outcome.
+    /// Returns whether an outcome was actually consumed (a result arrived,
+    /// or the worker disconnected) -- `false` on an empty channel (still
+    /// running) or when nothing is pending. The native adapter's busy-tick
+    /// timer uses this to decide between a full `refresh` (something
+    /// changed) and the lightweight `sync_busy` (nothing did).
+    pub fn poll(&mut self, respawn: impl Fn() + Send + Clone + 'static) -> bool {
         let Some(receiver) = &self.pending else {
-            return;
+            return false;
         };
         let outcome = match receiver.try_recv() {
             Ok(outcome) => outcome,
-            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Empty) => return false,
             Err(TryRecvError::Disconnected) => {
                 self.pending = None;
                 let status = Status {
@@ -299,7 +305,7 @@ impl AppModel {
                         self.review.scan_failed = true;
                     }
                 }
-                return;
+                return true;
             }
         };
         self.pending = None;
@@ -361,6 +367,7 @@ impl AppModel {
                 }
             }
         }
+        true
     }
 
     /// Keeps the Ollama Cloud selection only while the freshly loaded list
@@ -809,6 +816,34 @@ mod tests {
         assert!(app.pending.is_none());
         assert!(!app.microsoft.lines.is_empty());
         assert!(app.model_status.lines.is_empty());
+    }
+
+    // Regression guard for the perf fix: the native adapter's busy-tick
+    // timer decides between a full `refresh` and the lightweight
+    // `sync_busy` based on this return value, so it must be exact --
+    // `false` on nothing pending or an empty channel (job still running),
+    // `true` the moment an outcome (success or a disconnected worker) is
+    // actually consumed.
+    #[test]
+    fn poll_reports_whether_it_consumed_an_outcome() {
+        let mut app = AppModel::new();
+        assert!(!app.poll(|| {}), "nothing pending");
+
+        let (sender, receiver) = mpsc::channel();
+        app.pending = Some(receiver);
+        app.pending_service = Service::Model;
+        assert!(!app.poll(|| {}), "channel still empty");
+        assert!(app.pending.is_some());
+
+        sender.send(Outcome::Generation(Ok(()))).unwrap();
+        assert!(app.poll(|| {}), "a result arrived");
+        assert!(app.pending.is_none());
+
+        let (sender, receiver) = mpsc::channel::<Outcome>();
+        app.pending = Some(receiver);
+        drop(sender);
+        assert!(app.poll(|| {}), "the worker disconnected");
+        assert!(app.pending.is_none());
     }
 
     #[test]

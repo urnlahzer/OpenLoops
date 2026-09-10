@@ -47,6 +47,11 @@ export component SourcesScreen {
     in-out property <string> shared-mailboxes;
     in property <bool> own-inbox-accessible;
     in property <[StatusLine]> microsoft-lines;
+    // Busy/progress text shown while a job targets this card -- kept out of
+    // `microsoft-lines` (which stays `Tokens.success`/`Tokens.warning` only)
+    // so an in-progress job never reads as a warning (owner nit, perf-fix
+    // round: "should be text-2").
+    in property <string> microsoft-busy-line;
     in-out property <int> provider-index;
     in-out property <string> api-key;
     in-out property <bool> show-key;
@@ -59,6 +64,9 @@ export component SourcesScreen {
     in-out property <bool> parallel-field-focused;
     in property <string> model-status;
     in property <bool> model-succeeded;
+    // Same rationale as `microsoft-busy-line`: the model card's own busy
+    // line, always `Tokens.text-2`, never riding on `model-succeeded`.
+    in property <string> model-busy-line;
     in property <string> provider-disclosure;
     in property <string> key-placeholder;
     in property <string> load-models-label;
@@ -131,6 +139,7 @@ export component SourcesScreen {
                             }
                             VerticalLayout { width: 100%; spacing: Tokens.space-1;
                                 for line in root.microsoft-lines: WrappedText { text: line.text; text-color: line.succeeded ? Tokens.success : Tokens.warning; horizontal-stretch: 1; }
+                                if !root.microsoft-busy-line.is-empty: WrappedText { text: root.microsoft-busy-line; text-color: Tokens.text-2; horizontal-stretch: 1; }
                             }
                         }
                     }
@@ -173,6 +182,7 @@ export component SourcesScreen {
                                 HelperText { text: "Content-free generation check, up to 150 s."; horizontal-stretch: 1; }
                             }
                             WrappedText { text: root.model-status; text-color: root.model-succeeded ? Tokens.success : Tokens.warning; horizontal-stretch: 1; }
+                            if !root.model-busy-line.is-empty: WrappedText { text: root.model-busy-line; text-color: Tokens.text-2; horizontal-stretch: 1; }
                             HelperText { text: "This connection test sends no email. Scanning inboxes sends recent message text from your configured inboxes to " + root.provider-disclosure + "."; width: 100%; }
                         }
                     }

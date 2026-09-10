@@ -3,7 +3,7 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use crate::{
     app_model::{AccountDisplay, AppModel, Outcome, Service, Status},
-    review_model::{ReviewState, open_badge_count, scan_strip},
+    review_model::{ReviewState, ScanStrip, open_badge_count, scan_strip},
     settings::{MAX_OPENROUTER_PARALLEL, MIN_OPENROUTER_PARALLEL, OllamaPlan, Provider},
 };
 use openloops_graph::live::{ConnectionConfig, check_connection};
@@ -130,12 +130,43 @@ fn provider_connected(model: &AppModel) -> bool {
     !model.selected_model().is_empty() && model.model_status.succeeded
 }
 
-fn status_with_busy(status: &Status, busy: Option<&str>) -> String {
-    let mut lines = status.lines.clone();
-    if let Some(busy) = busy {
-        lines.push(busy.to_owned());
+/// Replaces `window`'s list model only when the freshly projected `new`
+/// value differs (by `PartialEq`, item by item) from `cache`, the last value
+/// actually pushed. `ModelRc::new(VecModel::from(..))` always allocates a
+/// *new* backing model, which forces every `Repeater`/`ListView` bound to it
+/// to rebuild and re-layout even when the content is byte-identical to what
+/// is already showing; leaving the model untouched when nothing changed is
+/// the whole point of this (perf fix, owner round 3, 2026-09-10). Shared by
+/// every projected list on both screens -- `sync`'s own `models`/
+/// `ollama-plan-options` here, and `sync_review`'s row/pill/meta/evidence/
+/// conversation lists in `slint_review.rs`.
+pub(crate) fn sync_list_cached<T: Clone + PartialEq + 'static>(
+    cache: &mut Vec<T>,
+    new: Vec<T>,
+    set: impl FnOnce(ModelRc<T>),
+) {
+    if *cache != new {
+        set(ModelRc::new(VecModel::from(new.clone())));
+        *cache = new;
     }
-    lines.join("\n")
+}
+
+/// Same idea as [`sync_list_cached`] for a single (non-list) projected
+/// value, e.g. the review screen's `completion-card`.
+pub(crate) fn sync_value_cached<T: Clone + PartialEq>(
+    cache: &mut Option<T>,
+    new: T,
+    set: impl FnOnce(T),
+) {
+    if cache.as_ref() != Some(&new) {
+        set(new.clone());
+        *cache = Some(new);
+    }
+}
+
+thread_local! {
+    static MODELS_CACHE: RefCell<Vec<SharedString>> = const { RefCell::new(Vec::new()) };
+    static OLLAMA_PLAN_OPTIONS_CACHE: RefCell<Vec<SharedString>> = const { RefCell::new(Vec::new()) };
 }
 
 #[allow(clippy::too_many_lines)]
@@ -199,7 +230,7 @@ fn sync(model: &AppModel, window: &AppWindow) {
             .first()
             .is_some_and(|line| line == "Personal inbox: access confirmed."),
     );
-    let mut microsoft_lines = model
+    let microsoft_lines = model
         .microsoft
         .lines
         .iter()
@@ -208,15 +239,21 @@ fn sync(model: &AppModel, window: &AppWindow) {
             succeeded: line.ends_with("access confirmed."),
         })
         .collect::<Vec<_>>();
-    if model.pending_service == Service::Microsoft
-        && let Some(busy_text) = &busy_text
-    {
-        microsoft_lines.push(StatusLine {
-            text: busy_text.clone().into(),
-            succeeded: false,
-        });
-    }
     window.set_microsoft_lines(ModelRc::new(VecModel::from(microsoft_lines)));
+    // The busy/progress line rides in its own property, always rendered in
+    // `Tokens.text-2` (owner nit, perf-fix round: it used to piggyback on
+    // `microsoft-lines`/`model-status` with `succeeded: false`, which read as
+    // a warning while a job was simply still running). `sync_busy` updates
+    // these same two properties every tick without touching anything else on
+    // this screen.
+    window.set_microsoft_busy_line(
+        if model.pending_service == Service::Microsoft {
+            busy_text.as_deref().unwrap_or_default()
+        } else {
+            ""
+        }
+        .into(),
+    );
     window.set_provider_index(match model.provider {
         Provider::OllamaCloud => 0,
         Provider::OpenRouter => 1,
@@ -234,13 +271,13 @@ fn sync(model: &AppModel, window: &AppWindow) {
     if window.get_api_key().as_str() != desired_api_key {
         window.set_api_key(desired_api_key.into());
     }
-    let values = display_model_values(model);
-    window.set_models(ModelRc::new(VecModel::from(
-        values
-            .into_iter()
-            .map(SharedString::from)
-            .collect::<Vec<_>>(),
-    )));
+    let values = display_model_values(model)
+        .into_iter()
+        .map(SharedString::from)
+        .collect::<Vec<_>>();
+    MODELS_CACHE.with(|cache| {
+        sync_list_cached(&mut cache.borrow_mut(), values, |m| window.set_models(m));
+    });
     window.set_model_index(display_model_index(selected_index(model)));
     window.set_model_value(display_model_value(model).into());
     window.set_ollama_plan_index(match model.ollama_plan {
@@ -248,21 +285,27 @@ fn sync(model: &AppModel, window: &AppWindow) {
         OllamaPlan::Pro => 1,
         OllamaPlan::Max => 2,
     });
-    window.set_ollama_plan_options(ModelRc::new(VecModel::from(
-        [OllamaPlan::Free, OllamaPlan::Pro, OllamaPlan::Max]
-            .map(|plan| SharedString::from(plan.label()))
-            .to_vec(),
-    )));
+    let plan_options = [OllamaPlan::Free, OllamaPlan::Pro, OllamaPlan::Max]
+        .map(|plan| SharedString::from(plan.label()))
+        .to_vec();
+    OLLAMA_PLAN_OPTIONS_CACHE.with(|cache| {
+        sync_list_cached(&mut cache.borrow_mut(), plan_options, |m| {
+            window.set_ollama_plan_options(m);
+        });
+    });
     if !window.get_parallel_field_focused() {
         window.set_openrouter_parallel(model.openrouter_parallel.to_string().into());
     }
-    let model_busy = if model.pending_service == Service::Model {
-        busy_text.as_deref()
-    } else {
-        None
-    };
-    window.set_model_status(status_with_busy(&model.model_status, model_busy).into());
+    window.set_model_status(joined_status(&model.model_status).into());
     window.set_model_succeeded(model.model_status.succeeded);
+    window.set_model_busy_line(
+        if model.pending_service == Service::Model {
+            busy_text.as_deref().unwrap_or_default()
+        } else {
+            ""
+        }
+        .into(),
+    );
     window.set_provider_disclosure(model.provider_disclosure().into());
     window.set_key_placeholder(match model.provider {
         Provider::OllamaCloud => "Paste your Ollama API key".into(),
@@ -279,6 +322,56 @@ fn sync(model: &AppModel, window: &AppWindow) {
     });
     window.set_can_test_model(!model.selected_model().is_empty() && !model.active_key().is_empty());
     crate::slint_review::sync_review(model, window, &cards, busy, review_scanning, strip_model);
+}
+
+/// The busy tick's lightweight counterpart to [`sync`]/[`refresh`]: updates
+/// only what actually changes while a job runs -- `busy`, the chip text and
+/// elapsed seconds, the scan strip's progress fields while a Review scan is
+/// active, the Microsoft/model card's own busy line, and the `can-*` flags
+/// that are unconditionally `false` while busy -- never the per-card review
+/// projection (`ReviewState::card_contexts`, an HMAC fingerprint per card)
+/// or any of `sync_review`'s rebuilt lists (perf fix, owner round 3,
+/// 2026-09-10: the old 250 ms tick ran the full `sync` and paid for both on
+/// every tick). Called from `run`'s timer when `AppModel::poll` did not
+/// consume an outcome; a consumed outcome (or the job finishing) still runs
+/// the full `refresh`, same as every user callback.
+pub(crate) fn sync_busy(model: &AppModel, window: &AppWindow) {
+    window.set_busy(true);
+    window.set_scanning(true);
+    let elapsed = model.started.elapsed();
+    let busy_text = format!("{} · {}s", model.progress, elapsed.as_secs());
+    window.set_busy_chip_text(busy_text.clone().into());
+
+    if let Some(progress) = model.scan_progress.as_deref() {
+        let strip = scan_strip(Some(progress), &model.review);
+        // The `Scanning` arm never reads `cards` (only `Finished` does, to
+        // summarise expectations), so an empty slice here never reaches
+        // `ReviewState::card_contexts`. `Finished`/`Idle` strips do not
+        // change between full syncs (nothing about them is a function of
+        // elapsed time), so they are left exactly as the last full `sync`
+        // rendered them.
+        if matches!(strip, ScanStrip::Scanning { .. }) {
+            let (strip_model, scan_chip) = crate::slint_review::scan_strip_view(&strip, model, &[]);
+            window.set_review_scan_chip_text(scan_chip.into());
+            window.set_scan_strip(strip_model);
+        }
+    }
+
+    match model.pending_service {
+        Service::Microsoft => window.set_microsoft_busy_line(busy_text.into()),
+        Service::Model => window.set_model_busy_line(busy_text.into()),
+        Service::Review => {}
+    }
+
+    // Each of these is `X && !busy` in the full sync; busy is always true
+    // here, so they are unconditionally false -- no need to recompute `X`,
+    // which is exactly the card-context-dependent work this function exists
+    // to skip.
+    window.set_can_scan(false);
+    window.set_can_rescan(false);
+    window.set_can_track(false);
+    window.set_can_watch(false);
+    window.set_can_remind(false);
 }
 
 fn finish_edit(model: &mut AppModel) {
@@ -423,10 +516,20 @@ pub fn run() -> Result<(), slint::PlatformError> {
         let timer_weak = Rc::downgrade(&timer);
         timer.start(TimerMode::Repeated, Duration::from_millis(250), move || {
             let mut model_ref = model.borrow_mut();
-            model_ref.poll(|| {});
+            let consumed = model_ref.poll(|| {});
             let _ = model_ref.persist_changes();
             drop(model_ref);
-            refresh(&model, &weak);
+            // A consumed outcome changed something real (a result landed, or
+            // the job chained into another one) and needs the full
+            // `sync`/`sync_review` pass, same as any user callback. An empty
+            // poll means nothing but the elapsed-time display moved, so
+            // `sync_busy` alone keeps the chip/strip live without paying for
+            // the per-card review projection four times a second.
+            if consumed {
+                refresh(&model, &weak);
+            } else if let Some(window) = weak.upgrade() {
+                sync_busy(&model.borrow(), &window);
+            }
             if model.borrow().pending.is_none()
                 && let Some(timer) = timer_weak.upgrade()
             {
@@ -923,5 +1026,61 @@ mod tests {
         model.models = vec!["available-model".into()];
         model.selected = "available-model".into();
         assert_eq!(display_model_value(&model), "available-model");
+    }
+
+    // `sync_busy`'s own behaviour (never touching the review projection,
+    // updating the scan strip while scanning) is exercised in
+    // `slint_review.rs`'s `a_single_native_window_covers_busy_guards_projection_cache_and_sync_busy`
+    // test, alongside every other test in this crate that needs a real
+    // `AppWindow` -- see that test's comment for why they all have to share
+    // one: Slint's `backend-winit` platform binds to whichever OS thread
+    // first initializes it for the life of the process, and a second
+    // `#[test]` fn (its own thread, even under `--test-threads=1`) calling
+    // `AppWindow::new()` fails with "The Slint platform was initialized in
+    // another thread".
+
+    // Requirement 6b: the list-model cache leaves the existing `ModelRc` in
+    // place (rather than allocating and installing a new one) when the
+    // freshly projected content is unchanged, and always installs a new one
+    // when it changed. `ModelRc`'s own `PartialEq` compares the backing
+    // pointer (see `i-slint-core`'s `model.rs`), so equality here means
+    // "the very same model object", not merely "equal content".
+    #[test]
+    fn sync_list_cached_skips_the_setter_when_content_is_unchanged() {
+        let mut cache: Vec<i32> = Vec::new();
+        let mut sets = 0;
+        let mut last: ModelRc<i32> = ModelRc::default();
+        sync_list_cached(&mut cache, vec![1, 2, 3], |m| {
+            sets += 1;
+            last = m;
+        });
+        assert_eq!(sets, 1);
+        let first = last.clone();
+
+        sync_list_cached(&mut cache, vec![1, 2, 3], |m| {
+            sets += 1;
+            last = m;
+        });
+        assert_eq!(sets, 1, "unchanged content must not call the setter again");
+        assert_eq!(last, first);
+
+        sync_list_cached(&mut cache, vec![1, 2, 4], |m| {
+            sets += 1;
+            last = m;
+        });
+        assert_eq!(sets, 2, "changed content must replace the model");
+        assert_ne!(last, first);
+    }
+
+    #[test]
+    fn sync_value_cached_skips_the_setter_when_content_is_unchanged() {
+        let mut cache: Option<i32> = None;
+        let mut sets = 0;
+        sync_value_cached(&mut cache, 7, |_| sets += 1);
+        assert_eq!(sets, 1);
+        sync_value_cached(&mut cache, 7, |_| sets += 1);
+        assert_eq!(sets, 1, "unchanged value must not call the setter again");
+        sync_value_cached(&mut cache, 8, |_| sets += 1);
+        assert_eq!(sets, 2, "changed value must call the setter");
     }
 }
