@@ -63,8 +63,11 @@ created") against Microsoft To Do directly. The Ollama
 test sends a fixed content-free request. Successful generation confirms that
 request's validity, not a model's extraction quality.
 
-The title bar shows "Not signed in" until the Graph layer exposes a display
-name; `ConnectionReport` carries no account identifiers by design.
+The title bar's account element shows "Signed in · Microsoft 365" once the
+Microsoft connection has succeeded, or once review messages have already
+loaded, and nothing otherwise; the Graph layer exposes no display name yet
+(`ConnectionReport` carries no account identifiers by design), so no name or
+avatar is shown.
 
 The app registration is still a developer setup prerequisite. Ordinary user
 onboarding will need a publisher-owned multitenant registration configured in
@@ -79,6 +82,10 @@ Build the executable once from a development checkout:
 ```powershell
 cargo build -p openloops-desktop --bin openloops-ui --features native-ui --locked
 ```
+
+The window/taskbar icon is set at runtime from `ui/assets/openloops-256.png` via
+Slint's `icon` property on the window; a pinned taskbar shortcut's own icon
+would need an embedded exe resource, which is out of scope here.
 
 The native window uses Slint 1.17.1 with the Fluent style and native renderer. A narrow
 `settings.rs` module uses pinned `keyring-core` and `windows-native-keyring-store`

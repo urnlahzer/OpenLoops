@@ -37,6 +37,12 @@ export struct ScanStripModel {
     coverage-warning: string,
     coverage-label: string,
     coverage-notes: string,
+    // Addendum item 7: the "Event index: ..." line is developer telemetry,
+    // split out of `coverage-notes` (by its "Event index:" prefix, in
+    // `slint_review.rs`) so the coverage panel shows only actionable
+    // per-source/per-conversation lines by default; this renders separately
+    // under a collapsed "Diagnostics" disclosure.
+    coverage-diagnostics: string,
     progress: float,
     incomplete: bool,
 }
@@ -180,6 +186,13 @@ export component ReviewScreen {
                 WrappedText { text: root.scan-strip.summary; text-color: Tokens.text-2; }
                 if !root.scan-strip.coverage-warning.is-empty: WrappedText { text: root.scan-strip.coverage-warning; text-color: Tokens.warning; }
                 if root.coverage-open: Callout { kind: "warning"; text: root.scan-strip.coverage-notes; }
+                // Addendum item 7: collapsed by default, and only reachable
+                // once the coverage panel itself is open -- the event-index
+                // diagnostics line stays out of the way for an owner who
+                // never opens either disclosure.
+                if root.coverage-open && !root.scan-strip.coverage-diagnostics.is-empty: Disclosure { title: "Diagnostics";
+                    WrappedText { text: root.scan-strip.coverage-diagnostics; }
+                }
             }
             // N3: one bottom hairline, not a four-side border.
             Rectangle { y: parent.height - Tokens.hairline; height: Tokens.hairline; background: Tokens.stroke-1; }

@@ -750,6 +750,7 @@ pub(crate) fn scan_strip_view(
                     coverage_warning: "".into(),
                     coverage_label: "".into(),
                     coverage_notes: "".into(),
+                    coverage_diagnostics: "".into(),
                     progress: f32::from(*percent) / 100.0,
                     incomplete: false,
                 },
@@ -789,6 +790,24 @@ pub(crate) fn scan_strip_view(
                 1 => "Coverage: 1 source incomplete".to_string(),
                 count => format!("Coverage: {count} sources incomplete"),
             };
+            // Addendum item 7: the "Event index: ..." line is developer
+            // telemetry, identified by its own prefix (not by position, so
+            // reordering `coverage_notes` upstream can't silently surface it
+            // among the actionable lines) and rendered separately under a
+            // collapsed "Diagnostics" disclosure in `review.slint`.
+            let (diagnostics, notes): (Vec<&String>, Vec<&String>) = coverage_notes
+                .iter()
+                .partition(|line| line.starts_with("Event index:"));
+            let notes = notes
+                .into_iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let diagnostics = diagnostics
+                .into_iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join("\n");
             (
                 ScanStripModel {
                     state: "finished".into(),
@@ -805,7 +824,8 @@ pub(crate) fn scan_strip_view(
                     summary: summary.into(),
                     coverage_warning: coverage_warning.into(),
                     coverage_label: coverage_label.into(),
-                    coverage_notes: coverage_notes.join("\n").into(),
+                    coverage_notes: notes.into(),
+                    coverage_diagnostics: diagnostics.into(),
                     progress: 1.0,
                     incomplete: *incomplete,
                 },
@@ -824,6 +844,7 @@ pub(crate) fn scan_strip_view(
                 coverage_warning: "".into(),
                 coverage_label: "".into(),
                 coverage_notes: "".into(),
+                coverage_diagnostics: "".into(),
                 progress: 0.0,
                 incomplete: false,
             },
@@ -2032,6 +2053,48 @@ mod tests {
             "Coverage: 1 source incomplete"
         );
         assert!(finished.summary.contains("Reviewed 4 of 4 loaded messages"));
+    }
+
+    #[test]
+    fn scan_strip_view_separates_diagnostics_from_actionable_coverage_notes() {
+        let app = model();
+        let finished = ScanStrip::Finished {
+            incomplete: false,
+            summary: String::new(),
+            coverage_notes: vec![
+                "Inbox: 3 messages".into(),
+                "Event index: 1 event learned (0 meetings, 1 calendar subjects, 0 subject \
+                 prose, 0 body prose); 1 tied to their own message's event, 0 named an event, \
+                 0 carried a time, 0 matched by name, 0 matched by request text, 0 closed from \
+                 the index, 0 closed from a stated time."
+                    .into(),
+                "1 conversation identity was merged by subject and participants.".into(),
+            ],
+        };
+        let (view, _) = scan_strip_view(&finished, &app, &[]);
+        assert_eq!(
+            view.coverage_notes.as_str(),
+            "Inbox: 3 messages\n1 conversation identity was merged by subject and participants."
+        );
+        assert!(!view.coverage_notes.contains("Event index:"));
+        assert!(
+            view.coverage_diagnostics
+                .as_str()
+                .starts_with("Event index:")
+        );
+    }
+
+    #[test]
+    fn scan_strip_view_leaves_coverage_diagnostics_empty_with_no_event_index_line() {
+        let app = model();
+        let finished = ScanStrip::Finished {
+            incomplete: false,
+            summary: String::new(),
+            coverage_notes: vec!["Inbox: 3 messages".into()],
+        };
+        let (view, _) = scan_strip_view(&finished, &app, &[]);
+        assert_eq!(view.coverage_notes.as_str(), "Inbox: 3 messages");
+        assert!(view.coverage_diagnostics.is_empty());
     }
 
     #[test]

@@ -7,6 +7,12 @@ export { ReviewRow, MetaCell, ReviewPill, ScanStripModel, EvidenceCard, Completi
 
 export component AppWindow inherits Window {
     title: "OpenLoops";
+    // Owner feedback item 5: the taskbar/title-bar icon. Path is relative to
+    // this .slint file; `slint-build` resolves and embeds it at compile
+    // time, so `build.rs` needs no extra include path for it. A pinned
+    // taskbar shortcut's own icon would need an embedded exe resource --
+    // that is out of scope here (see docs/native-setup.md).
+    icon: @image-url("assets/openloops-256.png");
     min-width: Tokens.window-min-width;
     min-height: Tokens.window-min-height;
     preferred-width: Tokens.window-width;
@@ -20,8 +26,6 @@ export component AppWindow inherits Window {
     in property <bool> scanning;
     in property <string> busy-chip-text;
     in property <string> review-scan-chip-text;
-    in property <string> account-name;
-    in property <string> account-initials;
     in property <bool> account-signed-in;
     in property <int> review-badge;
     in property <string> provider-name;
@@ -133,7 +137,7 @@ export component AppWindow inherits Window {
 
     VerticalLayout {
         spacing: 0px;
-        TitleBar { scanning: root.scanning; scan-text: root.review-scan-chip-text.is-empty ? root.busy-chip-text : root.review-scan-chip-text; account-name: root.account-name; account-initials: root.account-initials; account-signed-in: root.account-signed-in; }
+        TitleBar { scanning: root.scanning; scan-text: root.review-scan-chip-text.is-empty ? root.busy-chip-text : root.review-scan-chip-text; account-signed-in: root.account-signed-in; }
         HorizontalLayout { spacing: 0px; vertical-stretch: 1;
             NavRail { selected-index <=> root.active-screen; review-badge: root.review-badge; provider-name: root.provider-name; provider-connected: root.provider-connected; enabled: !root.busy; selected(index) => { root.navigate(index); } }
             if root.active-screen == 1: SourcesScreen {

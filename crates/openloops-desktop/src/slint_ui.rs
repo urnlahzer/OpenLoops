@@ -2,7 +2,7 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use crate::{
-    app_model::{self, AccountDisplay, AppModel, Outcome, Service, Status},
+    app_model::{AccountDisplay, AppModel, Outcome, Service, Status},
     review_model::{ReviewState, open_badge_count, scan_strip},
     settings::{MAX_OPENROUTER_PARALLEL, MIN_OPENROUTER_PARALLEL, OllamaPlan, Provider},
 };
@@ -22,10 +22,6 @@ const OPENROUTER_KEYS_URL: &str = "https://openrouter.ai/settings/keys";
 
 fn joined_status(status: &Status) -> String {
     status.lines.join("\n")
-}
-
-fn account_display(display_name: Option<&str>) -> AccountDisplay {
-    display_name.map_or_else(AccountDisplay::default, AccountDisplay::signed_in)
 }
 
 /// The label shown for the `ComboBox` row that means "nothing picked yet".
@@ -145,8 +141,13 @@ fn status_with_busy(status: &Status, busy: Option<&str>) -> String {
 #[allow(clippy::too_many_lines)]
 fn sync(model: &AppModel, window: &AppWindow) {
     // Graph does not expose the signed-in display name through the current
-    // connection report yet; keep the adapter seam ready without inventing one.
-    let account = account_display(None);
+    // connection report yet, so the title bar shows only a connection
+    // summary (owner feedback item 3): once the Microsoft connection has
+    // succeeded, or once review messages have already loaded (mail is
+    // plainly being scanned even if a rescan's own check has not yet
+    // re-run), rather than a misleading "Not signed in".
+    let account =
+        AccountDisplay::connected(model.microsoft.succeeded || !model.review.messages.is_empty());
     let cards = model
         .review
         .analysis
@@ -159,12 +160,7 @@ fn sync(model: &AppModel, window: &AppWindow) {
     let busy = model.pending.is_some();
     let busy_text = busy.then(|| {
         let elapsed = model.started.elapsed();
-        format!(
-            "{} {} · {}s",
-            app_model::busy_indicator(elapsed.as_millis()),
-            model.progress,
-            elapsed.as_secs()
-        )
+        format!("{} · {}s", model.progress, elapsed.as_secs())
     });
     window.set_busy(busy);
     let review_scanning = model.scan_progress.is_some();
@@ -176,8 +172,6 @@ fn sync(model: &AppModel, window: &AppWindow) {
     let strip = scan_strip(model.scan_progress.as_deref(), &model.review);
     let (strip_model, scan_chip) = crate::slint_review::scan_strip_view(&strip, model, &cards);
     window.set_review_scan_chip_text(scan_chip.into());
-    window.set_account_name(account.name.into());
-    window.set_account_initials(account.initials.into());
     window.set_account_signed_in(account.signed_in);
     window.set_review_badge(i32::try_from(open_badge_count(&cards)).unwrap_or(i32::MAX));
     window.set_provider_name(match model.provider {
@@ -381,6 +375,23 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 .into(),
         }];
         initial_model.openrouter_selected = model_id.into();
+    }
+    // Owner feedback item 1: `OPENLOOPS_PREVIEW_BUSY=1` seeds a fake pending
+    // job so the title-bar busy chip renders in a screenshot without a real
+    // long-running operation. The channel's `Sender` is leaked (never
+    // dropped, never sent to) so `poll`'s `TryRecvError::Disconnected`
+    // branch never fires and the chip stays up for the whole capture. Only
+    // bound under `ui-screenshot`; a normal run never sets this variable.
+    #[cfg(feature = "ui-screenshot")]
+    if std::env::var("OPENLOOPS_PREVIEW_BUSY").as_deref() == Ok("1") {
+        let (sender, receiver) = std::sync::mpsc::channel::<Outcome>();
+        std::mem::forget(sender);
+        initial_model.pending = Some(receiver);
+        initial_model.pending_service = Service::Microsoft;
+        initial_model.progress = "Complete Microsoft sign-in; then scanning recent messages";
+        initial_model.started = std::time::Instant::now()
+            .checked_sub(Duration::from_secs(82))
+            .unwrap_or_else(std::time::Instant::now);
     }
     let model = Rc::new(RefCell::new(initial_model));
     let window = AppWindow::new()?;

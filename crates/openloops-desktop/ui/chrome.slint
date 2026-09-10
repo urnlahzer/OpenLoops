@@ -1,44 +1,43 @@
 import { Tokens } from "tokens.slint";
-import { Avatar, Pill } from "widgets.slint";
-import { Spinner } from "std-widgets.slint";
+import { Pill } from "widgets.slint";
 
 export component TitleBar inherits Rectangle {
     in property <bool> scanning;
     in property <string> scan-text;
-    in property <string> account-name;
-    in property <string> account-initials;
     in property <bool> account-signed-in;
     height: Tokens.title-height;
     background: Tokens.brand;
     HorizontalLayout {
         padding-left: Tokens.space-4; padding-right: Tokens.space-4; spacing: Tokens.space-3;
-        Rectangle { width: Tokens.space-6; height: Tokens.space-6; background: Tokens.bg-surface; border-radius: Tokens.radius-4;
-            Text { text: "O"; color: Tokens.brand; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
-        }
         Text { text: "OpenLoops"; color: Tokens.bg-surface; font-size: Tokens.font-15; font-weight: 600; vertical-alignment: center; }
         Text { text: "Outlook companion"; color: Tokens.bg-surface; font-size: Tokens.font-13; vertical-alignment: center; }
-        // N1/X11: a translucent white chip, not the `brand-subtle` fill
-        // `Pill` uses (that tint reads as near-invisible on the title bar's
-        // own `brand` background). The Fluent `Spinner` here is the only
-        // animation this chip drives; nothing else in the title bar repaints
-        // while it spins. `scan-text` is already §3's Review-scan copy or,
-        // for any other running job, that job's label and elapsed seconds
-        // (`root.review-scan-chip-text.is-empty ? root.busy-chip-text : ...`
-        // in app.slint) -- this chip does not distinguish the two itself.
-        if root.scanning: Rectangle { background: Tokens.chip-bg; border-radius: Tokens.radius-pill;
-            HorizontalLayout { padding-left: Tokens.space-2; padding-right: Tokens.space-3; padding-top: Tokens.space-1; padding-bottom: Tokens.space-1; spacing: Tokens.space-2;
-                Spinner { indeterminate: true; width: Tokens.font-16; height: Tokens.font-16; }
-                Text { text: root.scan-text; color: Tokens.bg-surface; font-size: Tokens.font-13; font-weight: 600; vertical-alignment: center; }
-            }
+        // N1/X11 (revised): a quiet, non-animating chip -- no `Spinner` (it
+        // requested continuous repaints, producing black frames on
+        // hybrid-GPU systems) and no dot-count prefix on the text (that
+        // throttled indicator was redundant with the elapsed-seconds count
+        // already in `scan-text` and read, with the spinner, as a large
+        // translucent oval rather than a quiet label). Sized to its own text
+        // rather than any fixed pill height. `scan-text` is already §3's
+        // Review-scan copy or, for any other running job, that job's label
+        // and elapsed seconds (`root.review-scan-chip-text.is-empty ?
+        // root.busy-chip-text : ...` in app.slint) -- this chip does not
+        // distinguish the two itself.
+        if root.scanning: Rectangle {
+            background: Tokens.chip-bg; border-radius: Tokens.radius-4;
+            width: chip-label.preferred-width + 2 * Tokens.space-3;
+            height: chip-label.preferred-height + 2 * Tokens.space-1;
+            chip-label := Text { text: root.scan-text; color: Tokens.bg-surface; font-size: Tokens.font-13; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
         }
         Rectangle { horizontal-stretch: 1; background: Tokens.transparent; }
-        if root.account-signed-in: Avatar { initials: root.account-initials; accessible-name: root.account-name; }
-        VerticalLayout { spacing: Tokens.space-1;
-            Text { text: root.account-name; color: Tokens.bg-surface; font-size: Tokens.font-13; font-weight: 600; horizontal-alignment: right; vertical-alignment: center; }
-            if root.account-signed-in: Text { text: "Signed in · Microsoft 365"; color: Tokens.bg-surface; font-size: Tokens.font-13; horizontal-alignment: right; vertical-alignment: center; }
-        }
+        // Owner feedback item 3: the Graph layer exposes no display name, so
+        // there is no avatar and no name here -- only a connection summary,
+        // shown once the Microsoft connection has succeeded or review
+        // messages have already loaded, and nothing at all otherwise (never
+        // a misleading "Not signed in" while mail is actually being
+        // scanned).
+        if root.account-signed-in: Text { text: "Signed in · Microsoft 365"; color: Tokens.bg-surface; font-size: Tokens.font-13; horizontal-alignment: right; vertical-alignment: center; }
     }
-    Rectangle { y: parent.height - Tokens.hairline; height: Tokens.hairline; background: Tokens.stroke-1; }
+    Rectangle { x: 0; y: parent.height - Tokens.hairline; width: 100%; height: Tokens.hairline; background: Tokens.stroke-1; }
 }
 
 component NavItem inherits Rectangle {
@@ -124,7 +123,7 @@ export component NavRail inherits Rectangle {
             name := Text { x: -Tokens.space-2; y: dot.preferred-height + Tokens.space-1; width: Tokens.nav-width; text: root.provider-name; color: Tokens.text-2; font-size: Tokens.font-11; horizontal-alignment: center; wrap: word-wrap; }
         }
     }
-    Rectangle { x: parent.width - Tokens.hairline; width: Tokens.hairline; background: Tokens.stroke-1; }
+    Rectangle { x: parent.width - Tokens.hairline; y: 0; width: Tokens.hairline; height: 100%; background: Tokens.stroke-1; }
 }
 
 export component StatusBar inherits Rectangle {
@@ -133,7 +132,10 @@ export component StatusBar inherits Rectangle {
     in property <string> right-text;
     height: Tokens.status-height;
     background: Tokens.bg-bar;
-    Rectangle { height: Tokens.hairline; background: Tokens.stroke-1; }
+    // Explicit geometry (not just `height`): without it this hairline sits
+    // among the layout's other children and gets centred over the status
+    // text instead of pinned to the bar's own top edge.
+    Rectangle { x: 0; y: 0; width: 100%; height: Tokens.hairline; background: Tokens.stroke-1; }
     HorizontalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; spacing: Tokens.space-4;
         Text { text: root.left-text; color: Tokens.text-2; font-size: Tokens.font-13; vertical-alignment: center; }
         Rectangle { horizontal-stretch: 1; background: Tokens.transparent; }

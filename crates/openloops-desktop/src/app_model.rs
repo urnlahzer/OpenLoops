@@ -571,20 +571,6 @@ pub(crate) fn microsoft_status(result: Result<ConnectionReport, ConnectionError>
     }
 }
 
-/// Returns the throttled busy indicator text for the native UI.
-///
-/// The spinner requests continuous repaints, which can produce black frames on
-/// hybrid-GPU systems. This indicator advances only on the busy view's 250 ms
-/// repaint schedule.
-pub(crate) fn busy_indicator(elapsed_millis: u128) -> &'static str {
-    match (elapsed_millis / 250) % 3 {
-        0 => "·",
-        1 => "··",
-        2 => "···",
-        _ => unreachable!(),
-    }
-}
-
 /// Whether `url` is an Outlook web link `OpenLoops` is willing to draw a
 /// hyperlink to: exactly the two accepted host prefixes, requiring the
 /// trailing slash (so a bare host with nothing after it does not match) and
@@ -597,11 +583,16 @@ pub fn is_outlook_link(url: &str) -> bool {
         || url.starts_with("https://outlook.office365.com/")
 }
 
-/// How the signed-in Microsoft account is shown in the title bar (spec
-/// §4.1). Name comes from the Graph identity resolved at sign-in; before
-/// sign-in it shows "Not signed in".
+/// How the Microsoft account is shown in the title bar.
 ///
-/// No Graph identity is resolved yet, so the title bar uses the default.
+/// Owner feedback item 3: the Graph layer exposes no display name yet, so
+/// there is no avatar and no name to show -- only a connection summary
+/// ("Signed in · Microsoft 365") once the Microsoft connection has succeeded
+/// or review messages have already loaded, and nothing at all otherwise
+/// (never a misleading "Not signed in" while mail is actually being
+/// scanned). [`AccountDisplay::connected`] builds that display.
+/// [`AccountDisplay::signed_in`] is kept for when the Graph layer exposes a
+/// real display name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountDisplay {
     pub name: String,
@@ -620,11 +611,29 @@ impl Default for AccountDisplay {
 }
 
 impl AccountDisplay {
+    /// Builds the title bar's connection-summary display: no name, no
+    /// initials (so no avatar renders), and the summary line shown only
+    /// when `connected`.
+    #[must_use]
+    pub fn connected(connected: bool) -> Self {
+        Self {
+            name: String::new(),
+            initials: String::new(),
+            signed_in: connected,
+        }
+    }
+
     /// Builds the signed-in display for `display_name`: the initials are the
     /// uppercased first character of each of up to the first two
     /// whitespace-separated words (e.g. "Alex Rivera" -> "AR", "Alex" ->
     /// "A", "" -> "").
+    ///
+    /// Not wired into the native UI yet -- kept ready for when the Graph
+    /// layer exposes a real display name. Production code has no caller
+    /// until that wiring lands, so this would otherwise trip `dead_code`
+    /// outside `#[cfg(test)]` builds.
     #[must_use]
+    #[allow(dead_code)]
     pub fn signed_in(display_name: &str) -> Self {
         let initials = display_name
             .split_whitespace()
@@ -674,17 +683,6 @@ mod tests {
             *self.saved.borrow_mut() = None;
             Ok(())
         }
-    }
-
-    #[test]
-    fn busy_indicator_advances_every_250_milliseconds_and_wraps() {
-        assert_eq!(busy_indicator(0), "·");
-        assert_eq!(busy_indicator(249), "·");
-        assert_eq!(busy_indicator(250), "··");
-        assert_eq!(busy_indicator(499), "··");
-        assert_eq!(busy_indicator(500), "···");
-        assert_eq!(busy_indicator(749), "···");
-        assert_eq!(busy_indicator(750), "·");
     }
 
     #[test]
@@ -845,6 +843,19 @@ mod tests {
         assert_eq!(display.name, "Not signed in");
         assert_eq!(display.initials, "");
         assert!(!display.signed_in);
+    }
+
+    #[test]
+    fn account_display_connected_has_no_name_or_initials() {
+        let connected = AccountDisplay::connected(true);
+        assert_eq!(connected.name, "");
+        assert_eq!(connected.initials, "");
+        assert!(connected.signed_in);
+
+        let not_connected = AccountDisplay::connected(false);
+        assert_eq!(not_connected.name, "");
+        assert_eq!(not_connected.initials, "");
+        assert!(!not_connected.signed_in);
     }
 
     #[test]
