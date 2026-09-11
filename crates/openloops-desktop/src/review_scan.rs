@@ -2573,20 +2573,24 @@ fn event_tied_deadline(item: &Expectation, message_timestamp: i64, now: i64) -> 
 
 /// Finds deterministic event evidence scoped to the expectation's source:
 /// first an event learned from the evidence message itself -- but only for a
-/// request that [`has_scoped_event_language`] or carries an
-/// [`event_tied_deadline`], since merely appearing in an event-bearing
-/// message is not evidence the request is ABOUT that event (e.g. an
-/// unrelated action item listed alongside a meeting recap) -- otherwise the
-/// sole qualifying event in the same conversation when the request uses
-/// event-shaped language. Body-prose events are deliberately excluded from
-/// both rules; ambiguity between two conversation events leaves the item open.
+/// request that [`has_scoped_event_language`], carries an
+/// [`event_tied_deadline`], or satisfies [`rule_3_applies`]. The latter means
+/// the model named both the event and its distinct time; when the time points
+/// to the evidence message, it also lets that message's body-prose event
+/// qualify.
+/// Without one of those signals, merely appearing in an event-bearing message
+/// is not enough (e.g. an unrelated action item in an invite). Otherwise this
+/// finds the sole structured or subject-prose event in the same conversation
+/// when the request uses event-shaped language. Ambiguity between two
+/// conversation events leaves the item open.
 fn scoped_event<'a>(
     item: &Expectation,
     source: &ReviewMessage,
+    messages: &[ReviewMessage],
     index: &'a [EventRef],
     now: i64,
 ) -> Option<&'a EventRef> {
-    let qualifying = |event: &&EventRef| {
+    let normally_qualifying = |event: &&EventRef| {
         matches!(
             event.source,
             EventSource::Meeting | EventSource::Subject | EventSource::SubjectProse
@@ -2594,16 +2598,25 @@ fn scoped_event<'a>(
     };
     index
         .iter()
-        .filter(qualifying)
-        .find(|event| event.message_handle == item.evidence.message)
-        .filter(|_| {
+        .find(|event| {
+            event.message_handle == item.evidence.message
+                && (normally_qualifying(event)
+                    || (event.source == EventSource::Prose
+                        && item
+                            .event_time
+                            .as_ref()
+                            .is_some_and(|anchor| anchor.message == item.evidence.message)
+                        && rule_3_applies(item, messages, now, event.end)))
+        })
+        .filter(|event| {
             has_scoped_event_language(item)
                 || event_tied_deadline(item, source.input.timestamp, now)
+                || rule_3_applies(item, messages, now, event.end)
         })
         .or_else(|| {
             let mut events = index
                 .iter()
-                .filter(qualifying)
+                .filter(normally_qualifying)
                 .filter(|event| event.conversation == source.conversation);
             has_scoped_event_language(item)
                 .then(|| events.next().filter(|_| events.next().is_none()))?
@@ -2626,6 +2639,74 @@ fn deadline_boundary(item: &Expectation, messages: &[ReviewMessage], now: i64) -
     }
 }
 
+fn local_day(timestamp: i64, offset_seconds: i32) -> i64 {
+    timestamp
+        .saturating_add(i64::from(offset_seconds))
+        .div_euclid(86_400)
+}
+
+/// Whether the item's own deadline is another rendering of `event_time` or
+/// resolves to the same instant/local day as `event_end`. In either case the
+/// item is overdue work, not work made irrelevant by a passed event.
+fn deadline_is_event_time(
+    item: &Expectation,
+    messages: &[ReviewMessage],
+    now: i64,
+    event_end: i64,
+) -> bool {
+    let (Some(deadline), Some(event_time)) = (&item.deadline, &item.event_time) else {
+        return false;
+    };
+    if deadline
+        .quote
+        .trim()
+        .eq_ignore_ascii_case(event_time.quote.trim())
+    {
+        return true;
+    }
+    let Some(message) = messages
+        .iter()
+        .find(|message| message.input.handle == deadline.message)
+    else {
+        return false;
+    };
+    let offset = local_offset_seconds(message.input.timestamp, 0);
+    match classify(&deadline.quote, message.input.timestamp, now, offset) {
+        DeadlineView::PastDue {
+            boundary,
+            offset_seconds,
+        }
+        | DeadlineView::Due {
+            boundary,
+            offset_seconds,
+        } => {
+            boundary == event_end
+                || local_day(boundary, offset_seconds) == local_day(event_end, offset_seconds)
+        }
+        DeadlineView::DueDate { day, boundary, .. }
+        | DeadlineView::DueBusinessDay { day, boundary, .. } => {
+            boundary == event_end || day == local_day(event_end, offset)
+        }
+        DeadlineView::DueRange {
+            end_day, boundary, ..
+        } => boundary == event_end || end_day == local_day(event_end, offset),
+        DeadlineView::EventTied | DeadlineView::Soft | DeadlineView::Unknown => false,
+    }
+}
+
+/// Rule 3 requires both a named-event anchor and a distinct event-time anchor.
+/// An own deadline at that same time/day remains overdue instead of closing.
+fn rule_3_applies(
+    item: &Expectation,
+    messages: &[ReviewMessage],
+    now: i64,
+    event_end: i64,
+) -> bool {
+    item.event.is_some()
+        && item.event_time.is_some()
+        && !deadline_is_event_time(item, messages, now, event_end)
+}
+
 /// Closes `item` against `event` when `event` has already ended -- but only
 /// when `event` had ALREADY ended, relative to `event`, at
 /// `source_timestamp` (the evidence message's own send time) as well as
@@ -2642,6 +2723,9 @@ fn close_from_index(
     if event.end >= now
         || event.end <= source_timestamp
         || deadline_boundary(item, messages, now).is_some_and(|d| d > event.end)
+        || (item.event.is_some()
+            && item.event_time.is_some()
+            && !rule_3_applies(item, messages, now, event.end))
     {
         return false;
     }
@@ -2661,8 +2745,8 @@ fn close_from_index(
 /// [`classify`] against the message that stated it -- the only way to close
 /// a loop whose event date is stated only in an email body rather than a
 /// meeting invite or calendar subject, so it has no index entry at all.
-/// `name` is the event's own name when known (from [`named_event_phrase`]),
-/// used as-is since an item reaching this path always named an event.
+/// The closure name always comes from the model's `event` anchor, never from
+/// the bare time phrase.
 /// Applies the same temporal guard as [`close_from_index`]: an event that had
 /// already ended by `source_timestamp` (the evidence message's own send
 /// time) can never close the item, even if it also reads as past relative to
@@ -2671,9 +2755,11 @@ fn close_from_stated_time(
     item: &mut Expectation,
     messages: &[ReviewMessage],
     now: i64,
-    name: &str,
     source_timestamp: i64,
 ) -> bool {
+    let Some(name) = item.event.as_ref().map(|event| event.quote.clone()) else {
+        return false;
+    };
     let Some(event_time) = &item.event_time else {
         return false;
     };
@@ -2688,14 +2774,14 @@ fn close_from_stated_time(
     let Some(end) = past_due_boundary(&view) else {
         return false;
     };
-    if end <= source_timestamp {
+    if end <= source_timestamp || !rule_3_applies(item, messages, now, end) {
         return false;
     }
     if deadline_boundary(item, messages, now).is_some_and(|deadline| deadline > end) {
         return false;
     }
     item.event_passed = Some(EventPassed {
-        name: name.to_string(),
+        name,
         end,
         message_handle: event_time.message.clone(),
         // `event_time` is an `Anchor`, which the model can only ground in a
@@ -2713,14 +2799,14 @@ fn close_from_stated_time(
 ///   event ([`named_event_phrase`]) with [`match_event`] -- when the index
 ///   has a match, it alone decides this item, whether or not it closes;
 /// - failing that, a model-supplied `event_time` phrase -- a verbatim
-///   date/time anchor stating when the NAMED event occurs, found anywhere
-///   in the conversation -- classified directly ([`close_from_stated_time`]);
-///   only ever consulted for an item that named an event in the first
-///   place;
-/// - when no named index event matched, a structured or subject-prose event
-///   learned from the evidence message itself, or the sole qualifying event
-///   in its conversation when the request uses event language
-///   ([`scoped_event`]);
+///   date/time anchor stating when the named `event` anchor occurs, found
+///   anywhere in the conversation -- classified directly
+///   ([`close_from_stated_time`]);
+/// - when no named index event matched, an event learned from the evidence
+///   message itself, or the sole qualifying event in its conversation when
+///   the request uses event language ([`scoped_event`]); `event` plus
+///   `event_time` anchors make the own-message branch event-bound
+///   and can admit body prose when the time points to that same message;
 /// - for an item that named no event at all, the index again, but matched
 ///   against the item's own `action`/`evidence.quote` text instead
 ///   ([`text_matched_event`]), at a much stronger bar so an unrelated
@@ -2732,9 +2818,9 @@ fn close_from_stated_time(
 /// recap, or thank-you note written after its own event can never be closed
 /// by that event -- and [`scoped_event`]'s own-message branch only credits
 /// an event learned from the evidence message itself to a request that
-/// [`has_scoped_event_language`] or carries an [`event_tied_deadline`],
-/// since merely appearing in an event-bearing message is not evidence the
-/// request is about that event.
+/// [`has_scoped_event_language`], carries an [`event_tied_deadline`], or has
+/// distinct model-supplied `event` and `event_time` anchors. An `event_time`
+/// that is also the item's own deadline never invokes rule 3.
 ///
 /// Always pushes one content-free coverage note (even when every count is
 /// zero, so the chain from "events learned" to "expectations closed" stays
@@ -2776,14 +2862,14 @@ pub fn close_passed_events(result: &mut ScanResult, messages: &[ReviewMessage], 
                 }
                 continue;
             }
-            if close_from_stated_time(item, messages, now, &phrase, source.input.timestamp) {
+            if close_from_stated_time(item, messages, now, source.input.timestamp) {
                 closed_from_stated_time += 1;
                 result.event_closures += 1;
                 continue;
             }
         }
 
-        if let Some(event) = scoped_event(item, source, &index, now) {
+        if let Some(event) = scoped_event(item, source, messages, &index, now) {
             scoped += 1;
             if close_from_index(item, event, messages, now, source.input.timestamp) {
                 closed_from_index += 1;
@@ -6329,6 +6415,89 @@ at the downtown courthouse. Let me know if that works.",
         }
     }
 
+    fn event_anchored_logistics_fixture() -> (ReviewMessage, Expectation) {
+        const SUBJECT: &str = "Claude Code Workshop SF | Anthropic x Tenex";
+        const EVENT_TIME: &str = "Tuesday, September 2, 2026, 9:00 AM \u{2013} 12:00 PM PT";
+        let body = format!(
+            "{SUBJECT}\n{EVENT_TIME}\nVenue: Harbor Studio, 400 Example Avenue.\n\
+             Please review the schedule, venue & logistics.\n\
+             Send the slides to the organiser."
+        );
+        let mut mail = synthetic(&body, 0, "claude-code-workshop-thread");
+        mail.received = "2026-08-20T16:00:00Z".into();
+        mail.subject = SUBJECT.into();
+        mail.sender = "Morgan Lee <morgan@training.example.invalid>".into();
+        mail.sender_address = "morgan@training.example.invalid".into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+
+        let (_, template) = closure_test_messages();
+        let mut item = scoped_event_expectation(
+            &template,
+            &message.input.handle,
+            "Review the schedule, venue & logistics",
+            "Please review the schedule, venue & logistics.",
+        );
+        item.event = Some(Anchor {
+            message: message.input.handle.clone(),
+            block: 0,
+            quote: SUBJECT.into(),
+            context: body.clone(),
+        });
+        item.event_time = Some(Anchor {
+            message: message.input.handle.clone(),
+            block: 0,
+            quote: EVENT_TIME.into(),
+            context: body,
+        });
+        (message, item)
+    }
+
+    #[test]
+    fn event_anchored_logistics_request_closes_after_the_event() {
+        let (message, item) = event_anchored_logistics_fixture();
+        let index = build_event_index(std::slice::from_ref(&message));
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].source, EventSource::Prose);
+        let event_end = index[0].end;
+        let mut result = closure_result(vec![item]);
+
+        close_passed_events(&mut result, std::slice::from_ref(&message), event_end + 1);
+
+        let passed = result.analysis.items[0].event_passed.as_ref().unwrap();
+        assert_eq!(passed.name, "claude code workshop sf | anthropic x tenex");
+        assert_eq!(passed.message_handle, message.input.handle);
+        assert_eq!(result.event_closures, 1);
+    }
+
+    #[test]
+    fn event_anchored_request_stays_open_before_the_event() {
+        let (message, item) = event_anchored_logistics_fixture();
+        let event_start = build_event_index(std::slice::from_ref(&message))[0].start;
+        let mut result = closure_result(vec![item]);
+
+        close_passed_events(&mut result, std::slice::from_ref(&message), event_start - 1);
+
+        assert!(result.analysis.items[0].event_passed.is_none());
+        assert_eq!(result.event_closures, 0);
+    }
+
+    #[test]
+    fn unanchored_generic_request_in_an_invite_still_stays_open() {
+        let (message, mut item) = event_anchored_logistics_fixture();
+        item.action = "Send the slides to the organiser".into();
+        item.action_phrase = "send the slides to the organiser".into();
+        item.evidence.quote = "Send the slides to the organiser.".into();
+        item.event = None;
+        item.event_time = None;
+        let event_end = build_event_index(std::slice::from_ref(&message))[0].end;
+        let mut result = closure_result(vec![item]);
+
+        close_passed_events(&mut result, std::slice::from_ref(&message), event_end + 1);
+
+        assert!(result.analysis.items[0].event_passed.is_none());
+        assert_eq!(result.event_closures, 0);
+    }
+
     #[test]
     fn scoped_subject_event_closes_the_event_shaped_request_and_future_stays_open() {
         let event_message = scoped_event_message();
@@ -6944,6 +7113,36 @@ at the downtown courthouse. Let me know if that works.",
         assert_eq!(result.event_closures, 0);
     }
 
+    #[test]
+    fn event_time_equal_to_the_deadline_does_not_close_the_request() {
+        let (mut messages, mut item) = closure_test_messages();
+        messages[0].input.timestamp = timestamp("2026-09-02T12:00:00Z"); // Wednesday
+        item.deadline = Some(Anchor {
+            message: item.evidence.message.clone(),
+            block: 0,
+            quote: "Friday".into(),
+            context: String::new(),
+        });
+        item.event = Some(Anchor {
+            message: item.evidence.message.clone(),
+            block: 0,
+            quote: "the workshop".into(),
+            context: String::new(),
+        });
+        item.event_time = Some(Anchor {
+            message: item.evidence.message.clone(),
+            block: 0,
+            quote: "Friday".into(),
+            context: String::new(),
+        });
+        let mut result = closure_result(vec![item]);
+
+        close_passed_events(&mut result, &messages, timestamp("2026-09-15T00:00:00Z"));
+
+        assert!(result.analysis.items[0].event_passed.is_none());
+        assert_eq!(result.event_closures, 0);
+    }
+
     /// Regression for the real-world defect: a meeting-summary message sent
     /// AFTER its own meeting, naming that meeting in its subject and
     /// carrying an action item worded with event-shaped language ("bring"),
@@ -7167,6 +7366,52 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
             &mut result,
             std::slice::from_ref(&message),
             timestamp("2026-09-09T15:30:00Z"),
+        );
+
+        assert!(result.analysis.items[0].event_passed.is_none());
+        assert_eq!(result.event_closures, 0);
+    }
+
+    #[test]
+    fn recap_artifact_never_closes_even_with_an_anchor() {
+        const EVENT_TIME: &str = "Tuesday, September 2, 2026, 9:00 AM \u{2013} 12:00 PM PT";
+        let body = format!(
+            "Meeting Purpose\nClaude Code Workshop SF\n{EVENT_TIME}\n\
+             Action Items\nReview the schedule, venue & logistics."
+        );
+        let mut mail = synthetic(&body, 0, "anchored-fathom-thread");
+        mail.received = "2026-09-03T16:00:00Z".into();
+        mail.subject = "Claude Code Workshop SF - Meeting Summary".into();
+        mail.sender = "Fathom <no-reply@fathom.video>".into();
+        mail.sender_address = "no-reply@fathom.video".into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        assert!(build_event_index(std::slice::from_ref(&message)).is_empty());
+
+        let (_, template) = closure_test_messages();
+        let mut item = scoped_event_expectation(
+            &template,
+            &message.input.handle,
+            "Review the schedule, venue & logistics",
+            "Review the schedule, venue & logistics.",
+        );
+        item.event = Some(Anchor {
+            message: message.input.handle.clone(),
+            block: 0,
+            quote: "Claude Code Workshop SF".into(),
+            context: body.clone(),
+        });
+        item.event_time = Some(Anchor {
+            message: message.input.handle.clone(),
+            block: 0,
+            quote: EVENT_TIME.into(),
+            context: body,
+        });
+        let mut result = closure_result(vec![item]);
+
+        close_passed_events(
+            &mut result,
+            std::slice::from_ref(&message),
+            timestamp("2026-09-10T00:00:00Z"),
         );
 
         assert!(result.analysis.items[0].event_passed.is_none());

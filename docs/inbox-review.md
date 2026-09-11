@@ -25,7 +25,13 @@ in the normal application.
    in an email body. Requests in a meeting-metadata or subject event message,
    and event-worded requests elsewhere in a conversation containing exactly
    one such event, are tied to that scoped event without relying on a
-   model-supplied event anchor; body-prose events are excluded. A request with
+   model-supplied event anchor; body-prose events are otherwise excluded. A
+   request the analysis tied to a named event and its time closes once that
+   event has passed; a request whose only time is its own deadline stays open
+   when overdue. Both anchors let the request use its own message's event
+   without event-shaped wording, admit body-prose event evidence when the time
+   anchor points to that message, and supply the time when no event-index entry
+   exists. A request with
    its own stated deadline later than the event end stays open. An event can
    only close a request if the event had not yet ended when the request's own
    message was sent, and a request found only in an event-bearing message
