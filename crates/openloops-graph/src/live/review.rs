@@ -1,9 +1,10 @@
 //! Explicit, bounded, read-only review. No following server-provided URLs or storing mail.
 use super::{
-    Client, ConnectionConfig, ConnectionError, SharedScope, Url, bounded_body, classify_status,
-    groups, inbox_url, with_session,
+    Client, ConnectionConfig, ConnectionError, GRAPH_TIMEOUT_SECONDS, SharedScope, Url,
+    bounded_body, classify_status, groups, inbox_url, request_error, with_session,
 };
 use serde_json::Value;
+use std::time::Duration;
 
 /// Private message content; deliberately no Debug implementation.
 #[derive(Clone, Default)]
@@ -37,6 +38,7 @@ pub struct SourceReview {
     pub label: String,
     pub messages: Vec<MailItem>,
     pub errors: Vec<ConnectionError>,
+    pub message_errors: Vec<ConnectionError>,
     pub partial: bool,
 }
 
@@ -61,6 +63,7 @@ pub fn load_recent(config: &ConnectionConfig) -> Result<Vec<SourceReview>, Conne
                     label: address.clone(),
                     messages: vec![],
                     errors: vec![ConnectionError::MissingSharedScope],
+                    message_errors: vec![],
                     partial: false,
                 });
             } else {
@@ -78,7 +81,7 @@ pub fn load_recent(config: &ConnectionConfig) -> Result<Vec<SourceReview>, Conne
     })
 }
 
-pub(super) fn fetch(http: &Client, token: &str, url: Url) -> Result<Vec<u8>, ConnectionError> {
+pub(super) fn fetch(http: &Client, token: &str, url: &Url) -> Result<Vec<u8>, ConnectionError> {
     fetch_from_origin(http, token, url, GRAPH_ORIGIN)
 }
 
@@ -98,27 +101,71 @@ const GRAPH_ORIGIN: &str = "https://graph.microsoft.com/";
 fn fetch_from_origin(
     http: &Client,
     token: &str,
-    url: Url,
+    url: &Url,
     expected_origin: &str,
+) -> Result<Vec<u8>, ConnectionError> {
+    fetch_from_origin_with_policy(
+        http,
+        token,
+        url,
+        expected_origin,
+        Duration::from_secs(GRAPH_TIMEOUT_SECONDS),
+        Duration::from_secs(2),
+    )
+}
+
+fn fetch_from_origin_with_policy(
+    http: &Client,
+    token: &str,
+    url: &Url,
+    expected_origin: &str,
+    timeout: Duration,
+    retry_delay: Duration,
 ) -> Result<Vec<u8>, ConnectionError> {
     let expected =
         Url::parse(expected_origin).map_err(|_| ConnectionError::InvalidConfiguration)?;
     if url.origin() != expected.origin() {
         return Err(ConnectionError::InvalidConfiguration);
     }
-    let response = http
-        .get(url)
-        .bearer_auth(token)
-        .header(
-            "Prefer",
-            "outlook.body-content-type=\"html\", IdType=\"ImmutableId\"",
-        )
-        .send()
-        .map_err(|_| ConnectionError::Transport)?;
-    if response.status().as_u16() != 200 {
-        return Err(classify_status(response.status().as_u16()));
+    for attempt in 0..2 {
+        let response = http
+            .get(url.clone())
+            .bearer_auth(token)
+            .header(
+                "Prefer",
+                "outlook.body-content-type=\"html\", IdType=\"ImmutableId\"",
+            )
+            .timeout(timeout)
+            .send();
+        let (result, retryable) = match response {
+            Ok(response) if response.status().as_u16() == 200 => {
+                let result = bounded_body(response);
+                let retryable = matches!(
+                    result,
+                    Err(ConnectionError::Timeout(_) | ConnectionError::Transport)
+                );
+                (result, retryable)
+            }
+            Ok(response) => {
+                let status = response.status().as_u16();
+                (Err(classify_status(status)), matches!(status, 503 | 504))
+            }
+            Err(error) => {
+                let error = request_error(&error, timeout.as_secs());
+                let retryable = matches!(
+                    error,
+                    ConnectionError::Timeout(_) | ConnectionError::Transport
+                );
+                (Err(error), retryable)
+            }
+        };
+        if attempt == 0 && retryable {
+            std::thread::sleep(retry_delay);
+        } else {
+            return result;
+        }
     }
-    bounded_body(response)
+    unreachable!("the retry loop always returns on its final attempt")
 }
 
 fn page(bytes: &[u8]) -> Result<(Vec<Value>, bool), ConnectionError> {
@@ -141,7 +188,7 @@ pub(super) fn identity(
 ) -> Result<(String, Vec<String>), ConnectionError> {
     let url = Url::parse("https://graph.microsoft.com/v1.0/me?$select=id,mail,userPrincipalName")
         .map_err(|_| ConnectionError::InvalidConfiguration)?;
-    let value: Value = serde_json::from_slice(&fetch(http, token, url)?)
+    let value: Value = serde_json::from_slice(&fetch(http, token, &url)?)
         .map_err(|_| ConnectionError::ResourceUnavailable)?;
     let id = text(&value, "id", 512)?;
     let addresses: Vec<_> = ["mail", "userPrincipalName"]
@@ -210,7 +257,7 @@ pub(super) fn pages(
     let mut url = original.clone();
     let mut all = vec![];
     for _ in 0..10 {
-        let bytes = fetch(http, token, url)?;
+        let bytes = fetch(http, token, &url)?;
         let value: Value =
             serde_json::from_slice(&bytes).map_err(|_| ConnectionError::ResourceUnavailable)?;
         let (rows, _) = page(&bytes)?;
@@ -458,7 +505,7 @@ fn hydrate(
     mut row: Value,
 ) -> Result<MailItem, ConnectionError> {
     let id = text(&row, "id", 2048)?;
-    let bytes = fetch(http, token, message_url(address, &id)?).map_err(|error| match error {
+    let bytes = fetch(http, token, &message_url(address, &id)?).map_err(|error| match error {
         ConnectionError::ResponseTooLarge => ConnectionError::MessageTooLarge,
         other => other,
     })?;
@@ -475,7 +522,7 @@ fn hydrate(
     if is_event_message(&body_value)
         && let Ok(url) = event_url(address, &id)
     {
-        result.event = fetch_event(http, token, url, GRAPH_ORIGIN);
+        result.event = fetch_event(http, token, &url, GRAPH_ORIGIN);
     }
     Ok(result)
 }
@@ -487,7 +534,7 @@ fn hydrate(
 /// rather than failing the whole message. `expected_origin` is threaded
 /// through to [`fetch_from_origin`] purely for testability; every real
 /// caller passes [`GRAPH_ORIGIN`].
-fn fetch_event(http: &Client, token: &str, url: Url, expected_origin: &str) -> Option<MailEvent> {
+fn fetch_event(http: &Client, token: &str, url: &Url, expected_origin: &str) -> Option<MailEvent> {
     let bytes = fetch_from_origin(http, token, url, expected_origin).ok()?;
     let value: Value = serde_json::from_slice(&bytes).ok()?;
     mail_event(&value)
@@ -524,7 +571,7 @@ fn windowed_rows(
     let mut page_limit_hit = true;
     let mut next_page_rejected = false;
     for _ in 0..10 {
-        let bytes = match fetch(http, token, current.clone()) {
+        let bytes = match fetch(http, token, &current) {
             Ok(bytes) => bytes,
             Err(error) => {
                 errors.push(error);
@@ -600,6 +647,7 @@ fn load_folder(http: &Client, token: &str, address: Option<&str>, sent: bool) ->
         ),
         messages: vec![],
         errors: vec![],
+        message_errors: vec![],
         partial: false,
     };
     let date_field = if sent {
@@ -624,16 +672,29 @@ fn load_folder(http: &Client, token: &str, address: Option<&str>, sent: bool) ->
         &mut source.errors,
     );
     source.partial = partial;
+    add_hydrated(&mut source, collected, sent, address.is_some(), |row| {
+        hydrate(http, token, address, row)
+    });
+    source
+}
+
+fn add_hydrated(
+    source: &mut SourceReview,
+    collected: Vec<Value>,
+    sent: bool,
+    team: bool,
+    mut hydrate_row: impl FnMut(Value) -> Result<MailItem, ConnectionError>,
+) {
     for row in collected {
         let sent_time = if sent {
             text(&row, "sentDateTime", 64).ok()
         } else {
             None
         };
-        match hydrate(http, token, address, row) {
+        match hydrate_row(row) {
             Ok(mut message) => {
                 message.sent = sent;
-                message.team = address.is_some();
+                message.team = team;
                 if let Some(sent_time) = sent_time {
                     message.received = sent_time;
                 }
@@ -643,10 +704,9 @@ fn load_folder(http: &Client, token: &str, address: Option<&str>, sent: bool) ->
                     source.messages.push(message);
                 }
             }
-            Err(error) => source.errors.push(error),
+            Err(error) => source.message_errors.push(error),
         }
     }
-    source
 }
 
 fn group_url(id: &str, thread: Option<&str>) -> Result<Url, ConnectionError> {
@@ -679,11 +739,12 @@ fn load_group(http: &Client, token: &str, address: &str) -> SourceReview {
         label: format!("Group: {address}"),
         messages: vec![],
         errors: vec![],
+        message_errors: vec![],
         partial: false,
     };
     let result = (|| {
-        let id = groups::resolve_id(&fetch(http, token, groups::lookup_url(address)?)?)?;
-        let (threads, partial) = page(&fetch(http, token, group_url(&id, None)?)?)?;
+        let id = groups::resolve_id(&fetch(http, token, &groups::lookup_url(address)?)?)?;
+        let (threads, partial) = page(&fetch(http, token, &group_url(&id, None)?)?)?;
         source.partial = partial || threads.len() > 20;
         for thread in threads.iter().take(20) {
             let result = (|| {
@@ -698,10 +759,13 @@ fn load_group(http: &Client, token: &str, address: &str) -> SourceReview {
                 }
                 let (posts, partial) = pages(http, token, &group_url(&id, Some(&thread_id))?, 40)?;
                 source.partial |= partial;
-                let mut messages = posts
-                    .iter()
-                    .map(|post| item(post, Some(&topic)))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let mut messages = Vec::new();
+                for post in &posts {
+                    match item(post, Some(&topic)) {
+                        Ok(message) => messages.push(message),
+                        Err(error) => source.message_errors.push(error),
+                    }
+                }
                 messages.sort_by(|a, b| b.received.cmp(&a.received));
                 for mut message in messages {
                     message.conversation = format!("group:{id}:{thread_id}");
@@ -954,6 +1018,151 @@ mod tests {
         (format!("http://127.0.0.1:{port}/"), handle)
     }
 
+    fn scripted_server(
+        responses: Vec<(Duration, Vec<u8>)>,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{Read, Write};
+        use std::sync::{Arc, atomic::AtomicUsize};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = Arc::clone(&calls);
+        let handle = std::thread::spawn(move || {
+            for (delay, response) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                server_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut buffer = [0u8; 4096];
+                let _ = stream.read(&mut buffer);
+                std::thread::sleep(delay);
+                let _ = stream.write_all(&response);
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://127.0.0.1:{port}/"), calls, handle)
+    }
+
+    #[test]
+    fn timeout_has_distinct_wording_after_one_retry() {
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec();
+        let (origin, calls, server) = scripted_server(vec![
+            (Duration::from_millis(1100), response.clone()),
+            (Duration::from_millis(1100), response),
+        ]);
+        let http = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+        let url = Url::parse(&format!("{origin}v1.0/me/messages")).unwrap();
+        let result = fetch_from_origin_with_policy(
+            &http,
+            "synthetic-token",
+            &url,
+            &origin,
+            Duration::from_secs(1),
+            Duration::ZERO,
+        );
+        assert_eq!(result, Err(ConnectionError::Timeout(1)));
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Microsoft did not answer within 1 seconds."
+        );
+        server.join().unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn service_unavailable_retries_once_then_succeeds() {
+        let (origin, calls, server) = scripted_server(vec![
+            (
+                Duration::ZERO,
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+            ),
+            (
+                Duration::ZERO,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_vec(),
+            ),
+        ]);
+        let http = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+        let url = Url::parse(&format!("{origin}v1.0/me/messages")).unwrap();
+        assert_eq!(
+            fetch_from_origin_with_policy(
+                &http,
+                "synthetic-token",
+                &url,
+                &origin,
+                Duration::from_secs(1),
+                Duration::ZERO,
+            ),
+            Ok(b"{}".to_vec())
+        );
+        server.join().unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn throttling_is_not_retried() {
+        let (origin, calls, server) = scripted_server(vec![(
+            Duration::ZERO,
+            b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+        )]);
+        let http = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+        let url = Url::parse(&format!("{origin}v1.0/me/messages")).unwrap();
+        assert_eq!(
+            fetch_from_origin_with_policy(
+                &http,
+                "synthetic-token",
+                &url,
+                &origin,
+                Duration::from_secs(1),
+                Duration::ZERO,
+            ),
+            Err(ConnectionError::Throttled)
+        );
+        server.join().unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn one_failed_body_fetch_does_not_drop_the_source() {
+        let mut source = SourceReview {
+            label: "Personal mailbox / Inbox".into(),
+            messages: vec![],
+            errors: vec![],
+            message_errors: vec![],
+            partial: false,
+        };
+        let rows = vec![
+            serde_json::json!({"id":"failed"}),
+            serde_json::json!({"id":"loaded"}),
+        ];
+        add_hydrated(&mut source, rows, false, false, |row| {
+            if row["id"] == "failed" {
+                Err(ConnectionError::Timeout(GRAPH_TIMEOUT_SECONDS))
+            } else {
+                Ok(MailItem {
+                    id: "loaded".into(),
+                    conversation: "synthetic-conversation".into(),
+                    ..MailItem::default()
+                })
+            }
+        });
+        assert_eq!(source.messages.len(), 1);
+        assert_eq!(source.message_errors, [ConnectionError::Timeout(90)]);
+        assert!(source.errors.is_empty());
+    }
+
     /// The status classification a 400 actually produces, not just that
     /// [`fetch_event`]'s best-effort `Option` collapses it to `None` --
     /// exercised through [`fetch_from_origin`] directly so the specific
@@ -972,7 +1181,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            fetch_from_origin(&http, "synthetic-token", url, &origin),
+            fetch_from_origin(&http, "synthetic-token", &url, &origin),
             Err(ConnectionError::BadRequest)
         );
         server.join().unwrap();
@@ -998,7 +1207,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            fetch_from_origin(&http, "synthetic-token", url, &origin),
+            fetch_from_origin(&http, "synthetic-token", &url, &origin),
             Err(ConnectionError::ResponseTooLarge)
         );
         server.join().unwrap();
@@ -1026,7 +1235,7 @@ mod tests {
             "{origin}v1.0/me/messages/synthetic-id/microsoft.graph.eventMessage"
         ))
         .unwrap();
-        let event = fetch_event(&http, "synthetic-token", url, &origin).unwrap();
+        let event = fetch_event(&http, "synthetic-token", &url, &origin).unwrap();
         assert_eq!(event.start, "2026-08-21T18:30:00Z");
         assert_eq!(event.end, "2026-08-21T19:30:00Z");
         assert!(!event.out_of_date);

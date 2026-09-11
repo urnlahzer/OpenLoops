@@ -1345,12 +1345,37 @@ pub struct ScanResult {
     /// calls against a provider already known to be unreachable or
     /// unauthorized.
     pub primary_scan_transport_error: bool,
+    /// Total number of conversations the scan grouped `analysis`'s source
+    /// messages into (`conversations_by_size`'s job count), independent of
+    /// how many messages each one carries.
+    pub conversation_count: usize,
+    /// Conversations `merge_conversation` folded in as
+    /// `JobOutcome::Completed(Ok(_))`.
+    pub analyzed_conversations: usize,
+    /// Conversations that were dispatched and came back as an error (or
+    /// panicked), including every Quota failure even though repeats
+    /// collapse to one `failures` line.
+    pub failed_conversations: usize,
+    /// Conversations still queued when the pass stopped and so never
+    /// dispatched at all -- the `run_jobs` indices with no outcome.
+    pub not_started_conversations: usize,
     /// Content-free diagnostic set when the closure pass itself
     /// stopped early on a transport-class provider error, e.g.
     /// `"Closure pass stopped: rate limited"`. Kept separate
     /// from `failures` (which counts unanalyzed conversations) since a
     /// closure-pass failure does not mean any conversation went unanalyzed.
     pub closure_pass_failure: Option<String>,
+}
+
+impl ScanResult {
+    /// Conversations `analysis` has no coverage for at all: dispatched and
+    /// failed, plus never dispatched because the pass stopped first. The
+    /// coverage panel and `set_scan`'s summary both report this instead of
+    /// `failures.len()`, which undercounts once repeated Quota failures
+    /// collapse to one line.
+    pub fn unanalyzed_conversations(&self) -> usize {
+        self.failed_conversations + self.not_started_conversations
+    }
 }
 
 /// Extracts a lowercase email address from a participant label such as
@@ -2206,6 +2231,10 @@ fn empty_result(total: usize) -> ScanResult {
         cross_thread_closures: 0,
         event_closures: 0,
         primary_scan_transport_error: false,
+        conversation_count: 0,
+        analyzed_conversations: 0,
+        failed_conversations: 0,
+        not_started_conversations: 0,
         closure_pass_failure: None,
     }
 }
@@ -2221,10 +2250,12 @@ fn merge_conversation(
     conversation: &[&ReviewMessage],
     outcome: JobOutcome<Expectations>,
     quota_reported: &mut bool,
+    not_started_messages: &mut usize,
 ) {
     match outcome {
         JobOutcome::Completed(Ok(analysis)) => {
             result.analyzed += conversation.len();
+            result.analyzed_conversations += 1;
             if let Some(note) = conversation_note(index, conversation, &analysis) {
                 result.conversation_notes.push(note);
             }
@@ -2244,19 +2275,29 @@ fn merge_conversation(
                     .push(failure_line(index, conversation, error));
             }
             *quota_reported |= error == ProviderError::Quota;
+            result.failed_conversations += 1;
             if is_stop_error(error) {
                 result.primary_scan_transport_error = true;
             }
         }
-        JobOutcome::Panicked => result.failures.push(format!(
-            "Conversation {}: the analysis failed unexpectedly and was skipped.",
-            index + 1
-        )),
-        JobOutcome::NotStarted => result.failures.push(format!(
-            "Conversation {} (subject: {}): not started because the scan stopped.",
-            index + 1,
-            subject_snippet(conversation)
-        )),
+        JobOutcome::Panicked => {
+            result.failures.push(format!(
+                "Conversation {}: the analysis failed unexpectedly and was skipped.",
+                index + 1
+            ));
+            result.failed_conversations += 1;
+        }
+        // Queued but never claimed -- either the cursor never reached it
+        // (the common case: the pass stopped and a worker simply had no
+        // more work behind it) or a worker claimed it just as the pass
+        // stopped (`run_worker`'s narrow post-claim check). Both are the
+        // same fact for the user, so they are not reported as individual
+        // failure lines here; `scan_conversations` folds every one of them
+        // into a single aggregate line once the pass is done.
+        JobOutcome::NotStarted => {
+            result.not_started_conversations += 1;
+            *not_started_messages += conversation.len();
+        }
     }
 }
 
@@ -2279,16 +2320,34 @@ fn scan_conversations(
             conversation
         })
         .collect();
+    result.conversation_count = ordered.len();
     progress
         .conversation_total
         .store(ordered.len(), Ordering::Relaxed);
     let processed_per_job: Vec<usize> = ordered.iter().map(Vec::len).collect();
-    let outcomes = run_jobs(&processed_per_job, pass, progress, &|index| {
+    let mut outcomes = run_jobs(&processed_per_job, pass, progress, &|index| {
         let inputs: Vec<ConversationMessage> =
             ordered[index].iter().map(|m| m.input.clone()).collect();
         analyze(&inputs)
     });
+    // A job the pass stopped before any worker ever reached it has no
+    // entry in `outcomes` at all (`run_worker`/`next_job` never dispatch
+    // it), which is exactly the bug this fixes: those conversations must
+    // still be accounted for as not started, not silently dropped.
+    if outcomes.len() < ordered.len() {
+        let mut dispatched = vec![false; ordered.len()];
+        for (index, _) in &outcomes {
+            dispatched[*index] = true;
+        }
+        for (index, was_dispatched) in dispatched.into_iter().enumerate() {
+            if !was_dispatched {
+                outcomes.push((index, JobOutcome::NotStarted));
+            }
+        }
+        outcomes.sort_by_key(|(index, _)| *index);
+    }
     let mut quota_reported = false;
+    let mut not_started_messages = 0usize;
     for (index, outcome) in outcomes {
         merge_conversation(
             &mut result,
@@ -2296,10 +2355,22 @@ fn scan_conversations(
             &ordered[index],
             outcome,
             &mut quota_reported,
+            &mut not_started_messages,
         );
     }
     if progress.cancel.load(Ordering::Relaxed) {
         result.cancelled = true;
+    }
+    // A stopped-by-you scan reports its not-started conversations only in
+    // the summary (see `set_scan`), not as a failure line here -- stopping
+    // on request is not a failure. A provider-stopped scan gets one
+    // aggregate line instead of one per conversation, so 95 unanalyzed
+    // conversations behind a single quota error read as one line, not 95.
+    if result.not_started_conversations > 0 && !result.cancelled {
+        result.failures.push(format!(
+            "{} conversations ({} messages) were not analyzed because the scan stopped after the provider error above.",
+            result.not_started_conversations, not_started_messages
+        ));
     }
     // Idle once this pass ends, same as `scan_closures`.
     progress.reset_pass();
@@ -4513,6 +4584,10 @@ mod tests {
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         close_passed_events(&mut result, &messages, timestamp("2026-10-01T00:00:00Z"));
@@ -4554,6 +4629,10 @@ mod tests {
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         // Well clear of the machine's own local offset either way.
@@ -5373,7 +5452,12 @@ at the downtown courthouse. Let me know if that works.",
             "dispatch stops once the provider is unreachable: {started}"
         );
         assert!(result.primary_scan_transport_error);
-        assert_eq!(result.failures.len(), started);
+        // One failure line per dispatched-and-failed request, plus one
+        // aggregate line for every conversation the pass never dispatched
+        // at all (`20 - started`, always > 0 here since started <= 8).
+        assert_eq!(result.failures.len(), started + 1);
+        assert_eq!(result.failed_conversations, started);
+        assert_eq!(result.not_started_conversations, 20 - started);
         assert!(!result.cancelled);
         assert_eq!(progress.snapshot().in_flight, 0);
     }
@@ -5392,9 +5476,93 @@ at the downtown courthouse. Let me know if that works.",
             });
         assert_eq!(calls.load(Ordering::SeqCst), 4);
         assert!(result.primary_scan_transport_error);
-        assert_eq!(result.failures.len(), 1);
+        // One collapsed Quota line for the 4 conversations actually
+        // attempted, plus one aggregate line for the 4 the pass stopped
+        // before ever dispatching.
+        assert_eq!(result.failures.len(), 2);
         assert!(result.failures[0].contains("HTTP 402"));
+        assert_eq!(result.failed_conversations, 4);
+        assert_eq!(result.not_started_conversations, 4);
         assert_eq!(progress.processed.load(Ordering::Relaxed), 4);
+    }
+
+    /// Owner's live-scan symptom (2026-09-11): a quota error on conversation
+    /// 2 of 6 leaves conversations 3-6 with no `JobOutcome` at all --
+    /// `run_worker`'s single worker sees `stop` before it ever calls
+    /// `next_job` for them, so they are absent from `run_jobs`'s answers,
+    /// not merely marked failed. Every one of the 6 must still be
+    /// accounted for, and the 4 that were never dispatched must read as one
+    /// line, not vanish and not get one line each.
+    #[test]
+    fn scan_stop_accounts_for_every_undispatched_conversation() {
+        let messages = parallel_corpus(6);
+        let positions = handle_positions(&messages);
+        let progress = ScanProgress::default();
+        let result = super::scan_conversations(&messages, &progress, &ParallelPass::new(1), &|c| {
+            if positions[&c[0].handle] == 1 {
+                return Err(ProviderError::Quota);
+            }
+            Ok(no_expectations())
+        });
+        assert_eq!(result.analyzed, 1, "only conversation 0 completed");
+        assert_eq!(result.unanalyzed_conversations(), 5);
+        assert_eq!(result.not_started_conversations, 4);
+        assert!(result.primary_scan_transport_error);
+        assert_eq!(
+            result
+                .failures
+                .iter()
+                .filter(|line| line.contains("HTTP 402"))
+                .count(),
+            1,
+            "exactly one Quota line: {:?}",
+            result.failures
+        );
+        assert_eq!(
+            result
+                .failures
+                .iter()
+                .filter(|line| line.contains("were not analyzed because the scan stopped"))
+                .count(),
+            1,
+            "exactly one aggregated not-started line: {:?}",
+            result.failures
+        );
+        assert!(
+            result.failures.iter().any(|line| line
+                == "4 conversations (4 messages) were not analyzed because the scan stopped after the provider error above."),
+            "{:?}",
+            result.failures
+        );
+    }
+
+    /// A quota error answered by every worker in the same first wave still
+    /// collapses to one `failures` line (`quota_reported`), but each of
+    /// those in-flight conversations was genuinely attempted and failed --
+    /// none of them were ever queued past the stop, so this is pure
+    /// `failed_conversations` accounting, no aggregated not-started line.
+    #[test]
+    fn quota_failures_in_flight_are_counted_even_when_their_lines_collapse() {
+        let messages = parallel_corpus(3);
+        let progress = ScanProgress::default();
+        let first_wave = std::sync::Barrier::new(3);
+        let result =
+            super::scan_conversations(&messages, &progress, &ParallelPass::new(3), &|_| {
+                first_wave.wait();
+                Err(ProviderError::Quota)
+            });
+        assert_eq!(
+            result
+                .failures
+                .iter()
+                .filter(|line| line.contains("HTTP 402"))
+                .count(),
+            1,
+            "exactly one Quota line: {:?}",
+            result.failures
+        );
+        assert_eq!(result.unanalyzed_conversations(), 3);
+        assert_eq!(result.not_started_conversations, 0);
     }
 
     #[test]
@@ -5472,7 +5640,10 @@ at the downtown courthouse. Let me know if that works.",
         });
         assert_eq!(calls, 1);
         assert_eq!(result.analyzed, 0);
-        assert_eq!(result.failures.len(), 1);
+        // The Network failure line, plus one aggregate line for the second
+        // conversation the pass never dispatched.
+        assert_eq!(result.failures.len(), 2);
+        assert_eq!(result.not_started_conversations, 1);
         assert!(result.primary_scan_transport_error);
     }
 
@@ -5575,6 +5746,10 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         let progress = ScanProgress::default();
@@ -6420,6 +6595,10 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         close_passed_events(&mut result, &messages, timestamp("2026-08-22T00:00:00Z"));
@@ -6483,6 +6662,10 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         // After the stated "Friday" (Sep 4) but well before the indexed
@@ -6524,6 +6707,10 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         close_passed_events(&mut result, &messages, timestamp("2026-08-22T00:00:00Z"));
@@ -6567,6 +6754,10 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         close_passed_events(&mut result, &messages, timestamp("2026-08-22T00:00:00Z"));
@@ -6592,6 +6783,10 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         close_passed_events(&mut result, &messages, timestamp("2026-08-22T00:00:00Z"));
@@ -6622,6 +6817,10 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         close_passed_events(&mut result, &messages, timestamp("2026-08-22T00:00:00Z"));
@@ -6669,6 +6868,10 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         close_passed_events(&mut result, &messages, now);
@@ -6725,6 +6928,10 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         close_passed_events(&mut result, &messages, now);
@@ -6853,6 +7060,10 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         let resolved_anchor = Anchor {
@@ -6910,6 +7121,10 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         let progress = ScanProgress::default();
@@ -6962,6 +7177,10 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         let resolved_anchor = Anchor {
@@ -7015,6 +7234,10 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         let progress = ScanProgress::default();
@@ -7048,6 +7271,10 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         scan_closures(&all, &ScanProgress::default(), &mut result, |_, _, _| {
@@ -7102,6 +7329,10 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         let resolved_anchor = Anchor {
@@ -7170,6 +7401,10 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         let mut calls = 0;
@@ -7227,6 +7462,10 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         let mut calls = 0;
@@ -7296,6 +7535,10 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: true,
+            conversation_count: 1,
+            analyzed_conversations: 0,
+            failed_conversations: 1,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         let progress = ScanProgress::default();
@@ -7344,6 +7587,10 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         };
         let mut calls = 0;

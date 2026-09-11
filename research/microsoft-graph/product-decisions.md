@@ -18,13 +18,13 @@ accepted product choice or mistake it for a passing technical gate.
 
 | Decision | Accepted consequence | Governing ADRs | Blocking gates |
 |---|---|---|---|
-| OWN-00 | The native companion is pure Rust. System-browser authorization code with PKCE is the MVP identity path; WAM is deferred. The Office.js/TypeScript add-in is the supported sandbox exception. | ADR-001, ADR-002 | G-ID, G-ADDIN |
+| OWN-00 | The native companion is pure Rust. System-browser authorization code with PKCE is the MVP identity path; WAM is deferred. The Office.js/TypeScript add-in is the supported sandbox exception. | ADR-001, ADR-002, ADR-014 | G-ID, G-ADDIN |
 | OWN-01 | The MVP is Windows-first, local, unelevated, per-user, and single-account. Remote container, NAS, and headless modes are outside the boundary. | ADR-001, ADR-010, ADR-012 | G-ADDIN, G-RELEASE |
 | OWN-02 | Commercial-global work/school accounts are the core matrix. Personal accounts stay disabled until their complete capability matrix passes. | ADR-002, ADR-003 | G-ID, G-MAIL, G-TODO, G-CAL, G-ADDIN |
 | OWN-03 | Development and preview are confirmation-first. Hybrid becomes the full-MVP default only after G-AUTO; fully automatic remains unavailable until G-AUTO-FULL. | ADR-008, ADR-009, ADR-011 | G-AUTO, G-AUTO-FULL |
 | OWN-04 | To Do-first preview is permitted. Calendar is required before claiming the complete PRD MVP. | ADR-009 | G-TODO, G-CAL |
 | OWN-05 | Invitation-loop detection ships only with the validated Calendar capability. | ADR-004, ADR-006, ADR-009 | G-CAL, G-MAIL |
-| OWN-06 | Minimized encrypted local state is the MVP baseline. Microsoft-hosted/cross-device state is a later feasibility adapter. Secure persistence failure is session-only or fail-closed. | ADR-PRIV-001, ADR-005 | G-STATE, G-PRIV, G-SEC-AUDIT |
+| OWN-06 | Minimized encrypted local state is the MVP baseline. Microsoft-hosted/cross-device state is a later feasibility adapter. Secure persistence failure is session-only or fail-closed. | ADR-PRIV-001, ADR-005, ADR-014 | G-STATE, G-PRIV, G-SEC-AUDIT |
 | OWN-07 | Only the enumerated encrypted derived metadata and approved source variants may persist, including the manual-artifact exception with identifiers, digests, and ownership/version flags. | ADR-PRIV-001, ADR-006, ADR-009 | G-STATE, G-PRIV |
 | OWN-08 | Local and external BYO model providers are first-class, including hosted Ollama use. External transmission requires exact disclosure, consent, protected keys, and a passing model gate. | ADR-007 | G-MODEL, G-PRIV |
 | OWN-09 | Polling and reconciliation are the timing model. Freshness is visible and no intermediate-state or instant-delivery guarantee is made. | ADR-004 | G-MAIL |

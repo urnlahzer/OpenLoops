@@ -1,0 +1,161 @@
+import { Tokens } from "tokens.slint";
+import { Pill } from "widgets.slint";
+
+export component TitleBar inherits Rectangle {
+    in property <bool> scanning;
+    in property <string> scan-text;
+    in property <bool> account-signed-in;
+    height: Tokens.title-height;
+    background: Tokens.brand;
+    HorizontalLayout {
+        padding-left: Tokens.space-4; padding-right: Tokens.space-4; spacing: Tokens.space-3;
+        Text { text: "OpenLoops"; color: Tokens.bg-surface; font-size: Tokens.font-15; font-weight: 600; vertical-alignment: center; }
+        Text { text: "Outlook companion"; color: Tokens.bg-surface; font-size: Tokens.font-13; vertical-alignment: center; }
+        // N1/X11 (revised): a quiet, non-animating chip -- no `Spinner` (it
+        // requested continuous repaints, producing black frames on
+        // hybrid-GPU systems) and no dot-count prefix on the text (that
+        // throttled indicator was redundant with the elapsed-seconds count
+        // already in `scan-text` and read, with the spinner, as a large
+        // translucent oval rather than a quiet label). Sized to its own text
+        // rather than any fixed pill height. `scan-text` is already §3's
+        // Review-scan copy or, for any other running job, that job's label
+        // and elapsed seconds (`root.review-scan-chip-text.is-empty ?
+        // root.busy-chip-text : ...` in app.slint) -- this chip does not
+        // distinguish the two itself.
+        if root.scanning: Rectangle {
+            background: Tokens.chip-bg; border-radius: Tokens.radius-4;
+            width: chip-label.preferred-width + 2 * Tokens.space-3;
+            height: chip-label.preferred-height + 2 * Tokens.space-1;
+            chip-label := Text { text: root.scan-text; color: Tokens.bg-surface; font-size: Tokens.font-13; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+        }
+        Rectangle { horizontal-stretch: 1; background: Tokens.transparent; }
+        // Owner feedback item 3: the Graph layer exposes no display name, so
+        // there is no avatar and no name here -- only a connection summary,
+        // shown once the Microsoft connection has succeeded or review
+        // messages have already loaded, and nothing at all otherwise (never
+        // a misleading "Not signed in" while mail is actually being
+        // scanned).
+        if root.account-signed-in: Text { text: "Signed in · Microsoft 365"; color: Tokens.bg-surface; font-size: Tokens.font-13; horizontal-alignment: right; vertical-alignment: center; }
+    }
+    Rectangle { x: 0; y: parent.height - Tokens.hairline; width: 100%; height: Tokens.hairline; background: Tokens.stroke-1; }
+}
+
+component NavItem inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <string> accessible-name: label;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    in property <int> badge;
+    callback activated;
+    height: Tokens.nav-item-height;
+    background: selected ? Tokens.nav-selected : Tokens.transparent;
+    border-radius: Tokens.radius-4;
+    forward-focus: nav-focus;
+    accessible-role: button;
+    accessible-label: accessible-name;
+    accessible-enabled: enabled;
+    accessible-action-default => { if root.enabled { root.activated(); } }
+    VerticalLayout {
+        padding-top: Tokens.space-1; padding-bottom: Tokens.space-1; spacing: Tokens.space-1;
+        // S7: unselected nav ink is `text-nav` (#424242), a distinct step
+        // between `text-1` (selected) and `text-2` -- see the Companion's
+        // nav rail, where "Sources" reads visibly lighter than a selected
+        // "Review".
+        Text { text: root.icon; color: root.selected ? Tokens.brand : Tokens.text-nav; font-size: Tokens.font-16; horizontal-alignment: center; vertical-alignment: center; }
+        Text { text: root.label; color: root.selected ? Tokens.brand : Tokens.text-nav; font-size: Tokens.font-11; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+    }
+    if root.badge > 0: Rectangle {
+        // R2: raised a full half badge-height above the item's own top edge
+        // (not just `space-1`/4px) and pulled in from the item's right edge
+        // by `space-1` rather than overhanging past it, so the badge clears
+        // the centered icon glyph's box entirely instead of touching it,
+        // however many digits the count grows to.
+        x: parent.width - self.width - Tokens.space-1;
+        y: -Tokens.nav-badge-size / 2;
+        width: max(Tokens.nav-badge-size, badge-text.preferred-width + 2 * Tokens.space-1); height: Tokens.nav-badge-size;
+        background: Tokens.danger; border-radius: Tokens.radius-pill;
+        badge-text := Text { text: root.badge; color: Tokens.bg-surface; font-size: Tokens.font-10; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+    }
+    TouchArea {
+        enabled: root.enabled;
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down && root.enabled {
+                nav-focus.focus();
+                root.activated();
+            }
+        }
+    }
+    nav-focus := FocusScope {
+        // A FocusScope with focus-on-click swallows the first press while it
+        // lacks focus (Slint returns EventAccepted after taking focus), so the
+        // TouchArea beneath only sees the second click. The TouchArea focuses
+        // this scope itself.
+        focus-on-click: false;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return { root.activated(); return accept; }
+            return reject;
+        }
+    }
+    if nav-focus.has-focus && root.enabled: Rectangle {
+        x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+        width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring;
+        border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+    }
+}
+
+export component NavRail inherits Rectangle {
+    in-out property <int> selected-index;
+    in property <int> review-badge;
+    in property <string> provider-name;
+    in property <bool> provider-connected;
+    in property <bool> enabled: true;
+    callback selected(int);
+    width: Tokens.nav-width;
+    background: Tokens.bg-canvas;
+    VerticalLayout { padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; padding-left: Tokens.space-2; padding-right: Tokens.space-2; spacing: Tokens.space-2;
+        NavItem {
+            icon: "□"; label: "Review"; selected: root.selected-index == 0; enabled: root.enabled; badge: root.review-badge;
+            accessible-name: root.review-badge > 0 ? "Review, " + root.review-badge + " open" : "Review";
+            activated => { if root.selected-index != 0 { root.selected-index = 0; root.selected(0); } }
+        }
+        NavItem {
+            icon: "◇"; label: "Sources"; selected: root.selected-index == 1; enabled: root.enabled;
+            activated => { if root.selected-index != 1 { root.selected-index = 1; root.selected(1); } }
+        }
+        Rectangle { vertical-stretch: 1; background: Tokens.transparent; }
+        // The provider label spans the whole rail width (outside the layout
+        // padding) so a name such as "OpenRouter" fits on one line at 11 px.
+        Rectangle { height: dot.preferred-height + Tokens.space-1 + name.preferred-height; background: Tokens.transparent;
+            // `Tokens.text-2`, not `text-3`, here: this dot sits over the nav
+        // rail's `bg-canvas`, where `text-3` falls to 4.35:1 (below the
+        // 4.5:1 the spec's own §7 requires for text) -- see the T5 contrast
+        // audit in the branch's task report.
+        dot := Text { x: -Tokens.space-2; y: 0; width: Tokens.nav-width; text: "●"; color: root.provider-connected ? Tokens.success : Tokens.text-2; font-size: Tokens.font-11; horizontal-alignment: center; }
+            name := Text { x: -Tokens.space-2; y: dot.preferred-height + Tokens.space-1; width: Tokens.nav-width; text: root.provider-name; color: Tokens.text-2; font-size: Tokens.font-11; horizontal-alignment: center; wrap: word-wrap; }
+        }
+    }
+    Rectangle { x: parent.width - Tokens.hairline; y: 0; width: Tokens.hairline; height: 100%; background: Tokens.stroke-1; }
+}
+
+export component StatusBar inherits Rectangle {
+    in property <string> left-text;
+    in property <string> center-text;
+    in property <string> right-text;
+    height: Tokens.status-height;
+    background: Tokens.bg-bar;
+    // Explicit geometry (not just `height`): without it this hairline sits
+    // among the layout's other children and gets centred over the status
+    // text instead of pinned to the bar's own top edge.
+    Rectangle { x: 0; y: 0; width: 100%; height: Tokens.hairline; background: Tokens.stroke-1; }
+    HorizontalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; spacing: Tokens.space-4;
+        Text { text: root.left-text; color: Tokens.text-2; font-size: Tokens.font-13; vertical-alignment: center; }
+        Rectangle { horizontal-stretch: 1; background: Tokens.transparent; }
+        // X8: elides rather than letting a long model id grow past its cap
+        // and push `right-text` off the bar.
+        Text { text: root.center-text; color: Tokens.text-2; font-size: Tokens.font-13; horizontal-alignment: center; vertical-alignment: center; max-width: Tokens.status-center-max-width; overflow: elide; }
+        Rectangle { horizontal-stretch: 1; background: Tokens.transparent; }
+        Text { text: root.right-text; color: Tokens.text-2; font-size: Tokens.font-13; vertical-alignment: center; }
+    }
+}

@@ -1,0 +1,118 @@
+export global Tokens {
+    out property <color> brand: #0F6CBD;
+    out property <color> brand-hover: #115EA3;
+    out property <color> brand-label: #0F548C;
+    out property <color> brand-subtle: #EBF3FC;
+    out property <color> brand-stroke: #B4D6FA;
+    out property <color> brand-panel: #F5FAFE;
+    out property <color> bg-canvas: #F0F0F0;
+    out property <color> bg-bar: #F5F5F5;
+    out property <color> bg-surface: #FFFFFF;
+    out property <color> bg-list: #FAFAFA;
+    out property <color> stroke-1: #E0E0E0;
+    out property <color> stroke-2: #D1D1D1;
+    out property <color> text-1: #242424;
+    out property <color> text-2: #616161;
+    out property <color> text-3: #707070;
+    out property <color> danger: #C50F1F;
+    out property <color> danger-bg: #FDF3F4;
+    out property <color> warning: #BC4B09;
+    out property <color> warning-bg: #FFF9F5;
+    out property <color> warning-stroke: #F4C7A8;
+    out property <color> success: #0E700E;
+    out property <color> success-bg: #F1FAF1;
+    out property <color> success-stroke: #9FD89F;
+    out property <color> watch: #4F52B2;
+    out property <color> watch-bg: #EEEFFC;
+    out property <color> nav-selected: stroke-1;
+    // X13: the Companion's unselected nav-rail ink (#424242) sits between
+    // `text-1` (#242424, too dark -- that's the *selected* ink) and `text-2`
+    // (#616161, too light) -- a distinct token rather than overloading
+    // either existing one.
+    out property <color> text-nav: #424242;
+    out property <color> transparent: #00000000;
+    // White at 16% alpha (N1/X11): the title-bar busy chip's own background,
+    // distinct from `brand-subtle` (which reads as a near-invisible tint
+    // against the title bar's own `brand` background).
+    out property <color> chip-bg: #FFFFFF29;
+    out property <length> font-10: 10px;
+    out property <length> font-11: 11px;
+    out property <length> font-13: 13px;
+    out property <length> font-14: 14px;
+    out property <length> font-15: 15px;
+    out property <length> font-16: 16px;
+    out property <length> font-22: 22px;
+    out property <length> radius-3: 3px;
+    out property <length> radius-4: 4px;
+    out property <length> radius-6: 6px;
+    out property <length> radius-8: 8px;
+    out property <length> radius-pill: 999px;
+    out property <length> space-1: 4px;
+    out property <length> space-2: 8px;
+    out property <length> space-3: 12px;
+    out property <length> space-4: 16px;
+    out property <length> space-5: 20px;
+    out property <length> space-6: 24px;
+    out property <length> space-8: 32px;
+    out property <length> button-pad-y: 5px;
+    out property <length> button-pad-x: 12px;
+    out property <length> card-pad-y: 20px;
+    out property <length> card-pad-x: 22px;
+    out property <length> pane-gutter-y: 24px;
+    out property <length> pane-gutter-x: 32px;
+    out property <length> click-min: 28px;
+    out property <length> focus-ring: 2px;
+    out property <length> hairline: 1px;
+    out property <length> badge-size: 18px;
+    // X12: the Companion draws the nav rail's open-count badge at 16px, one
+    // size step below the generic `badge-size` (18px) `StepHeading` still
+    // uses on the Sources screen -- kept as a separate token so the two
+    // don't drift together by accident.
+    out property <length> nav-badge-size: 16px;
+    out property <length> nav-item-height: 48px;
+    out property <length> progress-height: 4px;
+    out property <length> title-height: 48px;
+    out property <length> nav-width: 72px;
+    out property <length> status-height: 26px;
+    // X8: caps the status bar's centre ("Model: ... (...)") text so a long
+    // model id elides instead of pushing the right-hand text off the bar.
+    out property <length> status-center-max-width: 320px;
+    out property <length> command-height: 44px;
+    out property <length> command-bar-height: 44px;
+    out property <length> review-list-width: 380px;
+    out property <length> review-row-min-height: 56px;
+    out property <length> review-reading-max-width: 860px;
+    out property <length> review-section-gap: 20px;
+    out property <length> review-meta-min-width: 180px;
+    // X9: the meta grid's own column-count threshold, distinct from
+    // `review-meta-min-width` (each `MetaBlock`'s own minimum width).
+    out property <length> meta-col-min: 180px;
+    out property <length> review-row-bar-width: 3px;
+    out property <length> review-row-date-max-inline: 120px;
+    out property <length> group-dot-size: 8px;
+    out property <length> review-filter-width: 240px;
+    out property <length> card-min-width: 360px;
+    out property <length> window-min-width: 1100px;
+    out property <length> window-min-height: 640px;
+    out property <length> window-width: 1100px;
+    out property <length> window-height: 850px;
+    out property <length> field-height: 32px;
+    out property <length> textarea-row: 24px;
+    out property <length> avatar-size: 28px;
+    out property <length> segment-min-width: 72px;
+    // T-poll: the Companion's segmented track has 2px of inner padding
+    // around its pills; kept as its own token rather than reusing a
+    // 4-px spacing step that would visibly loosen the track.
+    out property <length> segment-track-pad: 2px;
+    out property <float> disabled-opacity: 0.5;
+    // "Segoe UI Variable" is installed on this machine only as the variable
+    // font file (SegUIVar.ttf); the FemtoVG/fontdb renderer this build uses
+    // does not drive its weight axis reliably, so a 600-weight request can
+    // fall back to a synthetic or plain-regular face. The static family's
+    // own Semibold face is installed, so weight 600 always resolves to a
+    // real face -- see docs/native-setup.md and ADR-014.
+    out property <string> font-family: "Segoe UI";
+    // Likewise "Cascadia Mono" is not installed on this machine (only
+    // Consolas is); Slint takes a single family name with no fallback list.
+    out property <string> mono-font-family: "Consolas";
+}

@@ -1,10 +1,38 @@
 # Live expectation review
 
-Open the native app and choose **Review inboxes**. Saved connections restore
+## Screen layout
+
+The nav rail on the left switches between **Review** and **Sources**; its
+Review icon carries a badge of how many open loops are `Review`, `Mine`, or
+`Watching` and not yet auto-resolved, hidden at zero. The Review screen's
+command bar holds **Scan inboxes** (becomes **Stop scan** while a scan runs),
+**Rescan loaded mail**, **Clear results and mail**, an **All / Mine / Team**
+filter, and the **Show resolved, handled and dismissed** checkbox. Directly
+under it, the scan strip shows one of three states: scanning (phase, "Conversation
+i of n", "m / total messages", elapsed time, and a progress bar), finished
+(a summary line, and expanding "Coverage details" into the incomplete-source
+notices), or idle (the scan-scope disclosure). The list pane groups open
+rows as Past due, Due, and No fixed deadline (dot colour and order match
+`ListGroup`/`DeadlineView`), with a fourth Resolved/handled/dismissed group
+appearing only when the checkbox above is on.
+
+The reading pane, top to bottom, shows: status/aging/reminder pills; the
+action-phrase title; a meta grid (Responsible, Waiting on this, Deadline
+stated in email, Source); an uncertainty callout when the model reported one;
+the decision buttons for the selected card; the action-status line; an inline
+reminder-draft panel when one is open (task title, remind-at time, quick
+picks, the scheduled-instant line, and the disclosure copy below); the
+reminder's own state (created or attempted, with reconcile buttons in the
+attempted case); one evidence card per anchor; the possible-later-completion
+card or note; and the collapsed "Full scanned conversation" disclosure with
+one row per message.
+
+Open the native app and select **Review**. Saved connections restore
 automatically. This is a real Microsoft/Ollama flow; no synthetic cards appear
 in the normal application.
 
-1. **Scan inboxes** opens Microsoft sign-in, reads the visible 30-day history,
+1. **Scan inboxes** reuses the current Microsoft session when available (and
+   otherwise opens sign-in), reads the visible 30-day history,
    and automatically analyzes conversations with the selected Ollama model.
    There is no individual message selection. Personal Inbox and Sent Items
    are joined by conversation identity, and a split identity is merged back
@@ -38,10 +66,14 @@ in the normal application.
    cancelling that draft restores the decision to what it was before the
    draft opened, unless you have changed the decision since (an action
    button, or a rescan closing the card by later evidence), in which case
-   the draft simply closes and the changed decision stands. The checkbox
-   **Show resolved, handled, dismissed, and
-   no-longer-relevant items** reveals closed cards. Model summaries and
-   source text are not saved locally.
+   the draft simply closes and the changed decision stands. Every closed card
+   -- terminal (Handled/Dismissed/No longer relevant) or auto-resolved alike
+   -- shows both **Reopen for review** and **Still open — track it**,
+   widening the old egui build's terminal-only "Reopen"/auto-resolved-only
+   "Still open" split to match spec §4.5 and the Companion; Enter on a
+   selected closed card runs **Reopen for review**. The checkbox
+   **Show resolved, handled and dismissed** reveals closed cards. Model
+   summaries and source text are not saved locally.
 4. **Set To Do reminder** is available on any open card and does not require
    tracking or watching it first; setting a reminder on a card still under
    review implies tracking it (a card already being watched stays watched).
@@ -49,7 +81,8 @@ in the normal application.
    under the card that opened it. The explicit create button authorizes
    one task in the same Microsoft account's default personal Tasks list.
    Microsoft To Do owns notification delivery, including when OpenLoops closes.
-   This requires delegated Tasks.ReadWrite and a separate browser sign-in.
+   This first requires delegated Tasks.ReadWrite; the browser opens only when
+   the current session does not already cover that incremental scope.
 5. **Rescan loaded mail** uses current in-memory mail without another Graph
    read. **Stop scan** stops dispatching and abandons the requests in flight. **Clear results
    and mail** removes memory content, preserving saved decisions and To Do tasks.
@@ -66,6 +99,15 @@ There are at most 10 configured sources. Pagination is confined to the same
 Graph origin and collection path. A capped, inaccessible, or oversized source
 is visible as incomplete coverage. Conversations above 40 messages or the
 provider payload bound fail visibly instead of silently losing context.
+Read-only Graph listings and body fetches retry once after two seconds for a
+timeout, interrupted connection, HTTP 503, or HTTP 504 (never HTTP 429), and a
+body failure skips only that message while reporting the source's failed count.
+When a provider error (quota, rate limiting, an unreachable or unauthorized
+provider) stops a scan early, the summary and the "Scan coverage and errors"
+panel count every affected conversation -- analyzed, failed, or never
+dispatched -- rather than counting failure lines, so conversations queued
+behind a single repeated error still show up in the totals instead of
+silently disappearing from the count.
 
 The model sees canonical message bodies, subjects, quoted history, participants,
 timestamps and ownership facts. It never receives a token or raw Graph IDs.
@@ -81,7 +123,7 @@ review. Missing replies in these configured folders/window never prove that
 work is unfinished. No reminders are created by scanning or inference alone.
 Conversations are analyzed in parallel, up to the concurrency the selected
 provider allows (the Ollama plan's slots, or the OpenRouter parallel ceiling on
-the Connections tab), and the busy view shows how many are done and how many
+the Sources screen), and the busy view shows how many are done and how many
 are in flight; the merged result is identical to analyzing them one at a time.
 Authentication, network, timeout, and HTTP server failures stop later requests.
 Rate limiting and quota instead narrow the concurrency, failing only the
@@ -118,7 +160,8 @@ is updated. Reminder records remain available for user reconciliation. Hitting
 the storage bound fails visibly and preserves existing records. A failed/corrupt
 read or detected concurrent edit stops saving rather than overwriting data.
 
-This is a foreground native preview. New scans require sign-in; there is no
+This is a foreground native preview. Scans require a current in-process Microsoft
+session; there is no
 unattended monitoring, Outlook add-in, or automatic external-task reconciliation.
 See [spec](working-demo-spec.md), [plan](working-demo-plan.md), and
 [roadmap](working-demo-roadmap.md) for the production path and remaining gates.

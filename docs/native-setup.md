@@ -2,8 +2,10 @@
 
 Open `target/debug/openloops-ui.exe` in File Explorer. Connection setup takes
 place in the window; neither credentials nor model selection require a terminal.
-The same native window now includes [conversation review and reviewed To Do
-reminders](inbox-review.md). It is a foreground preview; the Outlook add-in and
+The Slint-based native window has a navigation rail with **Review** and
+**Sources** screens. Review includes [conversation review and reviewed To Do
+reminders](inbox-review.md), while Sources contains Microsoft and model setup.
+It is a foreground preview; the Outlook add-in and
 unattended background service remain on the implementation roadmap.
 
 ## Using the window
@@ -48,13 +50,24 @@ The UI reports save failures and leaves the previous record intact. Windows limi
 the complete encoded record to 2,560 bytes; an oversized inbox list produces an
 error rather than truncating settings.
 
-The Microsoft check still discards its token and sign-in is required again; access
-check results and the Show key toggle are not saved. The separate
-[Review inboxes tab](inbox-review.md) automatically analyzes recent mail from
+The Microsoft check keeps its token only in process memory for reuse during its
+lifetime; access check results and the Show key toggle are not saved. The separate
+[Review screen](inbox-review.md) automatically analyzes recent mail from
 configured inboxes when the user clicks Scan inboxes.
-Reminder scheduling and task creation remain unimplemented. The Ollama
+**Set To Do reminder…** on a reviewed card opens an editable draft (title,
+local reminder time, quick picks) and, on confirmation, creates one task in
+the signed-in account's default personal Tasks list; a missing or uncertain
+write is never retried automatically and instead waits for the user to
+reconcile it ("I checked: the task exists" / "I checked: no task was
+created") against Microsoft To Do directly. The Ollama
 test sends a fixed content-free request. Successful generation confirms that
 request's validity, not a model's extraction quality.
+
+The title bar's account element shows "Signed in · Microsoft 365" once the
+Microsoft connection has succeeded, or once review messages have already
+loaded, and nothing otherwise; the Graph layer exposes no display name yet
+(`ConnectionReport` carries no account identifiers by design), so no name or
+avatar is shown.
 
 The app registration is still a developer setup prerequisite. Ordinary user
 onboarding will need a publisher-owned multitenant registration configured in
@@ -70,7 +83,11 @@ Build the executable once from a development checkout:
 cargo build -p openloops-desktop --bin openloops-ui --features native-ui --locked
 ```
 
-The native window uses eframe with its generic persistence disabled. A narrow
+The window/taskbar icon is set at runtime from `ui/assets/openloops-256.png` via
+Slint's `icon` property on the window; a pinned taskbar shortcut's own icon
+would need an embedded exe resource, which is out of scope here.
+
+The native window uses Slint 1.17.1 with the Fluent style and native renderer. A narrow
 `settings.rs` module uses pinned `keyring-core` and `windows-native-keyring-store`
 dependencies to access only the `OpenLoops/Setup/v1` generic credential, with
 credential search disabled. Network requests run on
@@ -81,13 +98,43 @@ The busy indicator updates four times a second by design.
 Serialized settings and API keys use zeroizing buffers without claiming removal
 of all UI, allocator, TLS, or operating-system copies.
 
-For visual checks on empty fields only, `ui-screenshot` builds a noninteractive
-window that saves `openloops-setup-empty.png` in the operating-system temporary
-directory and exits. This uses eframe's screenshot event before buffer swapping.
-The fields cannot be edited in that build, and real settings are never loaded or
-saved. Normal `native-ui` builds do not include screenshot saving. UI unit tests
-also disable the production store; the Windows integration test uses an isolated
-synthetic credential, verifies it from a fresh process, and deletes it afterward.
+Microsoft sign-in is reused for the access token's lifetime (normally about an
+hour) across connection checks, mail loads, scans, and reviewed reminder
+creation. The token remains only in process memory: it is never persisted and
+is cleared on Forget, an application client-ID change, a Graph 401 response, or
+process exit. No `offline_access` scope or refresh token is requested, so the
+next Microsoft operation opens sign-in again after expiry.
+
+The UI's `font-family` token is the static `"Segoe UI"`, not `"Segoe UI
+Variable"`: the variable family is installed on this machine only as the
+variable font file (`SegUIVar.ttf`), and this build's FemtoVG/fontdb renderer
+does not drive that file's weight axis reliably, so a requested weight of 600
+can render as a synthetic or plain-regular face. The static family's own
+Semibold face is installed, so weight 600 always resolves correctly (see
+ADR-014). `mono-font-family` is likewise the static `"Consolas"` rather than
+`"Cascadia Mono"`, which is not installed on this machine; Slint takes a
+single family name with no fallback list.
+
+The `ui-screenshot` feature (`cargo build -p openloops-desktop --bin openloops-ui
+--features ui-screenshot`) adds a `--preview-review` flag that loads the Review
+screen's synthetic layout fixture (`review_model::layout_fixture`) instead of a
+real scan, with its "Full scanned conversation" disclosure expanded by default.
+Used alone, `--preview-review` shows the fixture briefly, saves a screenshot to
+`<temp dir>/openloops-review-preview.png` via `slint::Window::take_snapshot`,
+and exits; a renderer that cannot produce a snapshot is reported on stderr and
+the PNG step is skipped without failing the process. `--preview-review --stay`
+instead leaves the fixture window open indefinitely, for driving an external
+window-capture tool against a real, visible window handle. Independent of
+`--preview-review`, setting `OPENLOOPS_PREVIEW_PROVIDER=openrouter` seeds a
+fresh run's Sources screen with OpenRouter selected, a parallel-requests
+value, and a long zero-data-retention model label, for capturing that
+screen's own layout without any saved settings. Setting
+`OPENLOOPS_PREVIEW_CONNECTED=1` seeds four successful Microsoft access lines,
+the personal-inbox confirmation pill, and a long successful settings status
+for the connected Sources layout. UI unit tests
+disable the production store; the Windows integration test uses
+an isolated synthetic credential, verifies it from a fresh process, and
+deletes it afterward.
 
 This optional interface does not pass a release gate or change the existing
 Phase 0 network-dependency restrictions. It is a local development executable,

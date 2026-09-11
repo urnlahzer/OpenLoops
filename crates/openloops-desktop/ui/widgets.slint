@@ -1,0 +1,610 @@
+import { Tokens } from "tokens.slint";
+import { Button, CheckBox as StdCheckBox, ComboBox, LineEdit, TextEdit } from "std-widgets.slint";
+
+// T1 (was `review.slint`'s private `WrappedText`, now the one shared copy):
+// a `Text` with `wrap: word-wrap` placed directly in a layout (or given only
+// `width: 100%`) reports a one-line preferred height and then renders
+// several lines over whatever follows it. R2: the previous version hosted
+// `label` in an INNER `Rectangle` whose own `height` was bound to `label`'s
+// `preferred-height` -- but that inner `Rectangle` was never itself given a
+// height, so `WrappedText`'s own ROOT (what the surrounding layout actually
+// measures) still reported no height at all. `inherits Rectangle` puts both
+// `height` and `min-height` directly on the root, bound to `label`'s
+// `preferred-height`, so the wrapped height is a real layout constraint of
+// the element every caller places. Every wrapping `Text` in the five
+// `.slint` files goes through this one component so this fix (and any
+// future one) lives in exactly one place.
+export component WrappedText inherits Rectangle {
+    in property <string> text;
+    // Named `text-color`, not `color`: `Rectangle` already defines `color`
+    // as a deprecated alias for `background`, and Slint refuses to override
+    // an inherited property with a different type/meaning.
+    in property <color> text-color: Tokens.text-2;
+    in property <length> size: Tokens.font-13;
+    in property <int> weight: 400;
+    in property <TextHorizontalAlignment> horizontal-alignment: left;
+    width: 100%;
+    // Slint rejects setting both `height` and `min-height` on one element;
+    // `height` alone already fixes this element's size to the wrapped
+    // text's real height, which is what a caller's layout measures.
+    height: label.preferred-height;
+    label := Text { width: 100%; text: root.text; color: root.text-color; font-size: root.size; font-weight: root.weight; horizontal-alignment: root.horizontal-alignment; wrap: word-wrap; }
+}
+
+component ButtonBase {
+    in property <string> text;
+    in property <string> accessible-name: text;
+    in property <bool> enabled: true;
+    in property <bool> primary: false;
+    callback clicked;
+    min-height: Tokens.click-min;
+    opacity: enabled ? 1 : Tokens.disabled-opacity;
+    button := Button {
+        text: root.text;
+        accessible-label: root.accessible-name;
+        enabled: root.enabled;
+        primary: root.primary;
+        clicked => { root.clicked(); }
+    }
+    if button.has-focus && root.enabled: Rectangle {
+        x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+        width: parent.width + 2 * Tokens.focus-ring;
+        height: parent.height + 2 * Tokens.focus-ring;
+        border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+    }
+}
+
+// Not built on `ButtonBase`/the std `Button`: that widget's own `disabled`
+// state recolours a primary button's background to a neutral grey (see
+// `i-slint-compiler`'s `widgets/fluent/button.slint`), which combined with
+// `ButtonBase`'s opacity wrapper reads as washed-out grey rather than the
+// spec's "primary buttons keep colour at 50% opacity" (§6). This hand-rolled
+// button keeps `Tokens.brand` as its background regardless of `enabled` and
+// leaves dimming entirely to `opacity`, the same recipe `LinkButton`,
+// `Segmented` and `NavItem` in this file already use for the same reason.
+export component PrimaryButton {
+    in property <string> text;
+    in property <string> accessible-name: text;
+    in property <bool> enabled: true;
+    callback clicked;
+    min-width: max(Tokens.click-min, label.preferred-width + 2 * Tokens.button-pad-x);
+    min-height: Tokens.click-min;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    opacity: enabled ? 1 : Tokens.disabled-opacity;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    Rectangle {
+        background: Tokens.brand;
+        border-radius: Tokens.radius-4;
+        HorizontalLayout {
+            padding-left: Tokens.button-pad-x; padding-right: Tokens.button-pad-x;
+            padding-top: Tokens.button-pad-y; padding-bottom: Tokens.button-pad-y;
+            alignment: center;
+            label := Text { text: root.text; color: Tokens.bg-surface; font-size: Tokens.font-14; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+        }
+    }
+    TouchArea { enabled: root.enabled; clicked => { primary-focus.focus(); root.clicked(); } }
+    primary-focus := FocusScope {
+        // A FocusScope with focus-on-click swallows the first press while it
+        // lacks focus (Slint returns EventAccepted after taking focus), so the
+        // TouchArea beneath only sees the second click. The TouchArea focuses
+        // this scope itself.
+        focus-on-click: false;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    if primary-focus.has-focus && root.enabled: Rectangle {
+        x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+        width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring;
+        border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+    }
+}
+// `ButtonBase`'s std `Button` (Fluent's own "standard" style) already renders
+// white-on-`stroke-2` for a non-primary, non-checked button, which is exactly
+// S4's Secondary spec -- so Secondary keeps that widget unchanged.
+export component SecondaryButton inherits ButtonBase { }
+
+// Subtle (transparent, no border, `text-1` ink, `bg-canvas` on hover) and
+// Outline (white, `brand` border and ink) have no equivalent state in the std
+// `Button` -- it only ever paints `control-background`/`control-border` for a
+// non-primary button (see `i-slint-compiler`'s `widgets/fluent/button.slint`)
+// -- so both are hand-rolled the same way `PrimaryButton`/`LinkButton` are.
+export component SubtleButton {
+    in property <string> text;
+    in property <string> accessible-name: text;
+    in property <bool> enabled: true;
+    callback clicked;
+    min-width: max(Tokens.click-min, label.preferred-width + 2 * Tokens.button-pad-x);
+    min-height: Tokens.click-min;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    opacity: enabled ? 1 : Tokens.disabled-opacity;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    Rectangle {
+        background: touch.has-hover ? Tokens.bg-canvas : Tokens.transparent;
+        border-radius: Tokens.radius-4;
+        HorizontalLayout {
+            padding-left: Tokens.button-pad-x; padding-right: Tokens.button-pad-x;
+            padding-top: Tokens.button-pad-y; padding-bottom: Tokens.button-pad-y;
+            alignment: center;
+            label := Text { text: root.text; color: Tokens.text-1; font-size: Tokens.font-14; font-weight: 400; horizontal-alignment: center; vertical-alignment: center; }
+        }
+    }
+    touch := TouchArea { enabled: root.enabled; clicked => { subtle-focus.focus(); root.clicked(); } }
+    subtle-focus := FocusScope {
+        // A FocusScope with focus-on-click swallows the first press while it
+        // lacks focus (Slint returns EventAccepted after taking focus), so the
+        // TouchArea beneath only sees the second click. The TouchArea focuses
+        // this scope itself.
+        focus-on-click: false;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    if subtle-focus.has-focus && root.enabled: Rectangle {
+        x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+        width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring;
+        border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+    }
+}
+
+export component OutlineButton {
+    in property <string> text;
+    in property <string> accessible-name: text;
+    in property <bool> enabled: true;
+    callback clicked;
+    min-width: max(Tokens.click-min, label.preferred-width + 2 * Tokens.button-pad-x);
+    min-height: Tokens.click-min;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    opacity: enabled ? 1 : Tokens.disabled-opacity;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    Rectangle {
+        background: Tokens.bg-surface;
+        border-width: Tokens.hairline; border-color: Tokens.brand;
+        border-radius: Tokens.radius-4;
+        HorizontalLayout {
+            padding-left: Tokens.button-pad-x; padding-right: Tokens.button-pad-x;
+            padding-top: Tokens.button-pad-y; padding-bottom: Tokens.button-pad-y;
+            alignment: center;
+            label := Text { text: root.text; color: Tokens.brand; font-size: Tokens.font-14; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+        }
+    }
+    TouchArea { enabled: root.enabled; clicked => { outline-focus.focus(); root.clicked(); } }
+    outline-focus := FocusScope {
+        // A FocusScope with focus-on-click swallows the first press while it
+        // lacks focus (Slint returns EventAccepted after taking focus), so the
+        // TouchArea beneath only sees the second click. The TouchArea focuses
+        // this scope itself.
+        focus-on-click: false;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    if outline-focus.has-focus && root.enabled: Rectangle {
+        x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+        width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring;
+        border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+    }
+}
+
+export component LinkButton {
+    in property <string> text;
+    in property <string> accessible-name: text;
+    in property <bool> enabled: true;
+    callback clicked;
+    min-height: Tokens.click-min;
+    horizontal-stretch: 0;
+    opacity: enabled ? 1 : Tokens.disabled-opacity;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    HorizontalLayout {
+        alignment: start;
+        Text { text: root.text; color: Tokens.brand; font-size: Tokens.font-13; font-weight: 600; vertical-alignment: center; accessible-role: none; }
+    }
+    TouchArea { enabled: root.enabled; clicked => { link-focus.focus(); root.clicked(); } }
+    link-focus := FocusScope {
+        // A FocusScope with focus-on-click swallows the first press while it
+        // lacks focus (Slint returns EventAccepted after taking focus), so the
+        // TouchArea beneath only sees the second click. The TouchArea focuses
+        // this scope itself.
+        focus-on-click: false;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    if link-focus.has-focus && root.enabled: Rectangle {
+        x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+        width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring;
+        border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+    }
+}
+
+export component Segmented {
+    in property <[string]> options;
+    in-out property <int> selected-index;
+    in property <string> accessible-name;
+    in property <bool> enabled: true;
+    callback selected(int);
+    min-height: Tokens.click-min;
+    width: 100%;
+    opacity: enabled ? 1 : Tokens.disabled-opacity;
+    accessible-role: groupbox;
+    accessible-label: accessible-name;
+    // S6: the Companion's `seg()` track is the control's own `bg-bar`
+    // background with the *selected* segment painted white (`bg-surface`)
+    // and unselected segments left transparent so the track shows through
+    // -- never a brand-filled block, which reads as a stray blue button
+    // (see the Sources/OpenRouter screenshot this task's brief points at).
+    // Ink stays `text-1` either way; only the background toggles.
+    track := Rectangle {
+        background: Tokens.bg-bar;
+        border-radius: Tokens.radius-6;
+        HorizontalLayout {
+            padding: Tokens.segment-track-pad;
+            spacing: Tokens.space-1;
+            for option[index] in root.options: segment := Rectangle {
+                min-width: Tokens.segment-min-width;
+                min-height: Tokens.click-min - 2 * Tokens.segment-track-pad;
+                horizontal-stretch: 1;
+                background: index == root.selected-index ? Tokens.bg-surface : Tokens.transparent;
+                border-radius: Tokens.radius-3;
+                forward-focus: segment-focus;
+                accessible-role: button;
+                accessible-label: option;
+                accessible-enabled: root.enabled;
+                accessible-checkable: true;
+                accessible-checked: index == root.selected-index;
+                accessible-action-default => {
+                    if root.enabled && index != root.selected-index {
+                        root.selected-index = index;
+                        root.selected(index);
+                    }
+                }
+                Text {
+                    text: option;
+                    color: Tokens.text-1;
+                    font-size: Tokens.font-13; font-weight: 600;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+                TouchArea {
+                enabled: root.enabled;
+                clicked => {
+                    segment-focus.focus();
+                    if index != root.selected-index {
+                        root.selected-index = index;
+                        root.selected(index);
+                    }
+                }
+            }
+            segment-focus := FocusScope {
+                // A FocusScope with focus-on-click swallows the first press while it
+                // lacks focus (Slint returns EventAccepted after taking focus), so the
+                // TouchArea beneath only sees the second click. The TouchArea focuses
+                // this scope itself.
+                focus-on-click: false;
+                enabled: root.enabled;
+                key-pressed(event) => {
+                    if event.text == Key.LeftArrow {
+                        if root.selected-index > 0 {
+                            root.selected-index -= 1;
+                            root.selected(root.selected-index);
+                        }
+                        return accept;
+                    } else if event.text == Key.RightArrow {
+                        if root.selected-index < root.options.length - 1 {
+                            root.selected-index += 1;
+                            root.selected(root.selected-index);
+                        }
+                        return accept;
+                    } else if event.text == " " || event.text == Key.Return {
+                        if index != root.selected-index {
+                            root.selected-index = index;
+                            root.selected(index);
+                        }
+                        return accept;
+                    }
+                    return reject;
+                }
+            }
+            if segment-focus.has-focus && root.enabled: Rectangle {
+                x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+                width: parent.width + 2 * Tokens.focus-ring;
+                height: parent.height + 2 * Tokens.focus-ring;
+                border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+            }
+            }
+        }
+    }
+}
+
+export component Pill inherits Rectangle {
+    in property <string> text;
+    in property <string> kind: "neutral";
+    in property <string> accessible-name: text;
+    private property <color> ink: kind == "success" ? Tokens.success : kind == "warning" ? Tokens.warning : kind == "danger" ? Tokens.danger : kind == "watch" ? Tokens.watch : kind == "brand" ? Tokens.brand : Tokens.text-2;
+    private property <color> fill: kind == "success" ? Tokens.success-bg : kind == "warning" ? Tokens.warning-bg : kind == "danger" ? Tokens.danger-bg : kind == "watch" ? Tokens.watch-bg : kind == "brand" ? Tokens.brand-subtle : Tokens.bg-bar;
+    accessible-role: AccessibleRole.text;
+    accessible-label: accessible-name;
+    preferred-width: pill-label.preferred-width + 2 * Tokens.space-2;
+    height: pill-label.preferred-height + 2 * Tokens.space-1;
+    min-width: self.preferred-width;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    background: root.fill;
+    border-radius: self.height / 2;
+    pill-label := Text {
+        x: Tokens.space-2;
+        y: Tokens.space-1;
+        text: root.text;
+        color: root.ink;
+        font-size: Tokens.font-13;
+        font-weight: 600;
+    }
+}
+
+export component Callout {
+    in property <string> text;
+    in property <string> kind: "info";
+    in property <string> accessible-name: text;
+    private property <color> ink: kind == "success" ? Tokens.success : kind == "warning" ? Tokens.warning : Tokens.brand;
+    private property <color> fill: kind == "success" ? Tokens.success-bg : kind == "warning" ? Tokens.warning-bg : Tokens.brand-subtle;
+    private property <color> stroke: kind == "success" ? Tokens.success-stroke : kind == "warning" ? Tokens.warning-stroke : Tokens.brand-stroke;
+    width: 100%;
+    accessible-role: AccessibleRole.text;
+    accessible-label: accessible-name;
+    // R2: bound explicitly to the named inner layout's own preferred height
+    // (rather than relying on the implicit "one layout child" auto-sizing),
+    // matching the pattern proven for the evidence card's quote/context
+    // stack -- a fixed/min height cut the wrapped text's last line.
+    Rectangle { height: inner.preferred-height; background: root.fill; border-color: root.stroke; border-width: Tokens.hairline; border-radius: Tokens.radius-4;
+        inner := VerticalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-2; alignment: start;
+            if !root.text.is-empty: WrappedText { text: root.text; text-color: root.ink; size: Tokens.font-13; }
+            @children
+        }
+    }
+}
+
+// R2: `inherits Rectangle` -- without a real base, the `height:` binding
+// below was on a root with no genuine layout-measurable size (the same bug
+// `WrappedText` and `HelperText` had), so a caller's `VerticalLayout` could
+// still under-reserve a multi-line helper's real height (e.g. "Outlook
+// Groups").
+export component Field inherits Rectangle {
+    in property <string> label;
+    // `accessible-label` is already a built-in property on every element, so
+    // this is named distinctly; it lets a caller give the screen-reader name
+    // its own text without changing the visible `label`.
+    in property <string> input-accessible-label: label;
+    in property <string> placeholder;
+    in property <string> helper-text;
+    in-out property <string> value;
+    in property <bool> password: false;
+    in property <bool> reveal-password: false;
+    in property <bool> multiline: false;
+    in property <bool> monospace: false;
+    in property <int> rows: 1;
+    in property <bool> enabled: true;
+    callback edited(string);
+    callback accepted(string);
+    callback focus-changed(bool);
+    out property <bool> has-focus;
+    // T2 (brief §1): the old `min-height` arithmetic assumed the helper text
+    // is always exactly one line, so a helper sentence that actually wraps
+    // to two or three lines (e.g. the OpenRouter "Parallel requests" field)
+    // rendered at a fixed one-line height and overlapped whatever followed
+    // it -- the "Model" label overlap in the Sources screenshot this task's
+    // brief points at. `layout` below is the field's real content (label +
+    // optional wrapped helper text + input), so its own `preferred-height`
+    // already accounts for however many lines the helper text needs.
+    height: layout.preferred-height;
+    width: 100%;
+    horizontal-stretch: 1;
+    opacity: enabled ? 1 : Tokens.disabled-opacity;
+    layout := VerticalLayout {
+        spacing: Tokens.space-1;
+        Text { text: root.label; color: Tokens.text-1; font-size: Tokens.font-14; font-weight: 600; width: 100%; horizontal-alignment: left; }
+        if !root.helper-text.is-empty: WrappedText { text: root.helper-text; }
+        if !root.multiline: line-frame := Rectangle {
+            min-height: Tokens.field-height;
+            width: 100%;
+            line-input := LineEdit {
+                width: 100%; height: 100%;
+                text <=> root.value; placeholder-text: root.placeholder; enabled: root.enabled;
+                accessible-label: root.input-accessible-label;
+                font-family: root.monospace ? Tokens.mono-font-family : Tokens.font-family;
+                input-type: root.password && !root.reveal-password ? InputType.password : InputType.text;
+                edited(value) => { root.edited(value); }
+                accepted => { root.accepted(self.text); }
+                changed has-focus => { root.has-focus = self.has-focus; root.focus-changed(self.has-focus); }
+            }
+            if line-input.has-focus && root.enabled: Rectangle {
+                x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+                width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring;
+                border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+            }
+            if line-input.has-focus && root.enabled: Rectangle { y: parent.height - Tokens.focus-ring; height: Tokens.focus-ring; background: Tokens.brand; }
+        }
+        if root.multiline: text-frame := Rectangle {
+            min-height: root.rows * Tokens.textarea-row;
+            width: 100%;
+            background: Tokens.bg-surface;
+            border-width: Tokens.hairline;
+            border-color: Tokens.stroke-2;
+            border-radius: Tokens.radius-4;
+            text-input := TextEdit {
+                width: 100%; height: 100%;
+                text <=> root.value; enabled: root.enabled; wrap: word-wrap;
+                accessible-label: root.input-accessible-label;
+                font-family: root.monospace ? Tokens.mono-font-family : Tokens.font-family;
+                edited => { root.edited(self.text); }
+                changed has-focus => { root.has-focus = self.has-focus; root.focus-changed(self.has-focus); }
+            }
+            if text-input.has-focus && root.enabled: Rectangle {
+                x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+                width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring;
+                border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+            }
+            if text-input.has-focus && root.enabled: Rectangle { y: parent.height - Tokens.focus-ring; height: Tokens.focus-ring; background: Tokens.brand; }
+        }
+    }
+}
+
+export component Disclosure {
+    in property <string> title;
+    in-out property <bool> expanded: false;
+    in property <bool> enabled: true;
+    callback toggled(bool);
+    width: 100%;
+    opacity: enabled ? 1 : Tokens.disabled-opacity;
+    VerticalLayout {
+        header := Rectangle {
+            min-height: Tokens.click-min;
+            width: 100%;
+            forward-focus: disclosure-focus;
+            accessible-role: button; accessible-label: root.title; accessible-enabled: root.enabled; accessible-expanded: root.expanded;
+            accessible-action-default => { if root.enabled { root.expanded = !root.expanded; root.toggled(root.expanded); } }
+            HorizontalLayout { alignment: start; spacing: Tokens.space-2;
+                // Neither "⌄" (U+2304) nor "▾" (U+25BE) is in whatever font
+                // actually backs Segoe UI Variable here -- both drew as a
+                // tofu box in the `--preview-review` screenshot loop, while
+                // "›" (used for the collapsed state below) does render.
+                // Rotating that same confirmed-good glyph 90° clockwise for
+                // the expanded state, rather than gambling on yet another
+                // codepoint, is exactly the fix the T5 brief calls out.
+                Text {
+                    text: "›";
+                    color: Tokens.text-2; font-size: Tokens.font-16; vertical-alignment: center; horizontal-alignment: center;
+                    transform-rotation: root.expanded ? 90deg : 0deg;
+                    transform-origin: { x: self.width / 2, y: self.height / 2 };
+                }
+                Text { text: root.title; color: Tokens.text-1; font-size: Tokens.font-13; font-weight: 600; vertical-alignment: center; }
+            }
+            TouchArea { enabled: root.enabled; clicked => { disclosure-focus.focus(); root.expanded = !root.expanded; root.toggled(root.expanded); } }
+            disclosure-focus := FocusScope {
+                // A FocusScope with focus-on-click swallows the first press while it
+                // lacks focus (Slint returns EventAccepted after taking focus), so the
+                // TouchArea beneath only sees the second click. The TouchArea focuses
+                // this scope itself.
+                focus-on-click: false;
+                enabled: root.enabled;
+                key-pressed(event) => {
+                    if event.text == " " || event.text == Key.Return {
+                        root.expanded = !root.expanded; root.toggled(root.expanded); return accept;
+                    }
+                    return reject;
+                }
+            }
+            if disclosure-focus.has-focus && root.enabled: Rectangle {
+                x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+                width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring;
+                border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-4;
+            }
+        }
+        content-clip := Rectangle {
+            width: 100%;
+            height: root.expanded ? content.preferred-height : 0px;
+            clip: true;
+            content := VerticalLayout {
+                width: 100%;
+                y: 0;
+                // N7: zero height alone still leaves collapsed fields and
+                // rows in the focus/accessibility tree; `visible` (which
+                // does not itself affect layout -- see the Slint facts in
+                // the brief) removes them from both while collapsed.
+                visible: root.expanded;
+                @children
+            }
+        }
+    }
+}
+
+export component Avatar {
+    in property <string> initials;
+    in property <string> accessible-name;
+    width: Tokens.avatar-size; height: Tokens.avatar-size;
+    accessible-role: image; accessible-label: accessible-name;
+    Rectangle { background: Tokens.brand-subtle; border-radius: Tokens.radius-pill;
+        Text { text: root.initials; color: Tokens.brand; font-size: Tokens.font-13; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+    }
+}
+
+export component ProgressBar {
+    in property <float> value;
+    in property <string> accessible-name;
+    height: Tokens.progress-height;
+    accessible-role: progress-indicator; accessible-label: accessible-name;
+    Rectangle { background: Tokens.stroke-1; border-radius: Tokens.radius-pill;
+        Rectangle { width: max(Tokens.space-1, min(parent.width, parent.width * root.value)); background: Tokens.brand; border-radius: Tokens.radius-pill; }
+    }
+}
+
+export component Checkbox {
+    in property <string> text;
+    in-out property <bool> checked;
+    in property <bool> enabled: true;
+    callback toggled(bool);
+    min-height: Tokens.click-min;
+    opacity: enabled ? 1 : Tokens.disabled-opacity;
+    check := StdCheckBox { text: root.text; accessible-label: root.text; checked <=> root.checked; enabled: root.enabled; toggled => { root.toggled(root.checked); } }
+    if check.has-focus && root.enabled: Rectangle {
+        x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+        width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring;
+        border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+    }
+}
+
+// `choices` carries the "Load models to choose" placeholder prepended as row
+// 0 by the Rust adapter, and `selected-index` is that same display index (0
+// = placeholder/none, 1..n = a real selection). This keeps the ComboBox's
+// own `current-index` always in bounds, so Slint's internal
+// `ComboBoxBase.reset-current()` (which fires on every `changed model` and
+// unconditionally assigns `current-index`, dropping any declarative binding
+// on it) never has to invent a selection: it always clamps to the value we
+// last pushed here via the `changed selected-index` handler below.
+export component ModelPicker {
+    in property <[string]> choices;
+    in-out property <int> selected-index;
+    in-out property <string> selected-value;
+    in property <bool> enabled: true;
+    in property <string> accessible-name;
+    callback selected(string);
+    horizontal-stretch: 1;
+    width: 100%;
+    opacity: enabled ? 1 : Tokens.disabled-opacity;
+    changed selected-index => { picker.current-index = root.selected-index; }
+    picker := ComboBox {
+        width: 100%;
+        model: root.choices;
+        current-index: root.selected-index;
+        current-value: root.selected-value;
+        accessible-label: root.accessible-name;
+        enabled: root.enabled;
+        selected(value) => { root.selected(value); }
+    }
+    if picker.has-focus && root.enabled: Rectangle {
+        x: -Tokens.focus-ring; y: -Tokens.focus-ring;
+        width: parent.width + 2 * Tokens.focus-ring; height: parent.height + 2 * Tokens.focus-ring;
+        border-width: Tokens.focus-ring; border-color: Tokens.brand; border-radius: Tokens.radius-6;
+    }
+}

@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<script src="./doc-page.js"></script>
+<style>
+html,body{margin:0;padding:0;font-family:'Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif;color:#242424;font-size:14px;line-height:1.6}
+doc-page:not(:defined){visibility:hidden}
+a{color:#0F6CBD;text-decoration:none}a:hover{color:#115EA3;text-decoration:underline}
+h1,h2,h3{text-wrap:balance;margin:0}
+p,li{text-wrap:pretty;orphans:3;widows:3}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th{text-align:left;font-weight:600;color:#616161;border-bottom:1px solid #D1D1D1;padding:6px 8px;vertical-align:top}
+td{border-bottom:1px solid #EBEBEB;padding:6px 8px;vertical-align:top}
+code{font-family:Consolas,'Cascadia Mono',Menlo,monospace;font-size:12.5px;background:#F5F5F5;padding:1px 5px;border-radius:3px}
+pre{font-family:Consolas,'Cascadia Mono',Menlo,monospace;font-size:12px;background:#F5F5F5;border:1px solid #E0E0E0;border-radius:4px;padding:10px 12px;line-height:1.5;white-space:pre-wrap;break-inside:avoid;margin:0}
+.keep{break-inside:avoid}
+</style>
+</helmet>
+<doc-page margin="0.8in">
+  <div slot="footer" style="display:flex;justify-content:space-between;font-size:11px;color:#616161;padding:0 0.8in 0.3in"><span>OpenLoops · Desktop UI build specification</span><span>Replaces crates/openloops-desktop (egui)</span></div>
+
+  <h1 style="font-size:28px;font-weight:600;line-height:1.2">OpenLoops desktop UI — build specification</h1>
+  <p style="color:#616161;margin:6px 0 0;font-size:14px">Rust implementation spec for the redesigned Outlook-companion window. Companion to <a href="OpenLoops Companion.dc.html">OpenLoops Companion.dc.html</a> (the interactive reference). Version 1 · September 2026.</p>
+
+  <div style="display:flex;flex-direction:column;gap:6px;margin:22px 0 0;padding:14px 18px;background:#F5F5F5;border-radius:6px;font-size:13px" class="keep">
+    <div style="font-weight:600">Scope in one paragraph</div>
+    <p style="margin:0">Replace <code>crates/openloops-desktop/src/{setup_ui,review_ui,deadline_view}.rs</code> with a new presentation layer. Everything below the UI — <code>openloops-domain</code>, <code>-graph</code>, <code>-inference</code>, <code>-persistence</code>, <code>-application</code>, the <code>loop_state</code> decision store and <code>settings</code> credential record — is unchanged and consumed as-is. No new capability is introduced: every button maps to an existing operation; every disclosure string is preserved.</p>
+  </div>
+
+  <h2 style="font-size:20px;font-weight:600;margin-top:32px">1. Toolkit decision</h2>
+  <p>egui cannot reach the Fluent look (no per-widget styling, no real text layout, no native scrolling) and is the root cause of the current UI. Two viable Rust routes:</p>
+  <table class="keep">
+    <thead><tr><th style="width:22%">Option</th><th>Fit</th><th>Cost</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Slint</strong> (recommended)</td><td>Native renderer, declarative <code>.slint</code> markup that mirrors this spec's component tree, Windows-first, accessibility tree, no webview. Segoe UI via system font.</td><td>Custom widgets for pills, command bar and reading pane; Fluent styling by hand (tokens in §2). Async via <code>slint::spawn_local</code> + the existing <code>mpsc</code> worker pattern.</td></tr>
+      <tr><td><strong>Dioxus desktop</strong> (alternative)</td><td>The reference HTML/CSS ports almost 1:1 into RSX; WebView2 is already on every Windows 10/11 box.</td><td>Webview process boundary; secrets must stay in Rust (never in JS state). Slightly larger footprint.</td></tr>
+    </tbody>
+  </table>
+  <p style="margin-top:10px">Either way keep the current threading model: one <code>pending: Option&lt;Receiver&lt;Outcome&gt;&gt;</code> job at a time, polled each frame/tick; the whole window is <code>disabled</code> while a job runs except <em>Stop scan</em>. The <code>Outcome</code> enum in <code>setup_ui.rs</code> is reused verbatim.</p>
+
+  <h2 style="font-size:20px;font-weight:600;margin-top:32px">2. Design tokens</h2>
+  <table class="keep">
+    <thead><tr><th style="width:26%">Token</th><th style="width:22%">Value</th><th>Use</th></tr></thead>
+    <tbody>
+      <tr><td><code>brand</code> / <code>brand.hover</code></td><td>#0F6CBD / #115EA3</td><td>Title bar, primary buttons, selected list bar, links, focus underline</td></tr>
+      <tr><td><code>brand.subtle</code> / <code>brand.stroke</code></td><td>#EBF3FC / #B4D6FA</td><td>Selected row, info bars, "Due" pill, reminder draft panel</td></tr>
+      <tr><td><code>bg.canvas</code> / <code>bg.bar</code></td><td>#F0F0F0 / #F5F5F5</td><td>Window and nav rail / command bar, status bar, meta grid</td></tr>
+      <tr><td><code>bg.surface</code> / <code>bg.list</code></td><td>#FFFFFF / #FAFAFA</td><td>Reading pane, cards / list pane</td></tr>
+      <tr><td><code>stroke.1</code> / <code>stroke.2</code></td><td>#E0E0E0 / #D1D1D1</td><td>Dividers / secondary button and input borders</td></tr>
+      <tr><td><code>text.1</code> / <code>text.2</code> / <code>text.3</code></td><td>#242424 / #616161 / #707070</td><td>Body / secondary / tertiary</td></tr>
+      <tr><td><code>danger</code> / <code>danger.bg</code></td><td>#C50F1F / #FDF3F4</td><td>Past due, Stop glyph, nav badge</td></tr>
+      <tr><td><code>warning</code> / <code>warning.bg</code> / stroke</td><td>#BC4B09 / #FFF9F5 / #F4C7A8</td><td>Uncertainty, coverage incomplete, reminder unconfirmed</td></tr>
+      <tr><td><code>success</code> / <code>success.bg</code> / stroke</td><td>#0E700E / #F1FAF1 / #9FD89F</td><td>Tracking, resolved, reminder created, confirmations</td></tr>
+      <tr><td><code>watch</code> / <code>watch.bg</code></td><td>#4F52B2 / #EEEFFC</td><td>"Watching team follow-up"</td></tr>
+      <tr><td>Type</td><td>Segoe UI Variable → Segoe UI</td><td>13 (secondary), 14 (body), 15–16 (section), 22 (page title). Weight 600 for emphasis; never bold 700 except badges.</td></tr>
+      <tr><td>Radius</td><td>4 / 6 / 8 / pill</td><td>Buttons &amp; inputs / cards / setup cards / status pills</td></tr>
+      <tr><td>Spacing</td><td>4-px grid</td><td>Button padding 5×12; card padding 20×22; pane gutters 24×32</td></tr>
+    </tbody>
+  </table>
+
+  <h2 style="font-size:20px;font-weight:600;margin-top:32px">3. Window frame</h2>
+  <p>Fixed chrome around a swappable screen. Minimum window 1100×640; list pane is fixed 380 px, reading pane fills.</p>
+  <pre class="keep">TitleBar (48)  ── brand · "OpenLoops" · "Outlook companion" · [scan chip while busy] · account
+├─ NavRail (72) ── Review [badge: open count] · Sources · (bottom) provider dot + name
+├─ Screen ─────── Review | Sources           (§4, §5)
+└─ StatusBar (26) ── "{n} saved decisions · Windows Credential Manager" · "Model: {model} ({provider})" · "Mail and summaries stay in memory only"</pre>
+  <table class="keep" style="margin-top:12px">
+    <thead><tr><th style="width:24%">Element</th><th>Behaviour</th></tr></thead>
+    <tbody>
+      <tr><td>Nav rail item</td><td>Icon (simple geometric) + 11 px label. Selected: bg #E0E0E0, ink brand. Badge = count of loops where <code>decision ∈ {Review, Mine, Watching}</code> and not auto-resolved; hidden at 0.</td></tr>
+      <tr><td>Scan chip (title bar)</td><td>Visible only while <code>pending_service == Review</code> and a scan is running: spinner + "Scanning · Conversation i of n · m / total messages".</td></tr>
+      <tr><td>Account</td><td>Initials avatar + display name + "Signed in · Microsoft 365". Name comes from the Graph identity resolved at sign-in; before sign-in show "Not signed in".</td></tr>
+      <tr><td>Startup screen</td><td>Same rule as today: Review when saved settings exist with client ID, key and model; otherwise Sources.</td></tr>
+    </tbody>
+  </table>
+
+  <h2 style="font-size:20px;font-weight:600;margin-top:32px;break-before:page">4. Review screen</h2>
+  <h3 style="font-size:15px;font-weight:600;margin-top:16px">4.1 Command bar (44 px)</h3>
+  <table class="keep">
+    <thead><tr><th style="width:26%">Control</th><th style="width:16%">Style</th><th>Enabled when / action</th></tr></thead>
+    <tbody>
+      <tr><td>Scan inboxes</td><td>Primary</td><td>client ID, active key and model non-empty and not busy. Runs <code>load_recent</code> then <code>scan</code> (existing flow). Label swaps to <strong>Stop scan</strong> (secondary, red square glyph) while scanning → sets <code>progress.cancel</code>.</td></tr>
+      <tr><td>Rescan loaded mail</td><td>Subtle</td><td><code>review.messages</code> non-empty and not busy → <code>start_scan</code>.</td></tr>
+      <tr><td>Clear results and mail</td><td>Subtle</td><td>Always. Resets <code>ReviewState</code>; decisions and To Do tasks preserved (say so in the action status).</td></tr>
+      <tr><td>Filter All / Mine / Team</td><td>Segmented</td><td>Client-side. Mine = owner is the signed-in user; Team = unassigned team request.</td></tr>
+      <tr><td>Show resolved, handled and dismissed</td><td>Checkbox, right-aligned</td><td>Maps to <code>show_handled</code>. Off by default.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 style="font-size:15px;font-weight:600;margin-top:20px">4.2 Scan status strip</h3>
+  <p>One of three states directly under the command bar:</p>
+  <ul style="margin:4px 0 0;padding-left:20px">
+    <li><strong>Scanning</strong> (brand.subtle bg): phase label — "Finding open loops" or "Cross-thread closure check" (<code>closure_phase</code>) — then "Conversation i of n", "m / total messages", "{s}s on this request", the provider disclosure, and a determinate 4-px progress bar (processed/total).</li>
+    <li><strong>Finished</strong> (white): green dot + "Scan finished" (or "Scan incomplete" in warning colour when <code>scan_incomplete</code>), the <code>expectations_summary</code> line, and a link button "Coverage: k sources incomplete" / "Coverage details" that expands the notices from <code>scan_summary</code>/<code>scan_errors</code> into a warning.bg panel.</li>
+    <li><strong>Idle</strong>: the two intro sentences from <code>review_card</code> plus the "Scan scope and data sent…" disclosure as a link to Sources §5.3.</li>
+  </ul>
+
+  <h3 style="font-size:15px;font-weight:600;margin-top:20px">4.3 List pane (380 px, bg.list)</h3>
+  <p>Header "Who is waiting on you · {n} open". Rows grouped, in this order, using the existing <code>DeadlineView</code>:</p>
+  <table class="keep">
+    <thead><tr><th style="width:30%">Group (dot colour)</th><th>Members</th></tr></thead>
+    <tbody>
+      <tr><td>Past due (danger)</td><td><code>PastDue*</code> variants — already sort first today</td></tr>
+      <tr><td>Due (brand)</td><td><code>Due</code>, <code>DueEndOfDay</code>, <code>DueEndOfBusiness</code>, range variants</td></tr>
+      <tr><td>No fixed deadline (text.3)</td><td><code>EventTied</code>, <code>Soft</code>, no deadline</td></tr>
+      <tr><td>Resolved, handled or dismissed (success)</td><td>Only when the checkbox is on: auto-resolved, Done, Dismissed, Moot</td></tr>
+    </tbody>
+  </table>
+  <p style="margin-top:10px"><strong>Row</strong> — 3-px left bar (aging colour; brand when selected), action phrase (600, wraps), "Waiting: {party} · {source short}", third line "{aging label} · {status label}" (hidden in compact density), right-aligned date. Selected row bg brand.subtle; hover #F0F0F0. Single selection; keyboard ↑/↓ moves it. Empty state text: "No open expectations match this filter. Missing replies in the scanned folders never prove work is finished."</p>
+
+  <h3 style="font-size:15px;font-weight:600;margin-top:20px;break-before:page">4.4 Reading pane (bg.surface, max content width 860)</h3>
+  <p>Sections top to bottom, 20-px gaps. Content maps to <code>ExpectationItem</code>, <code>DecisionRecord</code> and <code>DeadlineView</code>.</p>
+  <table>
+    <thead><tr><th style="width:24%">Section</th><th>Content and rules</th></tr></thead>
+    <tbody>
+      <tr><td>Pills</td><td>Status pill (table below) · aging pill (label from <code>deadline_view::label</code>) · optional "To Do reminder set" (brand.subtle) or "Reminder unconfirmed" (warning).</td></tr>
+      <tr><td>Title</td><td>Action phrase, 22 px / 600.</td></tr>
+      <tr><td>Meta grid</td><td>bg.bar, auto-fit 180-px columns: Responsible · Waiting on this · Deadline stated in email (quoted, or "Not specified", or "A deadline was stated, but its quotation could not be verified.") · Source.</td></tr>
+      <tr><td>Uncertainty</td><td>Warning callout, only when <code>item.uncertainty</code> non-empty.</td></tr>
+      <tr><td>Actions</td><td>See 4.5. One-line success-coloured <code>action_status</code> beneath.</td></tr>
+      <tr><td>Reminder draft</td><td>Inline panel (4.6) rendered directly under the actions of the card that opened it.</td></tr>
+      <tr><td>Reminder state</td><td><code>Reminder::Created</code>: success callout + "Open Microsoft To Do" link. <code>Reminder::Attempted</code>: warning callout with <code>marker(key)</code> in monospace, "Inspect Microsoft To Do" link, and the two reconcile buttons ("I checked: the task exists" / "…no task was created").</td></tr>
+      <tr><td>Why this was suggested</td><td>One evidence card per anchor: header (label · sender · time · "Open message in Outlook" deep link), quote in a brand-left-bordered block at 15 px, context line. Quoted history is never an evidence card.</td></tr>
+      <tr><td>Possible later completion</td><td>Success-bordered card when closure evidence exists; badge "evidence in another conversation" when cross-thread. Footer: "Completion is a hypothesis for you to confirm; it is never treated as final." Otherwise the grey note "No matching completion was identified…".</td></tr>
+      <tr><td>Full scanned conversation</td><td>Collapsed disclosure "Full scanned conversation · {subject} · {n} messages". Messages as avatar + sender/time/folder + body; sent messages tinted brand.subtle; quoted history in a nested collapsed block.</td></tr>
+    </tbody>
+  </table>
+  <table class="keep" style="margin-top:14px">
+    <thead><tr><th style="width:24%">Decision</th><th style="width:36%">Pill label</th><th>Colour</th></tr></thead>
+    <tbody>
+      <tr><td><code>Review</code></td><td>Needs your review</td><td>brand</td></tr>
+      <tr><td><code>Mine</code></td><td>Tracking</td><td>success</td></tr>
+      <tr><td><code>Watching</code></td><td>Watching team follow-up</td><td>watch</td></tr>
+      <tr><td>auto-resolved</td><td>Resolved — later reply found</td><td>success</td></tr>
+      <tr><td><code>Done</code> / <code>Dismissed</code> / <code>Moot</code></td><td>Handled / Dismissed – not mine / No longer relevant</td><td>neutral</td></tr>
+    </tbody>
+  </table>
+
+  <h3 style="font-size:15px;font-weight:600;margin-top:20px">4.5 Decision actions</h3>
+  <table class="keep">
+    <thead><tr><th style="width:28%">Button</th><th style="width:14%">Style</th><th>Shown when → effect (all via <code>decisions.update</code>)</th></tr></thead>
+    <tbody>
+      <tr><td>Track — this is mine</td><td>Primary</td><td>Open card, decision ≠ Mine → Mine</td></tr>
+      <tr><td>Keep an eye on this</td><td>Secondary</td><td>Open team card, decision ≠ Watching → Watching (does not assign work)</td></tr>
+      <tr><td>Handled · Not mine / dismiss · No longer relevant</td><td>Secondary</td><td>Open card → Done / Dismissed / Moot. Card leaves the open groups; action status confirms nothing textual was stored.</td></tr>
+      <tr><td>Set To Do reminder…</td><td>Outline brand, right-aligned</td><td>Open card, <code>reminder == None</code>, no draft open. Opens 4.6. If decision was Review, it becomes Mine (Watching stays Watching).</td></tr>
+      <tr><td>Reopen for review · Still open — track it</td><td>Primary · Secondary</td><td>Closed card → Review / Mine</td></tr>
+    </tbody>
+  </table>
+
+  <h3 style="font-size:15px;font-weight:600;margin-top:20px">4.6 Reminder draft panel</h3>
+  <p>Brand-stroked panel, bg #F5FAFE. Fields: <em>Task title</em> (prefilled with the action phrase, editable) and <em>Remind me at (local time)</em> (<code>YYYY-MM-DD HH:MM</code>, validated by <code>reminder_time</code>). Quick picks "In one hour" and "Tomorrow at 9 am". Live line "Scheduled instant: {local formatted}" or the validation hint. Disclosure copy retained verbatim (one task, personal default list, title/time/opaque reference only, Tasks.ReadWrite, To Do owns delivery, no automatic retry). Buttons: <strong>Create this reminder in Microsoft To Do</strong> (primary; writes <code>Reminder::Attempted</code> before dispatch, then triggers sign-in) and <strong>Cancel</strong> (restores the pre-draft decision only if it has not changed since the draft opened).</p>
+
+  <h2 style="font-size:20px;font-weight:600;margin-top:32px;break-before:page">5. Sources screen</h2>
+  <p>Command bar: <strong>Save settings</strong> (primary), Reload saved settings, Forget saved settings (subtle), right-aligned <code>settings_status</code> in success or warning colour. All disabled while busy or when the store is unavailable. Body: page title "Sources and model", then a two-column auto-fit card grid (min 360 px), a scan-scope card, and the persistence footnote.</p>
+  <h3 style="font-size:15px;font-weight:600;margin-top:16px">5.1 Card 1 — Connect Microsoft</h3>
+  <ul style="margin:4px 0 0;padding-left:20px">
+    <li>Numbered badge "1" + title; right-aligned success pill "Personal inbox confirmed" once <code>own_inbox_accessible</code>.</li>
+    <li>Application (client) ID — single-line, monospace, 128-char limit, brand bottom border on focus; "Open Microsoft Entra" link.</li>
+    <li>Outlook Groups — 3-row textarea, helper text; Shared mailboxes — collapsed disclosure with a 2-row textarea.</li>
+    <li><strong>Sign in &amp; check inboxes</strong> (primary; enabled when client ID non-empty) → <code>check_connection</code>. Result lines rendered per source in success/warning colour exactly as <code>microsoft_status</code> produces them.</li>
+    <li>Any edit clears Microsoft status, marks <code>pending_save</code>, and resets review state (unchanged semantics).</li>
+  </ul>
+  <h3 style="font-size:15px;font-weight:600;margin-top:16px">5.2 Card 2 — Choose your AI model</h3>
+  <ul style="margin:4px 0 0;padding-left:20px">
+    <li>Provider segmented control: Ollama Cloud | OpenRouter. Each provider keeps its own key and model (existing <code>Provider</code> logic).</li>
+    <li>API key — password field with "Show key" checkbox and "Create an API key" link (provider-specific URL). Keys trimmed on entry.</li>
+    <li>Model — dropdown, placeholder "Load models to choose"; beside it <strong>Load cloud models</strong> / <strong>Load ZDR models</strong> (secondary). OpenRouter shows the zero-data-retention note.</li>
+    <li><strong>Test selected model</strong> (primary; needs key + model) with "Content-free generation check, up to 150 s." Result line below. Footer disclosure: "This connection test sends no email. Scanning inboxes sends recent message text… to {provider disclosure}."</li>
+  </ul>
+  <h3 style="font-size:15px;font-weight:600;margin-top:16px">5.3 Scan scope card</h3>
+  <p>Four-cell grid (Window · Inbox/Sent Items · Groups · Sources) with the caps from <code>inbox-review.md</code>, then the data-sent paragraph. This card replaces the collapsible in today's Review tab; the Review idle state links here.</p>
+
+  <h2 style="font-size:20px;font-weight:600;margin-top:32px">6. Busy, error and empty states</h2>
+  <table class="keep">
+    <thead><tr><th style="width:28%">Situation</th><th>Presentation</th></tr></thead>
+    <tbody>
+      <tr><td>Any job running</td><td>Whole window disabled except Stop scan; title-bar chip spinner; primary buttons keep colour at 50 % opacity.</td></tr>
+      <tr><td>Worker disconnected</td><td>"The operation stopped unexpectedly. Please try again." in the status slot of the owning service (Microsoft card, model card, or scan strip).</td></tr>
+      <tr><td>Provider/transport error</td><td>Scan strip switches to warning state with the <code>ProviderError</code> text; completed conversations stay listed.</td></tr>
+      <tr><td>No usable expectations</td><td>Reading pane shows the two existing sentences (rejected-evidence vs none-identified) — never "all clear".</td></tr>
+      <tr><td>Credential store errors</td><td><code>SettingsError</code> text in the Sources command bar status; automatic save pauses as today.</td></tr>
+      <tr><td>Storage bound (50 records)</td><td>Action status in warning colour; existing records untouched.</td></tr>
+    </tbody>
+  </table>
+
+  <h2 style="font-size:20px;font-weight:600;margin-top:32px">7. Accessibility and input</h2>
+  <ul style="margin:4px 0 0;padding-left:20px">
+    <li>Every interactive element exposes a name and role to the accessibility tree (Slint: <code>accessible-role</code>; Dioxus: native HTML).</li>
+    <li>Focus ring 2 px brand outside the control; inputs show a 2-px brand bottom border on focus.</li>
+    <li>Keyboard: Tab order title bar → nav → command bar → list → reading pane. ↑/↓ in list; Enter opens the selected card's primary action; Esc cancels a draft.</li>
+    <li>Contrast: all text ≥ 4.5:1 on its background (pill inks above are chosen for this); status is never conveyed by colour alone (label text always present).</li>
+    <li>Minimum click target 28 px high; list rows 56 px comfortable / 44 px compact.</li>
+  </ul>
+
+  <h2 style="font-size:20px;font-weight:600;margin-top:32px">8. Non-goals for this delivery</h2>
+  <p>No dark theme, no Outlook add-in surface, no background service, no new persistence, no change to disclosure wording, no automatic reminders. The redesign is presentation only; every gate in <code>working-demo-roadmap.md</code> stays where it is.</p>
+</doc-page>
+</x-dc>
+</body>
+</html>

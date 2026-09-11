@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+html,body{margin:0;padding:0;background:#F0F0F0;color:#242424;font-family:'Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif;font-size:14px;line-height:1.4;-webkit-font-smoothing:antialiased}
+*{box-sizing:border-box}
+a{color:#0F6CBD;text-decoration:none}a:hover{color:#115EA3;text-decoration:underline}
+input,button{font:inherit}
+input::placeholder{color:#707070}
+@keyframes ol-spin{to{transform:rotate(360deg)}}
+@keyframes ol-indet{0%{left:-40%}100%{left:100%}}
+</style>
+</helmet>
+<div style="display:flex;flex-direction:column;height:100vh;min-height:640px;background:#F0F0F0;color:#242424;font-size:14px;overflow:hidden">
+
+  <!-- Title bar -->
+  <div style="display:flex;align-items:center;gap:16px;height:48px;padding:0 16px 0 12px;background:#0F6CBD;color:#fff;flex-shrink:0">
+    <div style="display:flex;align-items:center;gap:10px">
+      <div style="width:24px;height:24px;border-radius:6px;background:#fff;display:flex;align-items:center;justify-content:center"><div style="width:12px;height:12px;border-radius:50%;border:3px solid #0F6CBD"></div></div>
+      <div style="font-weight:600;font-size:15px;letter-spacing:0.01em">OpenLoops</div>
+      <div style="font-size:13px;opacity:0.85">Outlook companion</div>
+    </div>
+    <div style="flex:1"></div>
+    <sc-if value="{{ scanning }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;align-items:center;gap:8px;font-size:13px;background:rgba(255,255,255,0.16);padding:4px 10px;border-radius:4px">{{ spinner }}<span>Scanning · {{ progressText }}</span></div>
+    </sc-if>
+    <div style="display:flex;align-items:center;gap:8px;font-size:13px">
+      <div style="width:28px;height:28px;border-radius:50%;background:#EBF3FC;color:#0F6CBD;font-weight:600;display:flex;align-items:center;justify-content:center;font-size:12px">AM</div>
+      <div style="display:flex;flex-direction:column;line-height:1.2"><span style="font-weight:600">Alex Morgan</span><span style="opacity:0.85;font-size:12px">Signed in · Microsoft 365</span></div>
+    </div>
+  </div>
+
+  <div style="display:flex;flex:1;min-height:0">
+    <!-- Nav rail -->
+    <div style="width:72px;flex-shrink:0;background:#F0F0F0;border-right:1px solid #E0E0E0;display:flex;flex-direction:column;align-items:stretch;padding:8px 6px;gap:4px">
+      <button onClick="{{ goReview }}" style="border:none;background: {{ navReviewBg }};color:#242424;border-radius:6px;padding:10px 4px 8px;display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer;position:relative" style-hover="background:#E6E6E6">
+        <div style="width:22px;height:22px;border-radius:50%;border:2.5px solid {{ navReviewInk }};display:flex;align-items:center;justify-content:center"><div style="width:6px;height:6px;border-radius:50%;background: {{ navReviewInk }}"></div></div>
+        <span style="font-size:11px;font-weight:600;color: {{ navReviewInk }}">Review</span>
+        <sc-if value="{{ hasOpenCount }}" hint-placeholder-val="{{ true }}"><span style="position:absolute;top:6px;right:10px;background:#C50F1F;color:#fff;font-size:10px;font-weight:700;min-width:16px;height:16px;border-radius:8px;display:flex;align-items:center;justify-content:center;padding:0 4px">{{ openCount }}</span></sc-if>
+      </button>
+      <button onClick="{{ goConnections }}" style="border:none;background: {{ navConnBg }};color:#242424;border-radius:6px;padding:10px 4px 8px;display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer" style-hover="background:#E6E6E6">
+        <div style="width:22px;height:22px;border-radius:5px;border:2.5px solid {{ navConnInk }}"></div>
+        <span style="font-size:11px;font-weight:600;color: {{ navConnInk }}">Sources</span>
+      </button>
+      <div style="flex:1"></div>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:4px;padding:8px 0;font-size:10px;color:#616161;text-align:center"><div style="width:8px;height:8px;border-radius:50%;background: {{ modelDotColor }}"></div><span>{{ providerShort }}</span></div>
+    </div>
+
+    <!-- ===== REVIEW SCREEN ===== -->
+    <sc-if value="{{ isReview }}" hint-placeholder-val="{{ true }}">
+    <div style="display:flex;flex-direction:column;flex:1;min-width:0" data-screen-label="Review">
+      <!-- Command bar -->
+      <div style="display:flex;align-items:center;gap:4px;height:44px;padding:0 12px;background:#F5F5F5;border-bottom:1px solid #E0E0E0;flex-shrink:0;flex-wrap:nowrap;overflow:hidden">
+        <sc-if value="{{ notScanning }}" hint-placeholder-val="{{ true }}">
+          <button onClick="{{ startScan }}" style="display:flex;align-items:center;gap:6px;background:#0F6CBD;color:#fff;border:1px solid transparent;border-radius:4px;padding:5px 12px;font-weight:600;cursor:pointer;white-space:nowrap" style-hover="background:#115EA3"><span style="display:inline-block;width:0;height:0;border-left:8px solid #fff;border-top:5px solid transparent;border-bottom:5px solid transparent"></span>Scan inboxes</button>
+          <button onClick="{{ startScan }}" style="background:transparent;color:#242424;border:1px solid transparent;border-radius:4px;padding:5px 10px;cursor:pointer;white-space:nowrap" style-hover="background:#E6E6E6">Rescan loaded mail</button>
+        </sc-if>
+        <sc-if value="{{ scanning }}" hint-placeholder-val="{{ false }}">
+          <button onClick="{{ stopScan }}" style="display:flex;align-items:center;gap:6px;background:#fff;color:#242424;border:1px solid #D1D1D1;border-radius:4px;padding:5px 12px;font-weight:600;cursor:pointer;white-space:nowrap" style-hover="background:#F5F5F5"><span style="display:inline-block;width:9px;height:9px;background:#C50F1F;border-radius:1px"></span>Stop scan</button>
+        </sc-if>
+        <button onClick="{{ clearAll }}" style="background:transparent;color:#242424;border:1px solid transparent;border-radius:4px;padding:5px 10px;cursor:pointer;white-space:nowrap" style-hover="background:#E6E6E6">Clear results and mail</button>
+        <div style="width:1px;height:22px;background:#D1D1D1;margin:0 6px"></div>
+        <div style="display:flex;gap:2px;background:#E6E6E6;border-radius:4px;padding:2px">
+          <button onClick="{{ filterAll }}" style="border:none;border-radius:3px;padding:3px 10px;cursor:pointer;font-weight:600;font-size:13px;background: {{ fAllBg }};color:#242424">All</button>
+          <button onClick="{{ filterMine }}" style="border:none;border-radius:3px;padding:3px 10px;cursor:pointer;font-weight:600;font-size:13px;background: {{ fMineBg }};color:#242424">Mine</button>
+          <button onClick="{{ filterTeam }}" style="border:none;border-radius:3px;padding:3px 10px;cursor:pointer;font-weight:600;font-size:13px;background: {{ fTeamBg }};color:#242424">Team</button>
+        </div>
+        <div style="flex:1"></div>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:#424242;font-size:13px;white-space:nowrap"><input type="checkbox" checked="{{ showResolved }}" onChange="{{ toggleResolved }}" style="width:16px;height:16px;accent-color:#0F6CBD;margin:0">Show resolved, handled and dismissed</label>
+      </div>
+
+      <!-- Scan status bar -->
+      <sc-if value="{{ scanning }}" hint-placeholder-val="{{ false }}">
+        <div style="background:#EBF3FC;border-bottom:1px solid #B4D6FA;padding:8px 16px;display:flex;flex-direction:column;gap:6px;flex-shrink:0">
+          <div style="display:flex;align-items:center;gap:12px;font-size:13px;color:#0F548C"><span style="font-weight:600">{{ scanPhase }}</span><span>{{ progressText }}</span><span>·</span><span>{{ scanElapsed }}s on this request</span><div style="flex:1"></div><span style="color:#424242">Message text goes to {{ providerDisclosure }}. Attachments are not sent.</span></div>
+          <div style="height:4px;background:#C7E0F4;border-radius:2px;overflow:hidden;position:relative"><div style="height:100%;background:#0F6CBD;border-radius:2px;width: {{ progressPct }}"></div></div>
+        </div>
+      </sc-if>
+      <sc-if value="{{ showScanSummary }}" hint-placeholder-val="{{ true }}">
+        <div style="background:#fff;border-bottom:1px solid #E0E0E0;padding:8px 16px;display:flex;align-items:center;gap:10px;font-size:13px;color:#424242;flex-shrink:0;flex-wrap:wrap">
+          <span style="display:inline-flex;align-items:center;gap:6px;color:#0E700E;font-weight:600"><span style="width:8px;height:8px;border-radius:50%;background:#0E700E;display:inline-block"></span>Scan finished</span>
+          <span>{{ summaryLine }}</span>
+          <div style="flex:1"></div>
+          <button onClick="{{ toggleCoverage }}" style="background:transparent;border:none;color:#0F6CBD;cursor:pointer;padding:2px 4px;font-weight:600">{{ coverageLabel }}</button>
+        </div>
+        <sc-if value="{{ coverageOpen }}" hint-placeholder-val="{{ false }}">
+          <div style="background:#FFF9F5;border-bottom:1px solid #F4C7A8;padding:10px 16px;display:flex;flex-direction:column;gap:4px;font-size:13px;color:#424242;flex-shrink:0">
+            <div style="font-weight:600;color:#8A3707">Coverage is incomplete for 1 of 4 sources</div>
+            <div>Inbox — 100 of 100 messages · Sent Items — 43 messages · Group events@ — 20 of 20 threads (capped; earlier threads not read) · Shared mailbox support@ — 100 of 100 messages.</div>
+            <div>1 conversation exceeded 40 messages and was not analyzed. A missing reply in this window never proves work is unfinished.</div>
+          </div>
+        </sc-if>
+      </sc-if>
+
+      <div style="display:flex;flex:1;min-height:0">
+        <!-- List pane -->
+        <div style="width:380px;flex-shrink:0;background:#FAFAFA;border-right:1px solid #E0E0E0;display:flex;flex-direction:column;min-height:0">
+          <div style="padding:12px 16px 8px;display:flex;align-items:baseline;gap:8px;border-bottom:1px solid #E0E0E0"><span style="font-weight:600;font-size:16px">Who is waiting on you</span><span style="color:#616161;font-size:13px">{{ listCountLabel }}</span></div>
+          <div style="overflow-y:auto;flex:1">
+            <sc-for list="{{ groups }}" as="group" hint-placeholder-count="3">
+              <div style="padding:10px 16px 4px;font-size:12px;font-weight:600;color:#616161;text-transform:uppercase;letter-spacing:0.04em;display:flex;align-items:center;gap:8px"><span style="width:8px;height:8px;border-radius:50%;background: {{ group.dot }}"></span>{{ group.title }}<span style="color:#8A8A8A;font-weight:400">{{ group.count }}</span></div>
+              <sc-for list="{{ group.items }}" as="item" hint-placeholder-count="2">
+                <div onClick="{{ item.select }}" style="display:flex;gap:10px;padding:10px 14px 10px 12px;cursor:pointer;border-left:3px solid {{ item.barColor }};background: {{ item.bg }};border-bottom:1px solid #EBEBEB" style-hover="background:#F0F0F0">
+                  <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px">
+                    <div style="font-weight:600;font-size:14px;color:#242424;text-wrap:pretty">{{ item.action }}</div>
+                    <div style="font-size:13px;color:#616161;display:flex;gap:6px;flex-wrap:wrap"><span>Waiting: {{ item.waitingParty }}</span><span>·</span><span>{{ item.sourceShort }}</span></div>
+                    <sc-if value="{{ comfortable }}" hint-placeholder-val="{{ true }}"><div style="font-size:12px;color:#707070;display:flex;gap:6px;flex-wrap:wrap"><span style="font-weight:600;color: {{ item.agingFg }}">{{ item.agingLabel }}</span><span>·</span><span>{{ item.statusLabel }}</span></div></sc-if>
+                  </div>
+                  <div style="font-size:12px;color:#707070;white-space:nowrap;padding-top:2px">{{ item.when }}</div>
+                </div>
+              </sc-for>
+            </sc-for>
+            <sc-if value="{{ listEmpty }}" hint-placeholder-val="{{ false }}">
+              <div style="padding:32px 20px;color:#616161;font-size:13px;text-align:center;text-wrap:pretty">No open expectations match this filter. Missing replies in the scanned folders never prove work is finished.</div>
+            </sc-if>
+          </div>
+        </div>
+
+        <!-- Reading pane -->
+        <div style="flex:1;min-width:0;background:#fff;overflow-y:auto">
+          <sc-if value="{{ hasSel }}" hint-placeholder-val="{{ true }}">
+          <div style="max-width:860px;padding:24px 32px 40px;display:flex;flex-direction:column;gap:20px">
+            <div style="display:flex;flex-direction:column;gap:10px">
+              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                <span style="font-size:12px;font-weight:600;padding:2px 8px;border-radius:10px;background: {{ sel.statusBg }};color: {{ sel.statusFg }}">{{ sel.statusLabel }}</span>
+                <span style="font-size:12px;font-weight:600;padding:2px 8px;border-radius:10px;background: {{ sel.agingBg }};color: {{ sel.agingFg }}">{{ sel.agingLabel }}</span>
+                <sc-if value="{{ sel.reminderCreated }}" hint-placeholder-val="{{ false }}"><span style="font-size:12px;font-weight:600;padding:2px 8px;border-radius:10px;background:#EBF3FC;color:#0F548C">To Do reminder set</span></sc-if>
+                <sc-if value="{{ sel.reminderAttempted }}" hint-placeholder-val="{{ false }}"><span style="font-size:12px;font-weight:600;padding:2px 8px;border-radius:10px;background:#FFF9F5;color:#8A3707">Reminder unconfirmed</span></sc-if>
+              </div>
+              <h1 style="margin:0;font-size:22px;font-weight:600;line-height:1.25;text-wrap:pretty">{{ sel.action }}</h1>
+              <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px 24px;padding:12px 16px;background:#F5F5F5;border-radius:6px;font-size:13px">
+                <div style="display:flex;flex-direction:column;gap:2px"><span style="color:#616161">Responsible</span><span style="font-weight:600">{{ sel.owner }}</span></div>
+                <div style="display:flex;flex-direction:column;gap:2px"><span style="color:#616161">Waiting on this</span><span style="font-weight:600">{{ sel.waitingParty }}</span></div>
+                <div style="display:flex;flex-direction:column;gap:2px"><span style="color:#616161">Deadline stated in email</span><span style="font-weight:600">{{ sel.deadlineText }}</span></div>
+                <div style="display:flex;flex-direction:column;gap:2px"><span style="color:#616161">Source</span><span style="font-weight:600">{{ sel.source }}</span></div>
+              </div>
+              <sc-if value="{{ sel.hasUncertainty }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex;gap:10px;padding:10px 12px;background:#FFF9F5;border:1px solid #F4C7A8;border-radius:4px;font-size:13px;color:#424242"><span style="font-weight:700;color:#BC4B09">!</span><span><strong>Uncertainty:</strong> {{ sel.uncertainty }}</span></div>
+              </sc-if>
+            </div>
+
+            <!-- Decision actions -->
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <sc-if value="{{ sel.isOpen }}" hint-placeholder-val="{{ true }}">
+                  <sc-if value="{{ sel.canTrack }}" hint-placeholder-val="{{ true }}"><button onClick="{{ sel.track }}" style="background:#0F6CBD;color:#fff;border:1px solid transparent;border-radius:4px;padding:5px 12px;font-weight:600;cursor:pointer" style-hover="background:#115EA3">Track — this is mine</button></sc-if>
+                  <sc-if value="{{ sel.canWatch }}" hint-placeholder-val="{{ false }}"><button onClick="{{ sel.watch }}" style="background:#fff;color:#242424;border:1px solid #D1D1D1;border-radius:4px;padding:5px 12px;font-weight:600;cursor:pointer" style-hover="background:#F5F5F5">Keep an eye on this</button></sc-if>
+                  <button onClick="{{ sel.handled }}" style="background:#fff;color:#242424;border:1px solid #D1D1D1;border-radius:4px;padding:5px 12px;font-weight:600;cursor:pointer" style-hover="background:#F5F5F5">Handled</button>
+                  <button onClick="{{ sel.dismiss }}" style="background:#fff;color:#242424;border:1px solid #D1D1D1;border-radius:4px;padding:5px 12px;font-weight:600;cursor:pointer" style-hover="background:#F5F5F5">Not mine / dismiss</button>
+                  <button onClick="{{ sel.moot }}" style="background:#fff;color:#242424;border:1px solid #D1D1D1;border-radius:4px;padding:5px 12px;font-weight:600;cursor:pointer" style-hover="background:#F5F5F5">No longer relevant</button>
+                  <div style="flex:1"></div>
+                  <button onClick="{{ sel.openDraft }}" disabled="{{ sel.reminderDisabled }}" style="background:#fff;color:#0F6CBD;border:1px solid #0F6CBD;border-radius:4px;padding:5px 12px;font-weight:600;cursor:pointer;opacity: {{ sel.reminderOpacity }}" style-hover="background:#EBF3FC">Set To Do reminder…</button>
+                </sc-if>
+                <sc-if value="{{ sel.isClosed }}" hint-placeholder-val="{{ false }}">
+                  <button onClick="{{ sel.reopen }}" style="background:#0F6CBD;color:#fff;border:1px solid transparent;border-radius:4px;padding:5px 12px;font-weight:600;cursor:pointer" style-hover="background:#115EA3">Reopen for review</button>
+                  <button onClick="{{ sel.track }}" style="background:#fff;color:#242424;border:1px solid #D1D1D1;border-radius:4px;padding:5px 12px;font-weight:600;cursor:pointer" style-hover="background:#F5F5F5">Still open — track it</button>
+                </sc-if>
+              </div>
+              <sc-if value="{{ hasActionStatus }}" hint-placeholder-val="{{ false }}"><div style="font-size:13px;color:#0E700E">{{ actionStatus }}</div></sc-if>
+            </div>
+
+            <!-- Reminder draft -->
+            <sc-if value="{{ draftOpen }}" hint-placeholder-val="{{ false }}">
+              <div style="border:1px solid #B4D6FA;background:#F5FAFE;border-radius:6px;padding:16px 18px;display:flex;flex-direction:column;gap:12px">
+                <div style="font-weight:600;font-size:15px">Review your Microsoft To Do reminder</div>
+                <div style="font-size:13px;color:#424242;text-wrap:pretty">Creates one task in your personal default Tasks list. Only the title, reminder time, and an opaque OpenLoops reference are sent to Microsoft. This requires delegated Tasks.ReadWrite and a separate browser sign-in.</div>
+                <div style="display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:12px">
+                  <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;color:#424242"><span style="font-weight:600">Task title</span><input value="{{ draftTitle }}" onChange="{{ setDraftTitle }}" style="border:1px solid #D1D1D1;border-bottom:2px solid #0F6CBD;border-radius:4px;padding:6px 10px;background:#fff;color:#242424;outline:none;width:100%"></label>
+                  <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;color:#424242"><span style="font-weight:600">Remind me at (local time)</span><input value="{{ draftWhen }}" onChange="{{ setDraftWhen }}" placeholder="YYYY-MM-DD HH:MM" style="border:1px solid #D1D1D1;border-bottom:2px solid #0F6CBD;border-radius:4px;padding:6px 10px;background:#fff;color:#242424;outline:none;width:100%;font-variant-numeric:tabular-nums"></label>
+                </div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;font-size:13px">
+                  <button onClick="{{ draftInHour }}" style="background:#fff;color:#242424;border:1px solid #D1D1D1;border-radius:4px;padding:3px 10px;cursor:pointer" style-hover="background:#F5F5F5">In one hour</button>
+                  <button onClick="{{ draftTomorrow }}" style="background:#fff;color:#242424;border:1px solid #D1D1D1;border-radius:4px;padding:3px 10px;cursor:pointer" style-hover="background:#F5F5F5">Tomorrow at 9 am</button>
+                  <span style="color:#616161">Scheduled instant: {{ draftInstant }}</span>
+                </div>
+                <div style="font-size:12px;color:#616161;text-wrap:pretty">This time is your choice, separate from the email deadline. Microsoft To Do controls alert delivery, including when OpenLoops is closed. A failed or uncertain write is never retried automatically.</div>
+                <div style="display:flex;gap:8px">
+                  <button onClick="{{ createDraft }}" style="background:#0F6CBD;color:#fff;border:1px solid transparent;border-radius:4px;padding:5px 12px;font-weight:600;cursor:pointer" style-hover="background:#115EA3">Create this reminder in Microsoft To Do</button>
+                  <button onClick="{{ cancelDraft }}" style="background:#fff;color:#242424;border:1px solid #D1D1D1;border-radius:4px;padding:5px 12px;font-weight:600;cursor:pointer" style-hover="background:#F5F5F5">Cancel</button>
+                </div>
+              </div>
+            </sc-if>
+
+            <!-- Reminder states -->
+            <sc-if value="{{ sel.reminderCreated }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;gap:12px;align-items:flex-start;padding:10px 12px;background:#F1FAF1;border:1px solid #9FD89F;border-radius:4px;font-size:13px;color:#424242"><span style="color:#0E700E;font-weight:700">✓</span><span style="flex:1">Reminder created in Microsoft To Do. Manage its alerts and completion there; marking this loop handled does not modify the task.</span><a href="https://to-do.office.com/tasks/" target="_blank" style="font-weight:600;white-space:nowrap">Open Microsoft To Do</a></div>
+            </sc-if>
+            <sc-if value="{{ sel.reminderAttempted }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;flex-direction:column;gap:10px;padding:12px 14px;background:#FFF9F5;border:1px solid #F4C7A8;border-radius:4px;font-size:13px;color:#424242">
+                <div><strong>Microsoft did not confirm the write.</strong> Check To Do before trying again; OpenLoops will not automatically retry. Reference: <span style="font-family:Consolas,'Cascadia Mono',monospace;background:#fff;padding:1px 6px;border-radius:3px;border:1px solid #E0E0E0">{{ sel.marker }}</span></div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><a href="https://to-do.office.com/tasks/" target="_blank" style="font-weight:600">Inspect Microsoft To Do</a><div style="flex:1"></div><button onClick="{{ sel.reconcileYes }}" style="background:#fff;color:#242424;border:1px solid #D1D1D1;border-radius:4px;padding:3px 10px;cursor:pointer" style-hover="background:#F5F5F5">I checked: the task exists</button><button onClick="{{ sel.reconcileNo }}" style="background:#fff;color:#242424;border:1px solid #D1D1D1;border-radius:4px;padding:3px 10px;cursor:pointer" style-hover="background:#F5F5F5">I checked: no task was created</button></div>
+              </div>
+            </sc-if>
+
+            <!-- Evidence -->
+            <div style="display:flex;flex-direction:column;gap:12px">
+              <div style="display:flex;align-items:baseline;gap:8px"><h2 style="margin:0;font-size:15px;font-weight:600">Why this was suggested</h2><span style="font-size:12px;color:#616161">Exact quotations resolved against the source mail. Quoted history is context, not evidence.</span></div>
+              <sc-for list="{{ sel.evidence }}" as="ev" hint-placeholder-count="1">
+                <div style="border:1px solid #E0E0E0;border-radius:6px;overflow:hidden">
+                  <div style="display:flex;align-items:center;gap:10px;padding:8px 14px;background:#F5F5F5;border-bottom:1px solid #E0E0E0;font-size:13px"><span style="font-weight:600;color:#0F548C">{{ ev.label }}</span><span style="color:#616161">{{ ev.sender }} · {{ ev.when }}</span><div style="flex:1"></div><a href="#" style="font-size:13px;font-weight:600">Open message in Outlook</a></div>
+                  <div style="padding:12px 14px;display:flex;flex-direction:column;gap:8px">
+                    <div style="border-left:3px solid #0F6CBD;padding:2px 12px;font-size:15px;line-height:1.45;color:#242424;text-wrap:pretty">“{{ ev.quote }}”</div>
+                    <div style="font-size:13px;color:#616161;text-wrap:pretty">{{ ev.context }}</div>
+                  </div>
+                </div>
+              </sc-for>
+              <sc-if value="{{ sel.hasClosure }}" hint-placeholder-val="{{ false }}">
+                <div style="border:1px solid #9FD89F;border-radius:6px;overflow:hidden">
+                  <div style="display:flex;align-items:center;gap:10px;padding:8px 14px;background:#F1FAF1;border-bottom:1px solid #9FD89F;font-size:13px"><span style="font-weight:600;color:#0E700E">Possible later completion</span><span style="color:#616161">{{ sel.closure.sender }} · {{ sel.closure.when }}</span><sc-if value="{{ sel.closure.other }}" hint-placeholder-val="{{ false }}"><span style="font-size:11px;font-weight:600;padding:1px 6px;border-radius:8px;background:#fff;border:1px solid #9FD89F;color:#0E700E">evidence in another conversation</span></sc-if><div style="flex:1"></div><a href="#" style="font-size:13px;font-weight:600">Open message in Outlook</a></div>
+                  <div style="padding:12px 14px;display:flex;flex-direction:column;gap:8px"><div style="border-left:3px solid #0E700E;padding:2px 12px;font-size:15px;line-height:1.45;text-wrap:pretty">“{{ sel.closure.quote }}”</div><div style="font-size:13px;color:#616161">Completion is a hypothesis for you to confirm; it is never treated as final.</div></div>
+                </div>
+              </sc-if>
+              <sc-if value="{{ sel.noClosure }}" hint-placeholder-val="{{ true }}">
+                <div style="font-size:13px;color:#616161;padding:8px 12px;background:#F5F5F5;border-radius:4px;text-wrap:pretty">No matching completion was identified in the scanned conversation. Work may have happened elsewhere or outside this 30-day window.</div>
+              </sc-if>
+            </div>
+
+            <!-- Conversation -->
+            <div style="border-top:1px solid #E0E0E0;padding-top:12px;display:flex;flex-direction:column;gap:10px">
+              <button onClick="{{ toggleConv }}" style="display:flex;align-items:center;gap:8px;background:transparent;border:none;padding:4px 0;cursor:pointer;color:#242424;font-weight:600;font-size:14px"><span style="display:inline-block;width:0;height:0;border-top:5px solid transparent;border-bottom:5px solid transparent;border-left:6px solid #616161;transform: {{ convChevron }};transition:transform .15s"></span>Full scanned conversation<span style="color:#616161;font-weight:400">{{ sel.subject }} · {{ sel.messageCount }} messages</span></button>
+              <sc-if value="{{ convOpen }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex;flex-direction:column;gap:8px">
+                  <sc-for list="{{ sel.messages }}" as="m" hint-placeholder-count="2">
+                    <div style="display:flex;gap:12px;padding:10px 12px;border:1px solid #E0E0E0;border-radius:6px;background: {{ m.bg }}">
+                      <div style="width:32px;height:32px;border-radius:50%;background:#E6E6E6;color:#424242;font-size:12px;font-weight:600;display:flex;align-items:center;justify-content:center;flex-shrink:0">{{ m.initials }}</div>
+                      <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:4px"><div style="display:flex;gap:8px;font-size:13px"><span style="font-weight:600">{{ m.sender }}</span><span style="color:#616161">{{ m.when }}</span><span style="color:#8A8A8A">{{ m.folder }}</span></div><div style="font-size:13px;color:#242424;white-space:pre-wrap;text-wrap:pretty">{{ m.body }}</div></div>
+                    </div>
+                  </sc-for>
+                </div>
+              </sc-if>
+            </div>
+          </div>
+          </sc-if>
+          <sc-if value="{{ noSel }}" hint-placeholder-val="{{ false }}">
+            <div style="height:100%;display:flex;align-items:center;justify-content:center;color:#616161;font-size:14px;padding:40px;text-align:center;text-wrap:pretty">Select an expectation to review its action, ownership, and evidence.</div>
+          </sc-if>
+        </div>
+      </div>
+    </div>
+    </sc-if>
+
+    <!-- ===== SOURCES / CONNECTIONS SCREEN ===== -->
+    <sc-if value="{{ isConnections }}" hint-placeholder-val="{{ false }}">
+    <div style="display:flex;flex-direction:column;flex:1;min-width:0" data-screen-label="Sources">
+      <div style="display:flex;align-items:center;gap:4px;height:44px;padding:0 12px;background:#F5F5F5;border-bottom:1px solid #E0E0E0;flex-shrink:0">
+        <button onClick="{{ saveSettings }}" style="background:#0F6CBD;color:#fff;border:1px solid transparent;border-radius:4px;padding:5px 12px;font-weight:600;cursor:pointer" style-hover="background:#115EA3">Save settings</button>
+        <button onClick="{{ reloadSettings }}" style="background:transparent;color:#242424;border:1px solid transparent;border-radius:4px;padding:5px 10px;cursor:pointer" style-hover="background:#E6E6E6">Reload saved settings</button>
+        <button onClick="{{ forgetSettings }}" style="background:transparent;color:#242424;border:1px solid transparent;border-radius:4px;padding:5px 10px;cursor:pointer" style-hover="background:#E6E6E6">Forget saved settings</button>
+        <div style="flex:1"></div>
+        <span style="font-size:13px;color: {{ settingsStatusColor }}">{{ settingsStatus }}</span>
+      </div>
+      <div style="flex:1;overflow-y:auto;padding:24px 32px 40px">
+        <div style="max-width:1100px;display:flex;flex-direction:column;gap:20px">
+          <div style="display:flex;flex-direction:column;gap:4px"><h1 style="margin:0;font-size:22px;font-weight:600">Sources and model</h1><div style="color:#616161;font-size:13px">Your own Inbox and Sent Items are included automatically. Settings save in Windows Credential Manager on this account.</div></div>
+
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:20px">
+            <!-- Microsoft card -->
+            <div style="background:#fff;border:1px solid #E0E0E0;border-radius:8px;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
+              <div style="display:flex;align-items:center;gap:10px"><span style="width:26px;height:26px;border-radius:50%;background:#0F6CBD;color:#fff;font-weight:700;font-size:13px;display:flex;align-items:center;justify-content:center">1</span><span style="font-weight:600;font-size:16px">Connect Microsoft</span><div style="flex:1"></div><span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:#0E700E;background:#F1FAF1;padding:2px 8px;border-radius:10px"><span style="width:6px;height:6px;border-radius:50%;background:#0E700E"></span>Personal inbox confirmed</span></div>
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:13px"><span style="font-weight:600">Application (client) ID</span><input value="00000000-0000-0000-0000-000000000000" readOnly="{{ true }}" style="border:1px solid #D1D1D1;border-bottom:2px solid #0F6CBD;border-radius:4px;padding:6px 10px;background:#fff;color:#242424;outline:none;font-family:Consolas,'Cascadia Mono',monospace;font-size:13px"><a href="https://entra.microsoft.com/" target="_blank" style="font-size:13px">Open Microsoft Entra</a></label>
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:13px"><span style="font-weight:600">Outlook Groups</span><span style="color:#616161">Addresses shown under Groups in Outlook. One per line or comma-separated.</span><textarea readOnly="{{ true }}" rows="3" style="border:1px solid #D1D1D1;border-bottom:2px solid #0F6CBD;border-radius:4px;padding:6px 10px;background:#fff;color:#242424;outline:none;font:inherit;font-size:13px;resize:vertical">events@example.invalid
+comms@example.invalid</textarea></label>
+              <div style="display:flex;flex-direction:column;gap:6px">
+                <button onClick="{{ toggleShared }}" style="display:flex;align-items:center;gap:8px;background:transparent;border:none;padding:0;cursor:pointer;color:#242424;font-weight:600;font-size:13px"><span style="display:inline-block;width:0;height:0;border-top:5px solid transparent;border-bottom:5px solid transparent;border-left:6px solid #616161;transform: {{ sharedChevron }}"></span>Shared mailboxes (optional)</button>
+                <sc-if value="{{ sharedOpen }}" hint-placeholder-val="{{ false }}">
+                  <label style="display:flex;flex-direction:column;gap:4px;font-size:13px"><span style="color:#616161">For mailboxes under Shared with me or Open another mailbox.</span><textarea readOnly="{{ true }}" rows="2" style="border:1px solid #D1D1D1;border-bottom:2px solid #0F6CBD;border-radius:4px;padding:6px 10px;background:#fff;color:#242424;outline:none;font:inherit;font-size:13px;resize:vertical">support@example.invalid</textarea></label>
+                </sc-if>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><button onClick="{{ checkMicrosoft }}" style="background:#0F6CBD;color:#fff;border:1px solid transparent;border-radius:4px;padding:5px 12px;font-weight:600;cursor:pointer" style-hover="background:#115EA3">Sign in &amp; check inboxes</button><span style="font-size:12px;color:#616161">Opens Microsoft sign-in in your browser. Checks access only; stores no mail.</span></div>
+              <div style="display:flex;flex-direction:column;gap:2px;font-size:13px;color:#0E700E">
+                <sc-for list="{{ msStatus }}" as="line" hint-placeholder-count="2"><span style="color: {{ line.color }}">{{ line.text }}</span></sc-for>
+              </div>
+            </div>
+
+            <!-- Model card -->
+            <div style="background:#fff;border:1px solid #E0E0E0;border-radius:8px;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
+              <div style="display:flex;align-items:center;gap:10px"><span style="width:26px;height:26px;border-radius:50%;background:#0F6CBD;color:#fff;font-weight:700;font-size:13px;display:flex;align-items:center;justify-content:center">2</span><span style="font-weight:600;font-size:16px">Choose your AI model</span></div>
+              <div style="display:flex;flex-direction:column;gap:4px;font-size:13px"><span style="font-weight:600">Provider</span>
+                <div style="display:flex;gap:2px;background:#E6E6E6;border-radius:4px;padding:2px;width:fit-content">
+                  <button onClick="{{ pickOllama }}" style="border:none;border-radius:3px;padding:4px 14px;cursor:pointer;font-weight:600;font-size:13px;background: {{ pOllamaBg }};color:#242424">Ollama Cloud</button>
+                  <button onClick="{{ pickOpenRouter }}" style="border:none;border-radius:3px;padding:4px 14px;cursor:pointer;font-weight:600;font-size:13px;background: {{ pOpenRouterBg }};color:#242424">OpenRouter</button>
+                </div>
+              </div>
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:13px"><span style="font-weight:600">API key</span><input value="{{ keyDisplay }}" readOnly="{{ true }}" style="border:1px solid #D1D1D1;border-bottom:2px solid #0F6CBD;border-radius:4px;padding:6px 10px;background:#fff;color:#242424;outline:none;font-family:Consolas,'Cascadia Mono',monospace;font-size:13px"><div style="display:flex;gap:16px;align-items:center"><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" checked="{{ revealKey }}" onChange="{{ toggleReveal }}" style="width:16px;height:16px;accent-color:#0F6CBD;margin:0">Show key</label><a href="{{ keyLink }}" target="_blank">Create an API key</a></div></label>
+              <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+                <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;flex:1;min-width:220px"><span style="font-weight:600">Model</span><div style="display:flex;align-items:center;border:1px solid #D1D1D1;border-bottom:2px solid #0F6CBD;border-radius:4px;padding:6px 10px;background:#fff;gap:8px"><span style="flex:1">{{ modelName }}</span><span style="display:inline-block;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:6px solid #616161"></span></div></label>
+                <button onClick="{{ loadModels }}" style="background:#fff;color:#242424;border:1px solid #D1D1D1;border-radius:4px;padding:6px 12px;font-weight:600;cursor:pointer;white-space:nowrap" style-hover="background:#F5F5F5">{{ loadModelsLabel }}</button>
+              </div>
+              <sc-if value="{{ isOpenRouter }}" hint-placeholder-val="{{ false }}"><div style="font-size:12px;color:#616161;text-wrap:pretty">Only models with a zero-data-retention endpoint are listed, and every request asks OpenRouter to route to those endpoints only. OpenRouter's own retention policy still applies.</div></sc-if>
+              <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><button onClick="{{ testModel }}" style="background:#0F6CBD;color:#fff;border:1px solid transparent;border-radius:4px;padding:5px 12px;font-weight:600;cursor:pointer" style-hover="background:#115EA3">Test selected model</button><span style="font-size:12px;color:#616161">Content-free generation check, up to 150 s.</span></div>
+              <sc-if value="{{ hasModelStatus }}" hint-placeholder-val="{{ false }}"><div style="font-size:13px;color: {{ modelStatusColor }}">{{ modelStatus }}</div></sc-if>
+              <div style="font-size:12px;color:#616161;text-wrap:pretty">This connection test sends no email. Scanning inboxes sends recent message text from your configured inboxes to {{ providerDisclosure }}.</div>
+            </div>
+          </div>
+
+          <!-- Scan scope -->
+          <div style="background:#fff;border:1px solid #E0E0E0;border-radius:8px;padding:18px 22px;display:flex;flex-direction:column;gap:10px">
+            <div style="font-weight:600;font-size:15px">Scan scope and data sent to the model provider</div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px 24px;font-size:13px">
+              <div style="display:flex;flex-direction:column;gap:2px"><span style="color:#616161">Window</span><span style="font-weight:600">Last 30 days</span></div>
+              <div style="display:flex;flex-direction:column;gap:2px"><span style="color:#616161">Inbox / Sent Items</span><span style="font-weight:600">Up to 100 messages per folder</span></div>
+              <div style="display:flex;flex-direction:column;gap:2px"><span style="color:#616161">Groups</span><span style="font-weight:600">20 recent threads · 40 posts each</span></div>
+              <div style="display:flex;flex-direction:column;gap:2px"><span style="color:#616161">Sources</span><span style="font-weight:600">At most 10 configured</span></div>
+            </div>
+            <div style="font-size:13px;color:#424242;text-wrap:pretty">Subjects, current text, quoted history and participants are sent to {{ providerDisclosure }}. Attachments, tokens and raw Graph IDs are never sent. Capped sources and conversations over 40 messages are reported as incomplete. Scans run only when you click Scan; this is not an unattended background service.</div>
+          </div>
+
+          <div style="font-size:12px;color:#616161;text-wrap:pretty">Settings and abstract loop decisions save in Windows Credential Manager. Mail and descriptions remain in memory; scan to reconstruct them after restart. Reviewed reminders live in Microsoft To Do. Outlook add-in integration is a separate step.</div>
+        </div>
+      </div>
+    </div>
+    </sc-if>
+  </div>
+
+  <!-- Status bar -->
+  <div style="height:26px;display:flex;align-items:center;gap:16px;padding:0 16px;background:#F5F5F5;border-top:1px solid #E0E0E0;font-size:12px;color:#616161;flex-shrink:0;white-space:nowrap;overflow:hidden">
+    <span>{{ savedCount }} saved decisions · Windows Credential Manager</span>
+    <span>Model: {{ modelName }} ({{ providerLabel }})</span>
+    <div style="flex:1"></div>
+    <span>Mail and summaries stay in memory only</span>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;density&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;comfortable&quot;,&quot;compact&quot;],&quot;default&quot;:&quot;comfortable&quot;,&quot;tsType&quot;:&quot;'comfortable' | 'compact'&quot;,&quot;section&quot;:&quot;List&quot;},&quot;scanning&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;State&quot;}}">
+const NOW = new Date();
+const AGING = {
+  pastdue: { fg: '#C50F1F', bg: '#FDF3F4', dot: '#C50F1F' },
+  due: { fg: '#0F548C', bg: '#EBF3FC', dot: '#0F6CBD' },
+  range: { fg: '#0F548C', bg: '#EBF3FC', dot: '#0F6CBD' },
+  event: { fg: '#616161', bg: '#F0F0F0', dot: '#8A8A8A' },
+  soft: { fg: '#616161', bg: '#F0F0F0', dot: '#8A8A8A' },
+  none: { fg: '#616161', bg: '#F0F0F0', dot: '#8A8A8A' },
+};
+const STATUS = {
+  review: { label: 'Needs your review', fg: '#0F548C', bg: '#EBF3FC' },
+  mine: { label: 'Tracking', fg: '#0E700E', bg: '#F1FAF1' },
+  watching: { label: 'Watching team follow-up', fg: '#4F52B2', bg: '#EEEFFC' },
+  done: { label: 'Handled', fg: '#616161', bg: '#F0F0F0' },
+  dismissed: { label: 'Dismissed / not mine', fg: '#616161', bg: '#F0F0F0' },
+  moot: { label: 'No longer relevant', fg: '#616161', bg: '#F0F0F0' },
+  resolved: { label: 'Resolved — later reply found', fg: '#0E700E', bg: '#F1FAF1' },
+};
+const LOOPS = [
+  { id: 'a1', action: 'Send the revised Q3 vendor contract to Priya for legal review', owner: 'You', team: false, waitingParty: 'Priya Natarajan (Legal)', source: 'Inbox · personal mailbox', sourceShort: 'Inbox', subject: 'Re: Vendor contract — revisions', when: 'Aug 31', deadlineQuote: 'before Thursday\u2019s sign-off meeting', aging: 'pastdue', agingLabel: 'Past due since Thu Sep 03, 2026 09:00', decision: 'review', reminder: 'none', uncertainty: '',
+    evidence: [{ label: 'Original request', sender: 'Priya Natarajan', when: 'Mon Aug 31, 10:12', quote: 'Could you send over the revised contract before Thursday\u2019s sign-off meeting? I need a day to redline it.', context: 'Addressed to you directly. Deadline resolved from the Thursday after the message date.' }],
+    closure: null, messages: [
+      { sender: 'Priya Natarajan', when: 'Aug 31, 10:12', folder: 'Inbox', body: 'Hi Alex — could you send over the revised contract before Thursday\u2019s sign-off meeting? I need a day to redline it.\n\nThanks,\nPriya' },
+      { sender: 'Alex Morgan', when: 'Aug 31, 11:40', folder: 'Sent Items', body: 'Will do — waiting on one number from procurement.' },
+    ] },
+  { id: 'a5', action: 'Reply with the updated headcount numbers for the planning deck', owner: 'You', team: false, waitingParty: 'Devon Park (Strategy)', source: 'Inbox · personal mailbox', sourceShort: 'Inbox', subject: 'FY27 planning deck — inputs', when: 'Sep 2', deadlineQuote: 'by Sept 8', aging: 'pastdue', agingLabel: 'Past due since Tue Sep 08, 2026 23:59', decision: 'mine', reminder: 'attempted', uncertainty: '',
+    evidence: [{ label: 'Original request', sender: 'Devon Park', when: 'Wed Sep 02, 15:05', quote: 'Please reply with the updated headcount numbers by Sept 8 so I can lock the planning deck.', context: 'Addressed to you and one other recipient; the request names you in the body.' }],
+    closure: null, messages: [
+      { sender: 'Devon Park', when: 'Sep 2, 15:05', folder: 'Inbox', body: 'Alex, Sam — please reply with the updated headcount numbers by Sept 8 so I can lock the planning deck. Alex, yours are the field numbers.' },
+    ] },
+  { id: 'a2', action: 'Share the onboarding checklist with the new field team leads', owner: 'You', team: false, waitingParty: 'Marcus Bell (Field Ops)', source: 'Sent Items · personal mailbox', sourceShort: 'Sent Items', subject: 'Re: Field lead onboarding', when: 'Sep 4', deadlineQuote: 'by end of this week', aging: 'due', agingLabel: 'Due by end of business Fri Sep 11, 2026', decision: 'mine', reminder: 'created', uncertainty: '',
+    evidence: [
+      { label: 'Your promise', sender: 'Alex Morgan (you)', when: 'Fri Sep 04, 09:31', quote: 'I\u2019ll share the onboarding checklist with the leads by end of this week.', context: 'An outgoing commitment in Sent Items. Business-week deadline resolved relative to the message date.' },
+      { label: 'What prompted it', sender: 'Marcus Bell', when: 'Thu Sep 03, 17:20', quote: 'The new leads start Monday — is there a checklist we can hand them?', context: 'Earlier message in the same conversation.' },
+    ],
+    closure: null, messages: [
+      { sender: 'Marcus Bell', when: 'Sep 3, 17:20', folder: 'Inbox', body: 'The new leads start Monday — is there a checklist we can hand them?' },
+      { sender: 'Alex Morgan', when: 'Sep 4, 09:31', folder: 'Sent Items', body: 'Yes. I\u2019ll share the onboarding checklist with the leads by end of this week.' },
+    ] },
+  { id: 'a9', action: 'Book the room block for the Q4 offsite', owner: 'You', team: false, waitingParty: 'Sam Whitfield', source: 'Inbox · personal mailbox', sourceShort: 'Inbox', subject: 'Q4 offsite logistics', when: 'Sep 6', deadlineQuote: 'sometime next week', aging: 'range', agingLabel: 'Due by end of Sun Sep 13, 2026 (range started Mon Sep 07)', decision: 'review', reminder: 'none', uncertainty: '',
+    evidence: [{ label: 'Original request', sender: 'Sam Whitfield', when: 'Sun Sep 06, 19:02', quote: 'Can you book the room block sometime next week? Rates go up after the 14th.', context: 'A week-long range; the card ages against the end of that range.' }],
+    closure: null, messages: [{ sender: 'Sam Whitfield', when: 'Sep 6, 19:02', folder: 'Inbox', body: 'Can you book the room block sometime next week? Rates go up after the 14th.' }] },
+  { id: 'a3', action: 'Confirm venue capacity for the October customer forum', owner: 'Team — unassigned', team: true, waitingParty: 'Events group', source: 'Group · events@example.invalid', sourceShort: 'Group: events@', subject: 'October customer forum — venue', when: 'Sep 1', deadlineQuote: 'before we send invites', aging: 'event', agingLabel: 'Tied to an event; time not stated', decision: 'watching', reminder: 'none', uncertainty: 'The request is addressed to the group; no individual owner is named. Group membership does not establish personal responsibility.',
+    evidence: [{ label: 'Team request', sender: 'Rosa Ibarra', when: 'Tue Sep 01, 08:45', quote: 'Someone needs to confirm venue capacity before we send invites.', context: 'Posted to the Group thread. No participant is named as owner.' }],
+    closure: null, messages: [{ sender: 'Rosa Ibarra', when: 'Sep 1, 08:45', folder: 'Group thread', body: 'Someone needs to confirm venue capacity before we send invites. Last year we were over by 30.' }] },
+  { id: 'a4', action: 'Approve the travel budget exception for the Denver install', owner: 'You', team: false, waitingParty: 'Lena Ortiz (Finance)', source: 'Shared mailbox · support@example.invalid', sourceShort: 'Shared: support@', subject: 'Denver install — travel exception', when: 'Sep 7', deadlineQuote: 'soon', aging: 'soft', agingLabel: 'Soft urgency; no fixed deadline', decision: 'review', reminder: 'none', uncertainty: 'A stated \u201csoon\u201d could not be resolved to a date.',
+    evidence: [{ label: 'Original request', sender: 'Lena Ortiz', when: 'Mon Sep 07, 13:18', quote: 'Alex, can you approve the travel exception soon? The techs fly out on the 16th.', context: 'Received in the shared mailbox; you are named in the body.' }],
+    closure: null, messages: [{ sender: 'Lena Ortiz', when: 'Sep 7, 13:18', folder: 'Shared mailbox', body: 'Alex, can you approve the travel exception soon? The techs fly out on the 16th.' }] },
+  { id: 'a6', action: 'Send Jordan the exported audit log for August', owner: 'You', team: false, waitingParty: 'Jordan Hale (Security)', source: 'Inbox · personal mailbox', sourceShort: 'Inbox', subject: 'August audit export', when: 'Aug 28', deadlineQuote: '', aging: 'none', agingLabel: 'No deadline stated', decision: 'review', resolved: true, reminder: 'none', uncertainty: '',
+    evidence: [{ label: 'Original request', sender: 'Jordan Hale', when: 'Fri Aug 28, 16:40', quote: 'Could you send me the exported audit log for August when you get a chance?', context: 'Addressed to you directly.' }],
+    closure: { sender: 'Alex Morgan (you)', when: 'Tue Sep 01, 09:12', quote: 'Attached is the August audit export you asked for.', other: true },
+    messages: [{ sender: 'Jordan Hale', when: 'Aug 28, 16:40', folder: 'Inbox', body: 'Could you send me the exported audit log for August when you get a chance?' }] },
+  { id: 'a7', action: 'Review the draft press note and return comments', owner: 'You', team: false, waitingParty: 'Comms group', source: 'Group · comms@example.invalid', sourceShort: 'Group: comms@', subject: 'Draft press note — v2', when: 'Aug 26', deadlineQuote: 'by Friday', aging: 'pastdue', agingLabel: 'Past due since Fri Aug 28, 2026 23:59', decision: 'done', reminder: 'none', uncertainty: '',
+    evidence: [{ label: 'Original request', sender: 'Nia Okafor', when: 'Wed Aug 26, 11:00', quote: 'Alex, please review the draft press note and return comments by Friday.', context: 'Posted to the Group thread; you are named.' }],
+    closure: null, messages: [{ sender: 'Nia Okafor', when: 'Aug 26, 11:00', folder: 'Group thread', body: 'Alex, please review the draft press note and return comments by Friday.' }] },
+  { id: 'a8', action: 'Register for the workplace ergonomics webinar', owner: 'You', team: false, waitingParty: 'HR newsletter', source: 'Inbox · personal mailbox', sourceShort: 'Inbox', subject: 'September wellbeing newsletter', when: 'Sep 1', deadlineQuote: 'by Sept 10', aging: 'due', agingLabel: 'Due by end of Thu Sep 10, 2026', decision: 'dismissed', reminder: 'none', uncertainty: 'Bulk mail; the request is not addressed to you individually.',
+    evidence: [{ label: 'Suggested request', sender: 'People Team', when: 'Tue Sep 01, 07:00', quote: 'Register for the ergonomics webinar by Sept 10.', context: 'Newsletter content. You dismissed it as not a personal obligation.' }],
+    closure: null, messages: [{ sender: 'People Team', when: 'Sep 1, 07:00', folder: 'Inbox', body: 'Register for the ergonomics webinar by Sept 10. Spaces are limited.' }] },
+];
+const pad = n => String(n).padStart(2, '0');
+const fmtWhen = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+const parseWhen = s => { const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(s.trim()); return m ? new Date(+m[1], m[2] - 1, +m[3], +m[4], +m[5]) : null; };
+const initials = n => n.split(/[\s(]+/).filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase();
+const SCAN_TOTAL = 22;
+
+class Component extends DCLogic {
+  state = { screen: 'review', selectedId: 'a1', showResolved: false, filter: 'all', loops: LOOPS, draft: null, scanning: false, progress: 0, elapsed: 0, convOpen: false, coverageOpen: false, sharedOpen: false, provider: 'ollama', revealKey: false, actionStatus: '', settingsStatus: 'Saved settings restored. Microsoft sign-in is still required.', settingsOk: true, modelStatus: '', modelOk: true, msStatus: [] };
+  componentDidMount() { if (this.props.scanning) this.startScan(); }
+  componentDidUpdate(prev) { if (prev.scanning !== this.props.scanning) { if (this.props.scanning) this.startScan(); else this.stopScan(); } }
+  componentWillUnmount() { clearInterval(this.timer); }
+  startScan = () => {
+    clearInterval(this.timer);
+    this.setState({ scanning: true, progress: 0, elapsed: 0, actionStatus: '' });
+    this.timer = setInterval(() => {
+      this.setState(s => {
+        const elapsed = s.elapsed + 1;
+        if (elapsed % 3 !== 0) return { elapsed };
+        const progress = s.progress + 1;
+        if (progress >= SCAN_TOTAL) { clearInterval(this.timer); return { scanning: false, progress: SCAN_TOTAL, elapsed: 0, actionStatus: 'Scan finished. Saved decisions were re-associated with their source actions.' }; }
+        return { progress, elapsed: 0 };
+      });
+    }, 350);
+  };
+  stopScan = () => { clearInterval(this.timer); this.setState({ scanning: false, actionStatus: 'Scan stopped after the current request. Results from completed conversations are shown.' }); };
+  setDecision(id, decision) {
+    this.setState(s => ({ loops: s.loops.map(l => l.id === id ? { ...l, decision, resolved: false } : l), draft: s.draft && s.draft.id === id ? null : s.draft, actionStatus: 'Decision saved on this Windows account. No mail text or names were stored.' }));
+  }
+  setReminder(id, reminder, msg) { this.setState(s => ({ loops: s.loops.map(l => l.id === id ? { ...l, reminder } : l), actionStatus: msg })); }
+  renderVals() {
+    const s = this.state;
+    const comfortable = (this.props.density ?? 'comfortable') !== 'compact';
+    const isReview = s.screen === 'review';
+    const isOpenLoop = l => !l.resolved && (l.decision === 'review' || l.decision === 'mine' || l.decision === 'watching');
+    const passFilter = l => s.filter === 'all' || (s.filter === 'mine' ? !l.team : l.team);
+    const openLoops = s.loops.filter(isOpenLoop);
+    const visible = s.loops.filter(l => passFilter(l) && (isOpenLoop(l) || s.showResolved));
+    const statusOf = l => l.resolved ? STATUS.resolved : STATUS[l.decision];
+    const decorate = l => {
+      const st = statusOf(l); const ag = AGING[l.aging]; const selected = l.id === s.selectedId;
+      return { ...l, statusLabel: st.label, statusFg: st.fg, statusBg: st.bg, agingFg: ag.fg, agingBg: ag.bg, barColor: selected ? '#0F6CBD' : (isOpenLoop(l) ? ag.dot : 'transparent'), bg: selected ? '#EBF3FC' : 'transparent', select: () => this.setState({ selectedId: l.id, convOpen: false, actionStatus: '' }) };
+    };
+    const mk = (title, dot, items) => items.length ? [{ title, dot, count: items.length, items: items.map(decorate) }] : [];
+    const open = visible.filter(isOpenLoop);
+    const groups = [
+      ...mk('Past due', '#C50F1F', open.filter(l => l.aging === 'pastdue')),
+      ...mk('Due', '#0F6CBD', open.filter(l => l.aging === 'due' || l.aging === 'range')),
+      ...mk('No fixed deadline', '#8A8A8A', open.filter(l => ['event', 'soft', 'none'].includes(l.aging))),
+      ...mk('Resolved, handled or dismissed', '#0E700E', visible.filter(l => !isOpenLoop(l))),
+    ];
+    const raw = s.loops.find(l => l.id === s.selectedId);
+    let sel = null;
+    if (raw) {
+      const d = decorate(raw); const id = raw.id;
+      const isOpen = isOpenLoop(raw);
+      sel = { ...d, isOpen, isClosed: !isOpen, canTrack: raw.decision !== 'mine', canWatch: raw.team && raw.decision !== 'watching', hasUncertainty: !!raw.uncertainty, deadlineText: raw.deadlineQuote ? `\u201c${raw.deadlineQuote}\u201d` : 'Not specified', hasClosure: !!raw.closure, noClosure: !raw.closure, closure: raw.closure || {}, reminderCreated: raw.reminder === 'created', reminderAttempted: raw.reminder === 'attempted', reminderDisabled: raw.reminder !== 'none' || !!s.draft, reminderOpacity: (raw.reminder !== 'none' || !!s.draft) ? 0.5 : 1, marker: 'OL-' + id.toUpperCase() + '-7F3A', messageCount: raw.messages.length,
+        messages: raw.messages.map(m => ({ ...m, initials: initials(m.sender), bg: m.folder === 'Sent Items' ? '#F5FAFE' : '#fff' })),
+        track: () => this.setDecision(id, 'mine'), watch: () => this.setDecision(id, 'watching'), handled: () => this.setDecision(id, 'done'), dismiss: () => this.setDecision(id, 'dismissed'), moot: () => this.setDecision(id, 'moot'), reopen: () => this.setDecision(id, 'review'),
+        openDraft: () => { if (raw.reminder !== 'none') return; const impliedTrack = raw.decision === 'review'; this.setState(st => ({ draft: { id, title: raw.action, when: fmtWhen(new Date(NOW.getTime() + 3600e3)), prev: raw.decision }, loops: impliedTrack ? st.loops.map(l => l.id === id ? { ...l, decision: 'mine' } : l) : st.loops, actionStatus: impliedTrack ? 'Opening a reminder draft tracks this as yours. Cancel restores the previous decision.' : '' })); },
+        reconcileYes: () => this.setReminder(id, 'created', 'Recorded: the To Do task exists. Manage it in Microsoft To Do.'),
+        reconcileNo: () => this.setReminder(id, 'none', 'Recorded: no task was created. You can set a reminder again.'),
+      };
+    }
+    const draft = s.draft; const draftDate = draft ? parseWhen(draft.when) : null;
+    const providerLabel = s.provider === 'ollama' ? 'Ollama Cloud' : 'OpenRouter';
+    const seg = on => on ? '#fff' : 'transparent';
+    const savedCount = s.loops.filter(l => l.decision !== 'review' || l.reminder !== 'none').length;
+    return {
+      isReview, isConnections: !isReview, comfortable,
+      goReview: () => this.setState({ screen: 'review' }), goConnections: () => this.setState({ screen: 'connections' }),
+      navReviewBg: isReview ? '#E0E0E0' : 'transparent', navReviewInk: isReview ? '#0F6CBD' : '#424242', navConnBg: isReview ? 'transparent' : '#E0E0E0', navConnInk: isReview ? '#424242' : '#0F6CBD',
+      openCount: openLoops.length, hasOpenCount: openLoops.length > 0,
+      scanning: s.scanning, notScanning: !s.scanning, startScan: this.startScan, stopScan: this.stopScan,
+      spinner: React.createElement('span', { style: { display: 'inline-block', width: 12, height: 12, border: '2px solid rgba(255,255,255,0.4)', borderTopColor: '#fff', borderRadius: '50%', animation: 'ol-spin 0.8s linear infinite' } }),
+      progressText: `Conversation ${Math.min(s.progress + 1, SCAN_TOTAL)} of ${SCAN_TOTAL} · ${Math.min(s.progress * 6 + 11, 143)} / 143 messages`, progressPct: `${Math.round((s.progress / SCAN_TOTAL) * 100)}%`, scanElapsed: s.elapsed, scanPhase: s.progress >= 18 ? 'Cross-thread closure check' : 'Finding open loops',
+      showScanSummary: !s.scanning, summaryLine: `${openLoops.length} open expectations from 22 conversations · 143 messages · 30-day window · ${s.provider === 'ollama' ? 'deepseek-v4-flash:0731' : 'vendor/model-1'} via ${providerLabel}`,
+      coverageOpen: s.coverageOpen, coverageLabel: s.coverageOpen ? 'Hide coverage details' : 'Coverage: 1 source incomplete', toggleCoverage: () => this.setState(st => ({ coverageOpen: !st.coverageOpen })),
+      clearAll: () => this.setState({ actionStatus: 'Results and mail cleared from memory. Saved decisions and To Do tasks are preserved.' }),
+      filterAll: () => this.setState({ filter: 'all' }), filterMine: () => this.setState({ filter: 'mine' }), filterTeam: () => this.setState({ filter: 'team' }),
+      fAllBg: seg(s.filter === 'all'), fMineBg: seg(s.filter === 'mine'), fTeamBg: seg(s.filter === 'team'),
+      showResolved: s.showResolved, toggleResolved: () => this.setState(st => ({ showResolved: !st.showResolved })),
+      groups, listEmpty: visible.length === 0, listCountLabel: `${open.length} open`,
+      hasSel: !!sel, noSel: !sel, sel: sel || {},
+      hasActionStatus: !!s.actionStatus, actionStatus: s.actionStatus,
+      draftOpen: !!draft && sel && draft.id === sel.id, draftTitle: draft ? draft.title : '', draftWhen: draft ? draft.when : '',
+      draftInstant: draftDate ? draftDate.toLocaleString(undefined, { weekday: 'short', month: 'short', day: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' }) : 'Enter a valid future time (YYYY-MM-DD HH:MM)',
+      setDraftTitle: e => { const v = e.target.value; this.setState(st => ({ draft: { ...st.draft, title: v } })); },
+      setDraftWhen: e => { const v = e.target.value; this.setState(st => ({ draft: { ...st.draft, when: v } })); },
+      draftInHour: () => this.setState(st => ({ draft: { ...st.draft, when: fmtWhen(new Date(Date.now() + 3600e3)) } })),
+      draftTomorrow: () => { const t = new Date(); t.setDate(t.getDate() + 1); t.setHours(9, 0, 0, 0); this.setState(st => ({ draft: { ...st.draft, when: fmtWhen(t) } })); },
+      createDraft: () => { if (!draft || !draftDate) return; this.setState(st => ({ loops: st.loops.map(l => l.id === draft.id ? { ...l, reminder: 'created' } : l), draft: null, actionStatus: 'Reminder created in your Microsoft To Do Tasks list.' })); },
+      cancelDraft: () => { if (!draft) return; this.setState(st => { const cur = st.loops.find(l => l.id === draft.id); const restore = cur && draft.prev === 'review' && cur.decision === 'mine'; return { draft: null, loops: restore ? st.loops.map(l => l.id === draft.id ? { ...l, decision: 'review' } : l) : st.loops, actionStatus: restore ? 'Draft cancelled; decision restored to “Needs your review”.' : 'Draft cancelled.' }; }); },
+      convOpen: s.convOpen, convChevron: s.convOpen ? 'rotate(90deg)' : 'rotate(0deg)', toggleConv: () => this.setState(st => ({ convOpen: !st.convOpen })),
+      sharedOpen: s.sharedOpen, sharedChevron: s.sharedOpen ? 'rotate(90deg)' : 'rotate(0deg)', toggleShared: () => this.setState(st => ({ sharedOpen: !st.sharedOpen })),
+      providerLabel, providerShort: s.provider === 'ollama' ? 'Ollama' : 'OpenRouter', providerDisclosure: s.provider === 'ollama' ? 'Ollama Cloud' : 'OpenRouter, restricted to zero-data-retention endpoints', isOpenRouter: s.provider !== 'ollama', modelDotColor: '#0E700E',
+      pickOllama: () => this.setState({ provider: 'ollama', modelStatus: '' }), pickOpenRouter: () => this.setState({ provider: 'openrouter', modelStatus: '' }), pOllamaBg: seg(s.provider === 'ollama'), pOpenRouterBg: seg(s.provider !== 'ollama'),
+      keyDisplay: s.revealKey ? (s.provider === 'ollama' ? 'ol-synthetic-key-0000000000' : 'or-synthetic-key-0000000000') : '••••••••••••••••••••••••', revealKey: s.revealKey, toggleReveal: () => this.setState(st => ({ revealKey: !st.revealKey })), keyLink: s.provider === 'ollama' ? 'https://ollama.com/settings/keys' : 'https://openrouter.ai/settings/keys',
+      modelName: s.provider === 'ollama' ? 'deepseek-v4-flash:0731' : 'Vendor: Model 1 (vendor/model-1)', loadModelsLabel: s.provider === 'ollama' ? 'Load cloud models' : 'Load ZDR models',
+      loadModels: () => this.setState({ modelStatus: s.provider === 'ollama' ? '14 cloud models loaded. Choose one and test it.' : '9 zero-data-retention models loaded. Choose one and test it.', modelOk: false }),
+      testModel: () => this.setState({ modelStatus: `${s.provider === 'ollama' ? 'deepseek-v4-flash:0731' : 'vendor/model-1'} passed the generation check.`, modelOk: true }),
+      hasModelStatus: !!s.modelStatus, modelStatus: s.modelStatus, modelStatusColor: s.modelOk ? '#0E700E' : '#424242',
+      checkMicrosoft: () => this.setState({ msStatus: [{ text: 'Personal inbox: access confirmed.', color: '#0E700E' }, { text: 'Group inbox 1: access confirmed.', color: '#0E700E' }, { text: 'Group inbox 2: access confirmed.', color: '#0E700E' }, { text: 'Shared mailbox 1: access confirmed.', color: '#0E700E' }] }), msStatus: s.msStatus,
+      saveSettings: () => this.setState({ settingsStatus: 'Saved on this Windows account, including your API key and model choice.', settingsOk: true }),
+      reloadSettings: () => this.setState({ settingsStatus: 'Saved settings restored. Microsoft sign-in is still required.', settingsOk: true }),
+      forgetSettings: () => this.setState({ settingsStatus: 'Saved settings removed and inputs cleared.', settingsOk: true, msStatus: [], modelStatus: '' }),
+      settingsStatus: s.settingsStatus, settingsStatusColor: s.settingsOk ? '#0E700E' : '#8A3707',
+      savedCount,
+    };
+  }
+}
+</script>
+</body>
+</html>

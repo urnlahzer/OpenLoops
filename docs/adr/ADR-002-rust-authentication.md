@@ -76,6 +76,11 @@ runtime and G-ID/G-PRIV evidence remain unimplemented. Absence of a usable
 protected store permits only ephemeral non-mutating/session-only behavior with
 no plaintext fallback.
 
+Session reuse (2026-09-10): the access token is held in process memory for the
+token lifetime and reused across the connection check, mail load, scan and
+reminders; never persisted; cleared on Forget, client-ID change, a 401, and
+exit.
+
 Disconnect stops new identity work, clears ephemeral state, removes
 application-owned cache material where the future adapter supports it, and
 deletes account-bound application state under ADR-005. It is never described as
