@@ -87,6 +87,11 @@ component NavItem inherits Rectangle {
         }
     }
     nav-focus := FocusScope {
+        // A FocusScope with focus-on-click swallows the first press while it
+        // lacks focus (Slint returns EventAccepted after taking focus), so the
+        // TouchArea beneath only sees the second click. The TouchArea focuses
+        // this scope itself.
+        focus-on-click: false;
         enabled: root.enabled;
         key-pressed(event) => {
             if event.text == " " || event.text == Key.Return { root.activated(); return accept; }

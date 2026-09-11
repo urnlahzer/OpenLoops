@@ -88,6 +88,11 @@ export component PrimaryButton {
     }
     TouchArea { enabled: root.enabled; clicked => { primary-focus.focus(); root.clicked(); } }
     primary-focus := FocusScope {
+        // A FocusScope with focus-on-click swallows the first press while it
+        // lacks focus (Slint returns EventAccepted after taking focus), so the
+        // TouchArea beneath only sees the second click. The TouchArea focuses
+        // this scope itself.
+        focus-on-click: false;
         enabled: root.enabled;
         key-pressed(event) => {
             if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
@@ -136,6 +141,11 @@ export component SubtleButton {
     }
     touch := TouchArea { enabled: root.enabled; clicked => { subtle-focus.focus(); root.clicked(); } }
     subtle-focus := FocusScope {
+        // A FocusScope with focus-on-click swallows the first press while it
+        // lacks focus (Slint returns EventAccepted after taking focus), so the
+        // TouchArea beneath only sees the second click. The TouchArea focuses
+        // this scope itself.
+        focus-on-click: false;
         enabled: root.enabled;
         key-pressed(event) => {
             if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
@@ -176,6 +186,11 @@ export component OutlineButton {
     }
     TouchArea { enabled: root.enabled; clicked => { outline-focus.focus(); root.clicked(); } }
     outline-focus := FocusScope {
+        // A FocusScope with focus-on-click swallows the first press while it
+        // lacks focus (Slint returns EventAccepted after taking focus), so the
+        // TouchArea beneath only sees the second click. The TouchArea focuses
+        // this scope itself.
+        focus-on-click: false;
         enabled: root.enabled;
         key-pressed(event) => {
             if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
@@ -207,6 +222,11 @@ export component LinkButton {
     }
     TouchArea { enabled: root.enabled; clicked => { link-focus.focus(); root.clicked(); } }
     link-focus := FocusScope {
+        // A FocusScope with focus-on-click swallows the first press while it
+        // lacks focus (Slint returns EventAccepted after taking focus), so the
+        // TouchArea beneath only sees the second click. The TouchArea focuses
+        // this scope itself.
+        focus-on-click: false;
         enabled: root.enabled;
         key-pressed(event) => {
             if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
@@ -278,6 +298,11 @@ export component Segmented {
                 }
             }
             segment-focus := FocusScope {
+                // A FocusScope with focus-on-click swallows the first press while it
+                // lacks focus (Slint returns EventAccepted after taking focus), so the
+                // TouchArea beneath only sees the second click. The TouchArea focuses
+                // this scope itself.
+                focus-on-click: false;
                 enabled: root.enabled;
                 key-pressed(event) => {
                     if event.text == Key.LeftArrow {
@@ -477,6 +502,11 @@ export component Disclosure {
             }
             TouchArea { enabled: root.enabled; clicked => { disclosure-focus.focus(); root.expanded = !root.expanded; root.toggled(root.expanded); } }
             disclosure-focus := FocusScope {
+                // A FocusScope with focus-on-click swallows the first press while it
+                // lacks focus (Slint returns EventAccepted after taking focus), so the
+                // TouchArea beneath only sees the second click. The TouchArea focuses
+                // this scope itself.
+                focus-on-click: false;
                 enabled: root.enabled;
                 key-pressed(event) => {
                     if event.text == " " || event.text == Key.Return {
