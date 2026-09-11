@@ -831,11 +831,167 @@ fn is_specific_event_name(name: &str) -> bool {
     name.split_whitespace().count() >= 2
 }
 
+/// Sender domains recap/transcription services use for their meeting-summary
+/// mail. Recognition hints only, deliberately generous: matching a sender
+/// domain here is sufficient on its own for [`is_meeting_recap_artifact`]
+/// because these domains are dedicated to producing after-the-fact meeting
+/// summaries, never ordinary correspondence. A message this old excludes as
+/// a recap artifact but that is ALSO written after its own event is already
+/// caught independently by the temporal rule in [`close_from_index`] and
+/// [`close_from_stated_time`]; this is belt-and-braces, not the only guard.
+const RECAP_SENDER_DOMAINS: &[&str] = &[
+    "fathom.video",
+    "fathom.ai",
+    "otter.ai",
+    "fireflies.ai",
+    "read.ai",
+    "tldv.io",
+    "grain.com",
+    "grain.co",
+    "avoma.com",
+    "gong.io",
+    "chorus.ai",
+];
+
+/// Sender display-name substrings (matched case-insensitively) that mark a
+/// notetaker/recap bot riding on a general-purpose platform address (Zoom,
+/// Google Meet) that cannot be identified by domain alone. Sufficient on
+/// their own, same as [`RECAP_SENDER_DOMAINS`].
+const RECAP_SENDER_NAME_HINTS: &[&str] = &["ai companion", "gemini"];
+
+/// Exact sender addresses (matched case-insensitively) belonging to a
+/// general-purpose platform (Zoom, Teams, Meet) rather than a dedicated
+/// recap vendor. These addresses ALSO send ordinary meeting invites and
+/// notifications, so an address match here is never enough by itself --
+/// [`is_meeting_recap_artifact`] additionally requires a
+/// [`RECAP_SUBJECT_HINTS`] match before treating one of these as a recap.
+const RECAP_SENDER_PLATFORM_ADDRESSES: &[&str] = &[
+    "no-reply@zoom.us",
+    "noreply@teams.microsoft.com",
+    "meetings-noreply@google.com",
+];
+
+/// Subject substrings (matched case-insensitively) that mark a meeting-recap
+/// or call-transcript email. Recognition hints only -- see
+/// [`is_meeting_recap_artifact`] for how they combine with sender and body
+/// evidence.
+const RECAP_SUBJECT_HINTS: &[&str] = &[
+    "meeting summary",
+    "meeting notes",
+    "meeting recap",
+    "recap",
+    "notes:",
+    "summary:",
+    "call summary",
+    "call notes",
+    "your meeting",
+    "transcript",
+    "highlights",
+    "action items",
+    "key takeaways",
+];
+
+/// Body section markers (matched case-insensitively, and only within the
+/// first [`RECAP_BODY_SCAN_CHARS`] characters of the first body block) that
+/// mark a structured meeting-recap email.
+const RECAP_BODY_MARKERS: &[&str] = &[
+    "action items",
+    "key takeaways",
+    "next steps",
+    "meeting purpose",
+    "summary",
+    "attendees",
+    "transcript",
+];
+
+/// How far into the first body block [`is_meeting_recap_artifact`] looks for
+/// a [`RECAP_BODY_MARKERS`] entry -- these services put their section
+/// headings up front, so scanning the whole (potentially long) body is
+/// unnecessary and would only invite false positives from later prose.
+const RECAP_BODY_SCAN_CHARS: usize = 600;
+
+/// Whether `message` is a machine-generated meeting-recap or call-transcript
+/// artifact from a transcription/notetaker service (Fathom, Otter, Fireflies,
+/// Read.ai, tl;dv, Grain, Avoma, Gong, Chorus, or a notetaker bot riding on
+/// Zoom/Teams/Meet), rather than an ordinary message written by a
+/// participant. True when ANY of:
+///
+/// - the sender's address matches a dedicated recap vendor's domain
+///   ([`RECAP_SENDER_DOMAINS`]) or display name ([`RECAP_SENDER_NAME_HINTS`]);
+/// - the sender is a general-purpose platform's notetaker address
+///   ([`RECAP_SENDER_PLATFORM_ADDRESSES`]) AND the subject also carries a
+///   recap pattern ([`RECAP_SUBJECT_HINTS`]);
+/// - the subject carries a recap pattern AND the first body block opens with
+///   a recap section marker ([`RECAP_BODY_MARKERS`]).
+///
+/// A sender match alone is decisive; otherwise two independent signals are
+/// required, so an ordinary message like "Send me your notes" (subject
+/// contains "notes" but not the `"notes:"` pattern, and carries no body
+/// marker) is never mistaken for one. These are recognition hints, not the
+/// only defense against closing a request from a past-tense summary -- see
+/// [`close_from_index`]'s and [`close_from_stated_time`]'s temporal guard.
+fn is_meeting_recap_artifact(message: &ReviewMessage) -> bool {
+    let sender = message
+        .input
+        .message
+        .sender
+        .as_ref()
+        .map(|block| block.as_string().to_lowercase())
+        .unwrap_or_default();
+    if RECAP_SENDER_DOMAINS
+        .iter()
+        .any(|domain| sender.contains(&format!("@{domain}")))
+        || RECAP_SENDER_NAME_HINTS
+            .iter()
+            .any(|hint| sender.contains(hint))
+    {
+        return true;
+    }
+
+    let subject = message.input.message.subject.as_string().to_lowercase();
+    let subject_has_recap_pattern = RECAP_SUBJECT_HINTS
+        .iter()
+        .any(|hint| subject.contains(hint));
+
+    if subject_has_recap_pattern
+        && RECAP_SENDER_PLATFORM_ADDRESSES
+            .iter()
+            .any(|address| sender.contains(address))
+    {
+        return true;
+    }
+
+    let body_prefix: String = message
+        .input
+        .message
+        .body_blocks
+        .first()
+        .map(|block| {
+            let text = block.as_string();
+            let cut = text
+                .char_indices()
+                .nth(RECAP_BODY_SCAN_CHARS)
+                .map_or(text.len(), |(index, _)| index);
+            text[..cut].to_lowercase()
+        })
+        .unwrap_or_default();
+    let body_has_marker = RECAP_BODY_MARKERS
+        .iter()
+        .any(|marker| body_prefix.contains(marker));
+
+    subject_has_recap_pattern && body_has_marker
+}
+
 /// One message's contribution to the event index, per the priority order
 /// documented on [`build_event_index`]. `None` when none of the sources
 /// found a sufficiently specific ([`is_specific_event_name`]) candidate (or
-/// the Graph/subject entry was out of date).
+/// the Graph/subject entry was out of date, or the message is a
+/// [`is_meeting_recap_artifact`] describing an event that has already
+/// happened).
 fn learn_one_event(message: &ReviewMessage) -> Option<(String, i64, i64, EventSource)> {
+    if is_meeting_recap_artifact(message) {
+        return None;
+    }
     let subject = message.input.message.subject.as_string();
     if let Some((start, end, out_of_date)) = message.event {
         if out_of_date {
@@ -2469,17 +2625,43 @@ fn has_scoped_event_language(item: &Expectation) -> bool {
     })
 }
 
+/// Whether `item`'s own deadline phrase, classified against `message_timestamp`,
+/// reads as [`DeadlineView::EventTied`] (e.g. "before the meeting") -- the
+/// same test [`named_event_phrase`] uses to accept a deadline-only naming of
+/// an event. Reused by [`scoped_event`] to let its own-message branch accept
+/// a request that names no event and uses no [`has_scoped_event_language`]
+/// wording, but whose deadline itself says it is tied to a gathering.
+fn event_tied_deadline(item: &Expectation, message_timestamp: i64, now: i64) -> bool {
+    let Some(deadline) = item.deadline.as_ref() else {
+        return false;
+    };
+    let offset = local_offset_seconds(message_timestamp, 0);
+    matches!(
+        classify(&deadline.quote, message_timestamp, now, offset),
+        DeadlineView::EventTied
+    )
+}
+
 /// Finds deterministic event evidence scoped to the expectation's source:
-/// first an event learned from the evidence message itself, otherwise the
-/// sole qualifying event in the same conversation when the request uses
-/// event-shaped language. Body-prose events are deliberately excluded from
-/// both rules; ambiguity between two conversation events leaves the item open.
+/// first an event learned from the evidence message itself -- but only for a
+/// request that [`has_scoped_event_language`], carries an
+/// [`event_tied_deadline`], or satisfies [`rule_3_applies`]. The latter means
+/// the model named both the event and its distinct time; when the time points
+/// to the evidence message, it also lets that message's body-prose event
+/// qualify.
+/// Without one of those signals, merely appearing in an event-bearing message
+/// is not enough (e.g. an unrelated action item in an invite). Otherwise this
+/// finds the sole structured or subject-prose event in the same conversation
+/// when the request uses event-shaped language. Ambiguity between two
+/// conversation events leaves the item open.
 fn scoped_event<'a>(
     item: &Expectation,
     source: &ReviewMessage,
+    messages: &[ReviewMessage],
     index: &'a [EventRef],
+    now: i64,
 ) -> Option<&'a EventRef> {
-    let qualifying = |event: &&EventRef| {
+    let normally_qualifying = |event: &&EventRef| {
         matches!(
             event.source,
             EventSource::Meeting | EventSource::Subject | EventSource::SubjectProse
@@ -2487,12 +2669,25 @@ fn scoped_event<'a>(
     };
     index
         .iter()
-        .filter(qualifying)
-        .find(|event| event.message_handle == item.evidence.message)
+        .find(|event| {
+            event.message_handle == item.evidence.message
+                && (normally_qualifying(event)
+                    || (event.source == EventSource::Prose
+                        && item
+                            .event_time
+                            .as_ref()
+                            .is_some_and(|anchor| anchor.message == item.evidence.message)
+                        && rule_3_applies(item, messages, now, event.end)))
+        })
+        .filter(|event| {
+            has_scoped_event_language(item)
+                || event_tied_deadline(item, source.input.timestamp, now)
+                || rule_3_applies(item, messages, now, event.end)
+        })
         .or_else(|| {
             let mut events = index
                 .iter()
-                .filter(qualifying)
+                .filter(normally_qualifying)
                 .filter(|event| event.conversation == source.conversation);
             has_scoped_event_language(item)
                 .then(|| events.next().filter(|_| events.next().is_none()))?
@@ -2515,15 +2710,94 @@ fn deadline_boundary(item: &Expectation, messages: &[ReviewMessage], now: i64) -
     }
 }
 
-/// Closes `item` against `event` when `event` has already ended. Returns
-/// whether it closed.
+fn local_day(timestamp: i64, offset_seconds: i32) -> i64 {
+    timestamp
+        .saturating_add(i64::from(offset_seconds))
+        .div_euclid(86_400)
+}
+
+/// Whether the item's own deadline is another rendering of `event_time` or
+/// resolves to the same instant/local day as `event_end`. In either case the
+/// item is overdue work, not work made irrelevant by a passed event.
+fn deadline_is_event_time(
+    item: &Expectation,
+    messages: &[ReviewMessage],
+    now: i64,
+    event_end: i64,
+) -> bool {
+    let (Some(deadline), Some(event_time)) = (&item.deadline, &item.event_time) else {
+        return false;
+    };
+    if deadline
+        .quote
+        .trim()
+        .eq_ignore_ascii_case(event_time.quote.trim())
+    {
+        return true;
+    }
+    let Some(message) = messages
+        .iter()
+        .find(|message| message.input.handle == deadline.message)
+    else {
+        return false;
+    };
+    let offset = local_offset_seconds(message.input.timestamp, 0);
+    match classify(&deadline.quote, message.input.timestamp, now, offset) {
+        DeadlineView::PastDue {
+            boundary,
+            offset_seconds,
+        }
+        | DeadlineView::Due {
+            boundary,
+            offset_seconds,
+        } => {
+            boundary == event_end
+                || local_day(boundary, offset_seconds) == local_day(event_end, offset_seconds)
+        }
+        DeadlineView::DueDate { day, boundary, .. }
+        | DeadlineView::DueBusinessDay { day, boundary, .. } => {
+            boundary == event_end || day == local_day(event_end, offset)
+        }
+        DeadlineView::DueRange {
+            end_day, boundary, ..
+        } => boundary == event_end || end_day == local_day(event_end, offset),
+        DeadlineView::EventTied | DeadlineView::Soft | DeadlineView::Unknown => false,
+    }
+}
+
+/// Rule 3 requires both a named-event anchor and a distinct event-time anchor.
+/// An own deadline at that same time/day remains overdue instead of closing.
+fn rule_3_applies(
+    item: &Expectation,
+    messages: &[ReviewMessage],
+    now: i64,
+    event_end: i64,
+) -> bool {
+    item.event.is_some()
+        && item.event_time.is_some()
+        && !deadline_is_event_time(item, messages, now, event_end)
+}
+
+/// Closes `item` against `event` when `event` has already ended -- but only
+/// when `event` had ALREADY ended, relative to `event`, at
+/// `source_timestamp` (the evidence message's own send time) as well as
+/// `now`: a message written after its event (a summary, a recap, a
+/// thank-you note) can never be closed by that event, since the event is the
+/// source of the request, not its deadline. Returns whether it closed.
 fn close_from_index(
     item: &mut Expectation,
     event: &EventRef,
     messages: &[ReviewMessage],
     now: i64,
+    source_timestamp: i64,
 ) -> bool {
-    if event.end >= now || deadline_boundary(item, messages, now).is_some_and(|d| d > event.end) {
+    if event.end >= now
+        || event.end <= source_timestamp
+        || deadline_boundary(item, messages, now).is_some_and(|d| d > event.end)
+        || (item.event.is_some()
+            && item.event_time.is_some()
+            && !rule_3_applies(item, messages, now, event.end))
+    {
         return false;
     }
     item.event_passed = Some(EventPassed {
@@ -2542,15 +2816,21 @@ fn close_from_index(
 /// [`classify`] against the message that stated it -- the only way to close
 /// a loop whose event date is stated only in an email body rather than a
 /// meeting invite or calendar subject, so it has no index entry at all.
-/// `name` is the event's own name when known (from [`named_event_phrase`]),
-/// used as-is since an item reaching this path always named an event.
-/// Returns whether it closed.
+/// The closure name always comes from the model's `event` anchor, never from
+/// the bare time phrase.
+/// Applies the same temporal guard as [`close_from_index`]: an event that had
+/// already ended by `source_timestamp` (the evidence message's own send
+/// time) can never close the item, even if it also reads as past relative to
+/// `now`. Returns whether it closed.
 fn close_from_stated_time(
     item: &mut Expectation,
     messages: &[ReviewMessage],
     now: i64,
-    name: &str,
+    source_timestamp: i64,
 ) -> bool {
+    let Some(name) = item.event.as_ref().map(|event| event.quote.clone()) else {
+        return false;
+    };
     let Some(event_time) = &item.event_time else {
         return false;
     };
@@ -2565,11 +2845,14 @@ fn close_from_stated_time(
     let Some(end) = past_due_boundary(&view) else {
         return false;
     };
+    if end <= source_timestamp || !rule_3_applies(item, messages, now, end) {
+        return false;
+    }
     if deadline_boundary(item, messages, now).is_some_and(|deadline| deadline > end) {
         return false;
     }
     item.event_passed = Some(EventPassed {
-        name: name.to_string(),
+        name,
         end,
         message_handle: event_time.message.clone(),
         // `event_time` is an `Anchor`, which the model can only ground in a
@@ -2587,18 +2870,28 @@ fn close_from_stated_time(
 ///   event ([`named_event_phrase`]) with [`match_event`] -- when the index
 ///   has a match, it alone decides this item, whether or not it closes;
 /// - failing that, a model-supplied `event_time` phrase -- a verbatim
-///   date/time anchor stating when the NAMED event occurs, found anywhere
-///   in the conversation -- classified directly ([`close_from_stated_time`]);
-///   only ever consulted for an item that named an event in the first
-///   place;
-/// - when no named index event matched, a structured or subject-prose event
-///   learned from the evidence message itself, or the sole qualifying event
-///   in its conversation when the request uses event language
-///   ([`scoped_event`]);
+///   date/time anchor stating when the named `event` anchor occurs, found
+///   anywhere in the conversation -- classified directly
+///   ([`close_from_stated_time`]);
+/// - when no named index event matched, an event learned from the evidence
+///   message itself, or the sole qualifying event in its conversation when
+///   the request uses event language ([`scoped_event`]); `event` plus
+///   `event_time` anchors make the own-message branch event-bound
+///   and can admit body prose when the time points to that same message;
 /// - for an item that named no event at all, the index again, but matched
 ///   against the item's own `action`/`evidence.quote` text instead
 ///   ([`text_matched_event`]), at a much stronger bar so an unrelated
 ///   generic phrase never matches by accident.
+///
+/// Two rules apply across every source above: an event can only close a
+/// request if the event had not yet ended when the evidence message was
+/// sent ([`close_from_index`], [`close_from_stated_time`]) -- a summary,
+/// recap, or thank-you note written after its own event can never be closed
+/// by that event -- and [`scoped_event`]'s own-message branch only credits
+/// an event learned from the evidence message itself to a request that
+/// [`has_scoped_event_language`], carries an [`event_tied_deadline`], or has
+/// distinct model-supplied `event` and `event_time` anchors. An `event_time`
+/// that is also the item's own deadline never invokes rule 3.
 ///
 /// Always pushes one content-free coverage note (even when every count is
 /// zero, so the chain from "events learned" to "expectations closed" stays
@@ -2634,22 +2927,22 @@ pub fn close_passed_events(result: &mut ScanResult, messages: &[ReviewMessage], 
             let event_match = match_event(&phrase, source.input.timestamp, &index);
             matched += usize::from(event_match.is_some());
             if let Some(event) = event_match {
-                if close_from_index(item, event, messages, now) {
+                if close_from_index(item, event, messages, now, source.input.timestamp) {
                     closed_from_index += 1;
                     result.event_closures += 1;
                 }
                 continue;
             }
-            if close_from_stated_time(item, messages, now, &phrase) {
+            if close_from_stated_time(item, messages, now, source.input.timestamp) {
                 closed_from_stated_time += 1;
                 result.event_closures += 1;
                 continue;
             }
         }
 
-        if let Some(event) = scoped_event(item, source, &index) {
+        if let Some(event) = scoped_event(item, source, messages, &index, now) {
             scoped += 1;
-            if close_from_index(item, event, messages, now) {
+            if close_from_index(item, event, messages, now, source.input.timestamp) {
                 closed_from_index += 1;
                 result.event_closures += 1;
             }
@@ -2658,7 +2951,7 @@ pub fn close_passed_events(result: &mut ScanResult, messages: &[ReviewMessage], 
 
         if !named_phrase_present && let Some(event) = text_matched_event(item, source, &index) {
             matched_by_text += 1;
-            if close_from_index(item, event, messages, now) {
+            if close_from_index(item, event, messages, now, source.input.timestamp) {
                 closed_from_index += 1;
                 result.event_closures += 1;
             }
@@ -6297,8 +6590,91 @@ at the downtown courthouse. Let me know if that works.",
         }
     }
 
+    fn event_anchored_logistics_fixture() -> (ReviewMessage, Expectation) {
+        const SUBJECT: &str = "Claude Code Workshop SF | Anthropic x Tenex";
+        const EVENT_TIME: &str = "Tuesday, September 2, 2026, 9:00 AM \u{2013} 12:00 PM PT";
+        let body = format!(
+            "{SUBJECT}\n{EVENT_TIME}\nVenue: Harbor Studio, 400 Example Avenue.\n\
+             Please review the schedule, venue & logistics.\n\
+             Send the slides to the organiser."
+        );
+        let mut mail = synthetic(&body, 0, "claude-code-workshop-thread");
+        mail.received = "2026-08-20T16:00:00Z".into();
+        mail.subject = SUBJECT.into();
+        mail.sender = "Morgan Lee <morgan@training.example.invalid>".into();
+        mail.sender_address = "morgan@training.example.invalid".into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+
+        let (_, template) = closure_test_messages();
+        let mut item = scoped_event_expectation(
+            &template,
+            &message.input.handle,
+            "Review the schedule, venue & logistics",
+            "Please review the schedule, venue & logistics.",
+        );
+        item.event = Some(Anchor {
+            message: message.input.handle.clone(),
+            block: 0,
+            quote: SUBJECT.into(),
+            context: body.clone(),
+        });
+        item.event_time = Some(Anchor {
+            message: message.input.handle.clone(),
+            block: 0,
+            quote: EVENT_TIME.into(),
+            context: body,
+        });
+        (message, item)
+    }
+
     #[test]
-    fn scoped_subject_event_closes_both_requests_from_its_message_and_future_stays_open() {
+    fn event_anchored_logistics_request_closes_after_the_event() {
+        let (message, item) = event_anchored_logistics_fixture();
+        let index = build_event_index(std::slice::from_ref(&message));
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].source, EventSource::Prose);
+        let event_end = index[0].end;
+        let mut result = closure_result(vec![item]);
+
+        close_passed_events(&mut result, std::slice::from_ref(&message), event_end + 1);
+
+        let passed = result.analysis.items[0].event_passed.as_ref().unwrap();
+        assert_eq!(passed.name, "claude code workshop sf | anthropic x tenex");
+        assert_eq!(passed.message_handle, message.input.handle);
+        assert_eq!(result.event_closures, 1);
+    }
+
+    #[test]
+    fn event_anchored_request_stays_open_before_the_event() {
+        let (message, item) = event_anchored_logistics_fixture();
+        let event_start = build_event_index(std::slice::from_ref(&message))[0].start;
+        let mut result = closure_result(vec![item]);
+
+        close_passed_events(&mut result, std::slice::from_ref(&message), event_start - 1);
+
+        assert!(result.analysis.items[0].event_passed.is_none());
+        assert_eq!(result.event_closures, 0);
+    }
+
+    #[test]
+    fn unanchored_generic_request_in_an_invite_still_stays_open() {
+        let (message, mut item) = event_anchored_logistics_fixture();
+        item.action = "Send the slides to the organiser".into();
+        item.action_phrase = "send the slides to the organiser".into();
+        item.evidence.quote = "Send the slides to the organiser.".into();
+        item.event = None;
+        item.event_time = None;
+        let event_end = build_event_index(std::slice::from_ref(&message))[0].end;
+        let mut result = closure_result(vec![item]);
+
+        close_passed_events(&mut result, std::slice::from_ref(&message), event_end + 1);
+
+        assert!(result.analysis.items[0].event_passed.is_none());
+        assert_eq!(result.event_closures, 0);
+    }
+
+    #[test]
+    fn scoped_subject_event_closes_the_event_shaped_request_and_future_stays_open() {
         let event_message = scoped_event_message();
         let event_end = build_event_index(std::slice::from_ref(&event_message))[0].end;
         let (_, template) = closure_test_messages();
@@ -6322,15 +6698,17 @@ at the downtown courthouse. Let me know if that works.",
             std::slice::from_ref(&event_message),
             event_end + 1,
         );
-        assert!(
-            passed
-                .analysis
-                .items
-                .iter()
-                .all(|item| item.event_passed.is_some())
-        );
-        assert_eq!(passed.event_closures, 2);
-        assert!(passed.conversation_notes[0].contains("2 tied to their own message's event"));
+        // "Install ... before arriving" uses event-shaped language
+        // (`has_scoped_event_language`), so the own-message branch of
+        // `scoped_event` credits it and it closes. "Claim the free month in
+        // the portal" merely appears in the same event-bearing message; it
+        // is not itself worded as being about the event and carries no
+        // `EventTied` deadline, so per the own-message-branch gating rule it
+        // must stay open even though it shares the event's message.
+        assert!(passed.analysis.items[0].event_passed.is_some());
+        assert!(passed.analysis.items[1].event_passed.is_none());
+        assert_eq!(passed.event_closures, 1);
+        assert!(passed.conversation_notes[0].contains("1 tied to their own message's event"));
 
         let mut future = closure_result(vec![install, claim]);
         close_passed_events(&mut future, std::slice::from_ref(&event_message), event_end);
@@ -6390,7 +6768,10 @@ at the downtown courthouse. Let me know if that works.",
         );
 
         assert!(result.analysis.items[0].event_passed.is_some());
-        assert!(result.analysis.items[1].event_passed.is_some());
+        // "Claim the free month" is not itself event-shaped language and
+        // carries no `EventTied` deadline, so the own-message-branch gating
+        // rule keeps it open even though it shares the event's message.
+        assert!(result.analysis.items[1].event_passed.is_none());
         assert!(result.analysis.items[2].event_passed.is_none());
         assert!(
             deadline_boundary(&result.analysis.items[2], &[event_message], event_end + 1)
@@ -6937,6 +7318,337 @@ at the downtown courthouse. Let me know if that works.",
         close_passed_events(&mut result, &messages, now);
         assert!(result.analysis.items[0].event_passed.is_none());
         assert_eq!(result.event_closures, 0);
+    }
+
+    #[test]
+    fn event_time_equal_to_the_deadline_does_not_close_the_request() {
+        let (mut messages, mut item) = closure_test_messages();
+        messages[0].input.timestamp = timestamp("2026-09-02T12:00:00Z"); // Wednesday
+        item.deadline = Some(Anchor {
+            message: item.evidence.message.clone(),
+            block: 0,
+            quote: "Friday".into(),
+            context: String::new(),
+        });
+        item.event = Some(Anchor {
+            message: item.evidence.message.clone(),
+            block: 0,
+            quote: "the workshop".into(),
+            context: String::new(),
+        });
+        item.event_time = Some(Anchor {
+            message: item.evidence.message.clone(),
+            block: 0,
+            quote: "Friday".into(),
+            context: String::new(),
+        });
+        let mut result = closure_result(vec![item]);
+
+        close_passed_events(&mut result, &messages, timestamp("2026-09-15T00:00:00Z"));
+
+        assert!(result.analysis.items[0].event_passed.is_none());
+        assert_eq!(result.event_closures, 0);
+    }
+
+    /// Regression for the real-world defect: a meeting-summary message sent
+    /// AFTER its own meeting, naming that meeting in its subject and
+    /// carrying an action item worded with event-shaped language ("bring"),
+    /// must never have that action item closed by "the meeting ended" -- the
+    /// meeting is the SOURCE of the request, not its deadline. The action
+    /// item deliberately uses `has_scoped_event_language` wording so this
+    /// test isolates the temporal guard (`close_from_index`'s
+    /// `source_timestamp` check) from `scoped_event`'s separate
+    /// own-message-language gate: without the temporal guard, this item
+    /// would still close.
+    #[test]
+    fn summary_sent_after_the_meeting_never_closes_its_action_items() {
+        let mut mail = synthetic(
+            "Action Items\nBring the workshop handout to Thomas.",
+            0,
+            "team-sync-thread",
+        );
+        mail.subject = "Team Sync @ Fri Sep 04, 2026 11am - 12pm (UTC)".into();
+        let mut summary_message = prepare(&mail, "Inbox", 0).unwrap();
+        let event_end = build_event_index(std::slice::from_ref(&summary_message))[0].end;
+        // Sent 90 minutes after the meeting ended.
+        summary_message.input.timestamp = event_end + 90 * 60;
+
+        let (_, template) = closure_test_messages();
+        let item = scoped_event_expectation(
+            &template,
+            &summary_message.input.handle,
+            "Bring the workshop handout to Thomas",
+            "Bring the workshop handout to Thomas.",
+        );
+        let mut result = closure_result(vec![item]);
+
+        close_passed_events(
+            &mut result,
+            std::slice::from_ref(&summary_message),
+            event_end + 86_400,
+        );
+
+        assert!(result.analysis.items[0].event_passed.is_none());
+        assert_eq!(result.event_closures, 0);
+    }
+
+    /// Rule 2 regression: `scoped_event`'s own-message branch must credit an
+    /// event only to a request actually worded as being about it. An invite
+    /// naming its own time, read before the event, still closes an
+    /// attendance-shaped request afterward but leaves an unrelated one open,
+    /// even though both requests share the invite's own message.
+    #[test]
+    fn own_message_event_closes_only_event_shaped_requests() {
+        let event_message = scoped_event_message();
+        let event_end = build_event_index(std::slice::from_ref(&event_message))[0].end;
+        let (_, template) = closure_test_messages();
+        let handle = &event_message.input.handle;
+        let attend = scoped_event_expectation(
+            &template,
+            handle,
+            "Confirm you can attend the workshop",
+            "Confirm you can attend the workshop.",
+        );
+        let slides = scoped_event_expectation(
+            &template,
+            handle,
+            "Send the slides to the organiser",
+            "Send the slides to the organiser.",
+        );
+        let mut result = closure_result(vec![attend, slides]);
+
+        close_passed_events(
+            &mut result,
+            std::slice::from_ref(&event_message),
+            event_end + 1,
+        );
+
+        assert!(
+            result.analysis.items[0].event_passed.is_some(),
+            "an attendance-shaped request must close once its own event has passed"
+        );
+        assert!(
+            result.analysis.items[1].event_passed.is_none(),
+            "a request with no event-shaped language and no EventTied deadline must stay open"
+        );
+    }
+
+    /// Rule 2's `EventTied`-deadline exception: a request with no
+    /// event-shaped wording of its own can still be credited to its own
+    /// message's event when its stated DEADLINE classifies as
+    /// `DeadlineView::EventTied` (e.g. "before the meeting").
+    #[test]
+    fn event_tied_deadline_closes_with_its_own_message_event() {
+        let event_message = scoped_event_message();
+        let event_end = build_event_index(std::slice::from_ref(&event_message))[0].end;
+        let (_, template) = closure_test_messages();
+        let handle = &event_message.input.handle;
+        let mut item = scoped_event_expectation(
+            &template,
+            handle,
+            "Send the updated budget",
+            "Send the updated budget.",
+        );
+        item.deadline = Some(Anchor {
+            message: handle.clone(),
+            block: 0,
+            quote: "before the workshop".into(),
+            context: "Send the updated budget, before the workshop.".into(),
+        });
+        let mut result = closure_result(vec![item]);
+
+        close_passed_events(
+            &mut result,
+            std::slice::from_ref(&event_message),
+            event_end + 1,
+        );
+
+        assert!(result.analysis.items[0].event_passed.is_some());
+        assert_eq!(result.event_closures, 1);
+    }
+
+    #[test]
+    fn fathom_sender_is_a_recap_artifact_regardless_of_subject_or_body() {
+        let mut mail = synthetic(
+            "Meeting Purpose\nCatch up on the neurosymbolic AI project.\n\
+Key Takeaways\nGood progress overall.\n\
+Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz link.",
+            0,
+            "fathom-thread",
+        );
+        mail.subject = "Liat and Erin catch up (Erin Fraser)".into();
+        mail.sender = "Fathom <no-reply@fathom.video>".into();
+        mail.sender_address = "no-reply@fathom.video".into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        assert!(is_meeting_recap_artifact(&message));
+    }
+
+    #[test]
+    fn subject_and_body_signals_together_mark_a_recap_artifact_with_no_known_sender_domain() {
+        let mut mail = synthetic(
+            "Summary\nAttendees: Alex, Sam\nWe discussed the roadmap.",
+            0,
+            "otter-style-thread",
+        );
+        mail.subject = "Call Summary: Weekly Sync".into();
+        mail.sender = "Notetaker <notifications@notetaking-relay.example.invalid>".into();
+        mail.sender_address = "notifications@notetaking-relay.example.invalid".into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        assert!(is_meeting_recap_artifact(&message));
+    }
+
+    #[test]
+    fn a_platform_notetaker_address_needs_a_recap_subject_too() {
+        let mut ordinary = synthetic("Here's the invite for next week.", 0, "zoom-thread");
+        ordinary.subject = "Your Zoom meeting is ready".into();
+        ordinary.sender = "Zoom <no-reply@zoom.us>".into();
+        ordinary.sender_address = "no-reply@zoom.us".into();
+        let ordinary_message = prepare(&ordinary, "Inbox", 0).unwrap();
+        assert!(
+            !is_meeting_recap_artifact(&ordinary_message),
+            "a platform notetaker address alone, without a recap-shaped subject, is not enough"
+        );
+
+        let mut recap = synthetic("Full call notes attached.", 1, "zoom-thread");
+        recap.subject = "Zoom Meeting Recap".into();
+        recap.sender = "Zoom <no-reply@zoom.us>".into();
+        recap.sender_address = "no-reply@zoom.us".into();
+        let recap_message = prepare(&recap, "Inbox", 1).unwrap();
+        assert!(is_meeting_recap_artifact(&recap_message));
+    }
+
+    #[test]
+    fn send_me_your_notes_is_not_a_recap_artifact() {
+        let mut mail = synthetic("Sure, here they are.", 0, "notes-thread");
+        mail.subject = "Send me your notes".into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        assert!(!is_meeting_recap_artifact(&message));
+    }
+
+    #[test]
+    fn an_ordinary_calendar_invite_is_not_a_recap_artifact() {
+        let event_message = scoped_event_message();
+        assert!(!is_meeting_recap_artifact(&event_message));
+    }
+
+    /// End-to-end regression for the Fathom-shaped defect: the recap message
+    /// contributes no event to the index at all (belt-and-braces alongside
+    /// the temporal rule), and its action item -- extracted as an open loop,
+    /// which is the whole point of the product -- stays open.
+    #[test]
+    fn fathom_recap_contributes_no_event_and_its_action_item_stays_open() {
+        let mut mail = synthetic(
+            "Meeting Purpose\nCatch up on the neurosymbolic AI project.\n\
+Key Takeaways\nGood progress overall.\n\
+Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz link.",
+            0,
+            "fathom-thread",
+        );
+        mail.subject = "Liat and Erin catch up (Erin Fraser)".into();
+        mail.sender = "Fathom <no-reply@fathom.video>".into();
+        mail.sender_address = "no-reply@fathom.video".into();
+        let mut message = prepare(&mail, "Inbox", 0).unwrap();
+        // Graph-supplied meeting metadata, as a real Fathom-linked calendar
+        // event might carry -- the recap check must skip it as an event
+        // source regardless of where the timing would otherwise come from.
+        message.event = Some((
+            timestamp("2026-09-08T13:00:00Z"),
+            timestamp("2026-09-08T14:00:00Z"),
+            false,
+        ));
+        message.input.timestamp = timestamp("2026-09-08T15:30:00Z"); // sent after the meeting
+
+        assert!(build_event_index(std::slice::from_ref(&message)).is_empty());
+
+        let (_, template) = closure_test_messages();
+        let item = scoped_event_expectation(
+            &template,
+            &message.input.handle,
+            "Send Thomas the resources on neurosymbolic AI and the Leavenitz link",
+            "Send Thomas the resources on neurosymbolic AI and the Leavenitz link.",
+        );
+        let mut result = closure_result(vec![item]);
+
+        close_passed_events(
+            &mut result,
+            std::slice::from_ref(&message),
+            timestamp("2026-09-09T15:30:00Z"),
+        );
+
+        assert!(result.analysis.items[0].event_passed.is_none());
+        assert_eq!(result.event_closures, 0);
+    }
+
+    #[test]
+    fn recap_artifact_never_closes_even_with_an_anchor() {
+        const EVENT_TIME: &str = "Tuesday, September 2, 2026, 9:00 AM \u{2013} 12:00 PM PT";
+        let body = format!(
+            "Meeting Purpose\nClaude Code Workshop SF\n{EVENT_TIME}\n\
+             Action Items\nReview the schedule, venue & logistics."
+        );
+        let mut mail = synthetic(&body, 0, "anchored-fathom-thread");
+        mail.received = "2026-09-03T16:00:00Z".into();
+        mail.subject = "Claude Code Workshop SF - Meeting Summary".into();
+        mail.sender = "Fathom <no-reply@fathom.video>".into();
+        mail.sender_address = "no-reply@fathom.video".into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        assert!(build_event_index(std::slice::from_ref(&message)).is_empty());
+
+        let (_, template) = closure_test_messages();
+        let mut item = scoped_event_expectation(
+            &template,
+            &message.input.handle,
+            "Review the schedule, venue & logistics",
+            "Review the schedule, venue & logistics.",
+        );
+        item.event = Some(Anchor {
+            message: message.input.handle.clone(),
+            block: 0,
+            quote: "Claude Code Workshop SF".into(),
+            context: body.clone(),
+        });
+        item.event_time = Some(Anchor {
+            message: message.input.handle.clone(),
+            block: 0,
+            quote: EVENT_TIME.into(),
+            context: body,
+        });
+        let mut result = closure_result(vec![item]);
+
+        close_passed_events(
+            &mut result,
+            std::slice::from_ref(&message),
+            timestamp("2026-09-10T00:00:00Z"),
+        );
+
+        assert!(result.analysis.items[0].event_passed.is_none());
+        assert_eq!(result.event_closures, 0);
+    }
+
+    /// Negative case for the recap fix: an ordinary calendar invite with
+    /// attendance-shaped language, sent before its event, must still close
+    /// after the event -- the recap skip in `learn_one_event` must not
+    /// suppress normal event evidence.
+    #[test]
+    fn an_ordinary_invite_with_attend_language_still_closes_after_its_event() {
+        let event_message = scoped_event_message();
+        let event_end = build_event_index(std::slice::from_ref(&event_message))[0].end;
+        let (_, template) = closure_test_messages();
+        let item = scoped_event_expectation(
+            &template,
+            &event_message.input.handle,
+            "Install the tool before arriving at the workshop",
+            "Install the tool before arriving at the workshop.",
+        );
+        let mut result = closure_result(vec![item]);
+
+        close_passed_events(
+            &mut result,
+            std::slice::from_ref(&event_message),
+            event_end + 1,
+        );
+
+        assert!(result.analysis.items[0].event_passed.is_some());
     }
 
     #[test]
