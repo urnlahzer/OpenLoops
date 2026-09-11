@@ -208,17 +208,39 @@ impl ReviewState {
     }
     pub fn set_scan(&mut self, result: ScanResult, model: String) {
         self.scan_failed = false;
-        self.scan_summary = format!(
-            "Reviewed {} of {} loaded messages in their conversations. {} conversations could not be analyzed{}.",
-            result.analyzed,
-            result.total,
-            result.failures.len(),
-            if result.cancelled {
-                "; stopped by you"
+        // Read conversation coverage off the counts `scan_conversations`
+        // tracks, not `failures.len()`: repeated Quota errors collapse to
+        // one failure line, so counting lines undercounts how many
+        // conversations actually went unanalyzed when a stop-class error
+        // leaves the rest of the queue undispatched.
+        let unanalyzed = result.unanalyzed_conversations();
+        self.scan_summary = if unanalyzed == 0 {
+            format!(
+                "Reviewed {} of {} loaded messages ({} of {} conversations).",
+                result.analyzed,
+                result.total,
+                result.analyzed_conversations,
+                result.conversation_count
+            )
+        } else {
+            let stopped_because = if result.cancelled {
+                "you stopped the scan"
             } else {
-                ""
-            }
-        );
+                "the scan stopped after a provider error"
+            };
+            format!(
+                "Reviewed {} of {} loaded messages ({} of {} conversations). {unanalyzed} conversations were not analyzed: {} failed, {} not started because {stopped_because}.",
+                result.analyzed,
+                result.total,
+                result.analyzed_conversations,
+                result.conversation_count,
+                result.failed_conversations,
+                result.not_started_conversations,
+            )
+        };
+        if result.cancelled {
+            self.scan_summary.push_str("; stopped by you");
+        }
         self.scan_incomplete = result.analyzed < result.total
             || self.source_failures > 0
             || result.analysis.rejected > 0
@@ -952,6 +974,10 @@ pub fn layout_fixture() -> ReviewState {
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 4,
+            analyzed_conversations: 4,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         },
         // T7: a long model id so the finished strip's summary line (ending
@@ -1339,6 +1365,10 @@ mod tests {
                 cross_thread_closures: 0,
                 event_closures: 0,
                 primary_scan_transport_error: false,
+                conversation_count: 1,
+                analyzed_conversations: 1,
+                failed_conversations: 0,
+                not_started_conversations: 0,
                 closure_pass_failure: None,
             },
             "model".into(),
@@ -1670,6 +1700,10 @@ mod tests {
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
+            conversation_count: 0,
+            analyzed_conversations: 0,
+            failed_conversations: 0,
+            not_started_conversations: 0,
             closure_pass_failure: None,
         }
     }
@@ -1708,6 +1742,30 @@ mod tests {
     }
 
     #[test]
+    fn set_scan_summary_reports_conversations_not_lines() {
+        // The strip used to count `failures.len()` -- failure LINES, which
+        // collapse repeated Quota errors to one -- so 95 silently
+        // undispatched conversations behind a single provider error read as
+        // "1 conversation could not be analyzed". The summary must instead
+        // read off the conversation counts `scan_conversations` now tracks.
+        let mut state = ReviewState::default();
+        let mut result = empty_scan_result();
+        result.analyzed = 35;
+        result.total = 130;
+        result.conversation_count = 41;
+        result.analyzed_conversations = 12;
+        result.failed_conversations = 1;
+        result.not_started_conversations = 28;
+        state.set_scan(result, "model".into());
+        assert_eq!(
+            state.scan_summary,
+            "Reviewed 35 of 130 loaded messages (12 of 41 conversations). \
+29 conversations were not analyzed: 1 failed, 28 not started because \
+the scan stopped after a provider error."
+        );
+    }
+
+    #[test]
     fn set_scan_reports_closure_pass_failure_as_incomplete() {
         let mut state = ReviewState::default();
         state.set_scan(
@@ -1726,6 +1784,10 @@ mod tests {
                 cross_thread_closures: 0,
                 event_closures: 0,
                 primary_scan_transport_error: false,
+                conversation_count: 1,
+                analyzed_conversations: 1,
+                failed_conversations: 0,
+                not_started_conversations: 0,
                 closure_pass_failure: Some("Closure pass stopped: rate limited".into()),
             },
             "model".into(),

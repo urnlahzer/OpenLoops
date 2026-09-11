@@ -102,6 +102,12 @@ provider payload bound fail visibly instead of silently losing context.
 Read-only Graph listings and body fetches retry once after two seconds for a
 timeout, interrupted connection, HTTP 503, or HTTP 504 (never HTTP 429), and a
 body failure skips only that message while reporting the source's failed count.
+When a provider error (quota, rate limiting, an unreachable or unauthorized
+provider) stops a scan early, the summary and the "Scan coverage and errors"
+panel count every affected conversation -- analyzed, failed, or never
+dispatched -- rather than counting failure lines, so conversations queued
+behind a single repeated error still show up in the totals instead of
+silently disappearing from the count.
 
 The model sees canonical message bodies, subjects, quoted history, participants,
 timestamps and ownership facts. It never receives a token or raw Graph IDs.
