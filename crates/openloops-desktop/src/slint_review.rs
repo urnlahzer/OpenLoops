@@ -1238,7 +1238,11 @@ pub(crate) fn register_callbacks(
                     model_ref.review_status = Status::default();
                     model_ref.start(
                         Service::Review,
-                        "Complete Microsoft sign-in; then scanning recent messages",
+                        if openloops_graph::live::has_session() {
+                            "Scanning recent messages"
+                        } else {
+                            "Complete Microsoft sign-in; then scanning recent messages"
+                        },
                         move || Outcome::Mail(load_recent(&config)),
                         || {},
                     );
@@ -1517,22 +1521,40 @@ pub(crate) fn register_callbacks(
         let model = Rc::clone(&model);
         let weak = window.as_weak();
         window.on_draft_title_edited(move |value| {
-            if let Some(draft) = &mut model.borrow_mut().review.draft {
-                draft.title = value.to_string();
-                draft.error.clear();
+            let changed = if let Some(draft) = &mut model.borrow_mut().review.draft {
+                if draft.title == value.as_str() {
+                    false
+                } else {
+                    draft.title = value.to_string();
+                    draft.error.clear();
+                    true
+                }
+            } else {
+                false
+            };
+            if changed {
+                refresh_draft(&model, &weak);
             }
-            refresh_draft(&model, &weak);
         });
     }
     {
         let model = Rc::clone(&model);
         let weak = window.as_weak();
         window.on_draft_when_edited(move |value| {
-            if let Some(draft) = &mut model.borrow_mut().review.draft {
-                draft.when = value.to_string();
-                draft.error.clear();
+            let changed = if let Some(draft) = &mut model.borrow_mut().review.draft {
+                if draft.when == value.as_str() {
+                    false
+                } else {
+                    draft.when = value.to_string();
+                    draft.error.clear();
+                    true
+                }
+            } else {
+                false
+            };
+            if changed {
+                refresh_draft(&model, &weak);
             }
-            refresh_draft(&model, &weak);
         });
     }
     {

@@ -1,5 +1,8 @@
 //! Resolve only explicitly selected group addresses; never enumerate memberships.
-use super::{Client, ConnectionError, Url, bounded_body, classify_status, valid_application_id};
+use super::{
+    Client, ConnectionError, GRAPH_TIMEOUT_SECONDS, Url, bounded_body, classify_status,
+    request_error, valid_application_id,
+};
 
 pub(super) fn lookup_url(address: &str) -> Result<Url, ConnectionError> {
     let mut url = Url::parse("https://graph.microsoft.com/v1.0/groups")
@@ -38,7 +41,7 @@ pub(super) fn check(http: &Client, token: &str, address: &str) -> Result<(), Con
         .get(lookup_url(address)?)
         .bearer_auth(token)
         .send()
-        .map_err(|_| ConnectionError::Transport)?;
+        .map_err(|error| request_error(&error, GRAPH_TIMEOUT_SECONDS))?;
     if response.status().as_u16() != 200 {
         return Err(classify_status(response.status().as_u16()));
     }
@@ -57,7 +60,7 @@ pub(super) fn check(http: &Client, token: &str, address: &str) -> Result<(), Con
         .get(url)
         .bearer_auth(token)
         .send()
-        .map_err(|_| ConnectionError::Transport)?;
+        .map_err(|error| request_error(&error, GRAPH_TIMEOUT_SECONDS))?;
     if response.status().as_u16() != 200 {
         return Err(classify_status(response.status().as_u16()));
     }

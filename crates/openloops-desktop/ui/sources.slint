@@ -8,11 +8,15 @@ component StepHeading {
     in property <string> number;
     in property <string> title;
     width: 100%;
-    HorizontalLayout { spacing: Tokens.space-3;
+    height: heading-layout.preferred-height;
+    heading-layout := HorizontalLayout { spacing: Tokens.space-3; alignment: stretch;
         Rectangle { width: Tokens.badge-size; height: Tokens.badge-size; background: Tokens.brand; border-radius: Tokens.radius-pill;
             Text { text: root.number; color: Tokens.bg-surface; font-size: Tokens.font-13; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
         }
-        Text { text: root.title; color: Tokens.text-1; font-size: Tokens.font-16; font-weight: 600; vertical-alignment: center; }
+        // A bare Text here on purpose: `WrappedText` fixes its own width to
+        // 100% of the parent, which a HorizontalLayout honours as a fixed
+        // width and pushes the pill outside the card.
+        Text { text: root.title; color: Tokens.text-1; font-size: Tokens.font-16; font-weight: 600; horizontal-stretch: 1; min-width: 0px; wrap: word-wrap; vertical-alignment: center; }
         @children
     }
 }
@@ -92,16 +96,15 @@ export component SourcesScreen {
     callback test-model;
 
     VerticalLayout { spacing: Tokens.space-1;
-        Rectangle { min-height: Tokens.command-height; background: Tokens.bg-bar;
-            HorizontalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-1; padding-bottom: Tokens.space-1; spacing: Tokens.space-2;
+        Rectangle { preferred-height: bar-layout.preferred-height; min-height: Tokens.command-bar-height; background: Tokens.bg-bar;
+            bar-layout := HorizontalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-1; padding-bottom: Tokens.space-1; spacing: Tokens.space-2;
                 PrimaryButton { text: "Save settings"; enabled: root.controls-enabled && root.store-available; clicked => { root.save-settings(); } }
                 // T6 (brief §2): the Companion's command-bar buttons besides
                 // "Save settings" are all subtle (transparent, regular
                 // weight) -- "Reload saved settings" was rendered Secondary.
                 SubtleButton { text: "Reload saved settings"; enabled: root.controls-enabled && root.store-available; clicked => { root.reload-settings(); } }
                 SubtleButton { text: "Forget saved settings"; enabled: root.controls-enabled && root.store-available; clicked => { root.forget-settings(); } }
-                Rectangle { horizontal-stretch: 1; background: Tokens.transparent; }
-                WrappedText { text: root.settings-status; text-color: root.settings-succeeded ? Tokens.success : Tokens.warning; horizontal-alignment: right; }
+                Text { text: root.settings-status; color: root.settings-succeeded ? Tokens.success : Tokens.warning; font-size: Tokens.font-13; horizontal-stretch: 1; min-width: 0px; wrap: word-wrap; horizontal-alignment: right; vertical-alignment: center; }
             }
             Rectangle { y: parent.height - Tokens.hairline; height: Tokens.hairline; background: Tokens.stroke-1; }
         }
@@ -117,11 +120,10 @@ export component SourcesScreen {
                     Text { text: "Sources and model"; color: Tokens.text-1; font-size: Tokens.font-22; font-weight: 600; }
                     HelperText { text: "Your own Inbox and Sent Items are included automatically. Settings save in Windows Credential Manager on this account."; width: 100%; }
                 }
-                HorizontalLayout { spacing: Tokens.space-5;
-                    Card { min-width: Tokens.card-min; horizontal-stretch: 1;
-                        VerticalLayout { alignment: start; padding-top: Tokens.card-pad-y; padding-bottom: Tokens.card-pad-y; padding-left: Tokens.card-pad-x; padding-right: Tokens.card-pad-x; spacing: Tokens.space-3;
+                HorizontalLayout { width: 100%; spacing: Tokens.space-5;
+                    Card { horizontal-stretch: 1; min-width: Tokens.card-min-width;
+                        VerticalLayout { width: 100%; alignment: start; padding-top: Tokens.card-pad-y; padding-bottom: Tokens.card-pad-y; padding-left: Tokens.card-pad-x; padding-right: Tokens.card-pad-x; spacing: Tokens.space-3;
                             StepHeading { number: "1"; title: "Connect Microsoft";
-                                Rectangle { horizontal-stretch: 1; background: Tokens.transparent; }
                                 if root.own-inbox-accessible: Pill { text: "Personal inbox confirmed"; kind: "success"; }
                             }
                             Field { label: "Application (client) ID"; placeholder: "From your Entra app's Overview"; value <=> root.client-id; monospace: true; enabled: root.controls-enabled; edited(value) => { root.client-id-edited(value); } }
@@ -143,8 +145,8 @@ export component SourcesScreen {
                             }
                         }
                     }
-                    Card { min-width: Tokens.card-min; horizontal-stretch: 1;
-                        VerticalLayout { alignment: start; padding-top: Tokens.card-pad-y; padding-bottom: Tokens.card-pad-y; padding-left: Tokens.card-pad-x; padding-right: Tokens.card-pad-x; spacing: Tokens.space-2;
+                    Card { horizontal-stretch: 1; min-width: Tokens.card-min-width;
+                        VerticalLayout { width: 100%; alignment: start; padding-top: Tokens.card-pad-y; padding-bottom: Tokens.card-pad-y; padding-left: Tokens.card-pad-x; padding-right: Tokens.card-pad-x; spacing: Tokens.space-2;
                             StepHeading { number: "2"; title: "Choose your AI model"; }
                             Text { text: "Provider"; color: Tokens.text-1; font-size: Tokens.font-14; font-weight: 600; width: 100%; horizontal-alignment: left; horizontal-stretch: 1; }
                             Segmented { options: ["Ollama Cloud", "OpenRouter"]; selected-index <=> root.provider-index; accessible-name: "Provider"; enabled: root.controls-enabled; selected(index) => { root.provider-selected(index); } }

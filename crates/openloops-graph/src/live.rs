@@ -7,9 +7,11 @@ mod groups;
 pub mod reminders;
 pub mod review;
 
+use std::collections::BTreeSet;
 use std::io::Read;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use oauth2::basic::BasicClient;
 use oauth2::{
@@ -18,11 +20,39 @@ use oauth2::{
 };
 use reqwest::blocking::Client;
 use url::Url;
-
 const AUTHORIZE: &str = "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize";
 const TOKEN: &str = "https://login.microsoftonline.com/organizations/oauth2/v2.0/token";
 const MAX_RESPONSE: u64 = 1024 * 1024;
+const TOKEN_TIMEOUT_SECONDS: u64 = 30;
+const GRAPH_TIMEOUT_SECONDS: u64 = 90;
 static CONNECTING: AtomicBool = AtomicBool::new(false);
+static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+
+struct Session {
+    access_token: Secret,
+    expires_at: Instant,
+    scopes: BTreeSet<String>,
+    shared: SharedScope,
+}
+
+#[derive(Clone)]
+struct Secret(Vec<u8>);
+
+impl Secret {
+    fn new(value: String) -> Self {
+        Self(value.into_bytes())
+    }
+
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.0).expect("secret originated as valid UTF-8")
+    }
+}
+
+impl Drop for Secret {
+    fn drop(&mut self) {
+        self.0.iter_mut().for_each(|byte| *byte = 0);
+    }
+}
 
 /// Closed errors: never contain URLs, identifiers, tokens, or server bodies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +64,7 @@ pub enum ConnectionError {
     SignInTimedOut,
     ConsentDenied,
     Transport,
+    Timeout(u64),
     TokenRejected,
     ResponseTooLarge,
     MessageTooLarge,
@@ -61,6 +92,9 @@ impl std::fmt::Display for ConnectionError {
             Self::SignInTimedOut => "Sign-in timed out. Run the connection command again.",
             Self::ConsentDenied => "Microsoft sign-in was declined or could not be completed.",
             Self::Transport => "Microsoft could not be reached over a secure connection.",
+            Self::Timeout(seconds) => {
+                return write!(f, "Microsoft did not answer within {seconds} seconds.");
+            }
             Self::TokenRejected => {
                 "Microsoft rejected the sign-in exchange. Check the registration and redirect URI."
             }
@@ -87,6 +121,36 @@ impl std::fmt::Display for ConnectionError {
 }
 
 impl std::error::Error for ConnectionError {}
+
+/// Removes the process-only Microsoft access token, if one is present.
+pub fn clear_session() {
+    *session_store() = None;
+}
+
+/// Reports whether a reusable, unexpired Microsoft session is in memory.
+#[must_use]
+pub fn has_session() -> bool {
+    session_store()
+        .as_ref()
+        .is_some_and(|session| session_is_fresh(session, Instant::now()))
+}
+
+fn session_store() -> std::sync::MutexGuard<'static, Option<Session>> {
+    SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn session_is_fresh(session: &Session, now: Instant) -> bool {
+    session
+        .expires_at
+        .checked_duration_since(now)
+        .is_some_and(|remaining| remaining > Duration::from_mins(1))
+}
+
+fn session_covers(session: &Session, required: &BTreeSet<String>, now: Instant) -> bool {
+    session_is_fresh(session, now) && session.scopes.is_superset(required)
+}
 
 /// Values are supplied at runtime and deliberately have no Debug implementation.
 pub struct ConnectionConfig {
@@ -224,7 +288,7 @@ pub fn check_connection(config: &ConnectionConfig) -> Result<ConnectionReport, C
 
 fn with_session<T>(
     config: &ConnectionConfig,
-    work: impl FnOnce(&Client, &str, SharedScope) -> Result<T, ConnectionError>,
+    work: impl FnMut(&Client, &str, SharedScope) -> Result<T, ConnectionError>,
 ) -> Result<T, ConnectionError> {
     with_scopes(config, false, work)
 }
@@ -232,12 +296,95 @@ fn with_session<T>(
 fn with_scopes<T>(
     config: &ConnectionConfig,
     reminders: bool,
-    work: impl FnOnce(&Client, &str, SharedScope) -> Result<T, ConnectionError>,
+    mut work: impl FnMut(&Client, &str, SharedScope) -> Result<T, ConnectionError>,
 ) -> Result<T, ConnectionError> {
     CONNECTING
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .map_err(|_| ConnectionError::AlreadyConnecting)?;
     let _guard = ConnectionGuard;
+    let required = required_scopes(config, reminders);
+    let http = graph_client()?;
+    run_with_session(
+        required,
+        |scopes| authorize(config, scopes),
+        |token, shared| work(&http, token, shared),
+    )
+}
+
+fn run_with_session<T>(
+    required: BTreeSet<String>,
+    mut authorize_session: impl FnMut(BTreeSet<String>) -> Result<Session, ConnectionError>,
+    mut work: impl FnMut(&str, SharedScope) -> Result<T, ConnectionError>,
+) -> Result<T, ConnectionError> {
+    let mut prior_scopes = BTreeSet::new();
+    let cached = {
+        let mut stored = session_store();
+        if let Some(session) = stored.as_ref() {
+            prior_scopes.clone_from(&session.scopes);
+        }
+        if stored
+            .as_ref()
+            .is_some_and(|session| session_covers(session, &required, Instant::now()))
+        {
+            stored
+                .as_ref()
+                .map(|session| (session.access_token.clone(), session.shared))
+        } else {
+            *stored = None;
+            None
+        }
+    };
+    if let Some((token, shared)) = cached {
+        match work(token.as_str(), shared) {
+            Err(ConnectionError::Unauthorized) => clear_session(),
+            result => return result,
+        }
+    }
+    prior_scopes.extend(required);
+    let session = authorize_session(prior_scopes)?;
+    let token = session.access_token.clone();
+    let shared = session.shared;
+    *session_store() = Some(session);
+    let result = work(token.as_str(), shared);
+    if matches!(result, Err(ConnectionError::Unauthorized)) {
+        clear_session();
+    }
+    result
+}
+
+fn required_scopes(config: &ConnectionConfig, reminders: bool) -> BTreeSet<String> {
+    let mut scopes = BTreeSet::from(["https://graph.microsoft.com/User.Read".to_owned()]);
+    let mail_scope = if reminders {
+        "Tasks.ReadWrite"
+    } else if config.shared_mailboxes.is_empty() {
+        "Mail.Read"
+    } else {
+        "Mail.Read.Shared"
+    };
+    scopes.insert(format!("https://graph.microsoft.com/{mail_scope}"));
+    if !reminders && !config.group_inboxes.is_empty() {
+        for scope in ["Group.ReadBasic.All", "Group-Conversation.Read.All"] {
+            scopes.insert(format!("https://graph.microsoft.com/{scope}"));
+        }
+    }
+    scopes
+}
+
+fn graph_client() -> Result<Client, ConnectionError> {
+    Client::builder()
+        .https_only(true)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(GRAPH_TIMEOUT_SECONDS))
+        .build()
+        .map_err(|_| ConnectionError::Transport)
+}
+
+fn authorize(
+    config: &ConnectionConfig,
+    requested_scopes: BTreeSet<String>,
+) -> Result<Session, ConnectionError> {
     let listener = callback::Listener::bind()?;
     let client = BasicClient::new(ClientId::new(config.client_id.clone()))
         .set_auth_uri(
@@ -252,36 +399,21 @@ fn with_scopes<T>(
                 .map_err(|_| ConnectionError::InvalidConfiguration)?,
         );
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
-    let mail_scope = if reminders {
-        "Tasks.ReadWrite"
-    } else if config.shared_mailboxes.is_empty() {
-        "Mail.Read"
-    } else {
-        "Mail.Read.Shared"
-    };
-    let mut authorization_request = client
-        .authorize_url(CsrfToken::new_random)
-        .add_scope(Scope::new("https://graph.microsoft.com/User.Read".into()))
-        .add_scope(Scope::new(format!(
-            "https://graph.microsoft.com/{mail_scope}"
-        )))
-        .set_pkce_challenge(challenge);
-    if !reminders && !config.group_inboxes.is_empty() {
-        for scope in ["Group.ReadBasic.All", "Group-Conversation.Read.All"] {
-            authorization_request = authorization_request
-                .add_scope(Scope::new(format!("https://graph.microsoft.com/{scope}")));
-        }
+    let mut authorization_request = client.authorize_url(CsrfToken::new_random);
+    for scope in &requested_scopes {
+        authorization_request = authorization_request.add_scope(Scope::new(scope.clone()));
     }
+    let authorization_request = authorization_request.set_pkce_challenge(challenge);
     let (authorization, state) = authorization_request
         .add_extra_param("response_mode", "query")
         .add_extra_param("prompt", "select_account")
         .url();
-    let http = Client::builder()
+    let token_http = Client::builder()
         .https_only(true)
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(TOKEN_TIMEOUT_SECONDS))
         .build()
         .map_err(|_| ConnectionError::Transport)?;
     webbrowser::open(authorization.as_str()).map_err(|_| ConnectionError::BrowserUnavailable)?;
@@ -291,18 +423,18 @@ fn with_scopes<T>(
         if request.uri() != TOKEN {
             return Err(ConnectionError::InvalidConfiguration);
         }
-        let response = http
+        let response = token_http
             .post(TOKEN)
             .headers(request.headers().clone())
             .body(request.body().clone())
             .send()
-            .map_err(|_| ConnectionError::Transport)?;
+            .map_err(|error| request_error(&error, TOKEN_TIMEOUT_SECONDS))?;
         let status = response.status();
         if status.is_redirection() {
             return Err(ConnectionError::TokenRejected);
         }
         let headers = response.headers().clone();
-        let body = bounded_body(response)?;
+        let body = bounded_body_with_timeout(response, TOKEN_TIMEOUT_SECONDS)?;
         let mut result = oauth2::HttpResponse::new(body);
         *result.status_mut() = status;
         *result.headers_mut() = headers;
@@ -312,15 +444,43 @@ fn with_scopes<T>(
         .exchange_code(AuthorizationCode::new(code))
         .set_pkce_verifier(verifier)
         .request(&exchange)
-        .map_err(|_| ConnectionError::TokenRejected)?;
+        .map_err(|error| match error {
+            oauth2::RequestTokenError::Request(error) => error,
+            _ => ConnectionError::TokenRejected,
+        })?;
     if token.token_type() != &oauth2::basic::BasicTokenType::Bearer {
         return Err(ConnectionError::TokenRejected);
     }
-    work(
-        &http,
-        token.access_token().secret(),
-        shared_scope(token.scopes()),
-    )
+    let expires_in = token.expires_in().ok_or(ConnectionError::TokenRejected)?;
+    let scopes = token.scopes().map_or(requested_scopes, |granted| {
+        granted
+            .iter()
+            .map(|scope| {
+                let value = scope.as_str();
+                if value.starts_with("https://graph.microsoft.com/") {
+                    value.to_owned()
+                } else {
+                    format!("https://graph.microsoft.com/{value}")
+                }
+            })
+            .collect()
+    });
+    Ok(Session {
+        access_token: Secret::new(token.access_token().secret().to_owned()),
+        expires_at: Instant::now()
+            .checked_add(expires_in)
+            .ok_or(ConnectionError::TokenRejected)?,
+        scopes,
+        shared: shared_scope(token.scopes()),
+    })
+}
+
+pub(super) fn request_error(error: &reqwest::Error, seconds: u64) -> ConnectionError {
+    if error.is_timeout() {
+        ConnectionError::Timeout(seconds)
+    } else {
+        ConnectionError::Transport
+    }
 }
 
 fn check_shared_inboxes(
@@ -359,7 +519,7 @@ fn check_inbox(http: &Client, token: &str, mailbox: Option<&str>) -> Result<(), 
         .get(inbox_url(mailbox)?)
         .bearer_auth(token)
         .send()
-        .map_err(|_| ConnectionError::Transport)?;
+        .map_err(|error| request_error(&error, GRAPH_TIMEOUT_SECONDS))?;
     match response.status().as_u16() {
         200 => {
             let _ = bounded_body(response)?;
@@ -382,6 +542,13 @@ fn classify_status(status: u16) -> ConnectionError {
 }
 
 fn bounded_body(response: reqwest::blocking::Response) -> Result<Vec<u8>, ConnectionError> {
+    bounded_body_with_timeout(response, GRAPH_TIMEOUT_SECONDS)
+}
+
+fn bounded_body_with_timeout(
+    response: reqwest::blocking::Response,
+    timeout_seconds: u64,
+) -> Result<Vec<u8>, ConnectionError> {
     if response
         .content_length()
         .is_some_and(|len| len > MAX_RESPONSE)
@@ -392,7 +559,13 @@ fn bounded_body(response: reqwest::blocking::Response) -> Result<Vec<u8>, Connec
     response
         .take(MAX_RESPONSE + 1)
         .read_to_end(&mut body)
-        .map_err(|_| ConnectionError::Transport)?;
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::TimedOut {
+                ConnectionError::Timeout(timeout_seconds)
+            } else {
+                ConnectionError::Transport
+            }
+        })?;
     if body.len() as u64 > MAX_RESPONSE {
         return Err(ConnectionError::ResponseTooLarge);
     }
@@ -403,6 +576,120 @@ fn bounded_body(response: reqwest::blocking::Response) -> Result<Vec<u8>, Connec
 mod tests {
     use super::*;
     const APP: &str = "11111111-1111-4111-8111-111111111111";
+    static SESSION_TEST: Mutex<()> = Mutex::new(());
+
+    fn synthetic_session(scopes: BTreeSet<String>, lifetime: Duration) -> Session {
+        Session {
+            access_token: Secret::new("synthetic-token".to_owned()),
+            expires_at: Instant::now() + lifetime,
+            scopes,
+            shared: SharedScope::NotReported,
+        }
+    }
+
+    #[test]
+    fn required_scope_sets_preserve_incremental_consent() {
+        let mail = ConnectionConfig::new(APP, None)
+            .unwrap()
+            .with_groups(Some("group@example.invalid"))
+            .unwrap();
+        let mail_scopes = required_scopes(&mail, false);
+        assert!(mail_scopes.contains("https://graph.microsoft.com/User.Read"));
+        assert!(mail_scopes.contains("https://graph.microsoft.com/Mail.Read"));
+        assert!(mail_scopes.contains("https://graph.microsoft.com/Group.ReadBasic.All"));
+        assert!(mail_scopes.contains("https://graph.microsoft.com/Group-Conversation.Read.All"));
+        assert!(!mail_scopes.contains("https://graph.microsoft.com/Tasks.ReadWrite"));
+
+        let reminder_scopes = required_scopes(&mail, true);
+        assert!(reminder_scopes.contains("https://graph.microsoft.com/User.Read"));
+        assert!(reminder_scopes.contains("https://graph.microsoft.com/Tasks.ReadWrite"));
+        assert!(!reminder_scopes.contains("https://graph.microsoft.com/Mail.Read"));
+        assert!(!reminder_scopes.contains("https://graph.microsoft.com/Group.ReadBasic.All"));
+    }
+
+    #[test]
+    fn session_uses_a_strict_sixty_second_expiry_margin() {
+        let scopes = BTreeSet::from(["scope".to_owned()]);
+        let now = Instant::now();
+        let at_margin = Session {
+            access_token: Secret::new("synthetic-token".to_owned()),
+            expires_at: now + Duration::from_mins(1),
+            scopes: scopes.clone(),
+            shared: SharedScope::NotReported,
+        };
+        let beyond_margin = Session {
+            expires_at: now + Duration::from_secs(61),
+            ..synthetic_session(scopes.clone(), Duration::from_secs(1))
+        };
+        assert!(!session_covers(&at_margin, &scopes, now));
+        assert!(session_covers(&beyond_margin, &scopes, now));
+    }
+
+    #[test]
+    fn clear_session_removes_the_process_session() {
+        let _serial = SESSION_TEST.lock().unwrap();
+        *session_store() = Some(synthetic_session(
+            BTreeSet::from(["scope".to_owned()]),
+            Duration::from_mins(2),
+        ));
+        assert!(has_session());
+        clear_session();
+        assert!(!has_session());
+    }
+
+    #[test]
+    fn cached_unauthorized_clears_and_reauthorizes_exactly_once() {
+        let _serial = SESSION_TEST.lock().unwrap();
+        clear_session();
+        let required = BTreeSet::from(["scope".to_owned()]);
+        *session_store() = Some(synthetic_session(required.clone(), Duration::from_mins(2)));
+        let mut authorizations = 0;
+        let mut work_calls = 0;
+        let result = run_with_session(
+            required.clone(),
+            |requested| {
+                authorizations += 1;
+                assert_eq!(requested, required);
+                let mut session = synthetic_session(requested, Duration::from_mins(2));
+                session.access_token = Secret::new("replacement-token".to_owned());
+                Ok(session)
+            },
+            |token, _| {
+                work_calls += 1;
+                if token == "synthetic-token" {
+                    Err(ConnectionError::Unauthorized)
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(authorizations, 1);
+        assert_eq!(work_calls, 2);
+        clear_session();
+    }
+
+    #[test]
+    fn insufficient_session_scope_authorizes_the_union() {
+        let _serial = SESSION_TEST.lock().unwrap();
+        clear_session();
+        let existing = BTreeSet::from(["Mail.Read".to_owned()]);
+        let required = BTreeSet::from(["Tasks.ReadWrite".to_owned()]);
+        *session_store() = Some(synthetic_session(existing.clone(), Duration::from_mins(2)));
+        let result = run_with_session(
+            required.clone(),
+            |requested| {
+                assert_eq!(
+                    requested,
+                    existing.union(&required).cloned().collect::<BTreeSet<_>>()
+                );
+                Ok(synthetic_session(requested, Duration::from_mins(2)))
+            },
+            |_, _| Ok(()),
+        );
+        assert_eq!(result, Ok(()));
+        clear_session();
+    }
 
     #[test]
     fn granted_scope_diagnostics_distinguish_missing_from_unreported() {

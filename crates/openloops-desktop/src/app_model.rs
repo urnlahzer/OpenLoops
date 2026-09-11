@@ -8,7 +8,7 @@ use crate::review_model::ReviewState;
 use crate::settings::{
     OllamaPlan, Provider, Settings, SettingsError, SettingsStore, max_parallel, production_store,
 };
-use openloops_graph::live::{ConnectionError, ConnectionReport};
+use openloops_graph::live::{ConnectionError, ConnectionReport, clear_session};
 use openloops_inference::ollama::suggested_model;
 use openloops_inference::openrouter::ModelChoice;
 use openloops_inference::provider::ProviderError;
@@ -242,6 +242,7 @@ impl AppModel {
     }
 
     pub fn forget_settings(&mut self) {
+        clear_session();
         let Some(store) = &self.store else {
             return;
         };

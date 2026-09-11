@@ -31,7 +31,8 @@ Open the native app and select **Review**. Saved connections restore
 automatically. This is a real Microsoft/Ollama flow; no synthetic cards appear
 in the normal application.
 
-1. **Scan inboxes** opens Microsoft sign-in, reads the visible 30-day history,
+1. **Scan inboxes** reuses the current Microsoft session when available (and
+   otherwise opens sign-in), reads the visible 30-day history,
    and automatically analyzes conversations with the selected Ollama model.
    There is no individual message selection. Personal Inbox and Sent Items
    are joined by conversation identity, and a split identity is merged back
@@ -80,7 +81,8 @@ in the normal application.
    under the card that opened it. The explicit create button authorizes
    one task in the same Microsoft account's default personal Tasks list.
    Microsoft To Do owns notification delivery, including when OpenLoops closes.
-   This requires delegated Tasks.ReadWrite and a separate browser sign-in.
+   This first requires delegated Tasks.ReadWrite; the browser opens only when
+   the current session does not already cover that incremental scope.
 5. **Rescan loaded mail** uses current in-memory mail without another Graph
    read. **Stop scan** stops dispatching and abandons the requests in flight. **Clear results
    and mail** removes memory content, preserving saved decisions and To Do tasks.
@@ -97,6 +99,9 @@ There are at most 10 configured sources. Pagination is confined to the same
 Graph origin and collection path. A capped, inaccessible, or oversized source
 is visible as incomplete coverage. Conversations above 40 messages or the
 provider payload bound fail visibly instead of silently losing context.
+Read-only Graph listings and body fetches retry once after two seconds for a
+timeout, interrupted connection, HTTP 503, or HTTP 504 (never HTTP 429), and a
+body failure skips only that message while reporting the source's failed count.
 
 The model sees canonical message bodies, subjects, quoted history, participants,
 timestamps and ownership facts. It never receives a token or raw Graph IDs.
@@ -149,7 +154,8 @@ is updated. Reminder records remain available for user reconciliation. Hitting
 the storage bound fails visibly and preserves existing records. A failed/corrupt
 read or detected concurrent edit stops saving rather than overwriting data.
 
-This is a foreground native preview. New scans require sign-in; there is no
+This is a foreground native preview. Scans require a current in-process Microsoft
+session; there is no
 unattended monitoring, Outlook add-in, or automatic external-task reconciliation.
 See [spec](working-demo-spec.md), [plan](working-demo-plan.md), and
 [roadmap](working-demo-roadmap.md) for the production path and remaining gates.

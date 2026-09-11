@@ -156,13 +156,21 @@ impl ReviewState {
                 }
             }
             state.notices.push(format!(
-                "{}: {count} messages{}",
+                "{}: {count} messages{}{}",
                 source.label,
                 if source.partial {
                     "; coverage capped, more mail exists"
                 } else {
                     ""
-                }
+                },
+                if source.message_errors.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "; {} message(s) could not be loaded",
+                        source.message_errors.len()
+                    )
+                },
             ));
             if source.partial {
                 state.source_failures += 1;
@@ -174,6 +182,20 @@ impl ReviewState {
                     .into_iter()
                     .map(|e| format!("{}: {e}", source.label)),
             );
+            state.source_failures += source.message_errors.len();
+            let mut message_failures = std::collections::BTreeMap::new();
+            for error in source.message_errors {
+                *message_failures.entry(error.to_string()).or_insert(0usize) += 1;
+            }
+            state
+                .notices
+                .extend(message_failures.into_iter().map(|(reason, count)| {
+                    format!(
+                        "{}: {count} message(s) could not be loaded ({}).",
+                        source.label,
+                        reason.trim_end_matches('.')
+                    )
+                }));
         }
         let merged = scanning::merge_threads(&mut state.messages);
         if merged > 0 {
@@ -1744,12 +1766,14 @@ mod tests {
                     mail("i-2", "c2", 2, "Second message."),
                 ],
                 errors: vec![],
+                message_errors: vec![],
                 partial: false,
             },
             SourceReview {
                 label: "Sent".into(),
                 messages: vec![mail("s-1", "c3", 3, "Here is the draft.")],
                 errors: vec![],
+                message_errors: vec![],
                 partial: false,
             },
         ];

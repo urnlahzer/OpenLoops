@@ -6,7 +6,7 @@ use crate::{
     review_model::{ReviewState, ScanStrip, open_badge_count, scan_strip},
     settings::{MAX_OPENROUTER_PARALLEL, MIN_OPENROUTER_PARALLEL, OllamaPlan, Provider},
 };
-use openloops_graph::live::{ConnectionConfig, check_connection};
+use openloops_graph::live::{ConnectionConfig, check_connection, clear_session};
 use openloops_inference::{
     ollama::{OllamaCloud, available_models},
     openrouter::{OpenRouter, available_zdr_models},
@@ -124,6 +124,15 @@ fn commit_parallel(value: &str, current: u16) -> u16 {
             .try_into()
             .expect("clamped parallel value fits u16")
     })
+}
+
+fn replace_if_changed<T: PartialEq>(current: &mut T, next: T) -> bool {
+    if *current == next {
+        false
+    } else {
+        *current = next;
+        true
+    }
 }
 
 fn provider_connected(model: &AppModel) -> bool {
@@ -486,6 +495,22 @@ pub fn run() -> Result<(), slint::PlatformError> {
             .checked_sub(Duration::from_secs(82))
             .unwrap_or_else(std::time::Instant::now);
     }
+    #[cfg(feature = "ui-screenshot")]
+    if std::env::var("OPENLOOPS_PREVIEW_CONNECTED").as_deref() == Ok("1") {
+        initial_model.microsoft = Status {
+            succeeded: true,
+            lines: vec![
+                "Personal inbox: access confirmed.".into(),
+                "Group inbox 1: access confirmed.".into(),
+                "Group inbox 2: access confirmed.".into(),
+                "Shared mailbox 1: access confirmed.".into(),
+            ],
+        };
+        initial_model.settings_status = Status {
+            succeeded: true,
+            lines: vec!["Settings saved securely on this Windows account; Microsoft access is confirmed for every configured source.".into()],
+        };
+    }
     let model = Rc::new(RefCell::new(initial_model));
     let window = AppWindow::new()?;
     let initial_screen = {
@@ -618,17 +643,30 @@ pub fn run() -> Result<(), slint::PlatformError> {
             let weak = window.as_weak();
             window.$setter(move |value| {
                 let mut $model_ref = model.borrow_mut();
-                $model_ref.$field = value.to_string();
+                if !replace_if_changed(&mut $model_ref.$field, value.to_string()) {
+                    return;
+                }
                 $clear
                 drop($model_ref);
                 refresh(&model, &weak);
             });
         }};
     }
-    text_edit!(on_client_id_edited, client_id, model_ref, {
-        model_ref.client_id = model_ref.client_id.chars().take(128).collect();
-        clear_microsoft_after_edit(&mut model_ref);
-    });
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_client_id_edited(move |value| {
+            let value: String = value.chars().take(128).collect();
+            let mut model_ref = model.borrow_mut();
+            if !replace_if_changed(&mut model_ref.client_id, value) {
+                return;
+            }
+            clear_session();
+            clear_microsoft_after_edit(&mut model_ref);
+            drop(model_ref);
+            refresh(&model, &weak);
+        });
+    }
     text_edit!(on_groups_edited, groups, model_ref, {
         clear_microsoft_after_edit(&mut model_ref);
     });
@@ -710,18 +748,19 @@ pub fn run() -> Result<(), slint::PlatformError> {
             // X5: the egui build's key fields enforced `char_limit(4096)`
             // (`setup_ui.rs` at 69235c1, lines 257-259 and 365-367); truncate
             // here the same way `client-id-edited` already truncates to 128.
-            let value: Zeroizing<String> = Zeroizing::new(value.chars().take(4096).collect());
-            match model_ref.provider {
-                Provider::OllamaCloud => {
-                    model_ref.key = value;
-                    model_ref.models.clear();
-                    model_ref.selected.clear();
-                }
-                Provider::OpenRouter => {
-                    model_ref.openrouter_key = value;
-                }
+            let value: String = value.chars().take(4096).collect();
+            let value: Zeroizing<String> = Zeroizing::new(value.trim().to_owned());
+            let changed = match model_ref.provider {
+                Provider::OllamaCloud => replace_if_changed(&mut model_ref.key, value),
+                Provider::OpenRouter => replace_if_changed(&mut model_ref.openrouter_key, value),
+            };
+            if !changed {
+                return;
             }
-            model_ref.trim_keys();
+            if model_ref.provider == Provider::OllamaCloud {
+                model_ref.models.clear();
+                model_ref.selected.clear();
+            }
             model_ref.model_status = Status::default();
             finish_edit(&mut model_ref);
             drop(model_ref);
@@ -824,15 +863,20 @@ pub fn run() -> Result<(), slint::PlatformError> {
         let model = Rc::clone(&model);
         let weak = window.as_weak();
         window.on_parallel_committed(move |value| {
-            {
+            let changed = {
                 let mut model_ref = model.borrow_mut();
                 let value = commit_parallel(&value, model_ref.openrouter_parallel);
-                if value != model_ref.openrouter_parallel {
+                if value == model_ref.openrouter_parallel {
+                    false
+                } else {
                     model_ref.openrouter_parallel = value;
                     finish_edit(&mut model_ref);
+                    true
                 }
+            };
+            if changed {
+                refresh(&model, &weak);
             }
-            refresh(&model, &weak);
         });
     }
     {
@@ -939,6 +983,15 @@ mod tests {
 
     fn model() -> AppModel {
         AppModel::with_store(Ok(None))
+    }
+
+    #[test]
+    fn unchanged_edit_guard_does_not_request_a_refresh() {
+        let mut value = String::from("unchanged");
+        assert!(!replace_if_changed(&mut value, "unchanged".to_owned()));
+        assert_eq!(value, "unchanged");
+        assert!(replace_if_changed(&mut value, "changed".to_owned()));
+        assert_eq!(value, "changed");
     }
 
     #[test]

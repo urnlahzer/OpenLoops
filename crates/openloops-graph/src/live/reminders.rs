@@ -1,5 +1,8 @@
 //! Explicit personal To Do creation. No automatic retry, email sending or shared task writes.
-use super::{ConnectionConfig, ConnectionError, Url, bounded_body, review, with_scopes};
+use super::{
+    ConnectionConfig, ConnectionError, GRAPH_TIMEOUT_SECONDS, Url, bounded_body, request_error,
+    review, with_scopes,
+};
 use serde_json::{Value, json};
 
 pub struct ReminderRequest {
@@ -80,9 +83,9 @@ pub fn create(config: &ConnectionConfig, request: &ReminderRequest) -> ReminderO
             .post(url)
             .bearer_auth(token)
             .header("Content-Type", "application/json")
-            .body(body)
+            .body(body.clone())
             .send()
-            .map_err(|_| ConnectionError::Transport)?;
+            .map_err(|error| request_error(&error, GRAPH_TIMEOUT_SECONDS))?;
         if response.status().as_u16() != 201 {
             return Err(ConnectionError::ResourceUnavailable);
         }

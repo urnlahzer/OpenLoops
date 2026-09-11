@@ -77,7 +77,15 @@ component NavItem inherits Rectangle {
         background: Tokens.danger; border-radius: Tokens.radius-pill;
         badge-text := Text { text: root.badge; color: Tokens.bg-surface; font-size: Tokens.font-10; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
     }
-    TouchArea { enabled: root.enabled; clicked => { nav-focus.focus(); root.activated(); } }
+    TouchArea {
+        enabled: root.enabled;
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down && root.enabled {
+                nav-focus.focus();
+                root.activated();
+            }
+        }
+    }
     nav-focus := FocusScope {
         enabled: root.enabled;
         key-pressed(event) => {

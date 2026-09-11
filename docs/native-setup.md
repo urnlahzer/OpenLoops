@@ -50,8 +50,8 @@ The UI reports save failures and leaves the previous record intact. Windows limi
 the complete encoded record to 2,560 bytes; an oversized inbox list produces an
 error rather than truncating settings.
 
-The Microsoft check still discards its token and sign-in is required again; access
-check results and the Show key toggle are not saved. The separate
+The Microsoft check keeps its token only in process memory for reuse during its
+lifetime; access check results and the Show key toggle are not saved. The separate
 [Review screen](inbox-review.md) automatically analyzes recent mail from
 configured inboxes when the user clicks Scan inboxes.
 **Set To Do reminder…** on a reviewed card opens an editable draft (title,
@@ -98,6 +98,13 @@ The busy indicator updates four times a second by design.
 Serialized settings and API keys use zeroizing buffers without claiming removal
 of all UI, allocator, TLS, or operating-system copies.
 
+Microsoft sign-in is reused for the access token's lifetime (normally about an
+hour) across connection checks, mail loads, scans, and reviewed reminder
+creation. The token remains only in process memory: it is never persisted and
+is cleared on Forget, an application client-ID change, a Graph 401 response, or
+process exit. No `offline_access` scope or refresh token is requested, so the
+next Microsoft operation opens sign-in again after expiry.
+
 The UI's `font-family` token is the static `"Segoe UI"`, not `"Segoe UI
 Variable"`: the variable family is installed on this machine only as the
 variable font file (`SegUIVar.ttf`), and this build's FemtoVG/fontdb renderer
@@ -121,7 +128,10 @@ window-capture tool against a real, visible window handle. Independent of
 `--preview-review`, setting `OPENLOOPS_PREVIEW_PROVIDER=openrouter` seeds a
 fresh run's Sources screen with OpenRouter selected, a parallel-requests
 value, and a long zero-data-retention model label, for capturing that
-screen's own layout without any saved settings. UI unit tests
+screen's own layout without any saved settings. Setting
+`OPENLOOPS_PREVIEW_CONNECTED=1` seeds four successful Microsoft access lines,
+the personal-inbox confirmation pill, and a long successful settings status
+for the connected Sources layout. UI unit tests
 disable the production store; the Windows integration test uses
 an isolated synthetic credential, verifies it from a fresh process, and
 deletes it afterward.
