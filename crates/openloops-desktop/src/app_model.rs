@@ -8,7 +8,10 @@ use crate::review_model::ReviewState;
 use crate::settings::{
     OllamaPlan, Provider, Settings, SettingsError, SettingsStore, max_parallel, production_store,
 };
-use openloops_graph::live::{ConnectionError, ConnectionReport, clear_session};
+use openloops_graph::live::{
+    ConnectionError, ConnectionReport, clear_session,
+    review::{LoadProgress, MailCache},
+};
 use openloops_inference::ollama::suggested_model;
 use openloops_inference::openrouter::ModelChoice;
 use openloops_inference::provider::ProviderError;
@@ -66,7 +69,11 @@ pub struct AppModel {
     pub automatic_save: bool,
     pub review: ReviewState,
     pub(crate) review_status: Status,
+    pub load_progress: Option<Arc<LoadProgress>>,
     pub scan_progress: Option<Arc<crate::review_model::ScanProgress>>,
+    /// In-memory only and fully replaced after each successful load. One load is already bounded
+    /// to at most 100 rows per folder and 10 configured sources, so no separate cache cap is needed.
+    pub mail_cache: Arc<MailCache>,
     /// Whether the most recent [`AppModel::reload_settings`] call (including
     /// the one `with_store` runs at construction) found an existing saved
     /// record. The native adapter reads this immediately after each such call,
@@ -108,7 +115,9 @@ impl AppModel {
             automatic_save: true,
             review: ReviewState::default(),
             review_status: Status::default(),
+            load_progress: None,
             scan_progress: None,
+            mail_cache: Arc::new(MailCache::default()),
             settings_existed: false,
         };
         match store {
@@ -132,6 +141,7 @@ impl AppModel {
     }
 
     fn apply_settings(&mut self, settings: Settings) {
+        self.clear_mail_cache();
         self.client_id = settings.client_id;
         self.groups = settings.groups;
         self.shared = settings.shared;
@@ -242,6 +252,7 @@ impl AppModel {
     }
 
     pub fn forget_settings(&mut self) {
+        self.clear_mail_cache();
         clear_session();
         let Some(store) = &self.store else {
             return;
@@ -259,6 +270,15 @@ impl AppModel {
                 self.settings_status = Status { lines: vec!["Could not remove saved settings. They remain in Windows Credential Manager; try again.".into()], succeeded: false };
             }
         }
+    }
+
+    pub(crate) fn clear_mail_cache(&mut self) {
+        if let Some(progress) = &self.load_progress {
+            progress.cancel.store(true, Ordering::Release);
+            self.pending = None;
+        }
+        self.load_progress = None;
+        self.mail_cache = Arc::new(MailCache::default());
     }
 
     pub(crate) fn start(
@@ -302,6 +322,7 @@ impl AppModel {
                     Service::Microsoft => self.microsoft = status,
                     Service::Model => self.model_status = status,
                     Service::Review => {
+                        self.load_progress = None;
                         self.review_status = status;
                         self.review.scan_failed = true;
                     }
@@ -337,6 +358,19 @@ impl AppModel {
                 self.microsoft = microsoft_status(result);
             }
             Outcome::Mail(Ok(sources)) => {
+                self.load_progress = None;
+                self.mail_cache = Arc::new(
+                    sources
+                        .iter()
+                        .flat_map(|source| &source.messages)
+                        .map(|message| {
+                            (
+                                (message.account.clone(), message.id.clone()),
+                                message.clone(),
+                            )
+                        })
+                        .collect(),
+                );
                 self.review = ReviewState::loaded(sources);
                 if self.review.messages.is_empty() {
                     self.review_status = Status { lines: vec!["No messages could be loaded for analysis. Check scan coverage and errors.".into()], succeeded: false };
@@ -345,7 +379,8 @@ impl AppModel {
                 }
             }
             Outcome::Mail(Err(error)) => {
-                self.review.scan_failed = true;
+                self.load_progress = None;
+                self.review.scan_failed = error != ConnectionError::Cancelled;
                 self.review_status = Status {
                     lines: vec![error.to_string()],
                     succeeded: false,
@@ -848,6 +883,73 @@ mod tests {
     }
 
     #[test]
+    fn mail_outcome_populates_the_session_cache_and_clears_load_progress() {
+        use openloops_graph::live::review::{LoadProgress, MailItem, SourceReview};
+
+        let mut app = AppModel::with_store(Ok(None));
+        app.load_progress = Some(Arc::new(LoadProgress::default()));
+        let sources = vec![SourceReview {
+            label: "Personal mailbox / Inbox".into(),
+            messages: vec![
+                MailItem {
+                    id: "synthetic-message-a".into(),
+                    account: "synthetic-account".into(),
+                    conversation: "synthetic-conversation-a".into(),
+                    received: "not-a-timestamp".into(),
+                    ..MailItem::default()
+                },
+                MailItem {
+                    id: "synthetic-message-b".into(),
+                    account: "synthetic-account".into(),
+                    conversation: "synthetic-conversation-b".into(),
+                    received: "not-a-timestamp".into(),
+                    ..MailItem::default()
+                },
+            ],
+            errors: vec![],
+            message_errors: vec![],
+            partial: false,
+        }];
+        let (sender, receiver) = mpsc::channel();
+        app.pending = Some(receiver);
+        app.pending_service = Service::Review;
+        sender.send(Outcome::Mail(Ok(sources))).unwrap();
+        assert!(app.poll(|| {}));
+        assert!(app.load_progress.is_none());
+        assert_eq!(app.mail_cache.len(), 2);
+        assert!(
+            app.mail_cache
+                .contains_key(&("synthetic-account".into(), "synthetic-message-a".into()))
+        );
+        assert!(
+            app.mail_cache
+                .contains_key(&("synthetic-account".into(), "synthetic-message-b".into()))
+        );
+    }
+
+    #[test]
+    fn cancelled_mail_outcome_is_not_a_scan_failure() {
+        use openloops_graph::live::review::LoadProgress;
+
+        let mut app = AppModel::with_store(Ok(None));
+        app.load_progress = Some(Arc::new(LoadProgress::default()));
+        let (sender, receiver) = mpsc::channel();
+        app.pending = Some(receiver);
+        app.pending_service = Service::Review;
+        sender
+            .send(Outcome::Mail(Err(ConnectionError::Cancelled)))
+            .unwrap();
+        assert!(app.poll(|| {}));
+        assert!(app.load_progress.is_none());
+        assert!(!app.review.scan_failed);
+        assert!(!app.review_status.succeeded);
+        assert_eq!(
+            app.review_status.lines,
+            ["Download stopped before the scan began."]
+        );
+    }
+
+    #[test]
     fn group_failure_is_visible_and_does_not_mark_microsoft_ready() {
         let status = microsoft_status(Ok(ConnectionReport {
             own_inbox_accessible: true,
@@ -944,11 +1046,16 @@ mod tests {
         assert_eq!(reopened.openrouter_parallel, 48);
         assert!(!reopened.microsoft.succeeded);
         assert!(reopened.pending.is_none());
+        reopened.mail_cache = Arc::new(std::collections::HashMap::from([(
+            ("synthetic-account".into(), "synthetic-message".into()),
+            openloops_graph::live::review::MailItem::default(),
+        )]));
         reopened.forget_settings();
         assert!(memory.saved.borrow().is_none());
         assert!(reopened.key.is_empty());
         assert!(reopened.openrouter_key.is_empty());
         assert!(reopened.groups.is_empty());
+        assert!(reopened.mail_cache.is_empty());
         assert!(!reopened.persist_changes());
     }
 

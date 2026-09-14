@@ -1,7 +1,10 @@
 //! Toolkit-free review state and pure decision/urgency/status logic.
 use crate::deadline_view::{DeadlineView, classify};
 use crate::loop_state::{Decision, Decisions, Record, Reminder, now};
-use openloops_graph::live::{reminders::ReminderRequest, review::SourceReview};
+use openloops_graph::live::{
+    reminders::ReminderRequest,
+    review::{LoadProgress, SourceReview},
+};
 use openloops_inference::expectations::{
     EventPassed, Expectation, Expectations, Owner, ResolutionKind,
 };
@@ -746,6 +749,25 @@ pub fn scan_strip(progress: Option<&ScanProgress>, review: &ReviewState) -> Scan
         processed,
         total,
         elapsed_secs,
+        percent,
+        stopping: progress.cancel.load(Ordering::Relaxed),
+    }
+}
+
+#[must_use]
+pub fn load_strip(progress: &LoadProgress, elapsed_secs: u64) -> ScanStrip {
+    let processed = progress.loaded.load(Ordering::Relaxed);
+    let total = progress.listed.load(Ordering::Relaxed);
+    let percent = (processed * 100)
+        .checked_div(total)
+        .map_or(0, |value| u8::try_from(value.min(100)).unwrap_or(100));
+    ScanStrip::Scanning {
+        phase: "Downloading recent messages",
+        conversation_index: progress.sources_done.load(Ordering::Relaxed) + 1,
+        conversation_total: progress.sources_total.load(Ordering::Relaxed),
+        processed,
+        total,
+        elapsed_secs: i64::try_from(elapsed_secs).unwrap_or(i64::MAX),
         percent,
         stopping: progress.cancel.load(Ordering::Relaxed),
     }
@@ -2064,6 +2086,54 @@ the scan stopped after a provider error."
         let review = ReviewState::default();
         match scan_strip(Some(&progress), &review) {
             ScanStrip::Scanning { percent, .. } => assert_eq!(percent, 0),
+            other => panic!("expected Scanning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_strip_reports_download_counts_and_listing_state() {
+        use openloops_graph::live::review::LoadProgress;
+
+        let progress = LoadProgress::default();
+        progress.loaded.store(37, Ordering::Relaxed);
+        progress.listed.store(180, Ordering::Relaxed);
+        progress.sources_done.store(1, Ordering::Relaxed);
+        progress.sources_total.store(4, Ordering::Relaxed);
+        match load_strip(&progress, 8) {
+            ScanStrip::Scanning {
+                phase,
+                conversation_index,
+                conversation_total,
+                processed,
+                total,
+                elapsed_secs,
+                percent,
+                stopping,
+            } => {
+                assert_eq!(phase, "Downloading recent messages");
+                assert_eq!(conversation_index, 2);
+                assert_eq!(conversation_total, 4);
+                assert_eq!(processed, 37);
+                assert_eq!(total, 180);
+                assert_eq!(elapsed_secs, 8);
+                assert_eq!(percent, 20);
+                assert!(!stopping);
+            }
+            other => panic!("expected Scanning, got {other:?}"),
+        }
+
+        let listing = LoadProgress::default();
+        match load_strip(&listing, 0) {
+            ScanStrip::Scanning {
+                processed,
+                total,
+                percent,
+                ..
+            } => {
+                assert_eq!(processed, 0);
+                assert_eq!(total, 0);
+                assert_eq!(percent, 0);
+            }
             other => panic!("expected Scanning, got {other:?}"),
         }
     }
