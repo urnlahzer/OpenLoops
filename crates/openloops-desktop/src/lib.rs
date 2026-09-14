@@ -14,6 +14,8 @@ pub(crate) mod settings;
 pub(crate) mod slint_review;
 #[cfg(feature = "native-ui")]
 pub mod slint_ui;
+#[cfg(all(test, feature = "native-ui"))]
+mod winres;
 
 // X7: `[lints.rust] unsafe_code = "allow"` in Cargo.toml is a *package*-level
 // exception that exists only so the Slint-generated module (built to
