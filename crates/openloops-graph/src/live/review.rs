@@ -5,7 +5,7 @@ use super::{
 };
 use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::Duration,
 };
@@ -41,12 +41,15 @@ pub struct MailEvent {
     pub out_of_date: bool,
 }
 
+#[derive(Clone)]
 pub struct SourceReview {
     pub label: String,
     pub messages: Vec<MailItem>,
     pub errors: Vec<ConnectionError>,
     pub message_errors: Vec<ConnectionError>,
     pub partial: bool,
+    /// True when a source-level error prevented any usable listing.
+    pub failed: bool,
 }
 
 /// Process-local progress and cancellation state for the mail download preceding a scan.
@@ -80,6 +83,20 @@ pub fn load_recent_with(
     cache: &MailCache,
     progress: &LoadProgress,
 ) -> Result<Vec<SourceReview>, ConnectionError> {
+    load_sources_with(config, cache, progress, None)
+}
+
+/// Loads every configured source, or only labels present in `source_filter`.
+///
+/// # Errors
+/// Returns fixed configuration/authentication errors, or [`ConnectionError::Cancelled`].
+#[allow(clippy::too_many_lines)]
+pub fn load_sources_with(
+    config: &ConnectionConfig,
+    cache: &MailCache,
+    progress: &LoadProgress,
+    source_filter: Option<&BTreeSet<String>>,
+) -> Result<Vec<SourceReview>, ConnectionError> {
     if 1 + config.group_inboxes.len() + config.shared_mailboxes.len() > 10 {
         return Err(ConnectionError::InvalidConfiguration);
     }
@@ -89,37 +106,46 @@ pub fn load_recent_with(
     progress.listed.store(0, Ordering::Relaxed);
     progress.loaded.store(0, Ordering::Relaxed);
     progress.sources_done.store(0, Ordering::Relaxed);
+    let selected = |label: &str| source_selected(source_filter, label);
+    let configured_labels = source_labels(config);
     progress.sources_total.store(
-        2 + config.group_inboxes.len() + config.shared_mailboxes.len() * 2,
+        configured_labels
+            .iter()
+            .filter(|label| selected(label))
+            .count(),
         Ordering::Relaxed,
     );
     with_session(config, |http, token, scope| {
         progress.listed.store(0, Ordering::Relaxed);
         progress.loaded.store(0, Ordering::Relaxed);
         progress.sources_done.store(0, Ordering::Relaxed);
-        let shared_sources = if scope == SharedScope::Missing {
-            config.shared_mailboxes.len()
-        } else {
-            config.shared_mailboxes.len() * 2
-        };
+        let active_labels = source_labels_for_scope(config, scope);
         progress.sources_total.store(
-            2 + config.group_inboxes.len() + shared_sources,
+            active_labels.iter().filter(|label| selected(label)).count(),
             Ordering::Relaxed,
         );
         ensure_loading(progress)?;
         let (account, addresses) = identity(http, token)?;
         ensure_loading(progress)?;
-        let mut sources = vec![load_mailbox(
-            http, token, None, &account, &addresses, cache, progress,
-        )?];
-        progress.sources_done.fetch_add(1, Ordering::Relaxed);
+        let mut sources = Vec::new();
+        if selected("Personal mailbox / Inbox") {
+            sources.push(load_mailbox(
+                http, token, None, &account, &addresses, cache, progress,
+            )?);
+            progress.sources_done.fetch_add(1, Ordering::Relaxed);
+        }
         ensure_loading(progress)?;
-        sources.push(load_sent(
-            http, token, None, &account, &addresses, cache, progress,
-        )?);
-        progress.sources_done.fetch_add(1, Ordering::Relaxed);
+        if selected("Personal mailbox / Sent Items") {
+            sources.push(load_sent(
+                http, token, None, &account, &addresses, cache, progress,
+            )?);
+            progress.sources_done.fetch_add(1, Ordering::Relaxed);
+        }
         for address in &config.group_inboxes {
             ensure_loading(progress)?;
+            if !selected(&format!("Group: {address}")) {
+                continue;
+            }
             let mut source = load_group(http, token, address);
             stamp_group_messages(&mut source, &account, &addresses);
             progress
@@ -134,41 +160,94 @@ pub fn load_recent_with(
         for address in &config.shared_mailboxes {
             ensure_loading(progress)?;
             if scope == SharedScope::Missing {
+                if !selected(address) {
+                    continue;
+                }
                 sources.push(SourceReview {
                     label: address.clone(),
                     messages: vec![],
                     errors: vec![ConnectionError::MissingSharedScope],
                     message_errors: vec![],
                     partial: false,
+                    failed: true,
                 });
                 progress.sources_done.fetch_add(1, Ordering::Relaxed);
             } else {
-                sources.push(load_mailbox(
-                    http,
-                    token,
-                    Some(address),
-                    &account,
-                    &addresses,
-                    cache,
-                    progress,
-                )?);
-                progress.sources_done.fetch_add(1, Ordering::Relaxed);
+                if selected(&format!("{address} / Inbox")) {
+                    sources.push(load_mailbox(
+                        http,
+                        token,
+                        Some(address),
+                        &account,
+                        &addresses,
+                        cache,
+                        progress,
+                    )?);
+                    progress.sources_done.fetch_add(1, Ordering::Relaxed);
+                }
                 ensure_loading(progress)?;
-                sources.push(load_sent(
-                    http,
-                    token,
-                    Some(address),
-                    &account,
-                    &addresses,
-                    cache,
-                    progress,
-                )?);
-                progress.sources_done.fetch_add(1, Ordering::Relaxed);
+                if selected(&format!("{address} / Sent Items")) {
+                    sources.push(load_sent(
+                        http,
+                        token,
+                        Some(address),
+                        &account,
+                        &addresses,
+                        cache,
+                        progress,
+                    )?);
+                    progress.sources_done.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
         ensure_loading(progress)?;
         Ok(sources)
     })
+}
+
+fn source_selected(source_filter: Option<&BTreeSet<String>>, label: &str) -> bool {
+    source_filter.is_none_or(|filter| {
+        filter.contains(label)
+            || label
+                .rsplit_once(" / ")
+                .is_some_and(|(mailbox, _)| filter.contains(mailbox))
+    })
+}
+
+fn source_labels(config: &ConnectionConfig) -> Vec<String> {
+    let mut labels = vec![
+        "Personal mailbox / Inbox".into(),
+        "Personal mailbox / Sent Items".into(),
+    ];
+    labels.extend(
+        config
+            .group_inboxes
+            .iter()
+            .map(|address| format!("Group: {address}")),
+    );
+    for address in &config.shared_mailboxes {
+        labels.push(format!("{address} / Inbox"));
+        labels.push(format!("{address} / Sent Items"));
+    }
+    labels
+}
+
+fn source_labels_for_scope(config: &ConnectionConfig, scope: SharedScope) -> Vec<String> {
+    if scope != SharedScope::Missing {
+        return source_labels(config);
+    }
+    let mut labels = vec![
+        "Personal mailbox / Inbox".into(),
+        "Personal mailbox / Sent Items".into(),
+    ];
+    labels.extend(
+        config
+            .group_inboxes
+            .iter()
+            .map(|address| format!("Group: {address}")),
+    );
+    labels.extend(config.shared_mailboxes.iter().cloned());
+    labels
 }
 
 fn ensure_loading(progress: &LoadProgress) -> Result<(), ConnectionError> {
@@ -798,6 +877,7 @@ fn load_folder(
         errors: vec![],
         message_errors: vec![],
         partial: false,
+        failed: false,
     };
     let date_field = if sent {
         "sentDateTime"
@@ -808,6 +888,7 @@ fn load_folder(
         Ok(url) => url,
         Err(error) => {
             source.errors.push(error);
+            source.failed = true;
             return Ok(source);
         }
     };
@@ -821,6 +902,7 @@ fn load_folder(
         &mut source.errors,
     );
     source.partial = partial;
+    source.failed = source_listing_failed(collected.len(), &source.errors);
     add_hydrated(
         &mut source,
         &collected,
@@ -947,6 +1029,7 @@ fn load_group(http: &Client, token: &str, address: &str) -> SourceReview {
         errors: vec![],
         message_errors: vec![],
         partial: false,
+        failed: false,
     };
     let result = (|| {
         let id = groups::resolve_id(&fetch(http, token, &groups::lookup_url(address)?)?)?;
@@ -992,7 +1075,12 @@ fn load_group(http: &Client, token: &str, address: &str) -> SourceReview {
     if let Err(error) = result {
         source.errors.push(error);
     }
+    source.failed = source_listing_failed(source.messages.len(), &source.errors);
     source
+}
+
+fn source_listing_failed(usable: usize, errors: &[ConnectionError]) -> bool {
+    usable == 0 && !errors.is_empty()
 }
 
 #[cfg(test)]
@@ -1402,6 +1490,7 @@ mod tests {
             errors: vec![],
             message_errors: vec![],
             partial: false,
+            failed: false,
         };
         let rows = vec![
             serde_json::json!({"id":"failed"}),
@@ -1432,6 +1521,86 @@ mod tests {
         assert_eq!(source.messages.len(), 1);
         assert_eq!(source.message_errors, [ConnectionError::Timeout(90)]);
         assert!(source.errors.is_empty());
+        assert!(!source.failed);
+    }
+
+    #[test]
+    fn source_level_error_sets_failed_but_body_error_does_not() {
+        assert!(source_listing_failed(
+            0,
+            &[ConnectionError::ResourceUnavailable]
+        ));
+        assert!(!source_listing_failed(
+            1,
+            &[ConnectionError::ResourceUnavailable]
+        ));
+        assert!(!source_listing_failed(0, &[]));
+    }
+
+    #[test]
+    fn source_filter_selects_only_the_requested_stable_label() {
+        let config = ConnectionConfig::new("11111111-1111-1111-1111-111111111111", None)
+            .unwrap()
+            .with_groups(Some("team@example.invalid"))
+            .unwrap();
+        let filter = BTreeSet::from(["Group: team@example.invalid".to_string()]);
+        let selected: Vec<String> = source_labels(&config)
+            .into_iter()
+            .filter(|label| filter.contains(label))
+            .collect();
+        assert_eq!(selected, ["Group: team@example.invalid"]);
+    }
+
+    #[test]
+    fn source_filter_lists_and_hydrates_only_the_selected_source() {
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_vec();
+        let (origin, calls, server) = scripted_server(vec![
+            (Duration::ZERO, response.clone()),
+            (Duration::ZERO, response),
+        ]);
+        let http = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+        let filter = BTreeSet::from(["Personal mailbox / Inbox".to_string()]);
+        let mut hydrated = Vec::new();
+        for label in ["Personal mailbox / Inbox", "Personal mailbox / Sent Items"] {
+            if !source_selected(Some(&filter), label) {
+                continue;
+            }
+            let list_url = Url::parse(&format!("{origin}list")).unwrap();
+            fetch_from_origin(&http, "synthetic-token", &list_url, &origin).unwrap();
+            let rows = synthetic_rows(1);
+            let mut source = SourceReview {
+                label: label.into(),
+                messages: vec![],
+                errors: vec![],
+                message_errors: vec![],
+                partial: false,
+                failed: false,
+            };
+            add_hydrated(
+                &mut source,
+                &rows,
+                false,
+                false,
+                "synthetic-account",
+                &[],
+                &MailCache::default(),
+                &LoadProgress::default(),
+                |row| {
+                    let url = Url::parse(&format!("{origin}hydrate/{}", row["id"])).unwrap();
+                    fetch_from_origin(&http, "synthetic-token", &url, &origin)?;
+                    Ok(hydrated_row(&row))
+                },
+            )
+            .unwrap();
+            hydrated.extend(source.messages);
+        }
+        server.join().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(hydrated.len(), 1);
     }
 
     fn synthetic_rows(count: usize) -> Vec<Value> {
@@ -1464,6 +1633,7 @@ mod tests {
             errors: vec![],
             message_errors: vec![],
             partial: false,
+            failed: false,
         };
         let progress = LoadProgress::default();
         add_hydrated(
@@ -1510,6 +1680,7 @@ mod tests {
             errors: vec![],
             message_errors: vec![],
             partial: false,
+            failed: false,
         };
         let progress = LoadProgress::default();
         add_hydrated(
@@ -1548,6 +1719,7 @@ mod tests {
             errors: vec![],
             message_errors: vec![],
             partial: false,
+            failed: false,
         };
         let progress = LoadProgress::default();
         let (origin, calls, max_in_flight, server) =
@@ -1624,6 +1796,7 @@ mod tests {
             errors: vec![],
             message_errors: vec![],
             partial: false,
+            failed: false,
         };
         let progress = LoadProgress::default();
         add_hydrated(
@@ -1680,6 +1853,7 @@ mod tests {
             errors: vec![],
             message_errors: vec![],
             partial: false,
+            failed: false,
         };
         let progress = LoadProgress::default();
         let requests = AtomicUsize::new(0);

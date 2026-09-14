@@ -73,6 +73,8 @@ export component ReviewScreen {
     in property <bool> review-scanning;
     in property <bool> can-scan;
     in property <bool> can-rescan;
+    in property <bool> can-retry-failed;
+    in property <int> retry-failed-count;
     in-out property <int> filter-index;
     in-out property <bool> show-handled;
     in property <string> show-handled-label;
@@ -116,6 +118,7 @@ export component ReviewScreen {
     callback scan-inboxes;
     callback stop-scan;
     callback rescan;
+    callback retry-failed;
     callback clear-results;
     callback filter-selected(int);
     callback show-handled-toggled(bool);
@@ -186,6 +189,16 @@ export component ReviewScreen {
                 WrappedText { text: root.scan-strip.summary; text-color: Tokens.text-2; }
                 if !root.scan-strip.coverage-warning.is-empty: WrappedText { text: root.scan-strip.coverage-warning; text-color: Tokens.warning; }
                 if root.coverage-open: Callout { kind: "warning"; text: root.scan-strip.coverage-notes; }
+                // Own row, packed to the start, so the button keeps its
+                // natural width instead of stretching across the strip.
+                if root.coverage-open: HorizontalLayout {
+                    alignment: start;
+                    SubtleButton {
+                        text: "Retry failed (" + root.retry-failed-count + ")";
+                        enabled: root.can-retry-failed;
+                        clicked => { root.retry-failed(); }
+                    }
+                }
                 // Addendum item 7: collapsed by default, and only reachable
                 // once the coverage panel itself is open -- the event-index
                 // diagnostics line stays out of the way for an owner who

@@ -64,6 +64,8 @@ export component AppWindow inherits Window {
     in property <bool> review-scanning;
     in property <bool> can-scan;
     in property <bool> can-rescan;
+    in property <bool> can-retry-failed;
+    in property <int> retry-failed-count;
     in-out property <int> review-filter-index;
     in-out property <bool> show-handled;
     in property <string> show-handled-label;
@@ -119,6 +121,7 @@ export component AppWindow inherits Window {
     callback scan-inboxes;
     callback stop-scan;
     callback rescan;
+    callback retry-failed;
     callback clear-results;
     callback review-filter-selected(int);
     callback show-handled-toggled(bool);
@@ -160,6 +163,7 @@ export component AppWindow inherits Window {
             }
             if root.active-screen == 0: ReviewScreen {
                 busy: root.busy; review-scanning: root.review-scanning; can-scan: root.can-scan; can-rescan: root.can-rescan;
+                can-retry-failed: root.can-retry-failed; retry-failed-count: root.retry-failed-count;
                 filter-index <=> root.review-filter-index; show-handled <=> root.show-handled; show-handled-label: root.show-handled-label; rows: root.review-rows; open-count: root.review-open-count;
                 scan-strip: root.scan-strip; coverage-open <=> root.coverage-open; has-analysis: root.review-has-analysis;
                 no-usable-items: root.review-no-usable-items; no-usable-text: root.review-no-usable-text; has-selection: root.review-has-selection;
@@ -169,7 +173,7 @@ export component AppWindow inherits Window {
                 draft-open: root.draft-open; draft-title <=> root.draft-title; draft-when <=> root.draft-when; draft-scheduled-line: root.draft-scheduled-line; draft-valid: root.draft-valid;
                 reminder-state: root.reminder-state; evidence-cards: root.evidence-cards; completion-card: root.completion-card; conversation-title: root.conversation-title; conversation-rows: root.conversation-rows;
                 todo-url: root.todo-url; conversation-expanded-default: root.conversation-expanded-default;
-                scan-inboxes => { root.scan-inboxes(); } stop-scan => { root.stop-scan(); } rescan => { root.rescan(); } clear-results => { root.clear-results(); }
+                scan-inboxes => { root.scan-inboxes(); } stop-scan => { root.stop-scan(); } rescan => { root.rescan(); } retry-failed => { root.retry-failed(); } clear-results => { root.clear-results(); }
                 filter-selected(index) => { root.review-filter-selected(index); } show-handled-toggled(value) => { root.show-handled-toggled(value); }
                 coverage-toggled(value) => { root.coverage-toggled(value); } sources-link => { root.navigate(1); root.active-screen = 1; }
                 select-row(handle) => { root.select-review-row(handle); } move-selection(delta) => { root.move-review-selection(delta); }
