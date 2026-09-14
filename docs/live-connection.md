@@ -16,7 +16,9 @@ The connection check requests delegated `User.Read` and `Mail.Read` for a person
 `Mail.Read.Shared` when shared mailboxes are selected. Shared mailbox
 access must already be assigned to the signed-in user. Registering a scope does
 not grant access; consent is handled by Microsoft at sign-in according to the
-organization's policies. No task scope is requested. Group lookup permission is requested only in Groups mode.
+organization's policies. The delegated `Tasks.ReadWrite` permission is requested
+only when a reminder is confirmed. Group lookup permission is requested only in
+Groups mode.
 
 ## Run
 
