@@ -42,6 +42,9 @@ pub struct ReviewMessage {
     pub conversation: String,
     pub date_label: String,
     pub web_link: String,
+    /// Addresses belonging to the signed-in account, preserved for
+    /// deterministic attribution checks after model output is projected.
+    pub own_addresses: Vec<String>,
     /// Lowercase addresses of sender, to, and cc, minus the account's own
     /// addresses, deduplicated and sorted. Used to link conversations that
     /// Exchange split into different `conversationId`s but that share
@@ -1588,6 +1591,65 @@ pub fn waiting_party_address(label: &str) -> Option<String> {
         .map(str::to_lowercase)
 }
 
+fn participant_display_name(label: &str) -> Option<&str> {
+    let name = label.split_once('<')?.0.trim();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Corrects the known recap-service attribution failure after the model
+/// response has been parsed, while the source conversation and account
+/// addresses are still available. This is intentionally part of projection:
+/// every later closure and coverage pass sees the corrected item.
+fn correct_recap_attribution(analysis: &mut Expectations, conversation: &[&ReviewMessage]) {
+    for item in &mut analysis.items {
+        if item.waiting_party == "Not established" {
+            continue;
+        }
+        let Some(source) = conversation
+            .iter()
+            .find(|message| message.input.handle == item.evidence.message)
+        else {
+            continue;
+        };
+        if !is_meeting_recap_artifact(source) {
+            continue;
+        }
+        let Some(waiting_address) = waiting_party_address(&item.waiting_party) else {
+            continue;
+        };
+        let waiting_on_owner = source
+            .own_addresses
+            .iter()
+            .any(|address| address.eq_ignore_ascii_case(&waiting_address));
+        let sender_label = source
+            .input
+            .message
+            .sender
+            .as_ref()
+            .map(CanonicalBlock::as_string);
+        let waiting_on_service = sender_label.as_deref().is_some_and(|sender| {
+            waiting_party_address(sender)
+                .is_some_and(|address| address.eq_ignore_ascii_case(&waiting_address))
+        });
+        if !waiting_on_owner && !waiting_on_service {
+            continue;
+        }
+        if waiting_on_service
+            && participant_display_name(&item.waiting_party).is_some_and(|waiting_name| {
+                !waiting_name.eq_ignore_ascii_case("you")
+                    && sender_label
+                        .as_deref()
+                        .and_then(participant_display_name)
+                        .is_none_or(|sender_name| !waiting_name.eq_ignore_ascii_case(sender_name))
+            })
+        {
+            continue;
+        }
+        item.waiting_party = "Not established".into();
+        item.owner = Owner::You;
+    }
+}
+
 /// Candidate messages for the cross-thread closure pass: later messages
 /// the signed-in user sent to `item`'s waiting party, in a conversation
 /// other than `evidence_conversation`, for `account` -- the account the
@@ -1910,6 +1972,7 @@ pub fn prepare(
             .format("%b %d, %Y %H:%M %:z")
             .to_string(),
         web_link: item.web_link.clone(),
+        own_addresses: item.own_addresses.clone(),
         other_addresses,
         event: mail_event_time(item),
     })
@@ -2918,12 +2981,13 @@ fn merge_conversation(
     not_started_messages: &mut usize,
 ) {
     match outcome {
-        JobOutcome::Completed(Ok(analysis)) => {
+        JobOutcome::Completed(Ok(mut analysis)) => {
             let conversation_id = conversation
                 .first()
                 .map_or_else(String::new, |message| message.conversation.clone());
             result.analyzed += conversation.len();
             result.analyzed_conversations += 1;
+            correct_recap_attribution(&mut analysis, conversation);
             if let Some(note) = conversation_note(index, conversation, &analysis) {
                 result.conversation_notes.push(note.clone());
                 result
@@ -7172,6 +7236,46 @@ at the downtown courthouse. Let me know if that works.",
         (all, item)
     }
 
+    fn recap_attribution_fixture(waiting_party: &str, recap: bool) -> (ReviewMessage, Expectation) {
+        let mut mail = synthetic(
+            "Meeting Purpose\nReview the project update.\nAction Items\nSend the project update.",
+            0,
+            "recap-attribution",
+        );
+        if recap {
+            mail.subject = "Project sync - Meeting Summary".into();
+            mail.sender = "Fathom <no-reply@fathom.video>".into();
+            mail.sender_address = "no-reply@fathom.video".into();
+        }
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        let (_, mut item) = closure_test_messages();
+        item.action = "Send the project update".into();
+        item.action_phrase = "send the project update".into();
+        item.owner = Owner::Team;
+        item.waiting_party = waiting_party.into();
+        item.evidence.message.clone_from(&message.input.handle);
+        item.evidence.quote = "Send the project update.".into();
+        item.evidence.context = "Send the project update.".into();
+        (message, item)
+    }
+
+    fn projected_recap_item(waiting_party: &str, recap: bool) -> Expectation {
+        let (message, item) = recap_attribution_fixture(waiting_party, recap);
+        let result = scan_conversations(
+            std::slice::from_ref(&message),
+            &ScanProgress::default(),
+            |_| {
+                Ok(Expectations {
+                    items: vec![item.clone()],
+                    rejected: 0,
+                    rejection_reasons: vec![],
+                    degraded: 0,
+                })
+            },
+        );
+        result.analysis.items.into_iter().next().unwrap()
+    }
+
     /// `count` open requests, each with a later reply in a different
     /// conversation, so every one of them is eligible for the closure pass.
     fn parallel_closure_fixture(count: usize) -> (Vec<ReviewMessage>, Vec<Expectation>) {
@@ -8454,6 +8558,93 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         mail.sender_address = "no-reply@fathom.video".into();
         let message = prepare(&mail, "Inbox", 0).unwrap();
         assert!(is_meeting_recap_artifact(&message));
+    }
+
+    #[test]
+    fn recap_waiting_on_own_address_defaults_to_suggested_you() {
+        let item = projected_recap_item("USER@EXAMPLE.INVALID", true);
+
+        assert_eq!(item.waiting_party, "Not established");
+        assert!(item.owner == Owner::You);
+    }
+
+    #[test]
+    fn recap_waiting_on_service_sender_defaults_to_suggested_you() {
+        let item = projected_recap_item("Fathom <NO-REPLY@FATHOM.VIDEO>", true);
+
+        assert_eq!(item.waiting_party, "Not established");
+        assert!(item.owner == Owner::You);
+    }
+
+    #[test]
+    fn recap_waiting_on_named_counterparty_is_untouched() {
+        let item = projected_recap_item("Other <dana@example.invalid>", true);
+
+        assert_eq!(item.waiting_party, "Other <dana@example.invalid>");
+        assert!(item.owner == Owner::Team);
+    }
+
+    #[test]
+    fn non_recap_with_the_same_attribution_is_untouched() {
+        let item = projected_recap_item("USER@EXAMPLE.INVALID", false);
+
+        assert_eq!(item.waiting_party, "USER@EXAMPLE.INVALID");
+        assert!(item.owner == Owner::Team);
+    }
+
+    #[test]
+    fn recap_with_no_waiting_party_is_untouched() {
+        let item = projected_recap_item("Not established", true);
+
+        assert_eq!(item.waiting_party, "Not established");
+        assert!(item.owner == Owner::Team);
+    }
+
+    #[test]
+    fn recap_suggested_you_item_is_eligible_for_closure_passes() {
+        let (message, item) = recap_attribution_fixture("user@example.invalid", true);
+        let mut result = scan_conversations(
+            std::slice::from_ref(&message),
+            &ScanProgress::default(),
+            |_| {
+                Ok(Expectations {
+                    items: vec![item.clone()],
+                    rejected: 0,
+                    rejection_reasons: vec![],
+                    degraded: 0,
+                })
+            },
+        );
+        let mut reply = reply_to(
+            "no-reply@fathom.video",
+            "recap-reply",
+            "recap-attribution",
+            "synthetic-account",
+            "Re: Project sync - Meeting Summary",
+        );
+        reply.body = "The project update was sent.".into();
+        let reply = prepare(&reply, "Sent", 1).unwrap();
+        let resolution = Anchor {
+            message: reply.input.handle.clone(),
+            block: 0,
+            quote: "The project update was sent.".into(),
+            context: "The project update was sent.".into(),
+        };
+        let mut calls = 0;
+
+        scan_closures(
+            &[message, reply],
+            &ScanProgress::default(),
+            &mut result,
+            |item, _, _| {
+                calls += 1;
+                assert!(item.owner == Owner::You);
+                Ok(Some((resolution.clone(), ResolutionKind::Completed)))
+            },
+        );
+
+        assert_eq!(calls, 1);
+        assert!(result.analysis.items[0].resolution.is_some());
     }
 
     #[test]
