@@ -78,6 +78,7 @@ pub enum ConnectionError {
     NotFound,
     ServerError,
     NextPageRejected,
+    Cancelled,
 }
 
 impl std::fmt::Display for ConnectionError {
@@ -116,6 +117,7 @@ impl std::fmt::Display for ConnectionError {
                 "Microsoft Graph reported a server-side failure (HTTP 5xx). Retry later."
             }
             Self::NextPageRejected => "Microsoft returned a next-page link outside the authorized collection; remaining pages were skipped.",
+            Self::Cancelled => "Download stopped before the scan began.",
         })
     }
 }

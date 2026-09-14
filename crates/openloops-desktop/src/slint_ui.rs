@@ -3,7 +3,7 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use crate::{
     app_model::{AccountDisplay, AppModel, Outcome, Service, Status},
-    review_model::{ReviewState, ScanStrip, open_badge_count, scan_strip},
+    review_model::{ReviewState, ScanStrip, load_strip, open_badge_count, scan_strip},
     settings::{MAX_OPENROUTER_PARALLEL, MIN_OPENROUTER_PARALLEL, OllamaPlan, Provider},
 };
 use openloops_graph::live::{ConnectionConfig, check_connection, clear_session};
@@ -22,6 +22,20 @@ const OPENROUTER_KEYS_URL: &str = "https://openrouter.ai/settings/keys";
 
 fn joined_status(status: &Status) -> String {
     status.lines.join("\n")
+}
+
+fn busy_text(model: &AppModel, elapsed_secs: u64) -> String {
+    if let Some(progress) = model.load_progress.as_deref() {
+        let listed = progress.listed.load(std::sync::atomic::Ordering::Relaxed);
+        if listed == 0 {
+            format!("Downloading recent messages · listing… · {elapsed_secs}s")
+        } else {
+            let loaded = progress.loaded.load(std::sync::atomic::Ordering::Relaxed);
+            format!("Downloading recent messages · {loaded} of {listed} · {elapsed_secs}s")
+        }
+    } else {
+        format!("{} · {elapsed_secs}s", model.progress)
+    }
 }
 
 /// The label shown for the `ComboBox` row that means "nothing picked yet".
@@ -198,18 +212,19 @@ fn sync(model: &AppModel, window: &AppWindow) {
     let provider = model.provider.label();
     let selected = model.selected_model();
     let busy = model.pending.is_some();
-    let busy_text = busy.then(|| {
-        let elapsed = model.started.elapsed();
-        format!("{} · {}s", model.progress, elapsed.as_secs())
-    });
+    let elapsed_secs = model.started.elapsed().as_secs();
+    let busy_text = busy.then(|| busy_text(model, elapsed_secs));
     window.set_busy(busy);
-    let review_scanning = model.scan_progress.is_some();
+    let review_scanning = model.load_progress.is_some() || model.scan_progress.is_some();
     // Spec §6: the title-bar chip shows for any running job (§3 describes
     // its Review-scan text; other jobs show their label and elapsed time).
     // The window picks the Review text when `review-scan-chip-text` is set.
     window.set_scanning(busy);
     window.set_busy_chip_text(busy_text.as_deref().unwrap_or_default().into());
-    let strip = scan_strip(model.scan_progress.as_deref(), &model.review);
+    let strip = model.load_progress.as_deref().map_or_else(
+        || scan_strip(model.scan_progress.as_deref(), &model.review),
+        |progress| load_strip(progress, elapsed_secs),
+    );
     let (strip_model, scan_chip) = crate::slint_review::scan_strip_view(&strip, model, &cards);
     window.set_review_scan_chip_text(scan_chip.into());
     window.set_account_signed_in(account.signed_in);
@@ -347,12 +362,20 @@ fn sync(model: &AppModel, window: &AppWindow) {
 pub(crate) fn sync_busy(model: &AppModel, window: &AppWindow) {
     window.set_busy(true);
     window.set_scanning(true);
-    let elapsed = model.started.elapsed();
-    let busy_text = format!("{} · {}s", model.progress, elapsed.as_secs());
+    let elapsed_secs = model.started.elapsed().as_secs();
+    let busy_text = busy_text(model, elapsed_secs);
     window.set_busy_chip_text(busy_text.clone().into());
 
-    if let Some(progress) = model.scan_progress.as_deref() {
-        let strip = scan_strip(Some(progress), &model.review);
+    let strip = model.load_progress.as_deref().map_or_else(
+        || {
+            model
+                .scan_progress
+                .as_deref()
+                .map(|progress| scan_strip(Some(progress), &model.review))
+        },
+        |progress| Some(load_strip(progress, elapsed_secs)),
+    );
+    if let Some(strip) = strip {
         // The `Scanning` arm never reads `cards` (only `Finished` does, to
         // summarise expectations), so an empty slice here never reaches
         // `ReviewState::card_contexts`. `Finished`/`Idle` strips do not
@@ -490,7 +513,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         std::mem::forget(sender);
         initial_model.pending = Some(receiver);
         initial_model.pending_service = Service::Microsoft;
-        initial_model.progress = "Complete Microsoft sign-in; then scanning recent messages";
+        initial_model.progress = "Complete Microsoft sign-in; then downloading recent messages";
         initial_model.started = std::time::Instant::now()
             .checked_sub(Duration::from_secs(82))
             .unwrap_or_else(std::time::Instant::now);
@@ -662,6 +685,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 return;
             }
             clear_session();
+            model_ref.clear_mail_cache();
             clear_microsoft_after_edit(&mut model_ref);
             drop(model_ref);
             refresh(&model, &weak);
@@ -1041,6 +1065,32 @@ mod tests {
         assert!(provider_connected(&model));
         model.model_status.succeeded = false;
         assert!(!provider_connected(&model));
+    }
+
+    #[test]
+    fn download_busy_text_shows_counts_and_listing_state() {
+        use openloops_graph::live::review::LoadProgress;
+
+        let mut model = model();
+        let progress = std::sync::Arc::new(LoadProgress::default());
+        progress
+            .loaded
+            .store(37, std::sync::atomic::Ordering::Relaxed);
+        progress
+            .listed
+            .store(180, std::sync::atomic::Ordering::Relaxed);
+        model.load_progress = Some(std::sync::Arc::clone(&progress));
+        assert_eq!(
+            busy_text(&model, 9),
+            "Downloading recent messages · 37 of 180 · 9s"
+        );
+        progress
+            .listed
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            busy_text(&model, 9),
+            "Downloading recent messages · listing… · 9s"
+        );
     }
 
     #[test]

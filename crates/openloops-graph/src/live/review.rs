@@ -4,7 +4,14 @@ use super::{
     bounded_body, classify_status, groups, inbox_url, request_error, with_session,
 };
 use serde_json::Value;
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    time::Duration,
+};
+
+/// Microsoft Graph documents a limit of four concurrent Outlook requests per mailbox.
+const OUTLOOK_REQUEST_WORKERS: usize = 4;
 
 /// Private message content; deliberately no Debug implementation.
 #[derive(Clone, Default)]
@@ -42,22 +49,90 @@ pub struct SourceReview {
     pub partial: bool,
 }
 
+/// Process-local progress and cancellation state for the mail download preceding a scan.
+#[derive(Default)]
+pub struct LoadProgress {
+    pub listed: AtomicUsize,
+    pub loaded: AtomicUsize,
+    pub sources_done: AtomicUsize,
+    pub sources_total: AtomicUsize,
+    pub cancel: AtomicBool,
+}
+
+/// Downloaded messages retained only for the current process session.
+pub type MailCache = HashMap<(String, String), MailItem>;
+
 /// Browser sign-in, then personal/shared Inbox messages and selected Group thread posts.
 /// Only invoke after the user chooses to load message content for review.
 /// # Errors
 /// Returns fixed configuration/authentication errors. Source-specific failures remain visible.
 pub fn load_recent(config: &ConnectionConfig) -> Result<Vec<SourceReview>, ConnectionError> {
+    load_recent_with(config, &MailCache::default(), &LoadProgress::default())
+}
+
+/// Browser sign-in, then a cancellable, cache-aware download of recent mail.
+///
+/// # Errors
+/// Returns fixed configuration/authentication errors, or [`ConnectionError::Cancelled`] when the
+/// caller stops the download. Source-specific failures remain visible on their source.
+pub fn load_recent_with(
+    config: &ConnectionConfig,
+    cache: &MailCache,
+    progress: &LoadProgress,
+) -> Result<Vec<SourceReview>, ConnectionError> {
     if 1 + config.group_inboxes.len() + config.shared_mailboxes.len() > 10 {
         return Err(ConnectionError::InvalidConfiguration);
     }
+    if progress.cancel.load(Ordering::Acquire) {
+        return Err(ConnectionError::Cancelled);
+    }
+    progress.listed.store(0, Ordering::Relaxed);
+    progress.loaded.store(0, Ordering::Relaxed);
+    progress.sources_done.store(0, Ordering::Relaxed);
+    progress.sources_total.store(
+        2 + config.group_inboxes.len() + config.shared_mailboxes.len() * 2,
+        Ordering::Relaxed,
+    );
     with_session(config, |http, token, scope| {
+        progress.listed.store(0, Ordering::Relaxed);
+        progress.loaded.store(0, Ordering::Relaxed);
+        progress.sources_done.store(0, Ordering::Relaxed);
+        let shared_sources = if scope == SharedScope::Missing {
+            config.shared_mailboxes.len()
+        } else {
+            config.shared_mailboxes.len() * 2
+        };
+        progress.sources_total.store(
+            2 + config.group_inboxes.len() + shared_sources,
+            Ordering::Relaxed,
+        );
+        ensure_loading(progress)?;
         let (account, addresses) = identity(http, token)?;
-        let mut sources = vec![load_mailbox(http, token, None)];
-        sources.push(load_sent(http, token, None));
+        ensure_loading(progress)?;
+        let mut sources = vec![load_mailbox(
+            http, token, None, &account, &addresses, cache, progress,
+        )?];
+        progress.sources_done.fetch_add(1, Ordering::Relaxed);
+        ensure_loading(progress)?;
+        sources.push(load_sent(
+            http, token, None, &account, &addresses, cache, progress,
+        )?);
+        progress.sources_done.fetch_add(1, Ordering::Relaxed);
         for address in &config.group_inboxes {
-            sources.push(load_group(http, token, address));
+            ensure_loading(progress)?;
+            let mut source = load_group(http, token, address);
+            stamp_group_messages(&mut source, &account, &addresses);
+            progress
+                .listed
+                .fetch_add(source.messages.len(), Ordering::Relaxed);
+            progress
+                .loaded
+                .fetch_add(source.messages.len(), Ordering::Relaxed);
+            sources.push(source);
+            progress.sources_done.fetch_add(1, Ordering::Relaxed);
         }
         for address in &config.shared_mailboxes {
+            ensure_loading(progress)?;
             if scope == SharedScope::Missing {
                 sources.push(SourceReview {
                     label: address.clone(),
@@ -66,19 +141,49 @@ pub fn load_recent(config: &ConnectionConfig) -> Result<Vec<SourceReview>, Conne
                     message_errors: vec![],
                     partial: false,
                 });
+                progress.sources_done.fetch_add(1, Ordering::Relaxed);
             } else {
-                sources.push(load_mailbox(http, token, Some(address)));
-                sources.push(load_sent(http, token, Some(address)));
+                sources.push(load_mailbox(
+                    http,
+                    token,
+                    Some(address),
+                    &account,
+                    &addresses,
+                    cache,
+                    progress,
+                )?);
+                progress.sources_done.fetch_add(1, Ordering::Relaxed);
+                ensure_loading(progress)?;
+                sources.push(load_sent(
+                    http,
+                    token,
+                    Some(address),
+                    &account,
+                    &addresses,
+                    cache,
+                    progress,
+                )?);
+                progress.sources_done.fetch_add(1, Ordering::Relaxed);
             }
         }
-        for source in &mut sources {
-            for message in &mut source.messages {
-                message.account.clone_from(&account);
-                message.own_addresses.clone_from(&addresses);
-            }
-        }
+        ensure_loading(progress)?;
         Ok(sources)
     })
+}
+
+fn ensure_loading(progress: &LoadProgress) -> Result<(), ConnectionError> {
+    if progress.cancel.load(Ordering::Acquire) {
+        Err(ConnectionError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn stamp_group_messages(source: &mut SourceReview, account: &str, addresses: &[String]) {
+    for message in &mut source.messages {
+        account.clone_into(&mut message.account);
+        message.own_addresses = addresses.to_vec();
+    }
 }
 
 pub(super) fn fetch(http: &Client, token: &str, url: &Url) -> Result<Vec<u8>, ConnectionError> {
@@ -540,12 +645,46 @@ fn fetch_event(http: &Client, token: &str, url: &Url, expected_origin: &str) -> 
     mail_event(&value)
 }
 
-fn load_mailbox(http: &Client, token: &str, address: Option<&str>) -> SourceReview {
-    load_folder(http, token, address, false)
+fn load_mailbox(
+    http: &Client,
+    token: &str,
+    address: Option<&str>,
+    account: &str,
+    own_addresses: &[String],
+    cache: &MailCache,
+    progress: &LoadProgress,
+) -> Result<SourceReview, ConnectionError> {
+    load_folder(
+        http,
+        token,
+        address,
+        false,
+        account,
+        own_addresses,
+        cache,
+        progress,
+    )
 }
 
-fn load_sent(http: &Client, token: &str, address: Option<&str>) -> SourceReview {
-    load_folder(http, token, address, true)
+fn load_sent(
+    http: &Client,
+    token: &str,
+    address: Option<&str>,
+    account: &str,
+    own_addresses: &[String],
+    cache: &MailCache,
+    progress: &LoadProgress,
+) -> Result<SourceReview, ConnectionError> {
+    load_folder(
+        http,
+        token,
+        address,
+        true,
+        account,
+        own_addresses,
+        cache,
+        progress,
+    )
 }
 
 // Walks the newest-first listing page by page, stopping as soon as a row older
@@ -638,7 +777,17 @@ fn windowed_rows(
     (collected, partial)
 }
 
-fn load_folder(http: &Client, token: &str, address: Option<&str>, sent: bool) -> SourceReview {
+#[allow(clippy::too_many_arguments)]
+fn load_folder(
+    http: &Client,
+    token: &str,
+    address: Option<&str>,
+    sent: bool,
+    account: &str,
+    own_addresses: &[String],
+    cache: &MailCache,
+    progress: &LoadProgress,
+) -> Result<SourceReview, ConnectionError> {
     let mut source = SourceReview {
         label: format!(
             "{} / {}",
@@ -659,7 +808,7 @@ fn load_folder(http: &Client, token: &str, address: Option<&str>, sent: bool) ->
         Ok(url) => url,
         Err(error) => {
             source.errors.push(error);
-            return source;
+            return Ok(source);
         }
     };
     let (collected, partial) = windowed_rows(
@@ -672,31 +821,87 @@ fn load_folder(http: &Client, token: &str, address: Option<&str>, sent: bool) ->
         &mut source.errors,
     );
     source.partial = partial;
-    add_hydrated(&mut source, collected, sent, address.is_some(), |row| {
-        hydrate(http, token, address, row)
-    });
-    source
+    add_hydrated(
+        &mut source,
+        &collected,
+        sent,
+        address.is_some(),
+        account,
+        own_addresses,
+        cache,
+        progress,
+        |row| hydrate(http, token, address, row),
+    )?;
+    Ok(source)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_hydrated(
     source: &mut SourceReview,
-    collected: Vec<Value>,
+    collected: &[Value],
     sent: bool,
     team: bool,
-    mut hydrate_row: impl FnMut(Value) -> Result<MailItem, ConnectionError>,
-) {
-    for row in collected {
-        let sent_time = if sent {
-            text(&row, "sentDateTime", 64).ok()
-        } else {
-            None
-        };
-        match hydrate_row(row) {
-            Ok(mut message) => {
-                message.sent = sent;
-                message.team = team;
-                if let Some(sent_time) = sent_time {
-                    message.received = sent_time;
+    account: &str,
+    own_addresses: &[String],
+    cache: &MailCache,
+    progress: &LoadProgress,
+    hydrate_row: impl Fn(Value) -> Result<MailItem, ConnectionError> + Sync,
+) -> Result<(), ConnectionError> {
+    progress
+        .listed
+        .fetch_add(collected.len(), Ordering::Relaxed);
+    let next = AtomicUsize::new(0);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        for _ in 0..OUTLOOK_REQUEST_WORKERS {
+            let sender = sender.clone();
+            let hydrate_row = &hydrate_row;
+            let next = &next;
+            scope.spawn(move || {
+                loop {
+                    if progress.cancel.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(row) = collected.get(index).cloned() else {
+                        break;
+                    };
+                    if progress.cancel.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let sent_time = sent.then(|| text(&row, "sentDateTime", 64).ok()).flatten();
+                    let cached = text(&row, "id", 2048).ok().and_then(|id| {
+                        cache
+                            .get(&(account.to_owned(), id))
+                            .cloned()
+                            .map(|message| (message, true))
+                    });
+                    let result =
+                        cached.map_or_else(|| hydrate_row(row).map(|message| (message, false)), Ok);
+                    if result.is_ok() {
+                        progress.loaded.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if sender.send((index, sent_time, result)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    drop(sender);
+    let mut results = receiver.into_iter().collect::<Vec<_>>();
+    results.sort_unstable_by_key(|(index, _, _)| *index);
+    for (_, sent_time, result) in results {
+        match result {
+            Ok((mut message, cached)) => {
+                if !cached {
+                    account.clone_into(&mut message.account);
+                    message.own_addresses = own_addresses.to_vec();
+                    message.sent = sent;
+                    message.team = team;
+                    if let Some(sent_time) = sent_time {
+                        message.received = sent_time;
+                    }
                 }
                 if message.id.is_empty() || message.conversation.is_empty() {
                     source.errors.push(ConnectionError::ResourceUnavailable);
@@ -707,6 +912,7 @@ fn add_hydrated(
             Err(error) => source.message_errors.push(error),
         }
     }
+    ensure_loading(progress)
 }
 
 fn group_url(id: &str, thread: Option<&str>) -> Result<Url, ConnectionError> {
@@ -1045,6 +1251,60 @@ mod tests {
         (format!("http://127.0.0.1:{port}/"), calls, handle)
     }
 
+    fn concurrent_server(
+        requests: usize,
+        delay: Duration,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{Read, Write};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let server_calls = Arc::clone(&calls);
+        let server_max = Arc::clone(&max_in_flight);
+        let handle = std::thread::spawn(move || {
+            let in_flight = Arc::new(AtomicUsize::new(0));
+            let mut handlers = Vec::with_capacity(requests);
+            for _ in 0..requests {
+                let (mut stream, _) = listener.accept().unwrap();
+                let in_flight = Arc::clone(&in_flight);
+                let calls = Arc::clone(&server_calls);
+                let max_in_flight = Arc::clone(&server_max);
+                handlers.push(std::thread::spawn(move || {
+                    let mut buffer = [0u8; 4096];
+                    let _ = stream.read(&mut buffer);
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_in_flight.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(delay);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                    );
+                    let _ = stream.flush();
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                }));
+            }
+            for handler in handlers {
+                handler.join().unwrap();
+            }
+        });
+        (
+            format!("http://127.0.0.1:{port}/"),
+            calls,
+            max_in_flight,
+            handle,
+        )
+    }
+
     #[test]
     fn timeout_has_distinct_wording_after_one_retry() {
         let response =
@@ -1147,20 +1407,301 @@ mod tests {
             serde_json::json!({"id":"failed"}),
             serde_json::json!({"id":"loaded"}),
         ];
-        add_hydrated(&mut source, rows, false, false, |row| {
-            if row["id"] == "failed" {
-                Err(ConnectionError::Timeout(GRAPH_TIMEOUT_SECONDS))
-            } else {
-                Ok(MailItem {
-                    id: "loaded".into(),
-                    conversation: "synthetic-conversation".into(),
-                    ..MailItem::default()
-                })
-            }
-        });
+        add_hydrated(
+            &mut source,
+            &rows,
+            false,
+            false,
+            "synthetic-account",
+            &[],
+            &MailCache::default(),
+            &LoadProgress::default(),
+            |row| {
+                if row["id"] == "failed" {
+                    Err(ConnectionError::Timeout(GRAPH_TIMEOUT_SECONDS))
+                } else {
+                    Ok(MailItem {
+                        id: "loaded".into(),
+                        conversation: "synthetic-conversation".into(),
+                        ..MailItem::default()
+                    })
+                }
+            },
+        )
+        .unwrap();
         assert_eq!(source.messages.len(), 1);
         assert_eq!(source.message_errors, [ConnectionError::Timeout(90)]);
         assert!(source.errors.is_empty());
+    }
+
+    fn synthetic_rows(count: usize) -> Vec<Value> {
+        (0..count)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("synthetic-message-{index}"),
+                    "conversationId": format!("synthetic-conversation-{index}"),
+                    "receivedDateTime": "2026-09-01T12:00:00Z"
+                })
+            })
+            .collect()
+    }
+
+    fn hydrated_row(row: &Value) -> MailItem {
+        MailItem {
+            id: row["id"].as_str().unwrap().into(),
+            conversation: row["conversationId"].as_str().unwrap().into(),
+            received: row["receivedDateTime"].as_str().unwrap().into(),
+            ..MailItem::default()
+        }
+    }
+
+    #[test]
+    fn concurrent_hydration_preserves_listing_order() {
+        let rows = synthetic_rows(8);
+        let mut source = SourceReview {
+            label: "Personal mailbox / Inbox".into(),
+            messages: vec![],
+            errors: vec![],
+            message_errors: vec![],
+            partial: false,
+        };
+        let progress = LoadProgress::default();
+        add_hydrated(
+            &mut source,
+            &rows,
+            false,
+            false,
+            "synthetic-account",
+            &["user@example.invalid".into()],
+            &MailCache::default(),
+            &progress,
+            |row| {
+                let index = row["id"]
+                    .as_str()
+                    .unwrap()
+                    .rsplit('-')
+                    .next()
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap();
+                std::thread::sleep(Duration::from_millis((8 - index) * 5));
+                Ok(hydrated_row(&row))
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            source
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            (0..8)
+                .map(|index| format!("synthetic-message-{index}"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn load_progress_reaches_the_discovered_row_count() {
+        let rows = synthetic_rows(5);
+        let mut source = SourceReview {
+            label: "Personal mailbox / Inbox".into(),
+            messages: vec![],
+            errors: vec![],
+            message_errors: vec![],
+            partial: false,
+        };
+        let progress = LoadProgress::default();
+        add_hydrated(
+            &mut source,
+            &rows,
+            false,
+            false,
+            "synthetic-account",
+            &[],
+            &MailCache::default(),
+            &progress,
+            |row| Ok(hydrated_row(&row)),
+        )
+        .unwrap();
+        assert_eq!(progress.listed.load(Ordering::Relaxed), 5);
+        assert_eq!(progress.loaded.load(Ordering::Relaxed), 5);
+    }
+
+    #[test]
+    fn load_recent_with_an_existing_cancel_returns_cancelled_without_sign_in() {
+        let config = ConnectionConfig::new("11111111-1111-1111-1111-111111111111", None).unwrap();
+        let progress = LoadProgress::default();
+        progress.cancel.store(true, Ordering::Relaxed);
+        assert!(matches!(
+            load_recent_with(&config, &MailCache::default(), &progress),
+            Err(ConnectionError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn concurrent_hydration_uses_at_most_four_requests() {
+        let rows = synthetic_rows(8);
+        let mut source = SourceReview {
+            label: "Personal mailbox / Inbox".into(),
+            messages: vec![],
+            errors: vec![],
+            message_errors: vec![],
+            partial: false,
+        };
+        let progress = LoadProgress::default();
+        let (origin, calls, max_in_flight, server) =
+            concurrent_server(8, Duration::from_millis(100));
+        let http = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+        add_hydrated(
+            &mut source,
+            &rows,
+            false,
+            false,
+            "synthetic-account",
+            &[],
+            &MailCache::default(),
+            &progress,
+            |row| {
+                let url = Url::parse(&format!("{origin}messages/{}", row["id"].as_str().unwrap()))
+                    .unwrap();
+                fetch_from_origin(&http, "synthetic-token", &url, &origin)?;
+                Ok(hydrated_row(&row))
+            },
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 8);
+        let maximum = max_in_flight.load(Ordering::SeqCst);
+        assert!(
+            maximum > 1,
+            "expected concurrent requests, observed {maximum}"
+        );
+        assert!(maximum <= 4, "observed {maximum} requests in flight");
+    }
+
+    #[test]
+    fn cached_hydration_makes_no_request_and_returns_the_item_unchanged() {
+        let rows = synthetic_rows(1);
+        let cached = MailItem {
+            subject: "Cached subject".into(),
+            body: "Cached synthetic body".into(),
+            body_is_html: true,
+            sender: "Synthetic Sender <sender@example.invalid>".into(),
+            received: "2026-08-31T18:00:00Z".into(),
+            id: "synthetic-message-0".into(),
+            conversation: "cached-conversation".into(),
+            account: "synthetic-account".into(),
+            own_addresses: vec!["cached@example.invalid".into()],
+            sender_address: "sender@example.invalid".into(),
+            to: vec!["recipient@example.invalid".into()],
+            cc: vec!["observer@example.invalid".into()],
+            sent: true,
+            team: true,
+            web_link: "https://outlook.office.com/mail/synthetic".into(),
+            event: Some(MailEvent {
+                start: "2026-09-01T18:00:00Z".into(),
+                end: "2026-09-01T19:00:00Z".into(),
+                out_of_date: false,
+            }),
+        };
+        let mut cache = MailCache::default();
+        cache.insert(
+            ("synthetic-account".into(), "synthetic-message-0".into()),
+            cached.clone(),
+        );
+        let (origin, calls, _, server) = concurrent_server(0, Duration::ZERO);
+        let http = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+        let mut source = SourceReview {
+            label: "Personal mailbox / Inbox".into(),
+            messages: vec![],
+            errors: vec![],
+            message_errors: vec![],
+            partial: false,
+        };
+        let progress = LoadProgress::default();
+        add_hydrated(
+            &mut source,
+            &rows,
+            false,
+            false,
+            "synthetic-account",
+            &[],
+            &cache,
+            &progress,
+            |row| {
+                let url = Url::parse(&format!("{origin}messages/{}", row["id"].as_str().unwrap()))
+                    .unwrap();
+                fetch_from_origin(&http, "synthetic-token", &url, &origin)?;
+                Ok(hydrated_row(&row))
+            },
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let returned = &source.messages[0];
+        assert_eq!(returned.subject, cached.subject);
+        assert_eq!(returned.body, cached.body);
+        assert_eq!(returned.body_is_html, cached.body_is_html);
+        assert_eq!(returned.sender, cached.sender);
+        assert_eq!(returned.received, cached.received);
+        assert_eq!(returned.id, cached.id);
+        assert_eq!(returned.conversation, cached.conversation);
+        assert_eq!(returned.account, cached.account);
+        assert_eq!(returned.own_addresses, cached.own_addresses);
+        assert_eq!(returned.sender_address, cached.sender_address);
+        assert_eq!(returned.to, cached.to);
+        assert_eq!(returned.cc, cached.cc);
+        assert_eq!(returned.sent, cached.sent);
+        assert_eq!(returned.team, cached.team);
+        assert_eq!(returned.web_link, cached.web_link);
+        let returned_event = returned.event.as_ref().unwrap();
+        let cached_event = cached.event.as_ref().unwrap();
+        assert_eq!(returned_event.start, cached_event.start);
+        assert_eq!(returned_event.end, cached_event.end);
+        assert_eq!(returned_event.out_of_date, cached_event.out_of_date);
+        assert_eq!(progress.loaded.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn cancelling_hydration_stops_dispatch_after_in_flight_rows() {
+        use std::sync::atomic::AtomicUsize;
+
+        let rows = synthetic_rows(20);
+        let mut source = SourceReview {
+            label: "Personal mailbox / Inbox".into(),
+            messages: vec![],
+            errors: vec![],
+            message_errors: vec![],
+            partial: false,
+        };
+        let progress = LoadProgress::default();
+        let requests = AtomicUsize::new(0);
+        let result = add_hydrated(
+            &mut source,
+            &rows,
+            false,
+            false,
+            "synthetic-account",
+            &[],
+            &MailCache::default(),
+            &progress,
+            |row| {
+                requests.fetch_add(1, Ordering::SeqCst);
+                progress.cancel.store(true, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(25));
+                Ok(hydrated_row(&row))
+            },
+        );
+        assert_eq!(result, Err(ConnectionError::Cancelled));
+        let request_count = requests.load(Ordering::SeqCst);
+        assert!((1..=4).contains(&request_count));
     }
 
     /// The status classification a 400 actually produces, not just that

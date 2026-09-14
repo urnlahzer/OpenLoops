@@ -17,7 +17,10 @@ use crate::{
         sync_value_cached,
     },
 };
-use openloops_graph::live::{ConnectionConfig, review::load_recent};
+use openloops_graph::live::{
+    ConnectionConfig,
+    review::{LoadProgress, load_recent_with},
+};
 use openloops_inference::{
     blocks::CanonicalBlock,
     expectations::{Anchor, EventPassed, Expectation, Owner},
@@ -750,7 +753,12 @@ pub(crate) fn scan_strip_view(
             percent,
             stopping,
         } => {
-            let conversation = format!("Conversation {conversation_index} of {conversation_total}");
+            let downloading = *phase == "Downloading recent messages";
+            let conversation = if downloading {
+                format!("Source {conversation_index} of {conversation_total}")
+            } else {
+                format!("Conversation {conversation_index} of {conversation_total}")
+            };
             let messages = format!("{processed} / {total} messages");
             (
                 ScanStripModel {
@@ -760,7 +768,9 @@ pub(crate) fn scan_strip_view(
                     messages: messages.clone().into(),
                     elapsed: format!("{elapsed_secs}s on this request").into(),
                     provider: model.provider_disclosure().into(),
-                    summary: if *stopping {
+                    summary: if *stopping && downloading {
+                        "Stopping after in-flight downloads finish."
+                    } else if *stopping {
                         "Stopping; the current request is dropped within a second."
                     } else {
                         ""
@@ -773,7 +783,17 @@ pub(crate) fn scan_strip_view(
                     progress: f32::from(*percent) / 100.0,
                     incomplete: false,
                 },
-                format!("Scanning · {conversation} · {messages}"),
+                if downloading {
+                    if *total == 0 {
+                        format!("Downloading recent messages · listing… · {elapsed_secs}s")
+                    } else {
+                        format!(
+                            "Downloading recent messages · {processed} of {total} · {elapsed_secs}s"
+                        )
+                    }
+                } else {
+                    format!("Scanning · {conversation} · {messages}")
+                },
             )
         }
         ScanStrip::Finished {
@@ -1236,14 +1256,17 @@ pub(crate) fn register_callbacks(
                     model_ref.review = ReviewState::default();
                     model_ref.review.decisions = decisions;
                     model_ref.review_status = Status::default();
+                    let progress = std::sync::Arc::new(LoadProgress::default());
+                    let cache = std::sync::Arc::clone(&model_ref.mail_cache);
+                    model_ref.load_progress = Some(std::sync::Arc::clone(&progress));
                     model_ref.start(
                         Service::Review,
                         if openloops_graph::live::has_session() {
-                            "Scanning recent messages"
+                            "Downloading recent messages"
                         } else {
-                            "Complete Microsoft sign-in; then scanning recent messages"
+                            "Complete Microsoft sign-in; then downloading recent messages"
                         },
-                        move || Outcome::Mail(load_recent(&config)),
+                        move || Outcome::Mail(load_recent_with(&config, &cache, &progress)),
                         || {},
                     );
                     REVIEW_UI.with(|state| state.borrow_mut().selected = None);
@@ -1264,10 +1287,13 @@ pub(crate) fn register_callbacks(
         let weak = window.as_weak();
         window.on_stop_scan(move || {
             let model_ref = model.borrow();
-            if model_ref.pending_service == Service::Review
-                && let Some(progress) = &model_ref.scan_progress
-            {
-                progress.cancel.store(true, Ordering::Relaxed);
+            if model_ref.pending_service == Service::Review {
+                if let Some(progress) = &model_ref.load_progress {
+                    progress.cancel.store(true, Ordering::Release);
+                }
+                if let Some(progress) = &model_ref.scan_progress {
+                    progress.cancel.store(true, Ordering::Relaxed);
+                }
             }
             drop(model_ref);
             refresh(&model, &weak);
@@ -1295,6 +1321,7 @@ pub(crate) fn register_callbacks(
             }
             model_ref.pending = None;
             model_ref.scan_progress = None;
+            model_ref.clear_mail_cache();
             let decisions = std::mem::take(&mut model_ref.review.decisions);
             model_ref.review = ReviewState::default();
             model_ref.review.decisions = decisions;
@@ -1940,6 +1967,53 @@ mod tests {
                 .starts_with("Scanning")
         );
         assert_eq!(window.get_scan_strip().state.as_str(), "scanning");
+
+        let download = std::sync::Arc::new(openloops_graph::live::review::LoadProgress::default());
+        download
+            .loaded
+            .store(37, std::sync::atomic::Ordering::Relaxed);
+        download
+            .listed
+            .store(180, std::sync::atomic::Ordering::Relaxed);
+        download
+            .sources_done
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        download
+            .sources_total
+            .store(4, std::sync::atomic::Ordering::Relaxed);
+        busy_model.scan_progress = None;
+        busy_model.load_progress = Some(std::sync::Arc::clone(&download));
+        busy_model.progress = "Downloading recent messages";
+        crate::slint_ui::sync_busy(&busy_model, &window);
+        assert!(
+            window
+                .get_busy_chip_text()
+                .as_str()
+                .starts_with("Downloading recent messages · 37 of 180 · ")
+        );
+        let strip = window.get_scan_strip();
+        assert_eq!(strip.state.as_str(), "scanning");
+        assert_eq!(strip.title.as_str(), "Downloading recent messages");
+        assert_eq!(strip.messages.as_str(), "37 / 180 messages");
+        assert_eq!(strip.conversation.as_str(), "Source 2 of 4");
+
+        let callback_model = Rc::new(RefCell::new(AppModel::with_store(Ok(None))));
+        let cancel = std::sync::Arc::new(openloops_graph::live::review::LoadProgress::default());
+        {
+            let mut model = callback_model.borrow_mut();
+            model.load_progress = Some(std::sync::Arc::clone(&cancel));
+            model.mail_cache = std::sync::Arc::new(std::collections::HashMap::from([(
+                ("synthetic-account".into(), "synthetic-message".into()),
+                openloops_graph::live::review::MailItem::default(),
+            )]));
+        }
+        let timer = Rc::new(Timer::default());
+        register_callbacks(&window, &callback_model, &timer);
+        window.invoke_clear_results();
+        let model = callback_model.borrow();
+        assert!(cancel.cancel.load(Ordering::Relaxed));
+        assert!(model.load_progress.is_none());
+        assert!(model.mail_cache.is_empty());
     }
 
     #[test]

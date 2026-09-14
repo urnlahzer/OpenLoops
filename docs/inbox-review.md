@@ -105,9 +105,14 @@ in the normal application.
 ## Coverage and interpretation
 
 Personal/shared Inbox and Sent Items each load up to 100 messages from the last
-30 days: message headers are listed newest-first in pages of 100 and each body
-is fetched separately, so one oversized message cannot fail the folder. Quoted
-Outlook reply history inside a message is treated as context, not current text.
+30 days: message headers are listed newest-first in pages of 100, then bodies
+are fetched four at a time per folder and placed back in listing order, so one
+oversized message cannot fail the folder. The download shows a running message
+count and can be stopped before the model scan begins. Bodies already downloaded
+in this session are reused without another Graph read until Clear results,
+Forget, or a client-ID change clears them, or until the app exits. This cache is
+in memory only. Quoted Outlook reply history inside a message is treated as
+context, not current text.
 Groups load up to 20 recent threads, each with up to 40
 posts; threads active within 30 days can include earlier posts as context.
 There are at most 10 configured sources. Pagination is confined to the same
