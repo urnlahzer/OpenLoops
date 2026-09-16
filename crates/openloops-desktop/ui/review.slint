@@ -17,7 +17,7 @@ export struct ReviewRow {
 }
 
 export struct MetaCell { label: string, value: string }
-export struct ReviewPill { text: string, kind: string }
+export struct ReviewPill { text: string, kind: string, hint: string }
 export struct EvidenceCard { label: string, sender: string, time: string, quote: string, context: string, subject-note: string, url: string }
 export struct CompletionCard { state: string, label: string, sender: string, time: string, quote: string, cross-thread: bool, url: string }
 export struct ConversationRow { initials: string, sender: string, meta: string, body: string, sent: bool, quoted-history: string }
@@ -310,7 +310,7 @@ export component ReviewScreen {
                                 // Same colour rule as the selected-card copy below.
                                 if !root.has-selection && !root.action-status.is-empty: WrappedText { text: root.action-status; text-color: root.action-status-succeeded ? Tokens.success : Tokens.warning; size: Tokens.font-13; }
                                 if root.has-selection: VerticalLayout { width: 100%; spacing: Tokens.review-section-gap; alignment: start;
-                                    HorizontalLayout { width: 100%; spacing: Tokens.space-2; alignment: start; for pill in root.pills: Pill { text: pill.text; kind: pill.kind; } }
+                                    HorizontalLayout { width: 100%; spacing: Tokens.space-2; alignment: start; for pill in root.pills: Pill { text: pill.text; kind: pill.kind; hint: pill.hint; } }
                                     WrappedText { text: root.title; text-color: Tokens.text-1; size: Tokens.font-22; weight: 600; }
                                     meta-card := Rectangle { background: Tokens.bg-bar; border-radius: Tokens.radius-6;
                                         // X9: column count follows the reading column's own width

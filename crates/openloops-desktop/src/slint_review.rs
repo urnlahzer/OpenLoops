@@ -23,7 +23,7 @@ use openloops_graph::live::{
 };
 use openloops_inference::{
     blocks::CanonicalBlock,
-    expectations::{Anchor, EventPassed, Expectation, Owner},
+    expectations::{Anchor, EventPassed, Expectation, Owner, ResolutionKind},
 };
 use slint::{ComponentHandle, Timer};
 
@@ -456,6 +456,10 @@ struct ReviewRowView {
 struct PillView {
     text: String,
     kind: &'static str,
+    /// Explains how the card reached this status, shown on hover. Empty when
+    /// the pill's own text already says everything relevant. See
+    /// `status_pill_hint`.
+    hint: String,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -503,6 +507,52 @@ fn owner_label(item: &Expectation, decision: Decision) -> &'static str {
     }
 }
 
+/// Explains, on hover, how a terminal card actually reached its status --
+/// specifically because `status_base_label`'s own doc comment establishes
+/// that a decision override (`Done`/`Dismissed`/`Moot`) always wins the pill
+/// *text* even when the model separately found closing evidence for the
+/// same item, so "Handled" alone cannot say whether the user clicked the
+/// button or a later reply/event already resolved it -- both can be true at
+/// once. Empty for every other decision: `Mine`/`Watching` are already
+/// self-explanatory action names, and a `Review`-state resolution/
+/// event-passed label already names its own cause and points at the
+/// Completion/Event evidence sections below.
+fn status_pill_hint(decision: Decision, item: &Expectation) -> String {
+    match decision {
+        Decision::Done if item.resolution.is_some() => {
+            let cause = match item.resolution_kind {
+                None => "closing evidence".to_owned(),
+                Some(ResolutionKind::Completed) => "evidence it was completed".to_owned(),
+                Some(ResolutionKind::Declined) => "evidence it was declined".to_owned(),
+                Some(ResolutionKind::Withdrawn) => {
+                    "evidence the requester withdrew it".to_owned()
+                }
+                Some(ResolutionKind::Superseded) => {
+                    "evidence the requester replaced it".to_owned()
+                }
+                Some(ResolutionKind::Agreed) => "evidence you agreed to it".to_owned(),
+            };
+            let where_found = if item.cross_thread {
+                "in another conversation"
+            } else {
+                "in a later reply"
+            };
+            format!(
+                "You marked this handled. The model had also found {cause} {where_found}; see Completion evidence below."
+            )
+        }
+        Decision::Done if item.event_passed.is_some() => {
+            "You marked this handled. The named event had also passed.".into()
+        }
+        Decision::Done => {
+            "You marked this handled; no closing evidence was found automatically.".into()
+        }
+        Decision::Dismissed => "You marked this \u{201c}not mine\u{201d}.".into(),
+        Decision::Moot => "You marked this \u{201c}no longer relevant\u{201d}.".into(),
+        Decision::Mine | Decision::Watching | Decision::Review => String::new(),
+    }
+}
+
 fn status_pill(item: &Expectation, card: &CardContext) -> PillView {
     let (text, kind): (String, &'static str) = match card.record.decision {
         Decision::Done => ("Handled".into(), "neutral"),
@@ -528,7 +578,8 @@ fn status_pill(item: &Expectation, card: &CardContext) -> PillView {
         }
         Decision::Review => ("Needs your review".into(), "brand"),
     };
-    PillView { text, kind }
+    let hint = status_pill_hint(card.record.decision, item);
+    PillView { text, kind, hint }
 }
 
 fn pills_for(item: &Expectation, card: &CardContext) -> Vec<PillView> {
@@ -541,6 +592,7 @@ fn pills_for(item: &Expectation, card: &CardContext) -> Vec<PillView> {
             } else {
                 "brand"
             },
+            hint: String::new(),
         });
     }
     match &card.record.reminder {
@@ -548,10 +600,12 @@ fn pills_for(item: &Expectation, card: &CardContext) -> Vec<PillView> {
         Reminder::Created { .. } => pills.push(PillView {
             text: "To Do reminder set".into(),
             kind: "brand",
+            hint: String::new(),
         }),
         Reminder::Attempted => pills.push(PillView {
             text: "Reminder unconfirmed".into(),
             kind: "warning",
+            hint: String::new(),
         }),
     }
     pills
@@ -1041,6 +1095,7 @@ fn sync_review_inner(
             .map(|pill| ReviewPill {
                 text: pill.text.into(),
                 kind: pill.kind.into(),
+                hint: pill.hint.into(),
             })
             .collect::<Vec<_>>();
         sync_list_cached(&mut review_ui.cache.pills, pills, |m| {
@@ -2088,6 +2143,51 @@ mod tests {
     }
 
     #[test]
+    fn status_pill_hint_explains_terminal_decisions_but_not_others() {
+        let review = crate::review_model::layout_fixture();
+        let mut item = review.analysis.as_ref().unwrap().items[0].clone();
+        // The fixture item starts with resolution: Some(..), resolution_kind:
+        // Some(Completed), cross_thread: true (see layout_fixture's card 1).
+        assert_eq!(
+            status_pill_hint(Decision::Done, &item),
+            "You marked this handled. The model had also found evidence it was completed in another conversation; see Completion evidence below."
+        );
+        item.cross_thread = false;
+        assert_eq!(
+            status_pill_hint(Decision::Done, &item),
+            "You marked this handled. The model had also found evidence it was completed in a later reply; see Completion evidence below."
+        );
+        item.resolution = None;
+        item.resolution_kind = None;
+        item.event_passed = Some(EventPassed {
+            name: "planning meeting".into(),
+            end: 1,
+            message_handle: "m0".into(),
+            from_subject: true,
+        });
+        assert_eq!(
+            status_pill_hint(Decision::Done, &item),
+            "You marked this handled. The named event had also passed."
+        );
+        item.event_passed = None;
+        assert_eq!(
+            status_pill_hint(Decision::Done, &item),
+            "You marked this handled; no closing evidence was found automatically."
+        );
+        assert_eq!(
+            status_pill_hint(Decision::Dismissed, &item),
+            "You marked this \u{201c}not mine\u{201d}."
+        );
+        assert_eq!(
+            status_pill_hint(Decision::Moot, &item),
+            "You marked this \u{201c}no longer relevant\u{201d}."
+        );
+        for decision in [Decision::Mine, Decision::Watching, Decision::Review] {
+            assert_eq!(status_pill_hint(decision, &item), "");
+        }
+    }
+
+    #[test]
     fn status_pills_cover_resolution_and_terminal_decisions() {
         let review = crate::review_model::layout_fixture();
         let mut item = review.analysis.as_ref().unwrap().items[0].clone();
@@ -2130,7 +2230,8 @@ mod tests {
             status_pill(&item, &resolved),
             PillView {
                 text: "Resolved — later reply found".into(),
-                kind: "success"
+                kind: "success",
+                hint: String::new(),
             }
         );
     }
@@ -2163,6 +2264,7 @@ mod tests {
             PillView {
                 text: crate::review_model::status_base_label(Decision::Review, &item),
                 kind: "neutral",
+                hint: String::new(),
             }
         );
         assert!(

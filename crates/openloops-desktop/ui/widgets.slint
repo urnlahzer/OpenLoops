@@ -341,11 +341,17 @@ export component Segmented {
 export component Pill inherits Rectangle {
     in property <string> text;
     in property <string> kind: "neutral";
+    // Explains the pill in a hover tooltip, e.g. how a "Handled" status was
+    // actually reached (clicked directly vs. the model finding closing
+    // evidence too -- both can be true at once, and the pill text alone
+    // can't say which). Empty means no tooltip: most pills already say
+    // everything relevant in their own text.
+    in property <string> hint: "";
     in property <string> accessible-name: text;
     private property <color> ink: kind == "success" ? Tokens.success : kind == "warning" ? Tokens.warning : kind == "danger" ? Tokens.danger : kind == "watch" ? Tokens.watch : kind == "brand" ? Tokens.brand : Tokens.text-2;
     private property <color> fill: kind == "success" ? Tokens.success-bg : kind == "warning" ? Tokens.warning-bg : kind == "danger" ? Tokens.danger-bg : kind == "watch" ? Tokens.watch-bg : kind == "brand" ? Tokens.brand-subtle : Tokens.bg-bar;
     accessible-role: AccessibleRole.text;
-    accessible-label: accessible-name;
+    accessible-label: root.hint.is-empty ? accessible-name : accessible-name + ". " + root.hint;
     preferred-width: pill-label.preferred-width + 2 * Tokens.space-2;
     height: pill-label.preferred-height + 2 * Tokens.space-1;
     min-width: self.preferred-width;
@@ -360,6 +366,49 @@ export component Pill inherits Rectangle {
         color: root.ink;
         font-size: Tokens.font-13;
         font-weight: 600;
+    }
+    if !root.hint.is-empty: TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: default;
+        changed has-hover => {
+            if self.has-hover {
+                hover-delay.running = true;
+            } else {
+                hover-delay.running = false;
+                tooltip.close();
+            }
+        }
+    }
+    hover-delay := Timer {
+        interval: 450ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            tooltip.show();
+        }
+    }
+    tooltip := PopupWindow {
+        close-policy: PopupClosePolicy.no-auto-close;
+        x: 0px;
+        y: root.height + Tokens.space-1;
+        Rectangle {
+            width: 260px;
+            height: inner.preferred-height;
+            background: Tokens.text-1;
+            border-radius: Tokens.radius-4;
+            inner := VerticalLayout {
+                padding-left: Tokens.space-2;
+                padding-right: Tokens.space-2;
+                padding-top: Tokens.space-2;
+                padding-bottom: Tokens.space-2;
+                WrappedText {
+                    text: root.hint;
+                    text-color: white;
+                    size: Tokens.font-13;
+                }
+            }
+        }
     }
 }
 
