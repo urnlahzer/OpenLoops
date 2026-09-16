@@ -53,7 +53,14 @@ fn task_body(request: &ReminderRequest) -> Result<Vec<u8>, ConnectionError> {
         .ok_or(ConnectionError::InvalidConfiguration)?
         .format("%Y-%m-%dT%H:%M:%S")
         .to_string();
-    serde_json::to_vec(&json!({"title":request.title,"body":{"contentType":"text","content":format!("Created after review in OpenLoops.\nOpenLoops reference: {}",request.marker)},"isReminderOn":true,"reminderDateTime":{"dateTime":when,"timeZone":"UTC"}})).map_err(|_|ConnectionError::InvalidConfiguration)
+    // dueDateTime and reminderDateTime are independent concepts in Microsoft
+    // To Do -- a due date with no reminder, or vice versa, is a normal task
+    // shape. This app only ever collects one date/time from the user (the
+    // reminder draft's own "when"), so there is nothing else to derive a due
+    // date from; using that same instant for both means the task at least
+    // shows up as due on the day it was set to alert, rather than carrying
+    // no due date at all.
+    serde_json::to_vec(&json!({"title":request.title,"body":{"contentType":"text","content":format!("Created after review in OpenLoops.\nOpenLoops reference: {}",request.marker)},"isReminderOn":true,"reminderDateTime":{"dateTime":when,"timeZone":"UTC"},"dueDateTime":{"dateTime":when,"timeZone":"UTC"}})).map_err(|_|ConnectionError::InvalidConfiguration)
 }
 
 /// Creates exactly one reviewed task, with an independently authorized session.
@@ -197,7 +204,7 @@ mod tests {
         let value: Value = serde_json::from_slice(&task_body(&request).unwrap()).unwrap();
         assert_eq!(value["title"], "Send the draft");
         assert_eq!(value["isReminderOn"], true);
-        assert!(value.get("dueDateTime").is_none());
+        assert_eq!(value["dueDateTime"], value["reminderDateTime"]);
         let mut bad = request;
         bad.at_utc = 1;
         assert!(task_body(&bad).is_err());
