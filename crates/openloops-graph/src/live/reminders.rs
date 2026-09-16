@@ -190,6 +190,66 @@ pub fn complete(
     }
 }
 
+/// Whether a previously created task's `status` currently reads as
+/// completed. Read-only: never writes anything back to Graph. A task
+/// deleted since creation (404), or any other failure, is `Unknown` rather
+/// than `NotCompleted` -- the caller must not treat "couldn't check" the
+/// same as "confirmed still open".
+pub enum TaskStatusOutcome {
+    Completed,
+    NotCompleted,
+    Unknown(ConnectionError),
+}
+
+#[must_use]
+pub fn check_status(
+    config: &ConnectionConfig,
+    account: &str,
+    list_id: &str,
+    task_id: &str,
+) -> TaskStatusOutcome {
+    if !valid_graph_id(list_id) || !valid_graph_id(task_id) {
+        return TaskStatusOutcome::Unknown(ConnectionError::InvalidConfiguration);
+    }
+    let result = with_scopes(config, true, |http, token, _| {
+        let (signed_in, _) = review::identity(http, token)?;
+        if signed_in != account {
+            return Err(ConnectionError::InvalidConfiguration);
+        }
+        let mut url = Url::parse("https://graph.microsoft.com/v1.0/me/todo/lists/")
+            .map_err(|_| ConnectionError::InvalidConfiguration)?;
+        url.path_segments_mut()
+            .map_err(|()| ConnectionError::InvalidConfiguration)?
+            .pop_if_empty()
+            .push(list_id)
+            .push("tasks")
+            .push(task_id);
+        // No $select: the lists lookup's own HTTP 400 traced to $select
+        // combined with $top on that collection endpoint; a single-resource
+        // GET is a different, more standard shape, but there's no need to
+        // take the same risk twice for one small field on one object.
+        let response = http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .map_err(|error| request_error(&error, GRAPH_TIMEOUT_SECONDS))?;
+        match response.status().as_u16() {
+            200 => {
+                let value: Value = serde_json::from_slice(&bounded_body(response)?)
+                    .map_err(|_| ConnectionError::ResourceUnavailable)?;
+                Ok(value["status"] == "completed")
+            }
+            404 => Err(ConnectionError::NotFound),
+            _ => Err(ConnectionError::ResourceUnavailable),
+        }
+    });
+    match result {
+        Ok(true) => TaskStatusOutcome::Completed,
+        Ok(false) => TaskStatusOutcome::NotCompleted,
+        Err(e) => TaskStatusOutcome::Unknown(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,6 +288,18 @@ mod tests {
         assert!(matches!(
             complete(&config, "acct", "list", ".."),
             ReminderCompletionOutcome::NotCompleted(ConnectionError::InvalidConfiguration)
+        ));
+    }
+    #[test]
+    fn check_status_rejects_invalid_ids_before_any_request() {
+        let config = ConnectionConfig::new("11111111-1111-1111-1111-111111111111", None).unwrap();
+        assert!(matches!(
+            check_status(&config, "acct", "", "task"),
+            TaskStatusOutcome::Unknown(ConnectionError::InvalidConfiguration)
+        ));
+        assert!(matches!(
+            check_status(&config, "acct", "list", ".."),
+            TaskStatusOutcome::Unknown(ConnectionError::InvalidConfiguration)
         ));
     }
 }

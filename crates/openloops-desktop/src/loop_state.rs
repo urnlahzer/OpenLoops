@@ -58,6 +58,15 @@ pub enum Reminder {
     /// Each id is bounded to `MAX_REMINDER_ID_LEN` bytes for storage; see
     /// that constant for why.
     Created { list_id: String, task_id: String },
+    /// Set only by the reminder-sync check (`reminders::check_status`)
+    /// finding the linked task already completed in Microsoft To Do --
+    /// never by the user clicking Handled, which leaves `reminder` as
+    /// `Created` even after `reminders::complete()` succeeds. This is the
+    /// one thing that distinguishes "the user marked this handled" from
+    /// "completing the task externally marked this handled" for
+    /// `status_pill_hint`, since the decision alone (`Done` either way)
+    /// can't say which.
+    Completed { list_id: String, task_id: String },
 }
 #[derive(Clone)]
 pub struct Record {
@@ -389,11 +398,15 @@ fn encode(secret: &[u8; 32], records: &[Record]) -> Result<Zeroizing<Vec<u8>>, (
             Reminder::None => 0,
             Reminder::Attempted => 1,
             Reminder::Created { .. } => 2,
+            Reminder::Completed { .. } => 3,
         });
         bytes.extend_from_slice(&r.updated.to_le_bytes());
-        if let Reminder::Created { list_id, task_id } = &r.reminder {
-            push_id(&mut bytes, list_id)?;
-            push_id(&mut bytes, task_id)?;
+        match &r.reminder {
+            Reminder::Created { list_id, task_id } | Reminder::Completed { list_id, task_id } => {
+                push_id(&mut bytes, list_id)?;
+                push_id(&mut bytes, task_id)?;
+            }
+            Reminder::None | Reminder::Attempted => {}
         }
     }
     if bytes.len() > 2560 {
@@ -431,11 +444,15 @@ fn decode(bytes: &[u8]) -> Result<([u8; 32], Vec<Record>), ()> {
         let reminder = match reminder_tag {
             0 => Reminder::None,
             1 => Reminder::Attempted,
-            2 => {
+            2 | 3 => {
                 let (list_id, remaining) = read_id(rest)?;
                 let (task_id, remaining) = read_id(remaining)?;
                 rest = remaining;
-                Reminder::Created { list_id, task_id }
+                if reminder_tag == 2 {
+                    Reminder::Created { list_id, task_id }
+                } else {
+                    Reminder::Completed { list_id, task_id }
+                }
             }
             _ => return Err(()),
         };

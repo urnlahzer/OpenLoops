@@ -173,6 +173,11 @@ fn reminder_state_view(record: &crate::loop_state::Record) -> ReminderView {
             text: "Reminder created in Microsoft To Do. Marking this loop Handled also marks the task complete there.",
             marker: String::new(),
         },
+        Reminder::Completed { .. } => ReminderView {
+            state: "created",
+            text: "The linked Microsoft To Do task was completed, which marked this loop Handled.",
+            marker: String::new(),
+        },
         Reminder::Attempted => ReminderView {
             state: "attempted",
             text: "A reminder attempt has no confirmed outcome. Inspect Microsoft To Do before allowing another attempt.",
@@ -511,14 +516,18 @@ fn owner_label(item: &Expectation, decision: Decision) -> &'static str {
 /// specifically because `status_base_label`'s own doc comment establishes
 /// that a decision override (`Done`/`Dismissed`/`Moot`) always wins the pill
 /// *text* even when the model separately found closing evidence for the
-/// same item, so "Handled" alone cannot say whether the user clicked the
-/// button or a later reply/event already resolved it -- both can be true at
-/// once. Empty for every other decision: `Mine`/`Watching` are already
-/// self-explanatory action names, and a `Review`-state resolution/
-/// event-passed label already names its own cause and points at the
-/// Completion/Event evidence sections below.
-fn status_pill_hint(decision: Decision, item: &Expectation) -> String {
+/// same item, or the reminder-sync check found the linked task already
+/// completed in Microsoft To Do, so "Handled" alone cannot say which of
+/// those actually happened -- more than one can be true at once. Empty for
+/// every other decision: `Mine`/`Watching` are already self-explanatory
+/// action names, and a `Review`-state resolution/event-passed label already
+/// names its own cause and points at the Completion/Event evidence sections
+/// below.
+fn status_pill_hint(decision: Decision, reminder: &Reminder, item: &Expectation) -> String {
     match decision {
+        Decision::Done if matches!(reminder, Reminder::Completed { .. }) => {
+            "The linked Microsoft To Do task was completed, which marked this handled.".into()
+        }
         Decision::Done if item.resolution.is_some() => {
             let cause = match item.resolution_kind {
                 None => "closing evidence".to_owned(),
@@ -578,7 +587,7 @@ fn status_pill(item: &Expectation, card: &CardContext) -> PillView {
         }
         Decision::Review => ("Needs your review".into(), "brand"),
     };
-    let hint = status_pill_hint(card.record.decision, item);
+    let hint = status_pill_hint(card.record.decision, &card.record.reminder, item);
     PillView { text, kind, hint }
 }
 
@@ -600,6 +609,11 @@ fn pills_for(item: &Expectation, card: &CardContext) -> Vec<PillView> {
         Reminder::Created { .. } => pills.push(PillView {
             text: "To Do reminder set".into(),
             kind: "brand",
+            hint: String::new(),
+        }),
+        Reminder::Completed { .. } => pills.push(PillView {
+            text: "To Do task completed".into(),
+            kind: "success",
             hint: String::new(),
         }),
         Reminder::Attempted => pills.push(PillView {
@@ -2149,12 +2163,12 @@ mod tests {
         // The fixture item starts with resolution: Some(..), resolution_kind:
         // Some(Completed), cross_thread: true (see layout_fixture's card 1).
         assert_eq!(
-            status_pill_hint(Decision::Done, &item),
+            status_pill_hint(Decision::Done, &Reminder::None, &item),
             "You marked this handled. The model had also found evidence it was completed in another conversation; see Completion evidence below."
         );
         item.cross_thread = false;
         assert_eq!(
-            status_pill_hint(Decision::Done, &item),
+            status_pill_hint(Decision::Done, &Reminder::None, &item),
             "You marked this handled. The model had also found evidence it was completed in a later reply; see Completion evidence below."
         );
         item.resolution = None;
@@ -2166,24 +2180,40 @@ mod tests {
             from_subject: true,
         });
         assert_eq!(
-            status_pill_hint(Decision::Done, &item),
+            status_pill_hint(Decision::Done, &Reminder::None, &item),
             "You marked this handled. The named event had also passed."
         );
         item.event_passed = None;
         assert_eq!(
-            status_pill_hint(Decision::Done, &item),
+            status_pill_hint(Decision::Done, &Reminder::None, &item),
             "You marked this handled; no closing evidence was found automatically."
         );
+        // Reminder::Completed wins over everything else -- the sync check
+        // found the linked task already done, regardless of what other
+        // evidence the model separately found.
+        item.resolution = review.analysis.as_ref().unwrap().items[0].resolution.clone();
         assert_eq!(
-            status_pill_hint(Decision::Dismissed, &item),
+            status_pill_hint(
+                Decision::Done,
+                &Reminder::Completed {
+                    list_id: "list".into(),
+                    task_id: "task".into()
+                },
+                &item
+            ),
+            "The linked Microsoft To Do task was completed, which marked this handled."
+        );
+        item.resolution = None;
+        assert_eq!(
+            status_pill_hint(Decision::Dismissed, &Reminder::None, &item),
             "You marked this \u{201c}not mine\u{201d}."
         );
         assert_eq!(
-            status_pill_hint(Decision::Moot, &item),
+            status_pill_hint(Decision::Moot, &Reminder::None, &item),
             "You marked this \u{201c}no longer relevant\u{201d}."
         );
         for decision in [Decision::Mine, Decision::Watching, Decision::Review] {
-            assert_eq!(status_pill_hint(decision, &item), "");
+            assert_eq!(status_pill_hint(decision, &Reminder::None, &item), "");
         }
     }
 
