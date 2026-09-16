@@ -313,9 +313,13 @@ impl ReviewState {
             .messages
             .iter()
             .find(|m| m.input.handle == item.evidence.message)?;
-        let key = self
-            .decisions
-            .fingerprint(&source.account, &source.id, &item.action_phrase);
+        let key = self.decisions.fingerprint(
+            &source.account,
+            &source.id,
+            item.evidence.block,
+            &item.evidence.quote,
+            &item.action_phrase,
+        );
         let record = self.decisions.get(&key);
         let terminal = matches!(
             record.decision,
@@ -1016,18 +1020,27 @@ pub fn layout_fixture() -> ReviewState {
         // "... · {model}") wraps at 1100 px.
         "anthropic/claude-sonnet-4.6-20260315:extended-thinking-zero-data-retention".into(),
     );
-    let first_key =
-        state
-            .decisions
-            .fingerprint("synthetic", "synthetic-0", "send the draft budget");
-    let second_key =
-        state
-            .decisions
-            .fingerprint("synthetic", "synthetic-1", "send the draft budget");
-    let third_key =
-        state
-            .decisions
-            .fingerprint("synthetic", "synthetic-3", "confirm the vendor invoice");
+    let first_key = state.decisions.fingerprint(
+        "synthetic",
+        "synthetic-0",
+        0,
+        "Could you send over the finalized draft budget before Thursday's sign-off meeting? I need to fold in the updated headcount numbers and the vendor renewal figures before we present it to the executive committee on Friday morning.",
+        "send the draft budget",
+    );
+    let second_key = state.decisions.fingerprint(
+        "synthetic",
+        "synthetic-1",
+        0,
+        body,
+        "send the draft budget",
+    );
+    let third_key = state.decisions.fingerprint(
+        "synthetic",
+        "synthetic-3",
+        0,
+        "Please confirm the vendor invoice by end of day Friday.",
+        "confirm the vendor invoice",
+    );
     state.decisions.records.push(Record {
         key: first_key,
         decision: Decision::Mine,
@@ -1222,7 +1235,7 @@ mod tests {
         let source = &state.messages[0];
         let key = state
             .decisions
-            .fingerprint(&source.account, &source.id, &item.action_phrase);
+            .fingerprint(&source.account, &source.id, item.evidence.block, &item.evidence.quote, &item.action_phrase);
         for decision in [Decision::Done, Decision::Dismissed, Decision::Moot] {
             let mut record = state.decisions.get(&key);
             record.decision = decision;
@@ -1366,7 +1379,7 @@ mod tests {
         let source = state.messages[0].clone();
         let key = state
             .decisions
-            .fingerprint(&source.account, &source.id, &item.action_phrase);
+            .fingerprint(&source.account, &source.id, item.evidence.block, &item.evidence.quote, &item.action_phrase);
         // Simulate "Set To Do reminder..." having been clicked on this
         // `Review` card: `decision_after_setting_reminder` implied `Mine`.
         let mut record = state.decisions.get(&key);

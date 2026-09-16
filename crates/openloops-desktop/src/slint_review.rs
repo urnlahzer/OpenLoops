@@ -1450,6 +1450,8 @@ pub(crate) fn register_callbacks(
             let key = model_ref.review.decisions.fingerprint(
                 &source.account,
                 &source.id,
+                item.evidence.block,
+                &item.evidence.quote,
                 &item.action_phrase,
             );
             let reminder = model_ref.review.decisions.get(&key).reminder;
@@ -1511,11 +1513,12 @@ pub(crate) fn register_callbacks(
             };
             let account = source.account.clone();
             let source_id = source.id.clone();
-            let action_phrase = item.action_phrase.clone();
+            let evidence_block = item.evidence.block;
+            let evidence_quote = item.evidence.quote.clone();
             let key = model_ref
                 .review
                 .decisions
-                .fingerprint(&account, &source_id, &action_phrase);
+                .fingerprint(&account, &source_id, evidence_block, &evidence_quote, &item.action_phrase);
             let record = model_ref.review.decisions.get(&key);
             let draft_open_for_this_card = model_ref
                 .review
@@ -2409,7 +2412,7 @@ mod tests {
         let source = source_message(&review, &item).unwrap();
         let key = review
             .decisions
-            .fingerprint(&source.account, &source.id, &item.action_phrase);
+            .fingerprint(&source.account, &source.id, item.evidence.block, &item.evidence.quote, &item.action_phrase);
         review.apply_decision_change(key, Decision::Mine, Reminder::Created);
         let cards = review.card_contexts(review.analysis.as_ref().map_or(&[], |a| &a.items));
         let pills = pills_for(&item, cards[0].as_ref().unwrap());
@@ -2631,9 +2634,13 @@ mod tests {
     #[test]
     fn reconcile_keeps_the_error_status_when_the_decision_update_is_rejected() {
         let mut review = crate::review_model::layout_fixture();
-        let key = review
-            .decisions
-            .fingerprint("synthetic", "synthetic-0", "send the draft budget");
+        let key = review.decisions.fingerprint(
+            "synthetic",
+            "synthetic-0",
+            0,
+            "Could you send over the finalized draft budget before Thursday's sign-off meeting? I need to fold in the updated headcount numbers and the vendor renewal figures before we present it to the executive committee on Friday morning.",
+            "send the draft budget",
+        );
 
         apply_reconcile(&mut review, key, true);
         assert!(review.action_status_succeeded);
