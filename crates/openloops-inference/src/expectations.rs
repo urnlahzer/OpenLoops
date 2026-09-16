@@ -272,6 +272,16 @@ fn string<'a>(v: &'a Value, key: &str, max: usize) -> Result<&'a str, ProviderEr
 /// exact-match the block text. The canonicalizer is contract-pinned and
 /// out of scope, so this runs at the matching site only.
 ///
+/// Typographic punctuation folds the same way and for the same reason:
+/// `U+2018`/`U+2019`/`U+02BC` (curly single quotes and the modifier-letter
+/// apostrophe) to `'`, `U+201C`/`U+201D` (curly double quotes) to `"`, and
+/// `U+2013`/`U+2014` (en/em dash) to `-`. Source HTML mail commonly carries
+/// the "smart" form (Outlook autocorrect, Word paste, newsletter
+/// templates), while a model asked to quote verbatim routinely normalizes
+/// to the plain ASCII form regardless of what the source actually used --
+/// otherwise-correct evidence would fail the exact-match check on
+/// typography alone.
+///
 /// `Anchor.quote` and `Anchor.context` are normalized for matching and
 /// display and are NOT scalar-index aligned with the `CanonicalBlock`
 /// backing them: this desktop review path never maps anchors back to
@@ -290,6 +300,16 @@ fn normalize_for_matching(text: &str) -> String {
             | '\u{3000}' => folded.push(' '),
             '\u{2028}' | '\u{2029}' => folded.push('\n'),
             '\u{200B}' | '\u{FEFF}' | '\u{00AD}' => {}
+            // Typographic punctuation: source HTML mail commonly carries
+            // "smart" quotes/dashes (Outlook, Word paste, many newsletter
+            // templates), while a model asked to quote verbatim routinely
+            // normalizes them to the plain ASCII form even when the source
+            // did not use one. Folding both sides here, same as the
+            // whitespace folds above, means that drift never breaks an
+            // otherwise-correct quote.
+            '\u{2018}' | '\u{2019}' | '\u{02BC}' => folded.push('\''),
+            '\u{201C}' | '\u{201D}' => folded.push('"'),
+            '\u{2013}' | '\u{2014}' => folded.push('-'),
             other => folded.push(other),
         }
     }
@@ -897,6 +917,40 @@ mod tests {
         let v = json!({"message":"m0","block":"b0","quote":"Let's move it one hour later."});
         let a = anchor(&v, &m, 12).unwrap();
         assert_eq!(a.quote, "Let's move it one hour later.");
+    }
+    #[test]
+    fn curly_apostrophe_in_source_matches_a_straight_apostrophe_quote() {
+        let mut m = nbsp_messages();
+        m[0].message.body_blocks =
+            vec![CanonicalBlock::new("Let\u{2019}s move it one hour later.").unwrap()];
+        let v = json!({"message":"m0","block":"b0","quote":"Let's move it one hour later."});
+        let a = anchor(&v, &m, 12).unwrap();
+        assert_eq!(a.quote, "Let's move it one hour later.");
+    }
+    #[test]
+    fn curly_double_quotes_in_source_match_straight_quotes_in_model_quote() {
+        let mut m = nbsp_messages();
+        m[0].message.body_blocks = vec![
+            CanonicalBlock::new("She called it \u{201C}the final draft\u{201D} yesterday.")
+                .unwrap(),
+        ];
+        let v =
+            json!({"message":"m0","block":"b0","quote":"called it \"the final draft\" yesterday"});
+        let a = anchor(&v, &m, 12).unwrap();
+        assert_eq!(a.quote, "called it \"the final draft\" yesterday");
+    }
+    #[test]
+    fn em_and_en_dash_in_source_match_a_hyphen_in_model_quote() {
+        let mut m = nbsp_messages();
+        m[0].message.body_blocks = vec![
+            CanonicalBlock::new(
+                "Deadline\u{2014}Friday at noon, not Thursday\u{2013}Friday this time.",
+            )
+            .unwrap(),
+        ];
+        let v = json!({"message":"m0","block":"b0","quote":"Deadline-Friday at noon"});
+        let a = anchor(&v, &m, 12).unwrap();
+        assert_eq!(a.quote, "Deadline-Friday at noon");
     }
     #[test]
     fn thin_space_quote_resolves() {
