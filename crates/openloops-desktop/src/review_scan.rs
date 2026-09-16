@@ -3095,17 +3095,24 @@ fn attempt_closure(
 }
 
 /// After the primary per-conversation scan, attempts to close any
-/// remaining open "you owe someone" requests. Each item is checked first
-/// against later replies the user sent in the same conversation, then
-/// against messages sent to the waiting party in a different conversation.
-/// Mutates `result.analysis.items` in place; only the latter resolutions set
-/// `cross_thread: true` and increment `result.cross_thread_closures`.
+/// remaining open "you owe someone" expectations -- both a `request`
+/// someone made of the user and a `promise` the user made unprompted are
+/// eligible: the other party's expectation is the same either way, and
+/// closure is decided the same way for both (later evidence the waiting
+/// party's address received, wherever it was sent). `attributed` is not
+/// eligible: it does not name the signed-in user as the one who owes the
+/// action. Each item is checked first against later replies the user sent
+/// in the same conversation, then against messages sent to the waiting
+/// party in a different conversation. Mutates `result.analysis.items` in
+/// place; only the latter resolutions set `cross_thread: true` and
+/// increment `result.cross_thread_closures`.
 ///
 /// Skipped entirely when `result.primary_scan_transport_error` is set: the
 /// provider is already known to be unreachable or unauthorized, so per-item
 /// closure calls would fail identically. Before running, the count of
-/// eligible items (open, `request`-kind, `You`-owned) is added to
-/// `progress.total`, and `progress.processed` is incremented once per
+/// eligible items (open, `request`- or `promise`-kind, `You`-owned) is
+/// added to `progress.total`, and `progress.processed` is incremented once
+/// per
 /// eligible item as it is processed, including one skipped for having no
 /// candidates, a shared-mailbox/list waiting party (see
 /// [`is_shared_mailbox_address`]), the [`MAX_CLOSURE_CALLS`] cap binding, or
@@ -3137,7 +3144,7 @@ fn scan_closures(
         .filter(|(_, item)| {
             item.resolution.is_none()
                 && item.event_passed.is_none()
-                && item.kind == "request"
+                && matches!(item.kind.as_str(), "request" | "promise")
                 && item.owner == Owner::You
         })
         .map(|(index, _)| index)
@@ -8286,8 +8293,8 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
 
         let mut already_resolved = base_item.clone();
         already_resolved.resolution = Some(already_resolved.evidence.clone());
-        let mut not_a_request = base_item.clone();
-        not_a_request.kind = "promise".into();
+        let mut not_owed_by_the_user = base_item.clone();
+        not_owed_by_the_user.kind = "attributed".into();
         let mut not_owned_by_you = base_item.clone();
         not_owned_by_you.owner = Owner::Team;
         let mut unresolvable_address = base_item.clone();
@@ -8297,7 +8304,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
             analysis: Expectations {
                 items: vec![
                     already_resolved,
-                    not_a_request,
+                    not_owed_by_the_user,
                     not_owned_by_you,
                     unresolvable_address,
                 ],
@@ -8326,6 +8333,56 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         });
         assert_eq!(calls, 0, "none of these items should reach the provider");
         assert_eq!(result.cross_thread_closures, 0);
+    }
+
+    /// A `promise` the user made unprompted is exactly as eligible for
+    /// cross-thread closure as a `request` someone made of the user: the
+    /// waiting party's expectation is the same either way. Mirrors
+    /// `scan_closures_resolves_open_request_and_counts_it` with the item's
+    /// only difference being `kind`.
+    #[test]
+    fn scan_closures_treats_an_open_promise_the_same_as_an_open_request() {
+        let (mut all, mut item) = closure_test_messages();
+        item.kind = "promise".into();
+        let valid = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
+        all.push(prepare(&valid, "Sent", all.len()).unwrap());
+
+        let mut result = ScanResult {
+            analysis: Expectations {
+                items: vec![item],
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            failures: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            cross_thread_closures: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
+            closure_pass_failure: None,
+        };
+        let resolved_anchor = Anchor {
+            message: all.last().unwrap().input.handle.clone(),
+            block: 0,
+            quote: "Sure, let's do it.".into(),
+            context: "Sure, let's do it.".into(),
+        };
+        let mut calls = 0;
+        scan_closures(&all, &ScanProgress::default(), &mut result, |_, _, _| {
+            calls += 1;
+            Ok(Some((resolved_anchor.clone(), ResolutionKind::Completed)))
+        });
+        assert_eq!(calls, 1, "a promise must reach the closure provider call");
+        assert_eq!(result.cross_thread_closures, 1);
+        assert!(result.analysis.items[0].resolution.is_some());
+        assert!(result.analysis.items[0].cross_thread);
     }
 
     #[test]
