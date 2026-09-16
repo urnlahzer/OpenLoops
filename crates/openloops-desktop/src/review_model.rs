@@ -52,7 +52,7 @@ pub(crate) struct ReminderDraft {
 
 /// Per-card decision and urgency facts, independent of the source mail or
 /// expectation item.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct CardContext {
     pub(crate) record: Record,
     pub(crate) terminal: bool,
@@ -562,8 +562,8 @@ pub(crate) fn expectations_summary(
 /// so `closed` is not (and must not be) a parameter here: `draft_open_here`
 /// is the only thing that can additionally disable the button, guarding
 /// against silently replacing a draft the user may have already edited.
-pub(crate) fn reminder_button_enabled(reminder: Reminder, draft_open_here: bool) -> bool {
-    reminder == Reminder::None && !draft_open_here
+pub(crate) fn reminder_button_enabled(reminder: &Reminder, draft_open_here: bool) -> bool {
+    matches!(reminder, Reminder::None) && !draft_open_here
 }
 /// Decision implied by opening a reminder draft on a card whose current
 /// decision is `current`. Setting a reminder implies personal tracking, so
@@ -1044,7 +1044,10 @@ pub fn layout_fixture() -> ReviewState {
     state.decisions.records.push(Record {
         key: first_key,
         decision: Decision::Mine,
-        reminder: Reminder::Created,
+        reminder: Reminder::Created {
+            list_id: "list".into(),
+            task_id: "task".into(),
+        },
         updated: now(),
     });
     state.decisions.records.push(Record {
@@ -1308,16 +1311,20 @@ mod tests {
 
     #[test]
     fn reminder_button_enabled_without_a_reminder_or_an_open_draft() {
+        let created = || Reminder::Created {
+            list_id: "list".into(),
+            task_id: "task".into(),
+        };
         for (reminder, draft_open_here, expected) in [
             (Reminder::None, false, true),
             (Reminder::Attempted, false, false),
-            (Reminder::Created, false, false),
+            (created(), false, false),
             (Reminder::None, true, false),
             (Reminder::Attempted, true, false),
-            (Reminder::Created, true, false),
+            (created(), true, false),
         ] {
             assert_eq!(
-                reminder_button_enabled(reminder, draft_open_here),
+                reminder_button_enabled(&reminder, draft_open_here),
                 expected,
                 "reminder={reminder:?} draft_open_here={draft_open_here}"
             );

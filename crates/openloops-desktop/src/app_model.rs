@@ -28,6 +28,10 @@ pub(crate) enum Outcome {
         String,
     ),
     Reminder([u8; 32], openloops_graph::live::reminders::ReminderOutcome),
+    ReminderCompletion(
+        [u8; 32],
+        openloops_graph::live::reminders::ReminderCompletionOutcome,
+    ),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -335,6 +339,9 @@ impl AppModel {
             Outcome::Reminder(key, outcome) => {
                 self.reminder_outcome(key, outcome);
             }
+            Outcome::ReminderCompletion(key, outcome) => {
+                self.reminder_completion_outcome(key, outcome);
+            }
             Outcome::Models(Ok(models)) => self.loaded_models(models),
             Outcome::ZdrModels(Ok(models)) => self.loaded_zdr_models(models),
             Outcome::Models(Err(error))
@@ -467,7 +474,7 @@ impl AppModel {
         use openloops_graph::live::reminders::ReminderOutcome;
         let mut record = self.review.decisions.get(&key);
         let (text, outcome_succeeded)=match outcome {
-            ReminderOutcome::Created=>{record.reminder=Reminder::Created; ("Reminder created in your Microsoft To Do Tasks list.".to_owned(), true)},
+            ReminderOutcome::Created{list_id,task_id}=>{record.reminder=Reminder::Created{list_id,task_id}; ("Reminder created in your Microsoft To Do Tasks list.".to_owned(), true)},
             ReminderOutcome::NotCreated(error)=>{record.reminder=Reminder::None;(format!("No reminder was created: {error} Sign in with the same account used for the scan."), false)},
             ReminderOutcome::Uncertain=>("Microsoft did not confirm the write. Check To Do before trying again; OpenLoops will not automatically retry.".to_owned(), false),
         };
@@ -478,6 +485,33 @@ impl AppModel {
             Ok(()) => text,
             Err(error) => format!("{text} {error}"),
         };
+    }
+
+    /// Reports whether the already-Handled card's linked To Do task was also
+    /// marked complete. Never reverts the local `Done` decision or the
+    /// `Reminder::Created` record on failure -- see `reminders::complete()`'s
+    /// doc comment -- so this only ever updates the status line, distinct
+    /// from `reminder_outcome`, which can revert a reminder to `None`.
+    fn reminder_completion_outcome(
+        &mut self,
+        _key: [u8; 32],
+        outcome: openloops_graph::live::reminders::ReminderCompletionOutcome,
+    ) {
+        use openloops_graph::live::reminders::ReminderCompletionOutcome;
+        self.review.action_status = match outcome {
+            ReminderCompletionOutcome::Completed => {
+                "Decision saved on this Windows account. The linked Microsoft To Do task was also marked complete.".to_owned()
+            }
+            ReminderCompletionOutcome::NotCompleted(error) => {
+                format!(
+                    "Decision saved on this Windows account. The linked Microsoft To Do task was not marked complete: {error}"
+                )
+            }
+            ReminderCompletionOutcome::Uncertain => {
+                "Decision saved on this Windows account. Microsoft did not confirm the To Do task was marked complete; check it there.".to_owned()
+            }
+        };
+        self.review.action_status_succeeded = matches!(outcome, ReminderCompletionOutcome::Completed);
     }
 
     /// Provider keys never contain whitespace. Trimming once, where the key

@@ -162,15 +162,15 @@ struct ReminderView {
 }
 
 fn reminder_state_view(record: &crate::loop_state::Record) -> ReminderView {
-    match record.reminder {
+    match &record.reminder {
         Reminder::None => ReminderView {
             state: "none",
             text: "",
             marker: String::new(),
         },
-        Reminder::Created => ReminderView {
+        Reminder::Created { .. } => ReminderView {
             state: "created",
-            text: "Reminder created in Microsoft To Do. Manage its alerts and completion there; marking this loop handled does not modify the task.",
+            text: "Reminder created in Microsoft To Do. Marking this loop Handled also marks the task complete there.",
             marker: String::new(),
         },
         Reminder::Attempted => ReminderView {
@@ -543,9 +543,9 @@ fn pills_for(item: &Expectation, card: &CardContext) -> Vec<PillView> {
             },
         });
     }
-    match card.record.reminder {
+    match &card.record.reminder {
         Reminder::None => {}
-        Reminder::Created => pills.push(PillView {
+        Reminder::Created { .. } => pills.push(PillView {
             text: "To Do reminder set".into(),
             kind: "brand",
         }),
@@ -712,7 +712,7 @@ fn selected_view(
         can_watch: !card.closed
             && item.owner != Owner::You
             && card.record.decision != Decision::Watching,
-        can_remind: !card.closed && reminder_button_enabled(card.record.reminder, draft_open),
+        can_remind: !card.closed && reminder_button_enabled(&card.record.reminder, draft_open),
         draft: draft_view(
             review
                 .draft
@@ -1189,7 +1189,17 @@ pub(crate) fn sync_review(
 fn apply_reconcile(review: &mut ReviewState, key: [u8; 32], exists: bool) {
     let record = review.decisions.get(&key);
     let reminder = if exists {
-        Reminder::Created
+        // The user is manually confirming a task exists after an Uncertain
+        // outcome -- OpenLoops never received a confirmed task/list id for
+        // it, so there is nothing to store. Empty ids mean the later
+        // complete-on-Handled step (see `on_review_decision`) has nothing to
+        // address and skips silently, exactly as if no reminder existed for
+        // that purpose; the reminder still counts as Created for every other
+        // purpose (dedup, the pill, the button state).
+        Reminder::Created {
+            list_id: String::new(),
+            task_id: String::new(),
+        }
     } else {
         Reminder::None
     };
@@ -1447,6 +1457,7 @@ pub(crate) fn register_callbacks(
             let Some(source) = source_message(&model_ref.review, item) else {
                 return;
             };
+            let account = source.account.clone();
             let key = model_ref.review.decisions.fingerprint(
                 &source.account,
                 &source.id,
@@ -1456,9 +1467,46 @@ pub(crate) fn register_callbacks(
             );
             let reminder = model_ref.review.decisions.get(&key).reminder;
             let decision = decision_from_code(value);
+            // Marking a card Handled also completes its linked Microsoft To
+            // Do task, if it has a real one -- never for Dismissed/Moot, and
+            // never for a reconcile-confirmed reminder with no known task id
+            // (see `apply_reconcile`). Captured before `apply_decision_change`
+            // moves `reminder` in; the completion call itself never reverts
+            // the decision or the reminder record on failure (see
+            // `reminders::complete()`), so it only ever affects the status
+            // line, dispatched after the decision is already saved.
+            let complete_task = if decision == Decision::Done {
+                match &reminder {
+                    Reminder::Created { list_id, task_id }
+                        if !list_id.is_empty() && !task_id.is_empty() =>
+                    {
+                        Some((list_id.clone(), task_id.clone()))
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
             model_ref
                 .review
                 .apply_decision_change(key, decision, reminder);
+            if let Some((list_id, task_id)) = complete_task {
+                if let Ok(config) = ConnectionConfig::new(model_ref.client_id.trim(), None) {
+                    model_ref.start(
+                        Service::Review,
+                        "Marking the linked Microsoft To Do task complete",
+                        move || {
+                            Outcome::ReminderCompletion(
+                                key,
+                                openloops_graph::live::reminders::complete(
+                                    &config, &account, &list_id, &task_id,
+                                ),
+                            )
+                        },
+                        || {},
+                    );
+                }
+            }
             drop(model_ref);
             refresh(&model, &weak);
         });
@@ -1525,7 +1573,7 @@ pub(crate) fn register_callbacks(
                 .draft
                 .as_ref()
                 .is_some_and(|draft| draft.key == key);
-            if reminder_button_enabled(record.reminder, draft_open_for_this_card) {
+            if reminder_button_enabled(&record.reminder, draft_open_for_this_card) {
                 let next = decision_after_setting_reminder(record.decision);
                 let title = reminder_title(record.decision, &item.action);
                 model_ref
@@ -2043,7 +2091,9 @@ mod tests {
     fn status_pills_cover_resolution_and_terminal_decisions() {
         let review = crate::review_model::layout_fixture();
         let mut item = review.analysis.as_ref().unwrap().items[0].clone();
-        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0].unwrap();
+        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0]
+            .clone()
+            .unwrap();
         let base = CardContext {
             record: Record {
                 decision: Decision::Review,
@@ -2060,7 +2110,7 @@ mod tests {
             let card = CardContext {
                 record: Record {
                     decision,
-                    ..base.record
+                    ..base.record.clone()
                 },
                 terminal: true,
                 closed: true,
@@ -2089,7 +2139,9 @@ mod tests {
     fn status_pill_uses_the_model_label_for_an_event_passed_closure() {
         let review = crate::review_model::layout_fixture();
         let mut item = review.analysis.as_ref().unwrap().items[0].clone();
-        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0].unwrap();
+        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0]
+            .clone()
+            .unwrap();
         let card = CardContext {
             record: Record {
                 decision: Decision::Review,
@@ -2124,7 +2176,9 @@ mod tests {
     fn status_pill_appends_the_cross_thread_suffix_only_when_the_model_sets_it() {
         let review = crate::review_model::layout_fixture();
         let mut item = review.analysis.as_ref().unwrap().items[0].clone();
-        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0].unwrap();
+        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0]
+            .clone()
+            .unwrap();
         let card = CardContext {
             record: Record {
                 decision: Decision::Review,
@@ -2151,7 +2205,9 @@ mod tests {
     fn deadline_pills_omit_missing_and_do_not_mark_closed_cards_danger() {
         let review = crate::review_model::layout_fixture();
         let item = &review.analysis.as_ref().unwrap().items[0];
-        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0].unwrap();
+        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0]
+            .clone()
+            .unwrap();
         let base = CardContext {
             record: Record {
                 decision: Decision::Review,
@@ -2162,7 +2218,7 @@ mod tests {
         };
         let no_deadline = CardContext {
             deadline: None,
-            ..base
+            ..base.clone()
         };
         assert_eq!(pills_for(item, &no_deadline).len(), 1);
         let past = DeadlineView::PastDue {
@@ -2171,7 +2227,7 @@ mod tests {
         };
         let open = CardContext {
             deadline: Some(past),
-            ..base
+            ..base.clone()
         };
         assert_eq!(pills_for(item, &open)[1].kind, "danger");
         let closed = CardContext {
@@ -2187,25 +2243,27 @@ mod tests {
         let mut review = crate::review_model::layout_fixture();
         let original = review.analysis.as_ref().unwrap().items[0].clone();
         review.analysis.as_mut().unwrap().items = vec![original.clone(); 4];
-        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0].unwrap();
+        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0]
+            .clone()
+            .unwrap();
         let cards = vec![
             Some(CardContext {
                 deadline: Some(DeadlineView::PastDue {
                     boundary: 0,
                     offset_seconds: 0,
                 }),
-                ..base
+                ..base.clone()
             }),
             Some(CardContext {
                 deadline: Some(DeadlineView::Due {
                     boundary: i64::MAX,
                     offset_seconds: 0,
                 }),
-                ..base
+                ..base.clone()
             }),
             Some(CardContext {
                 deadline: None,
-                ..base
+                ..base.clone()
             }),
             Some(CardContext {
                 record: Record {
@@ -2413,7 +2471,14 @@ mod tests {
         let key = review
             .decisions
             .fingerprint(&source.account, &source.id, item.evidence.block, &item.evidence.quote, &item.action_phrase);
-        review.apply_decision_change(key, Decision::Mine, Reminder::Created);
+        review.apply_decision_change(
+            key,
+            Decision::Mine,
+            Reminder::Created {
+                list_id: "list".into(),
+                task_id: "task".into(),
+            },
+        );
         let cards = review.card_contexts(review.analysis.as_ref().map_or(&[], |a| &a.items));
         let pills = pills_for(&item, cards[0].as_ref().unwrap());
         assert_eq!(pills[0].text, "Tracking");
@@ -2475,7 +2540,10 @@ mod tests {
             updated: 0,
         };
         assert_eq!(reminder_state_view(&record).state, "none");
-        record.reminder = Reminder::Created;
+        record.reminder = Reminder::Created {
+            list_id: "list".into(),
+            task_id: "task".into(),
+        };
         let created = reminder_state_view(&record);
         assert_eq!(created.state, "created");
         assert!(
@@ -2648,23 +2716,29 @@ mod tests {
             review.action_status,
             "Decision saved on this Windows account. No mail text or names were stored."
         );
-        assert_eq!(review.decisions.get(&key).reminder, Reminder::Created);
+        assert!(matches!(
+            review.decisions.get(&key).reminder,
+            Reminder::Created { .. }
+        ));
         let before_rejected_call = review.decisions.get(&key);
 
         review.decisions.error = Some(
-            "The saved-decision limit (50) is reached. Existing decisions are preserved.".into(),
+            "The saved-decision limit (55) is reached. Existing decisions are preserved.".into(),
         );
         apply_reconcile(&mut review, key, false);
         assert!(!review.action_status_succeeded);
         assert_eq!(
             review.action_status,
-            "The saved-decision limit (50) is reached. Existing decisions are preserved."
+            "The saved-decision limit (55) is reached. Existing decisions are preserved."
         );
         // The rejected update (Created -> None) must not have taken effect.
         assert_eq!(
             review.decisions.get(&key).reminder,
             before_rejected_call.reminder
         );
-        assert_eq!(review.decisions.get(&key).reminder, Reminder::Created);
+        assert!(matches!(
+            review.decisions.get(&key).reminder,
+            Reminder::Created { .. }
+        ));
     }
 }

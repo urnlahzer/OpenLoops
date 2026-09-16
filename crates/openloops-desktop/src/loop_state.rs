@@ -24,6 +24,15 @@ const CAP: usize = 55;
 /// unbounded, so the `CAP` rejection in `update()` stays rare under ordinary
 /// use while still bounding the store's size.
 const TERMINAL_EXPIRY_SECONDS: i64 = 180 * 86400;
+/// Bound on each Graph id stored in `Reminder::Created`, chosen to fit a
+/// single-byte length prefix (real Microsoft Graph To Do list/task ids are
+/// consistently well under this). Given the same 2560-byte credential-blob
+/// ceiling `CAP` is sized against, storing two such ids alongside every
+/// record is not something a raised `CAP` could also absorb; a save that
+/// would exceed the blob size still fails safely via `encode()`'s existing
+/// check (no corruption, an "unavailable" error instead of the friendlier
+/// "limit reached" one) rather than being separately guarded against here.
+const MAX_REMINDER_ID_LEN: usize = 255;
 const TARGET: &str = "OpenLoops/Decisions/v1";
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -37,15 +46,20 @@ pub enum Decision {
     Watching,
     Moot,
 }
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 #[cfg_attr(test, derive(Debug))]
 pub enum Reminder {
     #[default]
     None,
     Attempted,
-    Created,
+    /// Carries the Graph task-list and task id `reminders::create()`
+    /// resolved, so a later action (marking it complete once the card is
+    /// Handled) can address the same task -- see `reminders::complete()`.
+    /// Each id is bounded to `MAX_REMINDER_ID_LEN` bytes for storage; see
+    /// that constant for why.
+    Created { list_id: String, task_id: String },
 }
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Record {
     pub key: [u8; 32],
     pub decision: Decision,
@@ -216,7 +230,7 @@ impl Decisions {
         self.records
             .iter()
             .find(|r| &r.key == key)
-            .copied()
+            .cloned()
             .unwrap_or(Record {
                 key: *key,
                 decision: Decision::Review,
@@ -332,6 +346,28 @@ pub fn marker(key: &[u8; 32]) -> String {
     })
 }
 
+/// Appends one Graph id as a single-byte length prefix followed by its
+/// bytes. Fails rather than silently truncating an id over
+/// `MAX_REMINDER_ID_LEN` -- callers must reject or shorten it upstream
+/// instead (see `reminders::valid_graph_id`, which already bounds ids this
+/// tightly is not required there, so this is the actual enforcement point).
+fn push_id(bytes: &mut Vec<u8>, id: &str) -> Result<(), ()> {
+    let id = id.as_bytes();
+    if id.len() > MAX_REMINDER_ID_LEN {
+        return Err(());
+    }
+    bytes.push(u8::try_from(id.len()).map_err(|_| ())?);
+    bytes.extend_from_slice(id);
+    Ok(())
+}
+/// Reads one `push_id`-encoded id, returning it and the remaining bytes.
+fn read_id(rest: &[u8]) -> Result<(String, &[u8]), ()> {
+    let len = usize::from(*rest.first().ok_or(())?);
+    let rest = &rest[1..];
+    let (id, rest) = rest.split_at_checked(len).ok_or(())?;
+    Ok((String::from_utf8(id.to_vec()).map_err(|_| ())?, rest))
+}
+
 fn encode(secret: &[u8; 32], records: &[Record]) -> Result<Zeroizing<Vec<u8>>, ()> {
     if records.len() > CAP {
         return Err(());
@@ -352,9 +388,13 @@ fn encode(secret: &[u8; 32], records: &[Record]) -> Result<Zeroizing<Vec<u8>>, (
         bytes.push(match r.reminder {
             Reminder::None => 0,
             Reminder::Attempted => 1,
-            Reminder::Created => 2,
+            Reminder::Created { .. } => 2,
         });
         bytes.extend_from_slice(&r.updated.to_le_bytes());
+        if let Reminder::Created { list_id, task_id } = &r.reminder {
+            push_id(&mut bytes, list_id)?;
+            push_id(&mut bytes, task_id)?;
+        }
     }
     if bytes.len() > 2560 {
         return Err(());
@@ -365,34 +405,49 @@ fn decode(bytes: &[u8]) -> Result<([u8; 32], Vec<Record>), ()> {
     let payload = bytes.strip_prefix(MAGIC).ok_or(())?;
     let secret = payload.get(..32).ok_or(())?.try_into().map_err(|_| ())?;
     let count = usize::from(*payload.get(32).ok_or(())?);
-    if count > CAP || payload.len() != 33 + count * 42 {
+    if count > CAP {
         return Err(());
     }
+    let mut rest = payload.get(33..).ok_or(())?;
     let mut records = vec![];
-    for row in payload[33..].chunks_exact(42) {
-        let key = row[..32].try_into().map_err(|_| ())?;
+    for _ in 0..count {
+        let (row, remaining) = rest.split_at_checked(42).ok_or(())?;
+        let key: [u8; 32] = row[..32].try_into().map_err(|_| ())?;
         if records.iter().any(|r: &Record| r.key == key) {
             return Err(());
         }
+        let decision = match row[32] {
+            0 => Decision::Review,
+            1 => Decision::Mine,
+            2 => Decision::Done,
+            3 => Decision::Dismissed,
+            4 => Decision::Watching,
+            5 => Decision::Moot,
+            _ => return Err(()),
+        };
+        let reminder_tag = row[33];
+        let updated = i64::from_le_bytes(row[34..42].try_into().map_err(|_| ())?);
+        rest = remaining;
+        let reminder = match reminder_tag {
+            0 => Reminder::None,
+            1 => Reminder::Attempted,
+            2 => {
+                let (list_id, remaining) = read_id(rest)?;
+                let (task_id, remaining) = read_id(remaining)?;
+                rest = remaining;
+                Reminder::Created { list_id, task_id }
+            }
+            _ => return Err(()),
+        };
         records.push(Record {
             key,
-            decision: match row[32] {
-                0 => Decision::Review,
-                1 => Decision::Mine,
-                2 => Decision::Done,
-                3 => Decision::Dismissed,
-                4 => Decision::Watching,
-                5 => Decision::Moot,
-                _ => return Err(()),
-            },
-            reminder: match row[33] {
-                0 => Reminder::None,
-                1 => Reminder::Attempted,
-                2 => Reminder::Created,
-                _ => return Err(()),
-            },
-            updated: i64::from_le_bytes(row[34..42].try_into().map_err(|_| ())?),
+            decision,
+            reminder,
+            updated,
         });
+    }
+    if !rest.is_empty() {
+        return Err(());
     }
     Ok((secret, records))
 }
@@ -403,7 +458,15 @@ mod tests {
     #[test]
     fn terminal_records_expire_unless_a_reminder_is_present() {
         for decision in [Decision::Done, Decision::Dismissed, Decision::Moot] {
-            for reminder in [Reminder::None, Reminder::Attempted, Reminder::Created] {
+            for reminder in [
+                Reminder::None,
+                Reminder::Attempted,
+                Reminder::Created {
+                    list_id: "list".into(),
+                    task_id: "task".into(),
+                },
+            ] {
+                let has_reminder = !matches!(reminder, Reminder::None);
                 let mut state = Decisions::default();
                 state.records.push(Record {
                     key: [7; 32],
@@ -421,7 +484,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(
                     state.records.iter().any(|r| r.key == [7; 32]),
-                    reminder != Reminder::None
+                    has_reminder
                 );
             }
         }
@@ -443,10 +506,13 @@ mod tests {
             let record = Record {
                 key: [7; 32],
                 decision,
-                reminder: Reminder::Created,
+                reminder: Reminder::Created {
+                    list_id: "list".into(),
+                    task_id: "task".into(),
+                },
                 updated: 1_788_350_400,
             };
-            let bytes = encode(&[0; 32], &[record]).unwrap();
+            let bytes = encode(&[0; 32], &[record.clone()]).unwrap();
             assert_eq!(usize::from(bytes[MAGIC.len() + 33 + 32]), tag);
             let (_, records) = decode(&bytes).unwrap();
             assert_eq!(records.len(), 1);
