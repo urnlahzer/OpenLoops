@@ -23,6 +23,17 @@ const ZDR_ENDPOINTS: &str = "https://openrouter.ai/api/v1/endpoints/zdr";
 const MAX_LISTING: usize = 4_194_304;
 const MAX_ENDPOINTS: usize = 8192;
 const MAX_LABEL: usize = 128;
+/// Sent as `max_tokens` on every completion. Without it, OpenRouter's
+/// pre-request credit check reserves against the selected model's own
+/// output ceiling (65,536 tokens on some models) rather than what this
+/// bounded analysis answer could ever need, and can reject the request
+/// with HTTP 402 on an account with an otherwise-ample balance -- before
+/// the request is ever forwarded upstream, so it is never actually
+/// billed. `analysis-output-v1` answers are well under this even with a
+/// full 64-claim response; the margin above that is headroom for a
+/// reasoning model's hidden thinking tokens, which OpenRouter counts
+/// against the same ceiling.
+const MAX_OUTPUT_TOKENS: u32 = 16_384;
 
 /// One selectable zero-data-retention model: the exact provider-side
 /// `id` a request is bound to, and the human `label` shown beside it.
@@ -262,13 +273,15 @@ fn read_response(
 ///
 /// No `response_format` or `structured_outputs` member is sent: strict
 /// application validation of the answer stays authoritative, exactly as on
-/// the Ollama Cloud path. No tools member is sent either.
+/// the Ollama Cloud path. No tools member is sent either. `max_tokens` is
+/// sent -- see [`MAX_OUTPUT_TOKENS`].
 fn request(model: &str, system: &str, user: &str) -> Result<Vec<u8>, ProviderError> {
     let body = serde_json::to_vec(&json!({
         "model": model,
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         "stream": false,
-        "provider": {"zdr": true}
+        "provider": {"zdr": true},
+        "max_tokens": MAX_OUTPUT_TOKENS
     }))
     .map_err(|_| ProviderError::InvalidResponse)?;
     if body.len() > MAX_REQUEST {
@@ -558,7 +571,8 @@ mod tests {
         assert_eq!(sent["model"], MODEL);
         assert_eq!(sent["messages"][0]["role"], "system");
         assert_eq!(sent["messages"][1]["content"], "data");
-        assert_eq!(sent.as_object().unwrap().len(), 4);
+        assert_eq!(sent["max_tokens"], MAX_OUTPUT_TOKENS);
+        assert_eq!(sent.as_object().unwrap().len(), 5);
         for absent in ["response_format", "structured_outputs", "tools", "n"] {
             assert!(sent.get(absent).is_none(), "{absent} must not be sent");
         }

@@ -48,13 +48,26 @@ duplicate-rejecting parser.
 
 Each analysis request is a single non-streaming
 `POST https://openrouter.ai/api/v1/chat/completions` with the key as an
-`Authorization: Bearer` header and exactly four members: `model`, `messages`
-(one `system` and one `user`), `stream: false`, and `provider: {"zdr": true}`.
-That last member is the routing pin: OpenRouter routes the request only to
-zero-data-retention endpoints. It ORs with the ZDR setting on your account, so
-it holds whether or not your account is configured for ZDR, and OpenLoops never
-relaxes it for an individual request. Before any message text is sent,
-connecting re-checks that the selected model still appears in the ZDR listing.
+`Authorization: Bearer` header and exactly five members: `model`, `messages`
+(one `system` and one `user`), `stream: false`, `provider: {"zdr": true}`, and
+`max_tokens: 16384`. The `provider` member is the routing pin: OpenRouter
+routes the request only to zero-data-retention endpoints. It ORs with the ZDR
+setting on your account, so it holds whether or not your account is
+configured for ZDR, and OpenLoops never relaxes it for an individual request.
+Before any message text is sent, connecting re-checks that the selected model
+still appears in the ZDR listing.
+
+`max_tokens` is fixed, not user-configurable. Without it, OpenRouter's
+pre-request credit check reserves against the selected model's own output
+ceiling (65,536 tokens on some models) rather than what a bounded
+`analysis-output-v1` answer could ever need, and can reject the request with
+HTTP 402 -- "insufficient credits" -- on an account with an otherwise-ample
+balance. That rejection happens before the request is forwarded upstream, so
+it is never actually billed: your OpenRouter activity log stays clean, and
+the account's balance never moves, which is what makes this failure mode easy
+to mistake for a real "out of funds" state. 16,384 tokens is well above what a
+full 64-claim answer needs, with headroom for a reasoning model's hidden
+thinking tokens, which OpenRouter counts against the same ceiling.
 
 Subjects, current message text, quoted history, and participants for the
 messages in your configured scan scope leave the computer. Attachments and
