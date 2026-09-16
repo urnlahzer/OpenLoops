@@ -8,7 +8,17 @@ const MAGIC: &[u8] = b"OLDecisions\x02";
 /// known pre-v2 fingerprint scheme being retired" apart from genuine
 /// corruption -- see `open()`'s decode-failure handling.
 const OLD_MAGIC: &[u8] = b"OLDecisions\x01";
-const CAP: usize = 500;
+/// Windows' generic-credential blob is hard-capped at 2560 bytes
+/// (`CRED_MAX_CREDENTIAL_BLOB_SIZE`, `5 * CRED_MAX_STRING_LENGTH`) -- this is
+/// an OS ceiling on `entry.set_secret()`'s payload, not a policy choice, and
+/// `encode()` enforces it directly. With the fixed-size row (`MAGIC` +
+/// `secret`(32) + count(1) + `CAP` * 42-byte rows), the true maximum that can
+/// ever fit is `(2560 - MAGIC.len() - 33) / 42` ~= 59 records -- there is no
+/// room to raise this materially without moving off a single Windows
+/// credential blob (e.g. onto `openloops-persistence`'s SQLite store, or
+/// splitting across multiple named credentials), which is out of scope here.
+/// 55 leaves a small margin below that hard ceiling.
+const CAP: usize = 55;
 /// How long a terminal decision (`Done`/`Dismissed`/`Moot`) with no reminder
 /// attached is kept before it ages out of the saved set. Generous rather than
 /// unbounded, so the `CAP` rejection in `update()` stays rare under ordinary
@@ -232,10 +242,9 @@ impl Decisions {
         } else {
             if self.records.len() >= CAP {
                 self.records = old;
-                return Err(
-                    "The saved-decision limit (50) is reached. Existing decisions are preserved."
-                        .into(),
-                );
+                return Err(format!(
+                    "The saved-decision limit ({CAP}) is reached. Existing decisions are preserved."
+                ));
             }
             self.records.push(record);
         }
