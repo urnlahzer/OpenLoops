@@ -139,6 +139,7 @@ impl ReviewState {
         let mut state = Self::default();
         for source in sources {
             let mut count = 0;
+            let mut prepare_failures = std::collections::BTreeMap::new();
             for item in source.messages {
                 if state
                     .messages
@@ -147,17 +148,26 @@ impl ReviewState {
                 {
                     continue;
                 }
-                if let Ok(m) = scanning::prepare(&item, &source.label, state.messages.len()) {
-                    state.messages.push(m);
-                    count += 1;
-                } else {
-                    state.source_failures += 1;
-                    state.notices.push(format!(
-                        "{}: a message exceeded preparation limits or lacked required context.",
-                        source.label
-                    ));
+                match scanning::prepare(&item, &source.label, state.messages.len()) {
+                    Ok(m) => {
+                        state.messages.push(m);
+                        count += 1;
+                    }
+                    Err(error) => {
+                        state.source_failures += 1;
+                        *prepare_failures.entry(error.to_string()).or_insert(0usize) += 1;
+                    }
                 }
             }
+            state
+                .notices
+                .extend(prepare_failures.into_iter().map(|(reason, count)| {
+                    format!(
+                        "{}: {count} message(s) skipped during preparation ({}).",
+                        source.label,
+                        reason.trim_end_matches('.')
+                    )
+                }));
             state.notices.push(format!(
                 "{}: {count} messages{}{}",
                 source.label,
