@@ -70,10 +70,17 @@ pub fn create(config: &ConnectionConfig, request: &ReminderRequest) -> ReminderO
         if account != request.account {
             return Err(ConnectionError::InvalidConfiguration);
         }
-        let url = Url::parse(
-            "https://graph.microsoft.com/v1.0/me/todo/lists?$select=id,wellknownListName&$top=100",
-        )
-        .map_err(|_| ConnectionError::InvalidConfiguration)?;
+        // No $select/$top: Microsoft's own documented example for this
+        // endpoint (learn.microsoft.com/graph/api/todo-list-lists) is a bare
+        // GET with no query parameters, and its example response already
+        // includes both `id` and `wellknownListName` on every list without
+        // selecting them. A live 400 (HTTP Graph rejected the request as
+        // malformed) traced to this call when `$select=id,wellknownListName
+        // &$top=100` was present; this endpoint's OData query support is
+        // documented only as "some" parameters, not confirmed to include
+        // either of these two.
+        let url = Url::parse("https://graph.microsoft.com/v1.0/me/todo/lists")
+            .map_err(|_| ConnectionError::InvalidConfiguration)?;
         let (lists, partial) = review::pages(http, token, &url, 100)?;
         if partial {
             return Err(ConnectionError::ResponseTooLarge);
