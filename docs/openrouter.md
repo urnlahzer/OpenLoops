@@ -103,10 +103,20 @@ reported in the scan's failure list as
 > request; it was not resent.
 
 and the scan continues with the remaining conversations. HTTP 429 narrows the
-scan; it does not stop it. HTTP 402 (out of credits), unauthorized, network,
-timeout, and HTTP server errors do stop it: no further conversation is
-dispatched, requests already in flight finish, and the scan is reported as
-incomplete.
+scan; it does not stop it.
+
+HTTP 402 is likewise reported per conversation and does not stop the scan:
+live scans have shown it fire for one specific conversation while a dozen
+others on the same account, key, and model succeeded around it, so it is
+evidence about that one request rather than the account being out of
+credits. See `openrouter.rs`'s `MAX_OUTPUT_TOKENS` above for the usual
+mechanism. Unauthorized, network, timeout, and HTTP server errors do still
+stop the scan: no further conversation is dispatched, requests already in
+flight finish, and the scan is reported as incomplete. Unlike a 402, these
+have not been observed to be conversation-specific -- an invalid key or a
+down network affects every subsequent request identically, so continuing to
+dispatch into them would only produce the same failure repeated for no
+benefit.
 
 ## Contract and limits
 

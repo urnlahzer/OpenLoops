@@ -2049,12 +2049,19 @@ fn conversations_by_size(messages: &[ReviewMessage]) -> Vec<Vec<&ReviewMessage>>
 /// unreachable or unusable, rather than this one conversation being
 /// rejected: both `scan_conversations` and `scan_closures` stop the whole
 /// pass early on one of these instead of continuing past it.
+///
+/// `Quota` (HTTP 402) is deliberately excluded: live scans have repeatedly
+/// shown it fired for one specific conversation while a dozen others on the
+/// same account, key, and model succeeded around it, so it is evidence
+/// about that one request, not about the provider's health. Treating it as
+/// a stop condition cost every not-yet-dispatched conversation behind it
+/// for no reason -- it is handled like any other per-conversation failure
+/// instead (falls to `job_signal`'s `_ => JobSignal::Ok`).
 fn is_transport_error(error: ProviderError) -> bool {
     matches!(
         error,
         ProviderError::Unauthorized
             | ProviderError::RateLimited
-            | ProviderError::Quota
             | ProviderError::Network
             | ProviderError::Timeout
             | ProviderError::ServerError(_)
@@ -2405,7 +2412,6 @@ fn merge_conversation(
     index: usize,
     conversation: &[&ReviewMessage],
     outcome: JobOutcome<Expectations>,
-    quota_reported: &mut bool,
     not_started_messages: &mut usize,
 ) {
     match outcome {
@@ -2425,12 +2431,9 @@ fn merge_conversation(
         }
         JobOutcome::Completed(Err(ProviderError::Cancelled)) => result.cancelled = true,
         JobOutcome::Completed(Err(error)) => {
-            if error != ProviderError::Quota || !*quota_reported {
-                result
-                    .failures
-                    .push(failure_line(index, conversation, error));
-            }
-            *quota_reported |= error == ProviderError::Quota;
+            result
+                .failures
+                .push(failure_line(index, conversation, error));
             result.failed_conversations += 1;
             if is_stop_error(error) {
                 result.primary_scan_transport_error = true;
@@ -2502,7 +2505,6 @@ fn scan_conversations(
         }
         outcomes.sort_by_key(|(index, _)| *index);
     }
-    let mut quota_reported = false;
     let mut not_started_messages = 0usize;
     for (index, outcome) in outcomes {
         merge_conversation(
@@ -2510,7 +2512,6 @@ fn scan_conversations(
             index,
             &ordered[index],
             outcome,
-            &mut quota_reported,
             &mut not_started_messages,
         );
     }
@@ -5756,32 +5757,41 @@ at the downtown courthouse. Let me know if that works.",
     }
 
     #[test]
-    fn quota_stops_dispatch_and_is_reported_once() {
+    fn quota_is_a_per_conversation_failure_and_does_not_stop_dispatch() {
         let messages = parallel_corpus(8);
         let progress = ScanProgress::default();
         let calls = AtomicUsize::new(0);
-        let first_wave = std::sync::Barrier::new(4);
         let result =
             super::scan_conversations(&messages, &progress, &ParallelPass::new(4), &|_| {
                 calls.fetch_add(1, Ordering::SeqCst);
-                first_wave.wait();
                 Err(ProviderError::Quota)
             });
-        assert_eq!(calls.load(Ordering::SeqCst), 4);
-        assert!(result.primary_scan_transport_error);
-        // One collapsed Quota line for the 4 conversations actually
-        // attempted, plus one aggregate line for the 4 the pass stopped
-        // before ever dispatching.
-        assert_eq!(result.failures.len(), 2);
-        assert!(result.failures[0].contains("HTTP 402"));
-        assert_eq!(result.failed_conversations, 4);
-        assert_eq!(result.not_started_conversations, 4);
-        assert_eq!(progress.processed.load(Ordering::Relaxed), 4);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            8,
+            "every conversation is still dispatched; a quota error is about that one request"
+        );
+        assert!(!result.primary_scan_transport_error);
+        assert_eq!(result.failed_conversations, 8);
+        assert_eq!(result.not_started_conversations, 0);
+        assert_eq!(
+            result
+                .failures
+                .iter()
+                .filter(|line| line.contains("HTTP 402"))
+                .count(),
+            8,
+            "each occurrence gets its own line, none collapsed: {:?}",
+            result.failures
+        );
+        assert_eq!(progress.processed.load(Ordering::Relaxed), 8);
     }
 
-    /// Owner's live-scan symptom (2026-09-11): a quota error on conversation
-    /// 2 of 6 leaves conversations 3-6 with no `JobOutcome` at all --
-    /// `run_worker`'s single worker sees `stop` before it ever calls
+    /// Owner's live-scan symptom (2026-09-11, originally reproduced with a
+    /// quota error -- now a genuine transport error, since quota no longer
+    /// stops the pass; see `is_transport_error`): a stop-class error on
+    /// conversation 2 of 6 leaves conversations 3-6 with no `JobOutcome` at
+    /// all -- `run_worker`'s single worker sees `stop` before it ever calls
     /// `next_job` for them, so they are absent from `run_jobs`'s answers,
     /// not merely marked failed. Every one of the 6 must still be
     /// accounted for, and the 4 that were never dispatched must read as one
@@ -5793,7 +5803,7 @@ at the downtown courthouse. Let me know if that works.",
         let progress = ScanProgress::default();
         let result = super::scan_conversations(&messages, &progress, &ParallelPass::new(1), &|c| {
             if positions[&c[0].handle] == 1 {
-                return Err(ProviderError::Quota);
+                return Err(ProviderError::Network);
             }
             Ok(no_expectations())
         });
@@ -5805,10 +5815,10 @@ at the downtown courthouse. Let me know if that works.",
             result
                 .failures
                 .iter()
-                .filter(|line| line.contains("HTTP 402"))
+                .filter(|line| line.contains("Could not establish or complete a secure connection"))
                 .count(),
             1,
-            "exactly one Quota line: {:?}",
+            "exactly one Network line: {:?}",
             result.failures
         );
         assert_eq!(
@@ -5829,29 +5839,33 @@ at the downtown courthouse. Let me know if that works.",
         );
     }
 
-    /// A quota error answered by every worker in the same first wave still
-    /// collapses to one `failures` line (`quota_reported`), but each of
-    /// those in-flight conversations was genuinely attempted and failed --
-    /// none of them were ever queued past the stop, so this is pure
-    /// `failed_conversations` accounting, no aggregated not-started line.
+    /// A stop-class error answered by every worker in the same first wave is
+    /// fully accounted for as failed, not not-started: each of those
+    /// conversations was genuinely dispatched and attempted before the pass
+    /// ever saw the stop signal, so this is pure `failed_conversations`
+    /// accounting, with no aggregated not-started line -- nothing was left
+    /// behind. Unlike a quota error (see
+    /// `quota_is_a_per_conversation_failure_and_does_not_stop_dispatch`),
+    /// each occurrence here gets its own line rather than collapsing,
+    /// because that dedup was quota-specific.
     #[test]
-    fn quota_failures_in_flight_are_counted_even_when_their_lines_collapse() {
+    fn stop_error_failures_in_flight_are_each_counted_as_failed_not_not_started() {
         let messages = parallel_corpus(3);
         let progress = ScanProgress::default();
         let first_wave = std::sync::Barrier::new(3);
         let result =
             super::scan_conversations(&messages, &progress, &ParallelPass::new(3), &|_| {
                 first_wave.wait();
-                Err(ProviderError::Quota)
+                Err(ProviderError::Network)
             });
         assert_eq!(
             result
                 .failures
                 .iter()
-                .filter(|line| line.contains("HTTP 402"))
+                .filter(|line| line.contains("Could not establish or complete a secure connection"))
                 .count(),
-            1,
-            "exactly one Quota line: {:?}",
+            3,
+            "each in-flight conversation gets its own line: {:?}",
             result.failures
         );
         assert_eq!(result.unanalyzed_conversations(), 3);
