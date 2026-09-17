@@ -2374,6 +2374,13 @@ fn failure_line(index: usize, conversation: &[&ReviewMessage], error: ProviderEr
         ProviderError::RateLimited => {
             format!("{head}: The provider rate-limited this request; it was not resent.")
         }
+        // Append OpenRouter's own stated reason when one was captured, so a
+        // 402 is diagnosable from the failure line itself -- see
+        // `provider::record_quota_detail` for the boundary this crosses.
+        ProviderError::Quota => match openloops_inference::provider::last_quota_detail() {
+            Some(detail) => format!("{head}: {error} OpenRouter's reason: {detail}"),
+            None => format!("{head}: {error}"),
+        },
         error => format!("{head}: {error}"),
     }
 }

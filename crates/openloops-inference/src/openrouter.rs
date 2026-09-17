@@ -11,8 +11,8 @@ use zeroize::Zeroizing;
 
 use crate::provider::{
     MAX_PARALLEL_REQUESTS, MAX_REQUEST, MAX_RESPONSE, ModelClient, ProviderError, RequestControl,
-    https_client, json_document, parse_error, read_body, send_with_control, status_error,
-    valid_key, valid_model_name,
+    https_client, json_document, parse_error, read_body, record_quota_detail, send_with_control,
+    status_error, valid_key, valid_model_name,
 };
 
 const AUTHORITY: &str = "https://openrouter.ai";
@@ -264,6 +264,15 @@ fn read_response(
     match response.status().as_u16() {
         200 => {}
         401 => return Err(ProviderError::InvalidKey),
+        // A 402's body carries OpenRouter's own reason; keep only its
+        // `error.message` (see `provider::record_quota_detail`) so the
+        // failure line can say why rather than leaving it to guesswork.
+        402 => {
+            if let Ok(body) = read_body(response, MAX_RESPONSE, control) {
+                record_quota_detail(&body);
+            }
+            return Err(ProviderError::Quota);
+        }
         status => return Err(status_error(status)),
     }
     read_body(response, MAX_RESPONSE, control)

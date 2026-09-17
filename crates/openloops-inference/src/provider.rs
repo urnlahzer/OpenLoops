@@ -447,6 +447,80 @@ pub(crate) fn transport_error(error: &reqwest::Error) -> ProviderError {
     }
 }
 
+/// The most recent HTTP 402 body's `error.message`, bounded and stripped of
+/// control characters. A deliberate, narrow exception to `ProviderError`'s
+/// "no upstream error text escapes" boundary: a 402 reason is the
+/// provider's billing text ("Insufficient credits", "key limit exceeded",
+/// ...), never mailbox content, and without it every 402 has to be
+/// diagnosed by guesswork against a provider that would simply have said
+/// why. Only the `error.message` field of the documented error JSON shape
+/// is kept -- never the raw body -- so the boundary against prompts,
+/// keys, and message text still holds.
+static LAST_QUOTA_DETAIL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+const MAX_QUOTA_DETAIL_CHARS: usize = 240;
+
+pub(crate) fn record_quota_detail(body: &[u8]) {
+    let detail = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .map(|message| {
+            message
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(MAX_QUOTA_DETAIL_CHARS)
+                .collect::<String>()
+        })
+        .filter(|message| !message.trim().is_empty());
+    if let Ok(mut slot) = LAST_QUOTA_DETAIL.lock() {
+        *slot = detail;
+    }
+}
+
+/// See [`record_quota_detail`]. `None` when the last 402 carried no
+/// readable `error.message`, or no 402 has been seen.
+#[must_use]
+pub fn last_quota_detail() -> Option<String> {
+    LAST_QUOTA_DETAIL.lock().ok().and_then(|slot| slot.clone())
+}
+
+#[cfg(test)]
+mod quota_detail_tests {
+    use super::*;
+
+    // One test, not several: the slot is process-global, so separate tests
+    // would race each other on it.
+    #[test]
+    fn quota_detail_keeps_only_a_bounded_sanitized_error_message() {
+        record_quota_detail(br#"{"error":{"message":"Insufficient credits.\nAdd more.","code":402}}"#);
+        assert_eq!(
+            last_quota_detail().as_deref(),
+            Some("Insufficient credits.Add more.")
+        );
+
+        let long = format!(r#"{{"error":{{"message":"{}"}}}}"#, "x".repeat(1000));
+        record_quota_detail(long.as_bytes());
+        assert_eq!(
+            last_quota_detail().map(|d| d.chars().count()),
+            Some(MAX_QUOTA_DETAIL_CHARS)
+        );
+
+        // Not the documented error shape, or unreadable: nothing is kept,
+        // and a stale earlier detail is cleared rather than left to mislead.
+        record_quota_detail(br#"{"message":"top-level, wrong shape"}"#);
+        assert_eq!(last_quota_detail(), None);
+        record_quota_detail(b"not json at all");
+        assert_eq!(last_quota_detail(), None);
+        record_quota_detail(br#"{"error":{"message":"   "}}"#);
+        assert_eq!(last_quota_detail(), None);
+    }
+}
+
 pub(crate) fn status_error(status: u16) -> ProviderError {
     match status {
         401 | 403 => ProviderError::Unauthorized,
