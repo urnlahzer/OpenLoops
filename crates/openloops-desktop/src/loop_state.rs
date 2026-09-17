@@ -15,7 +15,7 @@ const OLD_MAGIC: &[u8] = b"OLDecisions\x01";
 /// `secret`(32) + count(1) + `CAP` * 42-byte rows), the true maximum that can
 /// ever fit is `(2560 - MAGIC.len() - 33) / 42` ~= 59 records -- there is no
 /// room to raise this materially without moving off a single Windows
-/// credential blob (e.g. onto `openloops-persistence`'s SQLite store, or
+/// credential blob (e.g. onto `openloops-persistence`'s `SQLite` store, or
 /// splitting across multiple named credentials), which is out of scope here.
 /// 55 leaves a small margin below that hard ceiling.
 const CAP: usize = 55;
@@ -57,7 +57,10 @@ pub enum Reminder {
     /// Handled) can address the same task -- see `reminders::complete()`.
     /// Each id is bounded to `MAX_REMINDER_ID_LEN` bytes for storage; see
     /// that constant for why.
-    Created { list_id: String, task_id: String },
+    Created {
+        list_id: String,
+        task_id: String,
+    },
     /// Set only by the reminder-sync check (`reminders::check_status`)
     /// finding the linked task already completed in Microsoft To Do --
     /// never by the user clicking Handled, which leaves `reminder` as
@@ -66,7 +69,10 @@ pub enum Reminder {
     /// "completing the task externally marked this handled" for
     /// `status_pill_hint`, since the decision alone (`Done` either way)
     /// can't say which.
-    Completed { list_id: String, task_id: String },
+    Completed {
+        list_id: String,
+        task_id: String,
+    },
 }
 #[derive(Clone)]
 pub struct Record {
@@ -499,10 +505,7 @@ mod tests {
                         updated: now(),
                     })
                     .unwrap();
-                assert_eq!(
-                    state.records.iter().any(|r| r.key == [7; 32]),
-                    has_reminder
-                );
+                assert_eq!(state.records.iter().any(|r| r.key == [7; 32]), has_reminder);
             }
         }
     }
@@ -529,7 +532,7 @@ mod tests {
                 },
                 updated: 1_788_350_400,
             };
-            let bytes = encode(&[0; 32], &[record.clone()]).unwrap();
+            let bytes = encode(&[0; 32], std::slice::from_ref(&record)).unwrap();
             assert_eq!(usize::from(bytes[MAGIC.len() + 33 + 32]), tag);
             let (_, records) = decode(&bytes).unwrap();
             assert_eq!(records.len(), 1);
@@ -641,7 +644,13 @@ mod tests {
         let target = format!("OpenLoops/TestDecisions/{}-{}", std::process::id(), now());
         let mut state = Decisions::open(Some(&target));
         assert!(state.error.is_none());
-        let key = state.fingerprint("synthetic-account", "synthetic-source", 0, "send the draft", "phrase");
+        let key = state.fingerprint(
+            "synthetic-account",
+            "synthetic-source",
+            0,
+            "send the draft",
+            "phrase",
+        );
         state
             .update(Record {
                 key,
@@ -693,7 +702,13 @@ mod tests {
         let target = std::env::var("OPENLOOPS_TEST_DECISIONS").unwrap();
         assert!(target.starts_with("OpenLoops/TestDecisions/"));
         let mut state = Decisions::open(Some(&target));
-        let key = state.fingerprint("synthetic-account", "synthetic-source", 0, "send the draft", "phrase");
+        let key = state.fingerprint(
+            "synthetic-account",
+            "synthetic-source",
+            0,
+            "send the draft",
+            "phrase",
+        );
         assert_eq!(state.get(&key).decision, Decision::Watching);
         assert!(state.begin_reminder(key).is_err());
     }

@@ -1027,13 +1027,10 @@ pub fn layout_fixture() -> ReviewState {
         "Could you send over the finalized draft budget before Thursday's sign-off meeting? I need to fold in the updated headcount numbers and the vendor renewal figures before we present it to the executive committee on Friday morning.",
         "send the draft budget",
     );
-    let second_key = state.decisions.fingerprint(
-        "synthetic",
-        "synthetic-1",
-        0,
-        body,
-        "send the draft budget",
-    );
+    let second_key =
+        state
+            .decisions
+            .fingerprint("synthetic", "synthetic-1", 0, body, "send the draft budget");
     let third_key = state.decisions.fingerprint(
         "synthetic",
         "synthetic-3",
@@ -1236,9 +1233,13 @@ mod tests {
 
         let (mut state, item) = aging_fixture();
         let source = &state.messages[0];
-        let key = state
-            .decisions
-            .fingerprint(&source.account, &source.id, item.evidence.block, &item.evidence.quote, &item.action_phrase);
+        let key = state.decisions.fingerprint(
+            &source.account,
+            &source.id,
+            item.evidence.block,
+            &item.evidence.quote,
+            &item.action_phrase,
+        );
         for decision in [Decision::Done, Decision::Dismissed, Decision::Moot] {
             let mut record = state.decisions.get(&key);
             record.decision = decision;
@@ -1384,9 +1385,13 @@ mod tests {
     fn set_scan_reverts_an_open_drafts_implied_mine_back_to_review() {
         let (mut state, item) = aging_fixture();
         let source = state.messages[0].clone();
-        let key = state
-            .decisions
-            .fingerprint(&source.account, &source.id, item.evidence.block, &item.evidence.quote, &item.action_phrase);
+        let key = state.decisions.fingerprint(
+            &source.account,
+            &source.id,
+            item.evidence.block,
+            &item.evidence.quote,
+            &item.action_phrase,
+        );
         // Simulate "Set To Do reminder..." having been clicked on this
         // `Review` card: `decision_after_setting_reminder` implied `Mine`.
         let mut record = state.decisions.get(&key);

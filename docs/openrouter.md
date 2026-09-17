@@ -57,17 +57,16 @@ configured for ZDR, and OpenLoops never relaxes it for an individual request.
 Before any message text is sent, connecting re-checks that the selected model
 still appears in the ZDR listing.
 
-`max_tokens` is fixed, not user-configurable. Without it, OpenRouter's
-pre-request credit check reserves against the selected model's own output
-ceiling (65,536 tokens on some models) rather than what a bounded
-`analysis-output-v1` answer could ever need, and can reject the request with
-HTTP 402 -- "insufficient credits" -- on an account with an otherwise-ample
-balance. That rejection happens before the request is forwarded upstream, so
-it is never actually billed: your OpenRouter activity log stays clean, and
-the account's balance never moves, which is what makes this failure mode easy
-to mistake for a real "out of funds" state. 16,384 tokens is well above what a
-full 64-claim answer needs, with headroom for a reasoning model's hidden
-thinking tokens, which OpenRouter counts against the same ceiling.
+`max_tokens` is fixed, not user-configurable. OpenRouter's pre-request credit
+check reserves credit for each request that is still in flight, sized by the
+request's output ceiling. Without an explicit `max_tokens` that ceiling is
+the selected model's own maximum (65,536 tokens on some models) rather than
+what a bounded `analysis-output-v1` answer could ever need, so a handful of
+concurrent requests can reserve past a modest balance. 16,384 tokens is well
+above what a full 64-claim answer needs, with headroom for a reasoning
+model's hidden thinking tokens, which OpenRouter counts against the same
+ceiling. See [Concurrency and rate limits](#concurrency-and-rate-limits) for
+what happens when the reservation still overruns the balance.
 
 Subjects, current message text, quoted history, and participants for the
 messages in your configured scan scope leave the computer. Attachments and
@@ -105,12 +104,28 @@ reported in the scan's failure list as
 and the scan continues with the remaining conversations. HTTP 429 narrows the
 scan; it does not stop it.
 
-HTTP 402 is likewise reported per conversation and does not stop the scan:
-live scans have shown it fire for one specific conversation while a dozen
-others on the same account, key, and model succeeded around it, so it is
-evidence about that one request rather than the account being out of
-credits. See `openrouter.rs`'s `MAX_OUTPUT_TOKENS` above for the usual
-mechanism. Unauthorized, network, timeout, and HTTP server errors do still
+OpenRouter uses HTTP 402 for two different conditions, and OpenLoops tells
+them apart by the reason OpenRouter states in the response body, which the
+failure line repeats verbatim.
+
+The first is a per-request credit reservation overrun:
+
+> This request would exceed your available credits given your current
+> in-flight requests. Retry after in-flight requests settle, or add credits.
+
+OpenRouter holds credit against every request still in flight, sized by its
+`max_tokens` (see above), and rejects a new request when the held total plus
+this request's reservation would pass the balance. The requests it does
+accept are forwarded, answered, and billed as usual, so the activity log
+shows them as successful. This is a too-many-at-once condition, and OpenLoops
+treats it exactly like HTTP 429: the concurrency narrows, the request is not
+resent, the conversation is reported failed, and the scan continues. A
+larger balance raises how many requests fit at once; so does a lower
+**Parallel requests (max)**.
+
+Any other 402 (an exhausted balance, a key spend limit) is reported per
+conversation and does not stop the scan either; the failure line carries
+OpenRouter's stated reason. Unauthorized, network, timeout, and HTTP server errors do still
 stop the scan: no further conversation is dispatched, requests already in
 flight finish, and the scan is reported as incomplete. Unlike a 402, these
 have not been observed to be conversation-specific -- an invalid key or a

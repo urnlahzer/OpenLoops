@@ -2083,7 +2083,9 @@ enum JobSignal {
     /// The provider answered. Whether that answer was usable says nothing
     /// about provider health, so a rejected analysis counts here too.
     Ok,
-    /// Rate limited: narrow the concurrency. The request is NOT resent --
+    /// Rate limited (HTTP 429), or `OpenRouter`'s in-flight credit
+    /// reservation (an HTTP 402 that says to retry after in-flight requests
+    /// settle): narrow the concurrency. The request is NOT resent --
     /// `network_policy.retries`
     /// forbids automatically retrying any request that carried content --
     /// so the conversation is reported as failed instead.
@@ -2223,16 +2225,17 @@ impl ParallelPass {
     }
 }
 
-/// How one finished job's answer steers the limiter. Rate limiting narrows
-/// the pass; quota and the other transport-class errors stop it; a
-/// cancelled request stops it too (the caller's flag is normally already
-/// set, but a provider may answer `Cancelled` on its own).
+/// How one finished job's answer steers the limiter. Rate limiting and
+/// `OpenRouter`'s in-flight credit reservation narrow the pass; the
+/// transport-class errors stop it; a cancelled request stops it too (the
+/// caller's flag is normally already set, but a provider may answer
+/// `Cancelled` on its own). A plain quota 402 is per-conversation.
 fn job_signal<T>(outcome: &Result<T, ProviderError>) -> JobSignal {
     let Err(error) = outcome else {
         return JobSignal::Ok;
     };
     match *error {
-        ProviderError::RateLimited => JobSignal::Backoff,
+        ProviderError::RateLimited | ProviderError::CreditsInFlight => JobSignal::Backoff,
         ProviderError::Cancelled => JobSignal::Stop,
         error if is_transport_error(error) => JobSignal::Stop,
         // Any other failure is about this one request, not the provider:
@@ -2373,6 +2376,9 @@ fn failure_line(index: usize, conversation: &[&ReviewMessage], error: ProviderEr
     match error {
         ProviderError::RateLimited => {
             format!("{head}: The provider rate-limited this request; it was not resent.")
+        }
+        ProviderError::CreditsInFlight => {
+            format!("{head}: {error} This request was not resent.")
         }
         // Append OpenRouter's own stated reason when one was captured, so a
         // 402 is diagnosable from the failure line itself -- see
@@ -3227,7 +3233,9 @@ fn merge_closures(
                 }
             }
             JobOutcome::Completed(Err(ProviderError::Cancelled)) => result.cancelled = true,
-            JobOutcome::Completed(Err(ProviderError::RateLimited)) => rate_limited += 1,
+            JobOutcome::Completed(Err(
+                ProviderError::RateLimited | ProviderError::CreditsInFlight,
+            )) => rate_limited += 1,
             JobOutcome::Completed(Err(error)) if is_stop_error(error) => {
                 if result.closure_pass_failure.is_none() {
                     result.closure_pass_failure = Some(format!("Closure pass stopped: {error}"));
@@ -5613,6 +5621,63 @@ at the downtown courthouse. Let me know if that works.",
                 .iter()
                 .all(|line| line
                     .ends_with("The provider rate-limited this request; it was not resent.")),
+            "{:?}",
+            result.failures
+        );
+        assert!(!result.primary_scan_transport_error);
+        assert!(!result.cancelled);
+        assert_eq!(result.analyzed, 22);
+        let allowed = pass.limiter_state().0;
+        assert!(
+            (1..=8).contains(&allowed),
+            "allowed concurrency stays inside 1..=max: {allowed}"
+        );
+    }
+
+    /// `OpenRouter`'s "would exceed your available credits given your current
+    /// in-flight requests" 402 is a too-many-at-once condition, so it steers
+    /// the limiter exactly like a 429: the scan narrows and continues, and
+    /// the request is not resent. A plain quota 402 stays per-conversation.
+    #[test]
+    fn an_in_flight_credit_402_narrows_concurrency_like_a_rate_limit() {
+        assert_eq!(
+            super::job_signal::<()>(&Err(ProviderError::CreditsInFlight)),
+            JobSignal::Backoff
+        );
+        assert_eq!(
+            super::job_signal::<()>(&Err(ProviderError::Quota)),
+            JobSignal::Ok
+        );
+        assert!(!super::is_transport_error(ProviderError::CreditsInFlight));
+
+        let messages = parallel_corpus(24);
+        let positions = handle_positions(&messages);
+        let calls: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
+        let pass = ParallelPass::new(8);
+        let result = super::scan_conversations(&messages, &ScanProgress::default(), &pass, &|c| {
+            *calls
+                .lock()
+                .unwrap()
+                .entry(c[0].handle.clone())
+                .or_default() += 1;
+            std::thread::sleep(Duration::from_millis(20));
+            if positions[&c[0].handle] % 12 == 1 {
+                return Err(ProviderError::CreditsInFlight);
+            }
+            Ok(no_expectations())
+        });
+        let calls = calls.into_inner().unwrap();
+        assert_eq!(calls.len(), 24, "every conversation is still attempted");
+        assert!(
+            calls.values().all(|count| *count == 1),
+            "a deferred request is never resent: {calls:?}"
+        );
+        assert_eq!(result.failures.len(), 2);
+        assert!(
+            result.failures.iter().all(|line| {
+                line.contains("requests already in flight")
+                    && line.ends_with("This request was not resent.")
+            }),
             "{:?}",
             result.failures
         );

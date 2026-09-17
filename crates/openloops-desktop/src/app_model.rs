@@ -34,7 +34,12 @@ pub(crate) enum Outcome {
     ),
     /// One `check_status` result per still-open, reminder-bearing decision
     /// found at the end of a scan -- see `AppModel::dispatch_reminder_sync`.
-    ReminderSync(Vec<([u8; 32], openloops_graph::live::reminders::TaskStatusOutcome)>),
+    ReminderSync(
+        Vec<(
+            [u8; 32],
+            openloops_graph::live::reminders::TaskStatusOutcome,
+        )>,
+    ),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -306,6 +311,26 @@ impl AppModel {
         });
     }
 
+    /// The pending job's worker went away without sending an outcome
+    /// (a panic, in practice): clear the job and report it on the service
+    /// that owned it.
+    fn pending_disconnected(&mut self) {
+        self.pending = None;
+        let status = Status {
+            lines: vec!["The operation stopped unexpectedly. Please try again.".into()],
+            succeeded: false,
+        };
+        match self.pending_service {
+            Service::Microsoft => self.microsoft = status,
+            Service::Model => self.model_status = status,
+            Service::Review => {
+                self.load_progress = None;
+                self.review_status = status;
+                self.review.scan_failed = true;
+            }
+        }
+    }
+
     /// Polls the pending job's channel, if any, applying its outcome.
     /// Returns whether an outcome was actually consumed (a result arrived,
     /// or the worker disconnected) -- `false` on an empty channel (still
@@ -320,20 +345,7 @@ impl AppModel {
             Ok(outcome) => outcome,
             Err(TryRecvError::Empty) => return false,
             Err(TryRecvError::Disconnected) => {
-                self.pending = None;
-                let status = Status {
-                    lines: vec!["The operation stopped unexpectedly. Please try again.".into()],
-                    succeeded: false,
-                };
-                match self.pending_service {
-                    Service::Microsoft => self.microsoft = status,
-                    Service::Model => self.model_status = status,
-                    Service::Review => {
-                        self.load_progress = None;
-                        self.review_status = status;
-                        self.review.scan_failed = true;
-                    }
-                }
+                self.pending_disconnected();
                 return true;
             }
         };
@@ -518,20 +530,24 @@ impl AppModel {
                 "Decision saved on this Windows account. Microsoft did not confirm the To Do task was marked complete; check it there.".to_owned()
             }
         };
-        self.review.action_status_succeeded = matches!(outcome, ReminderCompletionOutcome::Completed);
+        self.review.action_status_succeeded =
+            matches!(outcome, ReminderCompletionOutcome::Completed);
     }
 
     /// Applies the reverse direction of `reminder_completion_outcome`: a
     /// task the user completed directly in Microsoft To Do, discovered by
-    /// `dispatch_reminder_sync`, marks its loop Handled in OpenLoops.
+    /// `dispatch_reminder_sync`, marks its loop Handled in `OpenLoops`.
     /// `NotCompleted`/`Unknown` results change nothing -- a task that's
-    /// still open, or one OpenLoops simply couldn't check this time, is not
+    /// still open, or one `OpenLoops` simply couldn't check this time, is not
     /// evidence of anything; `Reminder::Completed` (rather than leaving it
     /// `Created`) is what lets `status_pill_hint` say this loop was closed
     /// by the To Do task specifically, not by the user clicking Handled.
     fn reminder_sync_outcome(
         &mut self,
-        results: Vec<([u8; 32], openloops_graph::live::reminders::TaskStatusOutcome)>,
+        results: Vec<(
+            [u8; 32],
+            openloops_graph::live::reminders::TaskStatusOutcome,
+        )>,
     ) {
         use crate::loop_state::{Decision, Reminder};
         use openloops_graph::live::reminders::TaskStatusOutcome;
@@ -655,12 +671,12 @@ impl AppModel {
 
     /// After a scan, checks whether any still-open, reminder-bearing
     /// decision's linked Microsoft To Do task was completed outside
-    /// OpenLoops -- the reverse direction of `on_review_decision`'s
+    /// `OpenLoops` -- the reverse direction of `on_review_decision`'s
     /// complete-on-Handled hook (`slint_review.rs`). Runs after
     /// `Outcome::Scan` rather than before the mail download, because
     /// matching a saved decision back to an account needs the freshly
     /// loaded messages: `Decisions` never stores the account itself, only
-    /// folds it into the opaque fingerprint (see loop_state.rs's module
+    /// folds it into the opaque fingerprint (see `loop_state.rs`'s module
     /// doc), so `card_context()`'s live `source_message` lookup is the only
     /// way to recover it. A no-op when nothing is eligible: only a
     /// `Mine`/`Watching`/`Review` decision with a `Reminder::Created`
@@ -1256,7 +1272,10 @@ mod tests {
             .send(Outcome::ReminderSync(vec![
                 (completed_key, TaskStatusOutcome::Completed),
                 (open_key, TaskStatusOutcome::NotCompleted),
-                (unknown_key, TaskStatusOutcome::Unknown(ConnectionError::Timeout(1))),
+                (
+                    unknown_key,
+                    TaskStatusOutcome::Unknown(ConnectionError::Timeout(1)),
+                ),
             ]))
             .unwrap();
         app.poll(|| {});

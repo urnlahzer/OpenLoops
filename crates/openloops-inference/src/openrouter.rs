@@ -10,9 +10,9 @@ use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use crate::provider::{
-    MAX_PARALLEL_REQUESTS, MAX_REQUEST, MAX_RESPONSE, ModelClient, ProviderError, RequestControl,
-    https_client, json_document, parse_error, read_body, record_quota_detail, send_with_control,
-    status_error, valid_key, valid_model_name,
+    MAX_PARALLEL_REQUESTS, MAX_REQUEST, MAX_RESPONSE, ModelClient, ProviderError, QuotaKind,
+    RequestControl, https_client, json_document, parse_error, read_body, record_quota_detail,
+    send_with_control, status_error, valid_key, valid_model_name,
 };
 
 const AUTHORITY: &str = "https://openrouter.ai";
@@ -23,16 +23,17 @@ const ZDR_ENDPOINTS: &str = "https://openrouter.ai/api/v1/endpoints/zdr";
 const MAX_LISTING: usize = 4_194_304;
 const MAX_ENDPOINTS: usize = 8192;
 const MAX_LABEL: usize = 128;
-/// Sent as `max_tokens` on every completion. Without it, OpenRouter's
-/// pre-request credit check reserves against the selected model's own
-/// output ceiling (65,536 tokens on some models) rather than what this
-/// bounded analysis answer could ever need, and can reject the request
-/// with HTTP 402 on an account with an otherwise-ample balance -- before
-/// the request is ever forwarded upstream, so it is never actually
-/// billed. `analysis-output-v1` answers are well under this even with a
-/// full 64-claim response; the margin above that is headroom for a
-/// reasoning model's hidden thinking tokens, which OpenRouter counts
-/// against the same ceiling.
+/// Sent as `max_tokens` on every completion. `OpenRouter`'s pre-request
+/// credit check holds credit for every request still in flight, sized by
+/// its output ceiling; without an explicit `max_tokens` that ceiling is
+/// the selected model's own maximum (65,536 tokens on some models) rather
+/// than what this bounded analysis answer could ever need, so a few
+/// concurrent requests can reserve past a modest balance and draw the
+/// in-flight HTTP 402 ([`ProviderError::CreditsInFlight`]).
+/// `analysis-output-v1` answers are well under this even with a full
+/// 64-claim response; the margin above that is headroom for a reasoning
+/// model's hidden thinking tokens, which `OpenRouter` counts against the
+/// same ceiling.
 const MAX_OUTPUT_TOKENS: u32 = 16_384;
 
 /// One selectable zero-data-retention model: the exact provider-side
@@ -267,9 +268,15 @@ fn read_response(
         // A 402's body carries OpenRouter's own reason; keep only its
         // `error.message` (see `provider::record_quota_detail`) so the
         // failure line can say why rather than leaving it to guesswork.
+        // OpenRouter also uses 402 for "would exceed your available credits
+        // given your current in-flight requests" -- a too-many-at-once
+        // condition it says to retry once in-flight requests settle. That
+        // one is a backoff signal, so it gets its own variant.
         402 => {
-            if let Ok(body) = read_body(response, MAX_RESPONSE, control) {
-                record_quota_detail(&body);
+            if let Ok(body) = read_body(response, MAX_RESPONSE, control)
+                && record_quota_detail(&body) == QuotaKind::InFlight
+            {
+                return Err(ProviderError::CreditsInFlight);
             }
             return Err(ProviderError::Quota);
         }
@@ -615,6 +622,15 @@ mod tests {
                 Err(expected)
             );
         }
+        // The one 402 that is a backoff signal, not a balance problem.
+        let (url, _captured) = loopback(http(
+            402,
+            br#"{"error":{"message":"This request would exceed your available credits given your current in-flight requests. Retry after in-flight requests settle, or add credits.","code":402}}"#,
+        ));
+        assert_eq!(
+            synthetic_provider().chat_at(&url, request(MODEL, "policy", "data").unwrap(), None),
+            Err(ProviderError::CreditsInFlight)
+        );
     }
 
     #[test]

@@ -533,12 +533,8 @@ fn status_pill_hint(decision: Decision, reminder: &Reminder, item: &Expectation)
                 None => "closing evidence".to_owned(),
                 Some(ResolutionKind::Completed) => "evidence it was completed".to_owned(),
                 Some(ResolutionKind::Declined) => "evidence it was declined".to_owned(),
-                Some(ResolutionKind::Withdrawn) => {
-                    "evidence the requester withdrew it".to_owned()
-                }
-                Some(ResolutionKind::Superseded) => {
-                    "evidence the requester replaced it".to_owned()
-                }
+                Some(ResolutionKind::Withdrawn) => "evidence the requester withdrew it".to_owned(),
+                Some(ResolutionKind::Superseded) => "evidence the requester replaced it".to_owned(),
                 Some(ResolutionKind::Agreed) => "evidence you agreed to it".to_owned(),
             };
             let where_found = if item.cross_thread {
@@ -1559,22 +1555,22 @@ pub(crate) fn register_callbacks(
             model_ref
                 .review
                 .apply_decision_change(key, decision, reminder);
-            if let Some((list_id, task_id)) = complete_task {
-                if let Ok(config) = ConnectionConfig::new(model_ref.client_id.trim(), None) {
-                    model_ref.start(
-                        Service::Review,
-                        "Marking the linked Microsoft To Do task complete",
-                        move || {
-                            Outcome::ReminderCompletion(
-                                key,
-                                openloops_graph::live::reminders::complete(
-                                    &config, &account, &list_id, &task_id,
-                                ),
-                            )
-                        },
-                        || {},
-                    );
-                }
+            if let Some((list_id, task_id)) = complete_task
+                && let Ok(config) = ConnectionConfig::new(model_ref.client_id.trim(), None)
+            {
+                model_ref.start(
+                    Service::Review,
+                    "Marking the linked Microsoft To Do task complete",
+                    move || {
+                        Outcome::ReminderCompletion(
+                            key,
+                            openloops_graph::live::reminders::complete(
+                                &config, &account, &list_id, &task_id,
+                            ),
+                        )
+                    },
+                    || {},
+                );
             }
             drop(model_ref);
             refresh(&model, &weak);
@@ -1632,10 +1628,13 @@ pub(crate) fn register_callbacks(
             let source_id = source.id.clone();
             let evidence_block = item.evidence.block;
             let evidence_quote = item.evidence.quote.clone();
-            let key = model_ref
-                .review
-                .decisions
-                .fingerprint(&account, &source_id, evidence_block, &evidence_quote, &item.action_phrase);
+            let key = model_ref.review.decisions.fingerprint(
+                &account,
+                &source_id,
+                evidence_block,
+                &evidence_quote,
+                &item.action_phrase,
+            );
             let record = model_ref.review.decisions.get(&key);
             let draft_open_for_this_card = model_ref
                 .review
@@ -2191,7 +2190,9 @@ mod tests {
         // Reminder::Completed wins over everything else -- the sync check
         // found the linked task already done, regardless of what other
         // evidence the model separately found.
-        item.resolution = review.analysis.as_ref().unwrap().items[0].resolution.clone();
+        item.resolution = review.analysis.as_ref().unwrap().items[0]
+            .resolution
+            .clone();
         assert_eq!(
             status_pill_hint(
                 Decision::Done,
@@ -2600,9 +2601,13 @@ mod tests {
         let mut review = crate::review_model::layout_fixture();
         let item = review.analysis.as_ref().unwrap().items[0].clone();
         let source = source_message(&review, &item).unwrap();
-        let key = review
-            .decisions
-            .fingerprint(&source.account, &source.id, item.evidence.block, &item.evidence.quote, &item.action_phrase);
+        let key = review.decisions.fingerprint(
+            &source.account,
+            &source.id,
+            item.evidence.block,
+            &item.evidence.quote,
+            &item.action_phrase,
+        );
         review.apply_decision_change(
             key,
             Decision::Mine,

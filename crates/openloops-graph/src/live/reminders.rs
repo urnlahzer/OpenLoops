@@ -16,7 +16,10 @@ pub enum ReminderOutcome {
     /// The task list and task id Graph reported, so a later action (e.g.
     /// marking it complete once the review card is Handled) can address the
     /// same task without re-resolving the default list.
-    Created { list_id: String, task_id: String },
+    Created {
+        list_id: String,
+        task_id: String,
+    },
     NotCreated(ConnectionError),
     Uncertain,
 }
