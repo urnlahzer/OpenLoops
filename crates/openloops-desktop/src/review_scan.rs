@@ -1,14 +1,21 @@
 use crate::deadline_view::{DeadlineView, EVENT_GENERIC_NOUNS, classify};
 use crate::settings::Provider;
 use chrono::{Datelike, TimeZone};
-use openloops_domain::deadline_parse::DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT;
+use openloops_contracts::{
+    AmbiguityCode, Claim, ClaimType, EvidenceComponent, Nullable, TemporalKind,
+};
+use openloops_domain::deadline::UnixSeconds;
+use openloops_domain::deadline_parse::{
+    DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT, ParseContext, TimezoneContext, Weekday,
+};
 use openloops_graph::live::{ConnectionError, review::MailItem};
 use openloops_inference::{
+    analysis::{AcceptedClaim, ClaimAnalysis, ReviewEvidence, analyze_claims, rejection_label},
     blocks::CanonicalBlock,
     canonical::canonicalize_plain,
     expectations::{
         Anchor, ConversationMessage, EventPassed, Expectation, Expectations, Owner, ResolutionKind,
-        closure as closure_pass, expectations as expectations_pass,
+        closure as closure_pass, expectations as expectations_pass, participant, resolve_owner,
     },
     message::CanonicalMessage,
     ollama::OllamaCloud,
@@ -18,6 +25,7 @@ use openloops_inference::{
         REPLY_HISTORY_CHUNK_MAX_CHARS, chunk_reply_history, is_underscore_separator,
         starts_with_ascii_ci,
     },
+    validation::{MessageContext, ParticipantHandle, ParticipantSlot, SuppliedContext},
     walker::canonicalize_html,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -1898,6 +1906,380 @@ fn connect(
     })
 }
 
+/// One participant slot's opaque governed handle (`"{m}-sender"`,
+/// `"{m}-to-{i}"`, `"{m}-cc-{i}"`), the message handle it belongs to, and
+/// which slot it names -- the per-conversation catalog
+/// [`governed_pass`] offers as `SuppliedContext::participants`.
+fn governed_participant_handles(
+    conversation: &[ConversationMessage],
+) -> Vec<(String, &str, ParticipantSlot)> {
+    let mut handles = Vec::new();
+    for m in conversation {
+        if m.message.sender.is_some() {
+            handles.push((
+                format!("{}-sender", m.handle),
+                m.handle.as_str(),
+                ParticipantSlot::Sender,
+            ));
+        }
+        for i in 0..m.message.to.len() {
+            handles.push((
+                format!("{}-to-{i}", m.handle),
+                m.handle.as_str(),
+                ParticipantSlot::To(i),
+            ));
+        }
+        for i in 0..m.message.cc.len() {
+            handles.push((
+                format!("{}-cc-{i}", m.handle),
+                m.handle.as_str(),
+                ParticipantSlot::Cc(i),
+            ));
+        }
+    }
+    handles
+}
+
+/// The [`ParseContext`] one message's temporal hypotheses reparse against:
+/// the same construction `deadline_view::classify` uses, so a governed
+/// deadline ages identically to one the old pipeline produced.
+fn governed_temporal_context(m: &ConversationMessage) -> ParseContext {
+    ParseContext {
+        message_timestamp: UnixSeconds(m.timestamp),
+        timezone: TimezoneContext {
+            base_offset_seconds: local_offset_seconds(m.timestamp, 0),
+            transition: None,
+        },
+        eod_seconds_since_midnight: DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT,
+        week_start: Weekday::Monday,
+    }
+}
+
+/// Runs one conversation through the ADR-007 governed pipeline
+/// ([`analyze_claims`]) and bridges its typed claims back onto the
+/// [`Expectation`] shape every downstream consumer (`close_passed_events`,
+/// `scan_closures`, the review UI, decision fingerprinting) already
+/// understands. This is [`scan`]'s only call site for its primary pass;
+/// nothing downstream of the returned [`Expectations`] changes.
+/// # Errors
+/// Returns the fixed provider or validation failure [`analyze_claims`] gave.
+fn governed_pass(
+    client: &dyn ModelClient,
+    conversation: &[ConversationMessage],
+    cancel: Option<&AtomicBool>,
+) -> Result<Expectations, ProviderError> {
+    let messages: Vec<MessageContext> = conversation
+        .iter()
+        .map(|m| MessageContext {
+            handle: m.handle.as_str(),
+            message: &m.message,
+            temporal_context: governed_temporal_context(m),
+        })
+        .collect();
+    let owned_handles = governed_participant_handles(conversation);
+    let participants: Vec<ParticipantHandle> = owned_handles
+        .iter()
+        .map(|(handle, message_handle, slot)| ParticipantHandle {
+            handle: handle.as_str(),
+            message_handle,
+            slot: *slot,
+        })
+        .collect();
+    let context = SuppliedContext {
+        messages: &messages,
+        participants: &participants,
+        loop_candidate_handles: &[],
+    };
+    let analysis = analyze_claims(client, &context, cancel)?;
+    Ok(map_claim_analysis(&analysis, conversation))
+}
+
+/// One of the two fixed reasons [`map_accepted_claim`] skips a claim
+/// instead of returning an [`Expectation`] (see [`map_claim_analysis`] for
+/// how each is counted and noted).
+enum ClaimSkip {
+    ClosureOrChange,
+    NonBodyEvidence,
+}
+
+/// The fixed note recorded once, no matter how many claims triggered it,
+/// when any claim was skipped because it would have closed or changed an
+/// existing loop but Phase 2a never offers `loop_candidate_handles` for it
+/// to name.
+const CLOSURE_OR_CHANGE_SKIPPED_NOTE: &str =
+    "Closure or change claims were skipped: no open loops were offered to attach them to.";
+/// The fixed note recorded once per claim skipped because its primary
+/// evidence did not cite a body or subject block.
+const NON_BODY_EVIDENCE_NOTE: &str = "Evidence cited a non-body component.";
+
+/// Bridges one conversation's [`ClaimAnalysis`] onto the [`Expectations`]
+/// shape every downstream consumer already understands.
+fn map_claim_analysis(
+    analysis: &ClaimAnalysis,
+    conversation: &[ConversationMessage],
+) -> Expectations {
+    let mut items = Vec::new();
+    let mut rejection_reasons: Vec<&'static str> = Vec::new();
+    let mut skipped = 0usize;
+    let mut skipped_closure_or_change = false;
+    for accepted in &analysis.accepted {
+        match map_accepted_claim(accepted, conversation) {
+            Ok(expectation) => push_unique_expectation(&mut items, expectation),
+            Err(ClaimSkip::ClosureOrChange) => {
+                skipped += 1;
+                skipped_closure_or_change = true;
+            }
+            Err(ClaimSkip::NonBodyEvidence) => {
+                skipped += 1;
+                rejection_reasons.push(NON_BODY_EVIDENCE_NOTE);
+            }
+        }
+    }
+    if skipped_closure_or_change {
+        rejection_reasons.push(CLOSURE_OR_CHANGE_SKIPPED_NOTE);
+    }
+    for reason in &analysis.rejected {
+        rejection_reasons.push(rejection_label(*reason));
+    }
+    Expectations {
+        items,
+        rejected: analysis.rejected.len() + skipped,
+        rejection_reasons,
+        degraded: 0,
+    }
+}
+
+/// The mapping Phase 2a applies to every claim type that can attach to an
+/// `Expectation`: its `kind` string, its deterministic `action` prefix, and
+/// the owner to start from before [`resolve_owner`] downgrades it.
+/// `PossibleClosure`, `DeadlineChange` and `Modification` return `None`:
+/// Phase 2a never offers `loop_candidate_handles`, so none of the three can
+/// ever legitimately attach to anything yet.
+fn claim_shape(claim_type: ClaimType) -> Option<(&'static str, &'static str, Owner)> {
+    match claim_type {
+        ClaimType::Request => Some(("request", "Requested: ", Owner::You)),
+        ClaimType::Question => Some(("request", "Answer: ", Owner::You)),
+        ClaimType::Promise => Some(("promise", "You promised: ", Owner::You)),
+        ClaimType::Delegation => Some(("request", "Delegated: ", Owner::You)),
+        ClaimType::Attribution => Some(("attributed", "Someone else owes: ", Owner::Unclear)),
+        ClaimType::PossibleClosure | ClaimType::DeadlineChange | ClaimType::Modification => None,
+    }
+}
+
+/// Builds one [`Expectation`] from an accepted claim, or reports which of
+/// the two fixed reasons it was skipped for instead.
+fn map_accepted_claim(
+    accepted: &AcceptedClaim,
+    conversation: &[ConversationMessage],
+) -> Result<Expectation, ClaimSkip> {
+    let claim = &accepted.claim;
+    let Some((kind, action_prefix, base_owner)) = claim_shape(claim.claim_type) else {
+        return Err(ClaimSkip::ClosureOrChange);
+    };
+    // `evidence` is never empty: the schema requires `minItems: 1`.
+    let primary = &accepted.evidence[0];
+    if !matches!(
+        primary.component,
+        EvidenceComponent::BodyBlock | EvidenceComponent::Subject
+    ) {
+        return Err(ClaimSkip::NonBodyEvidence);
+    }
+    // `validate()` step 4 already proved every evidence source_handle
+    // resolves against the messages this conversation supplied.
+    let Some(source_message) = conversation
+        .iter()
+        .find(|m| m.handle == primary.source_handle)
+    else {
+        return Err(ClaimSkip::NonBodyEvidence);
+    };
+    let action = format!("{action_prefix}{}", first_sentence(&primary.text));
+    let action_phrase = first_scalars(&primary.text, ACTION_PHRASE_MAX_SCALARS);
+    let owner = resolve_owner(base_owner, source_message);
+    let waiting_party = waiting_party_display(&claim.waiting_party_handle, conversation);
+    let (deadline, event) = temporal_anchors(claim, &accepted.evidence);
+    let evidence = Anchor {
+        message: primary.source_handle.clone(),
+        block: usize::from(primary.block_ordinal),
+        quote: primary.text.clone(),
+        context: primary.text.clone(),
+    };
+    Ok(Expectation {
+        action,
+        action_phrase,
+        owner,
+        waiting_party,
+        kind: kind.to_string(),
+        evidence,
+        deadline,
+        event,
+        event_time: None,
+        resolution: None,
+        resolution_kind: None,
+        uncertainty: uncertainty_text(claim),
+        unverified_deadline: false,
+        unverified_resolution: false,
+        cross_thread: false,
+        event_passed: None,
+    })
+}
+
+/// The `deadline`/`event` anchor pair for one claim's temporal hypothesis
+/// (if any): a `date`/`local_datetime`/`relative`/`soft_window` value
+/// anchors `deadline`; an `event_relative` one anchors `event` instead,
+/// leaving `deadline` `None`. `quote` is the model-normalized temporal
+/// value itself (never the surrounding evidence text), matching what
+/// `deadline_view::classify` and `close_passed_events` already expect to
+/// reparse.
+fn temporal_anchors(
+    claim: &Claim,
+    evidence: &[ReviewEvidence],
+) -> (Option<Anchor>, Option<Anchor>) {
+    let Nullable::Value(temporal) = &claim.temporal else {
+        return (None, None);
+    };
+    // Step 8 already proved this index addresses a real evidence entry.
+    let Some(source) = evidence.get(usize::from(temporal.text_evidence_index)) else {
+        return (None, None);
+    };
+    let anchor = Anchor {
+        message: source.source_handle.clone(),
+        block: usize::from(source.block_ordinal),
+        quote: temporal.value.clone(),
+        context: source.text.clone(),
+    };
+    match temporal.kind {
+        TemporalKind::Date
+        | TemporalKind::LocalDatetime
+        | TemporalKind::Relative
+        | TemporalKind::SoftWindow => (Some(anchor), None),
+        TemporalKind::EventRelative => (None, Some(anchor)),
+    }
+}
+
+/// One fixed label per ambiguity code, for [`uncertainty_text`].
+fn ambiguity_label(code: AmbiguityCode) -> &'static str {
+    match code {
+        AmbiguityCode::QuoteScope => "the cited text covers more than this item",
+        AmbiguityCode::Identity => "unclear who asks or who owes",
+        AmbiguityCode::Delegation => "may have been handed off",
+        AmbiguityCode::Deadline => "a time is implied but not stated",
+        AmbiguityCode::Relation => "unclear which loop this affects",
+        AmbiguityCode::CrossMessage => "evidence spans messages",
+        AmbiguityCode::InsufficientContext => "the conversation may not show enough",
+        AmbiguityCode::SemanticConflict => "messages disagree",
+    }
+}
+
+/// The fixed sentence a `delegation` claim always carries, ahead of any
+/// other ambiguity-code labels: it wins over the `delegation` ambiguity
+/// code's own ("may have been handed off") label when both apply, so that
+/// label is skipped rather than duplicated.
+const DELEGATION_UNCERTAINTY: &str =
+    "You handed this to someone else; the requester is still waiting on you.";
+
+/// `Expectation::uncertainty`: the `delegation`-type fixed sentence (if
+/// this claim is a delegation), followed by every other disclosed
+/// ambiguity code's fixed label, joined with "; ".
+fn uncertainty_text(claim: &Claim) -> String {
+    let is_delegation = claim.claim_type == ClaimType::Delegation;
+    let mut parts = Vec::new();
+    if is_delegation {
+        parts.push(DELEGATION_UNCERTAINTY);
+    }
+    for code in &claim.ambiguity_codes {
+        if is_delegation && *code == AmbiguityCode::Delegation {
+            continue;
+        }
+        parts.push(ambiguity_label(*code));
+    }
+    parts.join("; ")
+}
+
+/// `Expectation::waiting_party`: the display string
+/// [`openloops_inference::expectations::participant`] produces for the
+/// old-pipeline-format handle equivalent to `handle`, or "Not established"
+/// when `handle` is `null` or has no such equivalent (a `cc` slot: the old
+/// pipeline never offered one as a waiting party either, so `participant`
+/// has no case for it).
+fn waiting_party_display(
+    handle: &Nullable<String>,
+    conversation: &[ConversationMessage],
+) -> String {
+    let Nullable::Value(handle) = handle else {
+        return "Not established".to_string();
+    };
+    translate_participant_handle(handle)
+        .and_then(|old_handle| participant(&old_handle, conversation))
+        .unwrap_or_else(|| "Not established".to_string())
+}
+
+/// Rewrites one governed participant handle (`"{m}-sender"`, `"{m}-to-{i}"`,
+/// `"{m}-cc-{i}"`) to the old pipeline's own format (`"{m}:sender"`,
+/// `"{m}:to:{i}"`), or `None` for a `cc` handle, which has no old-pipeline
+/// equivalent.
+fn translate_participant_handle(handle: &str) -> Option<String> {
+    if let Some(m) = handle.strip_suffix("-sender") {
+        return Some(format!("{m}:sender"));
+    }
+    if let Some((m, index)) = handle.split_once("-to-") {
+        return Some(format!("{m}:to:{index}"));
+    }
+    None
+}
+
+/// The maximum Unicode scalars `action`'s first-sentence extract keeps
+/// before it is cut with a trailing "…".
+const ACTION_SENTENCE_MAX_SCALARS: usize = 140;
+/// The maximum Unicode scalars `action_phrase` keeps (dedup/fingerprint
+/// input only; never displayed as the card's own title).
+const ACTION_PHRASE_MAX_SCALARS: usize = 200;
+
+/// `text`'s first sentence -- up to and including the first `.`, `?` or
+/// `!` followed by whitespace or the text's end -- capped to
+/// [`ACTION_SENTENCE_MAX_SCALARS`] Unicode scalars with a trailing "…"
+/// appended only when that cap, not the sentence boundary, is what cut it.
+fn first_sentence(text: &str) -> String {
+    let scalars: Vec<char> = text.chars().collect();
+    let mut end = scalars.len();
+    for (i, &c) in scalars.iter().enumerate() {
+        if (c == '.' || c == '?' || c == '!')
+            && scalars.get(i + 1).is_none_or(|next| next.is_whitespace())
+        {
+            end = i + 1;
+            break;
+        }
+    }
+    let truncated = end > ACTION_SENTENCE_MAX_SCALARS;
+    if truncated {
+        end = ACTION_SENTENCE_MAX_SCALARS;
+    }
+    let sentence: String = scalars[..end].iter().collect();
+    let sentence = sentence.trim();
+    if truncated {
+        format!("{sentence}…")
+    } else {
+        sentence.to_string()
+    }
+}
+
+/// `text` trimmed to its first `max` Unicode scalars.
+fn first_scalars(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
+}
+
+/// Pushes `item` unless an item with the same action (case-insensitively)
+/// and the same evidence message is already present -- the same dedup rule
+/// `expectations::push_unique` applies to the old pipeline's own items.
+fn push_unique_expectation(items: &mut Vec<Expectation>, item: Expectation) {
+    let is_duplicate = items.iter().any(|existing| {
+        existing.action.eq_ignore_ascii_case(&item.action)
+            && existing.evidence.message == item.evidence.message
+    });
+    if !is_duplicate {
+        items.push(item);
+    }
+}
+
 /// Analyzes `messages`, running up to `parallel` model requests at once.
 ///
 /// Conversations are independent of one another and so are the closure
@@ -1920,7 +2302,7 @@ pub fn scan(
     let client = client.as_ref();
     let pass = ParallelPass::new(client.max_parallel());
     let mut result = scan_conversations(messages, progress, &pass, &|conversation| {
-        expectations_pass(client, conversation, Some(&progress.cancel))
+        governed_pass(client, conversation, Some(&progress.cancel))
     });
     close_passed_events(&mut result, messages, chrono::Utc::now().timestamp());
     scan_closures(
@@ -4213,6 +4595,189 @@ mod tests {
         chrono::DateTime::parse_from_rfc3339(value)
             .unwrap()
             .timestamp()
+    }
+
+    /// A synthetic [`ModelClient`] that always answers with the fixed body
+    /// it was constructed with, standing in for a real provider so
+    /// [`governed_pass`] can be exercised against a hand-written governed
+    /// answer instead of a network call.
+    struct FixedAnalysisClient(String);
+
+    impl ModelClient for FixedAnalysisClient {
+        fn model(&self) -> &'static str {
+            "fixed"
+        }
+
+        fn max_parallel(&self) -> usize {
+            1
+        }
+
+        fn complete(
+            &self,
+            _system: &str,
+            _user: &str,
+            _cancel: Option<&AtomicBool>,
+        ) -> Result<zeroize::Zeroizing<String>, ProviderError> {
+            Ok(zeroize::Zeroizing::new(self.0.clone()))
+        }
+    }
+
+    /// The fixed sender text of the synthetic `m0` message in
+    /// [`governed_pass_fixture`], reused by the test's own assertions.
+    const FIXTURE_SENDER: &str = "Alex <alex@example.invalid>";
+
+    /// Builds the two-message synthetic conversation and the hand-written
+    /// `analysis-output-v1` document
+    /// [`governed_pass_maps_claims_and_reports_skips_and_rejections`]
+    /// exercises: a request with a `relative` deadline and a named waiting
+    /// party, a question, a promise with a `local_datetime` deadline, a
+    /// delegation whose ambiguity codes include the redundant `delegation`
+    /// code, an attribution, a `possible_closure` with no offered loop
+    /// handles (must be skipped), a claim citing a `sender` component (must
+    /// be skipped), and a claim the validator rejects on range bounds.
+    fn governed_pass_fixture() -> ([ConversationMessage; 2], String) {
+        let m0_body = "Please send the report. Can you confirm receipt?";
+        let m1_body = "I will send the deck by 2026-09-01T21:00. I asked Sam to \
+            handle the appendix, but you are still on the hook for the deck. \
+            Already sent the earlier draft.";
+        let m0 = ConversationMessage {
+            handle: "m0".into(),
+            message: CanonicalMessage {
+                subject: CanonicalBlock::new("Synthetic thread").unwrap(),
+                body_blocks: vec![CanonicalBlock::new(m0_body).unwrap()],
+                quote_blocks: vec![],
+                sender: Some(CanonicalBlock::new(FIXTURE_SENDER).unwrap()),
+                to: vec![CanonicalBlock::new("User <user@example.invalid>").unwrap()],
+                cc: vec![],
+                attachment_names: vec![],
+                link_labels: vec![],
+            },
+            timestamp: timestamp("2026-08-28T12:00:00Z"),
+            from_user: false,
+            to_user: true,
+            team: false,
+        };
+        let m1 = ConversationMessage {
+            handle: "m1".into(),
+            message: CanonicalMessage {
+                subject: CanonicalBlock::new("Synthetic thread").unwrap(),
+                body_blocks: vec![CanonicalBlock::new(m1_body).unwrap()],
+                quote_blocks: vec![],
+                sender: Some(CanonicalBlock::new("User <user@example.invalid>").unwrap()),
+                to: vec![CanonicalBlock::new(FIXTURE_SENDER).unwrap()],
+                cc: vec![],
+                attachment_names: vec![],
+                link_labels: vec![],
+            },
+            timestamp: timestamp("2026-08-29T09:00:00Z"),
+            from_user: true,
+            to_user: false,
+            team: false,
+        };
+        let m0_len = m0_body.chars().count();
+        let m1_len = m1_body.chars().count();
+        let sender_len = FIXTURE_SENDER.chars().count();
+        let bad_range = m1_len + 500;
+        let body = format!(
+            r#"{{"schema_version":1,"claims":[
+                {{"claim_type":"request","evidence":[{{"source_handle":"m0","component":"body_block","block_ordinal":0,"range_start":0,"range_end":{m0_len}}}],"waiting_party_handle":"m0-sender","related_loop_handles":[],"temporal":{{"text_evidence_index":0,"kind":"relative","value":"friday"}},"confidence_micros":900000,"ambiguity_codes":[]}},
+                {{"claim_type":"question","evidence":[{{"source_handle":"m0","component":"body_block","block_ordinal":0,"range_start":0,"range_end":{m0_len}}}],"waiting_party_handle":null,"related_loop_handles":[],"temporal":null,"confidence_micros":900000,"ambiguity_codes":[]}},
+                {{"claim_type":"promise","evidence":[{{"source_handle":"m1","component":"body_block","block_ordinal":0,"range_start":0,"range_end":{m1_len}}}],"waiting_party_handle":null,"related_loop_handles":[],"temporal":{{"text_evidence_index":0,"kind":"local_datetime","value":"2026-09-01T21:00"}},"confidence_micros":900000,"ambiguity_codes":[]}},
+                {{"claim_type":"delegation","evidence":[{{"source_handle":"m1","component":"body_block","block_ordinal":0,"range_start":0,"range_end":{m1_len}}}],"waiting_party_handle":null,"related_loop_handles":[],"temporal":null,"confidence_micros":900000,"ambiguity_codes":["delegation","insufficient_context"]}},
+                {{"claim_type":"attribution","evidence":[{{"source_handle":"m0","component":"body_block","block_ordinal":0,"range_start":0,"range_end":{m0_len}}}],"waiting_party_handle":null,"related_loop_handles":[],"temporal":null,"confidence_micros":900000,"ambiguity_codes":[]}},
+                {{"claim_type":"possible_closure","evidence":[{{"source_handle":"m1","component":"body_block","block_ordinal":0,"range_start":0,"range_end":{m1_len}}}],"waiting_party_handle":null,"related_loop_handles":[],"temporal":null,"confidence_micros":900000,"ambiguity_codes":[]}},
+                {{"claim_type":"request","evidence":[{{"source_handle":"m0","component":"sender","block_ordinal":0,"range_start":0,"range_end":{sender_len}}}],"waiting_party_handle":null,"related_loop_handles":[],"temporal":null,"confidence_micros":900000,"ambiguity_codes":[]}},
+                {{"claim_type":"attribution","evidence":[{{"source_handle":"m1","component":"body_block","block_ordinal":0,"range_start":0,"range_end":{bad_range}}}],"waiting_party_handle":null,"related_loop_handles":[],"temporal":null,"confidence_micros":900000,"ambiguity_codes":[]}}
+            ]}}"#
+        );
+        ([m0, m1], body)
+    }
+
+    /// Exercises [`governed_pass`] end to end against
+    /// [`governed_pass_fixture`]'s hand-written governed answer, covering
+    /// every mapping branch described there.
+    #[test]
+    fn governed_pass_maps_claims_and_reports_skips_and_rejections() {
+        let (conversation, body) = governed_pass_fixture();
+        let m0_timestamp = conversation[0].timestamp;
+        let m1_timestamp = conversation[1].timestamp;
+        let client = FixedAnalysisClient(body);
+        let result = governed_pass(&client, &conversation, None).unwrap();
+
+        assert_eq!(
+            result.items.len(),
+            5,
+            "{:?}",
+            result.items.iter().map(|i| &i.action).collect::<Vec<_>>()
+        );
+        assert_eq!(result.rejected, 3);
+        assert!(
+            result
+                .rejection_reasons
+                .contains(&CLOSURE_OR_CHANGE_SKIPPED_NOTE)
+        );
+        assert!(result.rejection_reasons.contains(&NON_BODY_EVIDENCE_NOTE));
+        assert!(
+            result
+                .rejection_reasons
+                .contains(&"Evidence range fell outside its block.")
+        );
+
+        let request_item = result
+            .items
+            .iter()
+            .find(|i| i.action.starts_with("Requested: "))
+            .expect("request item");
+        assert!(request_item.owner == Owner::You);
+        assert_eq!(request_item.waiting_party, FIXTURE_SENDER);
+        let deadline = request_item.deadline.as_ref().expect("request deadline");
+        assert_eq!(deadline.quote, "friday");
+        assert_ne!(
+            classify(&deadline.quote, m0_timestamp, m0_timestamp + 86_400, 0),
+            DeadlineView::Unknown
+        );
+
+        let question_item = result
+            .items
+            .iter()
+            .find(|i| i.action.starts_with("Answer: "))
+            .expect("question item");
+        assert!(question_item.owner == Owner::You);
+
+        let promise_item = result
+            .items
+            .iter()
+            .find(|i| i.action.starts_with("You promised: "))
+            .expect("promise item");
+        assert!(promise_item.owner == Owner::You);
+        let promise_deadline = promise_item.deadline.as_ref().expect("promise deadline");
+        assert_eq!(promise_deadline.quote, "2026-09-01T21:00");
+        assert_ne!(
+            classify(
+                &promise_deadline.quote,
+                m1_timestamp,
+                m1_timestamp + 86_400,
+                0
+            ),
+            DeadlineView::Unknown
+        );
+
+        let delegation_item = result
+            .items
+            .iter()
+            .find(|i| i.action.starts_with("Delegated: "))
+            .expect("delegation item");
+        assert_eq!(
+            delegation_item.uncertainty,
+            format!("{DELEGATION_UNCERTAINTY}; the conversation may not show enough")
+        );
+
+        let attribution_item = result
+            .items
+            .iter()
+            .find(|i| i.action.starts_with("Someone else owes: "))
+            .expect("attribution item");
+        assert_eq!(attribution_item.kind, "attributed");
     }
 
     #[test]

@@ -13,6 +13,7 @@
 //! error text or response body escapes this module -- every failure is a
 //! fixed [`ProviderError`].
 use std::collections::HashSet;
+use std::sync::atomic::AtomicBool;
 
 use serde_json::{Value, json};
 
@@ -22,6 +23,14 @@ use crate::validation::{
 };
 
 const SCHEMA: &str = include_str!("../../../contracts/model/analysis-output.schema.json");
+
+/// The conversation-length cap [`projection`] enforces: the old
+/// `expectations` pipeline's own cap (`expectations::projection` allows up
+/// to 40 messages), carried over here so a real multi-message thread that
+/// pipeline already handled does not regress under the governed one. The
+/// byte bound ([`crate::provider::MAX_REQUEST`]) is unaffected and still
+/// applies independently.
+const MAX_CONVERSATION_MESSAGES: usize = 40;
 
 /// A review card contains only locally resolved source evidence, never invented model prose.
 pub struct ReviewClaim {
@@ -33,6 +42,12 @@ pub struct ReviewEvidence {
     pub source_handle: String,
     pub text: String,
     pub quoted: bool,
+    /// The cited component (`body_block`, `subject`, ...), carried through
+    /// so a caller building a review card can tell a `subject` citation
+    /// from a `body_block` one.
+    pub component: openloops_contracts::EvidenceComponent,
+    /// The cited block's ordinal within its component.
+    pub block_ordinal: u16,
 }
 
 pub struct ReviewAnalysis {
@@ -71,6 +86,150 @@ pub fn analyze_for_review(
     let (system, user) = projection(context)?;
     let answer = client.complete(&system, &user, None)?;
     review_analysis(answer.as_bytes(), context)
+}
+
+/// One accepted claim, kept whole (temporal, `waiting_party_handle`,
+/// `related_loop_handles`, `ambiguity_codes`, `confidence_micros`), paired
+/// with its evidence resolved to locally-verified source text.
+pub struct AcceptedClaim {
+    pub claim: openloops_contracts::Claim,
+    pub evidence: Vec<ReviewEvidence>,
+}
+
+/// The outcome of one governed analysis request: every claim
+/// [`crate::validation::validate`] accepted for review, whole, plus the
+/// closed rejection reason of every claim it rejected.
+pub struct ClaimAnalysis {
+    pub accepted: Vec<AcceptedClaim>,
+    pub rejected: Vec<crate::validation::ClaimRejectionReason>,
+}
+
+/// Sends only the supplied canonical projections and validates the returned
+/// claims locally, keeping every field of an accepted claim (not just its
+/// evidence) for a caller that bridges into a richer, typed downstream
+/// model than [`ReviewClaim`] offers.
+/// # Errors
+/// Rejects oversized input, tool calls, partial responses, and invalid analysis.
+pub fn analyze_claims(
+    client: &dyn ModelClient,
+    context: &SuppliedContext<'_>,
+    cancel: Option<&AtomicBool>,
+) -> Result<ClaimAnalysis, ProviderError> {
+    let (system, user) = projection(context)?;
+    let answer = client.complete(&system, &user, cancel)?;
+    claim_analysis(answer.as_bytes(), context)
+}
+
+fn claim_analysis(
+    bytes: &[u8],
+    context: &SuppliedContext<'_>,
+) -> Result<ClaimAnalysis, ProviderError> {
+    let bytes = json_document(bytes)?;
+    let parsed = openloops_contracts::parse_analysis_output(bytes).map_err(parse_error)?;
+    let AnalysisResult::Reviewed(outcome) = validate(bytes, context) else {
+        return Err(ProviderError::InvalidAnalysis);
+    };
+    let mut accepted = Vec::new();
+    let mut rejected = Vec::new();
+    for (claim, verdict) in parsed.claims.into_iter().zip(outcome.verdicts) {
+        match verdict.disposition {
+            ClaimDisposition::Reject(reason) => rejected.push(reason),
+            ClaimDisposition::AcceptForReview => {
+                let evidence = resolve_claim_evidence(&claim, context)?;
+                accepted.push(AcceptedClaim { claim, evidence });
+            }
+        }
+    }
+    Ok(ClaimAnalysis { accepted, rejected })
+}
+
+/// Resolves every evidence range of one already-[`ClaimDisposition::AcceptForReview`]
+/// claim to its locally-verified source text; every range here already
+/// passed [`crate::validation::validate`]'s bounds checks, so a resolution
+/// failure here can only mean supplied context drifted from what `validate`
+/// was given, which this treats the same as any other invalid analysis.
+fn resolve_claim_evidence(
+    claim: &openloops_contracts::Claim,
+    context: &SuppliedContext<'_>,
+) -> Result<Vec<ReviewEvidence>, ProviderError> {
+    claim
+        .evidence
+        .iter()
+        .map(|range| {
+            let message = context
+                .messages
+                .iter()
+                .find(|message| message.handle == range.source_handle)
+                .ok_or(ProviderError::InvalidAnalysis)?;
+            let block = resolve_block(message.message, range.component, range.block_ordinal)
+                .ok_or(ProviderError::InvalidAnalysis)?;
+            let text = block
+                .range_text(range.range_start, range.range_end)
+                .map_err(|_| ProviderError::InvalidAnalysis)?;
+            Ok(ReviewEvidence {
+                source_handle: range.source_handle.clone(),
+                text,
+                quoted: range.component == openloops_contracts::EvidenceComponent::QuoteBlock,
+                component: range.component,
+                block_ordinal: range.block_ordinal,
+            })
+        })
+        .collect()
+}
+
+/// One fixed, content-free sentence per [`crate::validation::ClaimRejectionReason`]
+/// variant, for a caller that reports why a claim never reached review
+/// without ever surfacing the model's own text.
+#[must_use]
+pub fn rejection_label(reason: crate::validation::ClaimRejectionReason) -> &'static str {
+    use crate::validation::{
+        ClaimRejectionReason, ConsistencyFailure, EvidenceBoundsFailure, HandleMembershipFailure,
+        ParticipantSlotFailure, TemporalReparseFailure,
+    };
+    match reason {
+        ClaimRejectionReason::HandleMembership(HandleMembershipFailure::UnknownMessageHandle) => {
+            "Evidence cited a message that was not part of this scan."
+        }
+        ClaimRejectionReason::HandleMembership(
+            HandleMembershipFailure::UnknownLoopCandidateHandle,
+        ) => "Referenced a loop that was not offered to this scan.",
+        ClaimRejectionReason::HandleMembership(
+            HandleMembershipFailure::UnknownParticipantHandle,
+        ) => "Named a waiting party that was not offered to this scan.",
+        ClaimRejectionReason::EvidenceBounds(EvidenceBoundsFailure::BlockOrdinalOutOfRange) => {
+            "Evidence pointed to a block that does not exist."
+        }
+        ClaimRejectionReason::EvidenceBounds(EvidenceBoundsFailure::EmptyRange) => {
+            "Evidence range was empty."
+        }
+        ClaimRejectionReason::EvidenceBounds(EvidenceBoundsFailure::RangeOutOfBounds) => {
+            "Evidence range fell outside its block."
+        }
+        ClaimRejectionReason::EvidenceBounds(EvidenceBoundsFailure::WhitespaceOnlyEvidence) => {
+            "Evidence range contained no actual text."
+        }
+        ClaimRejectionReason::ParticipantSlot(ParticipantSlotFailure::UnknownMessageHandle) => {
+            "Waiting party referenced a message that was not part of this scan."
+        }
+        ClaimRejectionReason::ParticipantSlot(ParticipantSlotFailure::SlotDoesNotExist) => {
+            "Waiting party referenced a participant slot that does not exist."
+        }
+        ClaimRejectionReason::TemporalReparse(
+            TemporalReparseFailure::TextEvidenceIndexOutOfRange,
+        ) => "Deadline referenced an evidence entry that does not exist.",
+        ClaimRejectionReason::TemporalReparse(TemporalReparseFailure::Unreproducible) => {
+            "Deadline value could not be reproduced by the deterministic parser."
+        }
+        ClaimRejectionReason::Consistency(ConsistencyFailure::DuplicateClaim) => {
+            "Duplicate of another claim in this scan."
+        }
+        ClaimRejectionReason::Consistency(ConsistencyFailure::UndisclosedCrossMessageEvidence) => {
+            "Evidence spanned messages without saying so."
+        }
+        ClaimRejectionReason::Consistency(ConsistencyFailure::ContradictoryDeadlineRelation) => {
+            "Two deadline changes for the same loop disagreed."
+        }
+    }
 }
 
 #[cfg(feature = "ollama-cloud")]
@@ -124,6 +283,8 @@ fn review_analysis(
                 source_handle: range.source_handle,
                 text,
                 quoted: range.component == openloops_contracts::EvidenceComponent::QuoteBlock,
+                component: range.component,
+                block_ordinal: range.block_ordinal,
             });
         }
         claims.push(ReviewClaim {
@@ -145,7 +306,7 @@ fn review_analysis(
 /// wire for a given context are the same regardless of which provider is
 /// selected.
 fn projection(context: &SuppliedContext<'_>) -> Result<(String, String), ProviderError> {
-    if context.messages.is_empty() || context.messages.len() > 5 {
+    if context.messages.is_empty() || context.messages.len() > MAX_CONVERSATION_MESSAGES {
         return Err(ProviderError::InputTooLarge);
     }
     let mut projections = Vec::new();
@@ -257,7 +418,7 @@ fn valid_handle(handle: &str) -> bool {
 }
 
 fn participant_projections(context: &SuppliedContext<'_>) -> Result<Vec<Value>, ProviderError> {
-    if context.participants.len() > 5 * 500 {
+    if context.participants.len() > MAX_CONVERSATION_MESSAGES * 500 {
         return Err(ProviderError::InputTooLarge);
     }
     let mut seen = HashSet::new();
@@ -646,5 +807,138 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn projection_accepts_forty_messages_and_rejects_forty_one() {
+        let message = synthetic_message("Please send the report.", true);
+        let handles: Vec<String> = (0..41).map(|i| format!("message_{i}")).collect();
+        let all_messages: Vec<crate::validation::MessageContext> = handles
+            .iter()
+            .map(|handle| crate::validation::MessageContext {
+                handle: handle.as_str(),
+                message: &message,
+                temporal_context: parse_context(0),
+            })
+            .collect();
+        let forty = SuppliedContext {
+            messages: &all_messages[..40],
+            participants: &[],
+            loop_candidate_handles: &[],
+        };
+        assert!(projection(&forty).is_ok());
+        let forty_one = SuppliedContext {
+            messages: &all_messages[..41],
+            participants: &[],
+            loop_candidate_handles: &[],
+        };
+        assert_eq!(projection(&forty_one), Err(ProviderError::InputTooLarge));
+    }
+
+    /// A synthetic [`ModelClient`] that always answers with the fixed body
+    /// it was constructed with, for exercising [`analyze_claims`] against a
+    /// hand-written analysis document rather than a real provider.
+    struct FixedClient(String);
+
+    impl ModelClient for FixedClient {
+        fn model(&self) -> &'static str {
+            "fixed"
+        }
+
+        fn max_parallel(&self) -> usize {
+            1
+        }
+
+        fn complete(
+            &self,
+            _system: &str,
+            _user: &str,
+            _cancel: Option<&AtomicBool>,
+        ) -> Result<Zeroizing<String>, ProviderError> {
+            Ok(Zeroizing::new(self.0.clone()))
+        }
+    }
+
+    #[test]
+    fn analyze_claims_keeps_whole_accepted_claims_and_collects_rejection_reasons() {
+        use crate::validation::{MessageContext, ParticipantHandle};
+        let ask = "Please send the draft budget by Friday.";
+        let message = synthetic_message(ask, true);
+        let messages = [MessageContext {
+            handle: "message_0",
+            message: &message,
+            temporal_context: parse_context(1_700_000_000),
+        }];
+        let participants = [ParticipantHandle {
+            handle: "sender_0",
+            message_handle: "message_0",
+            slot: ParticipantSlot::Sender,
+        }];
+        let context = SuppliedContext {
+            messages: &messages,
+            participants: &participants,
+            loop_candidate_handles: &[],
+        };
+        let good = json!({
+            "claim_type":"request",
+            "evidence":[whole_block("message_0", ask.chars().count())],
+            "waiting_party_handle":"sender_0",
+            "related_loop_handles":[],
+            "temporal":{"text_evidence_index":0,"kind":"relative","value":"friday"},
+            "confidence_micros":900_000,
+            "ambiguity_codes":[]
+        });
+        let mut bad = good.clone();
+        bad["evidence"][0]["range_end"] = json!(1000);
+        let body = serde_json::to_string(&json!({"schema_version":1,"claims":[good,bad]})).unwrap();
+        let client = FixedClient(body);
+        let result = analyze_claims(&client, &context, None).unwrap();
+        assert_eq!(result.accepted.len(), 1);
+        assert_eq!(result.rejected.len(), 1);
+        assert_eq!(
+            result.accepted[0].claim.claim_type,
+            openloops_contracts::ClaimType::Request
+        );
+        assert_eq!(result.accepted[0].evidence[0].text, ask);
+        assert_eq!(
+            result.accepted[0].evidence[0].component,
+            openloops_contracts::EvidenceComponent::BodyBlock
+        );
+        assert_eq!(
+            rejection_label(result.rejected[0]),
+            "Evidence range fell outside its block."
+        );
+    }
+
+    #[test]
+    fn rejection_label_covers_every_rejection_reason_with_a_distinct_sentence() {
+        use crate::validation::{
+            ClaimRejectionReason, ConsistencyFailure, EvidenceBoundsFailure,
+            HandleMembershipFailure, ParticipantSlotFailure, TemporalReparseFailure,
+        };
+        let reasons = [
+            ClaimRejectionReason::HandleMembership(HandleMembershipFailure::UnknownMessageHandle),
+            ClaimRejectionReason::HandleMembership(
+                HandleMembershipFailure::UnknownLoopCandidateHandle,
+            ),
+            ClaimRejectionReason::HandleMembership(
+                HandleMembershipFailure::UnknownParticipantHandle,
+            ),
+            ClaimRejectionReason::EvidenceBounds(EvidenceBoundsFailure::BlockOrdinalOutOfRange),
+            ClaimRejectionReason::EvidenceBounds(EvidenceBoundsFailure::EmptyRange),
+            ClaimRejectionReason::EvidenceBounds(EvidenceBoundsFailure::RangeOutOfBounds),
+            ClaimRejectionReason::EvidenceBounds(EvidenceBoundsFailure::WhitespaceOnlyEvidence),
+            ClaimRejectionReason::ParticipantSlot(ParticipantSlotFailure::UnknownMessageHandle),
+            ClaimRejectionReason::ParticipantSlot(ParticipantSlotFailure::SlotDoesNotExist),
+            ClaimRejectionReason::TemporalReparse(
+                TemporalReparseFailure::TextEvidenceIndexOutOfRange,
+            ),
+            ClaimRejectionReason::TemporalReparse(TemporalReparseFailure::Unreproducible),
+            ClaimRejectionReason::Consistency(ConsistencyFailure::DuplicateClaim),
+            ClaimRejectionReason::Consistency(ConsistencyFailure::UndisclosedCrossMessageEvidence),
+            ClaimRejectionReason::Consistency(ConsistencyFailure::ContradictoryDeadlineRelation),
+        ];
+        let labels: HashSet<&'static str> = reasons.into_iter().map(rejection_label).collect();
+        assert_eq!(labels.len(), 14, "every rejection reason has its own label");
     }
 }

@@ -397,7 +397,14 @@ fn optional_anchor(
     }
 }
 
-fn participant(handle: &str, messages: &[ConversationMessage]) -> Option<String> {
+/// Resolves an old-pipeline-style participant handle (`"{m}:sender"` or
+/// `"{m}:to:{i}"`) to the display string that message's canonical
+/// projection carries for that slot, or `None` when no message or slot
+/// matches. Shared with the governed desktop bridge
+/// (`openloops-desktop::review_scan::governed_pass`) so both pipelines
+/// resolve a waiting party's display name the same way.
+#[must_use]
+pub fn participant(handle: &str, messages: &[ConversationMessage]) -> Option<String> {
     for m in messages {
         if handle == format!("{}:sender", m.handle) {
             return m
@@ -459,10 +466,13 @@ fn action_phrase_from(
     Ok(action_phrase)
 }
 
-/// Downgrades an owner claim the evidence message does not support: `you`
-/// requires the signed-in user to have sent or received the message
-/// directly, and `team` requires a team-source message.
-fn resolve_owner(owner: Owner, source: &ConversationMessage) -> Owner {
+/// Downgrades an owner claim the evidence message does not support: `You`
+/// requires the signed-in user to have sent or received `source` directly,
+/// and `Team` requires a team-source message. Shared with the governed
+/// desktop bridge (`openloops-desktop::review_scan::governed_pass`) so both
+/// pipelines apply the same ownership downgrade rule.
+#[must_use]
+pub fn resolve_owner(owner: Owner, source: &ConversationMessage) -> Owner {
     if owner == Owner::You && !source.from_user && !source.to_user {
         return if source.team {
             Owner::Team
