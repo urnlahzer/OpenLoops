@@ -64,9 +64,11 @@ export component AppWindow inherits Window {
     in property <bool> review-scanning;
     in property <bool> can-scan;
     in property <bool> can-rescan;
+    in property <bool> can-sync-todo;
     in-out property <int> review-filter-index;
     in-out property <bool> show-handled;
     in property <string> show-handled-label;
+    in-out property <string> review-search-query;
     in property <[ReviewRow]> review-rows;
     in property <int> review-open-count;
     in property <ScanStripModel> scan-strip;
@@ -119,9 +121,11 @@ export component AppWindow inherits Window {
     callback scan-inboxes;
     callback stop-scan;
     callback rescan;
+    callback sync-todo;
     callback clear-results;
     callback review-filter-selected(int);
     callback show-handled-toggled(bool);
+    callback review-search-edited(string);
     callback coverage-toggled(bool);
     callback select-review-row(int);
     callback move-review-selection(int);
@@ -159,8 +163,8 @@ export component AppWindow inherits Window {
                 parallel-committed(value) => { root.parallel-committed(value); } test-model => { root.test-model(); }
             }
             if root.active-screen == 0: ReviewScreen {
-                busy: root.busy; review-scanning: root.review-scanning; can-scan: root.can-scan; can-rescan: root.can-rescan;
-                filter-index <=> root.review-filter-index; show-handled <=> root.show-handled; show-handled-label: root.show-handled-label; rows: root.review-rows; open-count: root.review-open-count;
+                busy: root.busy; review-scanning: root.review-scanning; can-scan: root.can-scan; can-rescan: root.can-rescan; can-sync-todo: root.can-sync-todo;
+                filter-index <=> root.review-filter-index; show-handled <=> root.show-handled; show-handled-label: root.show-handled-label; search-query <=> root.review-search-query; rows: root.review-rows; open-count: root.review-open-count;
                 scan-strip: root.scan-strip; coverage-open <=> root.coverage-open; has-analysis: root.review-has-analysis;
                 no-usable-items: root.review-no-usable-items; no-usable-text: root.review-no-usable-text; has-selection: root.review-has-selection;
                 pills: root.review-pills; title: root.review-title; meta: root.review-meta; uncertainty: root.review-uncertainty;
@@ -169,8 +173,9 @@ export component AppWindow inherits Window {
                 draft-open: root.draft-open; draft-title <=> root.draft-title; draft-when <=> root.draft-when; draft-scheduled-line: root.draft-scheduled-line; draft-valid: root.draft-valid;
                 reminder-state: root.reminder-state; evidence-cards: root.evidence-cards; completion-card: root.completion-card; conversation-title: root.conversation-title; conversation-rows: root.conversation-rows;
                 todo-url: root.todo-url; conversation-expanded-default: root.conversation-expanded-default;
-                scan-inboxes => { root.scan-inboxes(); } stop-scan => { root.stop-scan(); } rescan => { root.rescan(); } clear-results => { root.clear-results(); }
+                scan-inboxes => { root.scan-inboxes(); } stop-scan => { root.stop-scan(); } rescan => { root.rescan(); } sync-todo => { root.sync-todo(); } clear-results => { root.clear-results(); }
                 filter-selected(index) => { root.review-filter-selected(index); } show-handled-toggled(value) => { root.show-handled-toggled(value); }
+                search-edited(value) => { root.review-search-edited(value); }
                 coverage-toggled(value) => { root.coverage-toggled(value); } sources-link => { root.navigate(1); root.active-screen = 1; }
                 select-row(handle) => { root.select-review-row(handle); } move-selection(delta) => { root.move-review-selection(delta); }
                 list-primary-action => { root.list-primary-action(); }

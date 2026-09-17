@@ -122,6 +122,12 @@ pub struct ReviewState {
     /// tracking" is also the safer default of the two silent outcomes.
     pub(crate) draft: Option<ReminderDraft>,
     pub(crate) show_handled: bool,
+    /// Case-insensitive substring filter over each card's visible text (see
+    /// `slint_review.rs`'s `matches_search`/`card_matches_search`). Empty
+    /// means no filtering. Reset along with everything else in this struct
+    /// by "Clear results and mail" (`ReviewState::default()`), same as
+    /// `show_handled`.
+    pub(crate) search_query: String,
     /// Set when the most recent scan/mail-load attempt failed outright
     /// (a worker disconnect, or a `ProviderError`/`ConnectionError` from
     /// `Outcome::Mail`/`Outcome::Scan`) rather than completing -- even
@@ -353,6 +359,54 @@ impl ReviewState {
             .iter()
             .map(|item| {
                 self.card_context(item, clock.timestamp(), clock.offset().local_minus_utc())
+            })
+            .collect()
+    }
+
+    /// Still-open, reminder-bearing decisions eligible for a To Do sync
+    /// right now: a `Mine`/`Watching`/`Review` decision with a
+    /// `Reminder::Created` record carrying real (non-empty) ids, matched
+    /// back to the account that carries evidence for it. `cards` is the
+    /// caller's own `card_contexts(items)` result -- passed in rather than
+    /// recomputed here so a caller that already has it (every `sync`/
+    /// `sync_review` pass) never pays for a second HMAC fingerprint pass
+    /// just to learn how many cards are eligible. Shared by
+    /// `AppModel::dispatch_reminder_sync` (the actual Graph call) and
+    /// `AppModel::reminder_sync_eligible_count` (the Review toolbar's "Sync
+    /// To Do" button), so the two can never disagree about what counts as
+    /// eligible.
+    pub(crate) fn reminder_sync_checks(
+        &self,
+        items: &[Expectation],
+        cards: &[Option<CardContext>],
+    ) -> Vec<(String, [u8; 32], String, String)> {
+        items
+            .iter()
+            .zip(cards.iter())
+            .filter_map(|(item, card)| {
+                let card = card.as_ref()?;
+                if !matches!(
+                    card.record.decision,
+                    Decision::Mine | Decision::Watching | Decision::Review
+                ) {
+                    return None;
+                }
+                let Reminder::Created { list_id, task_id } = &card.record.reminder else {
+                    return None;
+                };
+                if list_id.is_empty() || task_id.is_empty() {
+                    return None;
+                }
+                let source = self
+                    .messages
+                    .iter()
+                    .find(|m| m.input.handle == item.evidence.message)?;
+                Some((
+                    source.account.clone(),
+                    card.record.key,
+                    list_id.clone(),
+                    task_id.clone(),
+                ))
             })
             .collect()
     }
