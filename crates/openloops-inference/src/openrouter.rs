@@ -9,11 +9,13 @@ use reqwest::blocking::{Client, Response};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
+use crate::analysis::{self, ReviewAnalysis};
 use crate::provider::{
     MAX_PARALLEL_REQUESTS, MAX_REQUEST, MAX_RESPONSE, ModelClient, ProviderError, QuotaKind,
     RequestControl, https_client, json_document, parse_error, read_body, record_quota_detail,
     send_with_control, status_error, valid_key, valid_model_name,
 };
+use crate::validation::{AnalysisResult, SuppliedContext};
 
 const AUTHORITY: &str = "https://openrouter.ai";
 const CHAT: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -92,6 +94,27 @@ impl OpenRouter {
     pub fn with_max_parallel(mut self, parallel: usize) -> Self {
         self.parallel = parallel.clamp(1, MAX_PARALLEL_REQUESTS);
         self
+    }
+
+    /// Sends only the supplied canonical projections and validates returned
+    /// evidence locally, through the shared [`analysis::analyze`]. Calling
+    /// this explicitly opts into transmitting those projections to
+    /// `OpenRouter`.
+    /// # Errors
+    /// Rejects oversized input, tool calls, partial responses, and invalid analysis.
+    pub fn analyze(&self, context: &SuppliedContext<'_>) -> Result<AnalysisResult, ProviderError> {
+        analysis::analyze(self, context)
+    }
+
+    /// Produces transient review cards backed by validated ranges of the
+    /// selected messages, through the shared [`analysis::analyze_for_review`].
+    /// # Errors
+    /// Returns fixed provider or validation failures; no raw upstream output escapes.
+    pub fn analyze_for_review(
+        &self,
+        context: &SuppliedContext<'_>,
+    ) -> Result<ReviewAnalysis, ProviderError> {
+        analysis::analyze_for_review(self, context)
     }
 
     /// Exercises generation with a fixed content-free request. No mailbox is accessed.
