@@ -145,6 +145,11 @@ pub enum ProviderError {
     ServerError(u16),
     ModelUnavailable,
     InvalidResponse,
+    /// The provider reported `finish_reason: "length"`: the model hit the
+    /// request's output ceiling before finishing its answer, so what came
+    /// back cannot be a complete document. A reasoning model's hidden
+    /// thinking counts against the same ceiling.
+    OutputTruncated,
     InputTooLarge,
     ResponseTooLarge,
     InvalidAnalysis,
@@ -171,6 +176,7 @@ impl std::fmt::Display for ProviderError {
             Self::ServerError(status) => return write!(f, "The provider returned a server error (HTTP {status}). Try again later or choose another model."),
             Self::ModelUnavailable => "The selected model is not in the provider's selectable model list.",
             Self::InvalidResponse => "The provider returned an incomplete or unsupported response.",
+            Self::OutputTruncated => "The model ran out of output room before finishing its answer (a reasoning model's thinking counts against the same limit). Try a model that thinks less, or a faster one.",
             Self::InputTooLarge => "The selected message projection exceeds the analysis limits.",
             Self::ResponseTooLarge => "The provider's response exceeds the allowed size.",
             Self::InvalidAnalysis => "The model output did not pass OpenLoops validation.",

@@ -338,6 +338,13 @@ fn parse_chat(bytes: &[u8], selected: &str) -> Result<Zeroizing<String>, Provide
     let message = choice
         .get("message")
         .ok_or(ProviderError::InvalidResponse)?;
+    // The answer was cut off at `max_tokens` (a reasoning model's hidden
+    // thinking counts against the same ceiling), so what came back is
+    // never a complete document. Named separately from the other
+    // malformed-answer cases because the remedy is different.
+    if choice.get("finish_reason").and_then(Value::as_str) == Some("length") {
+        return Err(ProviderError::OutputTruncated);
+    }
     if choice
         .get("finish_reason")
         .is_some_and(|reason| reason.as_str() != Some("stop"))
@@ -634,6 +641,21 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_cut_off_at_max_tokens_is_reported_as_truncated() {
+        let body = json!({
+            "id": "gen-synthetic",
+            "model": MODEL,
+            "choices": [{"index": 0, "finish_reason": "length",
+                "message": {"role": "assistant", "content": "{\"version\":1,\"expec", "refusal": null}}]
+        })
+        .to_string();
+        assert_eq!(
+            parse_chat(body.as_bytes(), MODEL),
+            Err(ProviderError::OutputTruncated)
+        );
+    }
+
+    #[test]
     fn only_one_completed_assistant_choice_from_the_selected_model_is_accepted() {
         assert_eq!(&*parse_chat(&answer("{}"), MODEL).unwrap(), "{}");
         assert_eq!(
@@ -653,9 +675,12 @@ mod tests {
             value["choices"][0]["message"][member] = replacement;
             rejected.push(value);
         }
-        let mut truncated: Value = serde_json::from_slice(&answer("{}")).unwrap();
-        truncated["choices"][0]["finish_reason"] = json!("length");
-        rejected.push(truncated);
+        // `finish_reason: "length"` is its own error now (see
+        // `an_answer_cut_off_at_max_tokens_is_reported_as_truncated`);
+        // any other non-"stop" reason stays a generic bad answer.
+        let mut filtered: Value = serde_json::from_slice(&answer("{}")).unwrap();
+        filtered["choices"][0]["finish_reason"] = json!("content_filter");
+        rejected.push(filtered);
         let mut two: Value = serde_json::from_slice(&answer("{}")).unwrap();
         two["choices"] = json!([two["choices"][0].clone(), two["choices"][0].clone()]);
         rejected.push(two);

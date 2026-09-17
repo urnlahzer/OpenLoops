@@ -578,6 +578,165 @@ fn push_unique(items: &mut Vec<Expectation>, item: Expectation) -> bool {
     }
 }
 
+/// Why an evidence object failed [`anchor`], as one fixed, content-free
+/// sentence for the scan's failure list. Reporting only: `anchor()` stays
+/// the single authority on what is accepted, and this never quotes the
+/// message or the model's text -- it only says *where* the quote turned up
+/// (or did not), so a scan's failure list can show whether the model is
+/// mis-numbering blocks, quoting reply history, gluing blocks together, or
+/// drifting from the source in ways [`normalize_for_matching`] does not
+/// fold. Checks run from most to least specific; the first that holds wins.
+fn evidence_failure_reason(
+    v: &Value,
+    messages: &[ConversationMessage],
+    min: usize,
+) -> &'static str {
+    let Some(handle) = v.get("message").and_then(Value::as_str) else {
+        return "Evidence did not name a message.";
+    };
+    let Some(m) = messages.iter().find(|m| m.handle == handle) else {
+        return "Evidence named a message that is not in this conversation.";
+    };
+    let quote = v
+        .get("quote")
+        .and_then(Value::as_str)
+        .map(|q| normalize_for_matching(q).trim().to_string())
+        .unwrap_or_default();
+    if quote.chars().count() < min {
+        return "Evidence quote was too short to anchor.";
+    }
+    let block = v
+        .get("block")
+        .and_then(Value::as_str)
+        .and_then(|b| b.strip_prefix('b'))
+        .and_then(|n| n.parse::<usize>().ok());
+    let blocks: Vec<String> = m
+        .message
+        .body_blocks
+        .iter()
+        .map(|b| normalize_for_matching(&b.as_string()))
+        .collect();
+    let named = block.and_then(|b| blocks.get(b));
+    if let Some(context) = named {
+        match context.matches(quote.as_str()).count() {
+            0 => {}
+            1 => return "Evidence quote cut a word in half.",
+            _ => return "Evidence quote appears more than once in its block.",
+        }
+    }
+    if blocks
+        .iter()
+        .enumerate()
+        .any(|(i, text)| Some(i) != block && text.contains(&quote))
+    {
+        return if named.is_some() {
+            "Evidence quote is in a different block of the same message than the one named."
+        } else {
+            "Evidence named a block the message does not have; the quote is in another block."
+        };
+    }
+    if named.is_none() {
+        return "Evidence named a block the message does not have.";
+    }
+    if blocks.join("\n").contains(&quote) || blocks.join(" ").contains(&quote) {
+        return "Evidence quote spans more than one block.";
+    }
+    if normalize_for_matching(&m.message.subject.as_string()).contains(&quote) {
+        return "Evidence quote is the message subject, not a body block.";
+    }
+    if m.message
+        .quote_blocks
+        .iter()
+        .any(|b| normalize_for_matching(&b.as_string()).contains(&quote))
+    {
+        return "Evidence quote is in the message's quoted history, not its current text.";
+    }
+    if messages.iter().filter(|o| o.handle != m.handle).any(|o| {
+        o.message
+            .body_blocks
+            .iter()
+            .any(|b| normalize_for_matching(&b.as_string()).contains(&quote))
+    }) {
+        return "Evidence quote is in a different message of the conversation.";
+    }
+    let loose = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let loose_quote = loose(&quote);
+    if !loose_quote.is_empty() && blocks.iter().any(|text| loose(text).contains(&loose_quote)) {
+        return "Evidence quote differs from the message text only in punctuation, spacing, or case.";
+    }
+    "Evidence quote was not found anywhere in the conversation."
+}
+
+/// Why a row whose evidence and waiting party both resolved still failed
+/// [`candidate`], as one fixed, content-free sentence. Walks `candidate()`'s
+/// checks in the same order and names the first that fails; reporting
+/// only, never a second authority on acceptance.
+fn schema_failure_reason(v: &Value, messages: &[ConversationMessage]) -> &'static str {
+    if keys(
+        v,
+        &[
+            "action",
+            "action_phrase",
+            "owner",
+            "waiting_party",
+            "kind",
+            "evidence",
+            "deadline",
+            "event",
+            "event_time",
+            "resolution",
+            "resolution_kind",
+            "uncertainty",
+        ],
+    )
+    .is_err()
+    {
+        return "Row had an unexpected or missing field.";
+    }
+    if !string(v, "action", 320).is_ok_and(|a| a.trim().chars().count() >= 8) {
+        return "Action summary was missing, over its limit, or shorter than 8 characters.";
+    }
+    if !matches!(string(v, "owner", 16), Ok("you" | "team" | "unclear")) {
+        return "Owner was not one of you, team, or unclear.";
+    }
+    let Ok(kind @ ("request" | "promise" | "attributed")) = string(v, "kind", 16) else {
+        return "Kind was not one of request, promise, or attributed.";
+    };
+    let Ok(evidence) = anchor(&v["evidence"], messages, 12) else {
+        return "Original evidence was not a unique exact quotation in a current message block.";
+    };
+    if action_phrase_from(v, &evidence, messages).is_err() {
+        return "Action phrase was not a verbatim, whole-word part of the evidence quote.";
+    }
+    let Some(source) = messages.iter().find(|m| m.handle == evidence.message) else {
+        return "Evidence named a message that is not in this conversation.";
+    };
+    if kind == "promise" && !source.from_user {
+        return "A promise was anchored to a message you did not send.";
+    }
+    if kind == "request" && source.from_user {
+        return "A request was anchored to a message you sent.";
+    }
+    if !v["waiting_party"].is_null() && string(v, "waiting_party", 128).is_err() {
+        return "Waiting party was not a participant handle.";
+    }
+    if let Ok(Some(later)) = optional_anchor(&v["resolution"], messages, 12)
+        && let Some(m) = messages.iter().find(|m| m.handle == later.message)
+        && m.timestamp <= source.timestamp
+    {
+        return "Completion evidence was not from a later message than the original evidence.";
+    }
+    if string(v, "uncertainty", 400).is_err() {
+        return "Uncertainty note was missing or over its limit.";
+    }
+    "Row failed a field limit."
+}
+
 /// After every salvage attempt in `parse()` has failed for `row`, determines
 /// every independently checkable reason the row was dropped and pushes each
 /// into `reasons`. Unlike a single `candidate()` call -- which returns only
@@ -611,6 +770,7 @@ fn push_rejection_reasons(
             reasons.push(
                 "Original evidence was not a unique exact quotation in a current message block.",
             );
+            reasons.push(evidence_failure_reason(&row["evidence"], messages, 12));
         } else {
             reasons.push("Ownership, chronology, or output schema was invalid.");
         }
@@ -640,6 +800,7 @@ fn push_rejection_reasons(
     }
     if !evidence_bad && !waiting_party_bad {
         reasons.push("Ownership, chronology, or output schema was invalid.");
+        reasons.push(schema_failure_reason(row, messages));
     }
 }
 
@@ -899,6 +1060,143 @@ mod tests {
         assert!(anchor(&full, &m, 2).is_ok());
         let partial = json!({"message":"m0","block":"b0","quote":"move it one hou"});
         assert!(anchor(&partial, &m, 2).is_err());
+    }
+    /// Two current blocks plus one quoted-history block, for the
+    /// content-free evidence sub-reason tests.
+    fn two_block_messages() -> Vec<ConversationMessage> {
+        let mut m = messages();
+        m[0].message.body_blocks = vec![
+            CanonicalBlock::new("Please send the résumé by Friday.").unwrap(),
+            CanonicalBlock::new("Thanks, Alex").unwrap(),
+        ];
+        m[0].message.quote_blocks =
+            vec![CanonicalBlock::new("Earlier: the budget is due next week.").unwrap()];
+        m
+    }
+    #[test]
+    fn evidence_sub_reason_names_where_the_quote_actually_is() {
+        let m = two_block_messages();
+        let reason = |v: Value| evidence_failure_reason(&v, &m, 12);
+        assert_eq!(
+            reason(
+                json!({"message":"m0","block":"b1","quote":"Please send the résumé by Friday."})
+            ),
+            "Evidence quote is in a different block of the same message than the one named."
+        );
+        assert_eq!(
+            reason(
+                json!({"message":"m0","block":"b7","quote":"Please send the résumé by Friday."})
+            ),
+            "Evidence named a block the message does not have; the quote is in another block."
+        );
+        assert_eq!(
+            reason(json!({"message":"m0","block":"b7","quote":"Nothing like this here."})),
+            "Evidence named a block the message does not have."
+        );
+        assert_eq!(
+            reason(json!({"message":"m0","block":"b0","quote":"by Friday. Thanks, Alex"})),
+            "Evidence quote spans more than one block."
+        );
+        assert_eq!(
+            reason(json!({"message":"m0","block":"b0","quote":"the budget is due next week"})),
+            "Evidence quote is in the message's quoted history, not its current text."
+        );
+        assert_eq!(
+            reason(
+                json!({"message":"m0","block":"b0","quote":"Please send the résumé by Friday!!"})
+            ),
+            "Evidence quote differs from the message text only in punctuation, spacing, or case."
+        );
+        assert_eq!(
+            reason(json!({"message":"m0","block":"b0","quote":"Bring the cake on Monday."})),
+            "Evidence quote was not found anywhere in the conversation."
+        );
+        assert_eq!(
+            reason(
+                json!({"message":"m9","block":"b0","quote":"Please send the résumé by Friday."})
+            ),
+            "Evidence named a message that is not in this conversation."
+        );
+        assert_eq!(
+            reason(json!({"message":"m0","block":"b0","quote":"Please send the résum"})),
+            "Evidence quote cut a word in half."
+        );
+        let m = resolution_messages();
+        assert_eq!(
+            evidence_failure_reason(
+                &json!({"message":"m0","block":"b0","quote":"I sent the résumé as requested."}),
+                &m,
+                12
+            ),
+            "Evidence quote is in a different message of the conversation."
+        );
+        let mut m = nbsp_messages();
+        m[0].message.body_blocks =
+            vec![CanonicalBlock::new("one hour later, one hour later.").unwrap()];
+        assert_eq!(
+            evidence_failure_reason(
+                &json!({"message":"m0","block":"b0","quote":"one hour"}),
+                &m,
+                2
+            ),
+            "Evidence quote appears more than once in its block."
+        );
+    }
+    #[test]
+    fn schema_sub_reason_names_the_first_failing_candidate_check() {
+        let m = messages();
+        let mut row = claim();
+        row["owner"] = json!("nobody");
+        assert_eq!(
+            schema_failure_reason(&row, &m),
+            "Owner was not one of you, team, or unclear."
+        );
+        let mut row = claim();
+        row["action_phrase"] = json!("fetch the thing");
+        assert_eq!(
+            schema_failure_reason(&row, &m),
+            "Action phrase was not a verbatim, whole-word part of the evidence quote."
+        );
+        let mut row = claim();
+        row["kind"] = json!("promise");
+        assert_eq!(
+            schema_failure_reason(&row, &m),
+            "A promise was anchored to a message you did not send."
+        );
+        let mut row = claim();
+        row["extra"] = json!(1);
+        assert_eq!(
+            schema_failure_reason(&row, &m),
+            "Row had an unexpected or missing field."
+        );
+    }
+    #[test]
+    fn rejected_rows_carry_a_sub_reason_next_to_the_general_one() {
+        let m = messages();
+        let mut row = claim();
+        row["evidence"]["block"] = json!("b7");
+        let result = parse_row(&row, &m);
+        assert_eq!(result.rejected, 1);
+        assert!(result.rejection_reasons.contains(
+            &"Original evidence was not a unique exact quotation in a current message block."
+        ));
+        assert!(result.rejection_reasons.contains(
+            &"Evidence named a block the message does not have; the quote is in another block."
+        ));
+        let mut row = claim();
+        row["owner"] = json!("nobody");
+        let result = parse_row(&row, &m);
+        assert_eq!(result.rejected, 1);
+        assert!(
+            result
+                .rejection_reasons
+                .contains(&"Ownership, chronology, or output schema was invalid.")
+        );
+        assert!(
+            result
+                .rejection_reasons
+                .contains(&"Owner was not one of you, team, or unclear.")
+        );
     }
     #[test]
     fn nbsp_followed_by_ascii_space_collapses_to_one_space() {
