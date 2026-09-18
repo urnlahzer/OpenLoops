@@ -9,11 +9,13 @@ use reqwest::blocking::{Client, Response};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
+use crate::analysis::{self, ReviewAnalysis};
 use crate::provider::{
-    MAX_PARALLEL_REQUESTS, MAX_REQUEST, MAX_RESPONSE, ModelClient, ProviderError, RequestControl,
-    https_client, json_document, parse_error, read_body, send_with_control, status_error,
-    valid_key, valid_model_name,
+    MAX_PARALLEL_REQUESTS, MAX_REQUEST, MAX_RESPONSE, ModelClient, ProviderError, QuotaKind,
+    RequestControl, https_client, json_document, parse_error, read_body, record_quota_detail,
+    send_with_control, status_error, valid_key, valid_model_name,
 };
+use crate::validation::{AnalysisResult, SuppliedContext};
 
 const AUTHORITY: &str = "https://openrouter.ai";
 const CHAT: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -23,6 +25,18 @@ const ZDR_ENDPOINTS: &str = "https://openrouter.ai/api/v1/endpoints/zdr";
 const MAX_LISTING: usize = 4_194_304;
 const MAX_ENDPOINTS: usize = 8192;
 const MAX_LABEL: usize = 128;
+/// Sent as `max_tokens` on every completion. `OpenRouter`'s pre-request
+/// credit check holds credit for every request still in flight, sized by
+/// its output ceiling; without an explicit `max_tokens` that ceiling is
+/// the selected model's own maximum (65,536 tokens on some models) rather
+/// than what this bounded analysis answer could ever need, so a few
+/// concurrent requests can reserve past a modest balance and draw the
+/// in-flight HTTP 402 ([`ProviderError::CreditsInFlight`]).
+/// `analysis-output-v1` answers are well under this even with a full
+/// 64-claim response; the margin above that is headroom for a reasoning
+/// model's hidden thinking tokens, which `OpenRouter` counts against the
+/// same ceiling.
+const MAX_OUTPUT_TOKENS: u32 = 16_384;
 
 /// One selectable zero-data-retention model: the exact provider-side
 /// `id` a request is bound to, and the human `label` shown beside it.
@@ -80,6 +94,27 @@ impl OpenRouter {
     pub fn with_max_parallel(mut self, parallel: usize) -> Self {
         self.parallel = parallel.clamp(1, MAX_PARALLEL_REQUESTS);
         self
+    }
+
+    /// Sends only the supplied canonical projections and validates returned
+    /// evidence locally, through the shared [`analysis::analyze`]. Calling
+    /// this explicitly opts into transmitting those projections to
+    /// `OpenRouter`.
+    /// # Errors
+    /// Rejects oversized input, tool calls, partial responses, and invalid analysis.
+    pub fn analyze(&self, context: &SuppliedContext<'_>) -> Result<AnalysisResult, ProviderError> {
+        analysis::analyze(self, context)
+    }
+
+    /// Produces transient review cards backed by validated ranges of the
+    /// selected messages, through the shared [`analysis::analyze_for_review`].
+    /// # Errors
+    /// Returns fixed provider or validation failures; no raw upstream output escapes.
+    pub fn analyze_for_review(
+        &self,
+        context: &SuppliedContext<'_>,
+    ) -> Result<ReviewAnalysis, ProviderError> {
+        analysis::analyze_for_review(self, context)
     }
 
     /// Exercises generation with a fixed content-free request. No mailbox is accessed.
@@ -253,6 +288,21 @@ fn read_response(
     match response.status().as_u16() {
         200 => {}
         401 => return Err(ProviderError::InvalidKey),
+        // A 402's body carries OpenRouter's own reason; keep only its
+        // `error.message` (see `provider::record_quota_detail`) so the
+        // failure line can say why rather than leaving it to guesswork.
+        // OpenRouter also uses 402 for "would exceed your available credits
+        // given your current in-flight requests" -- a too-many-at-once
+        // condition it says to retry once in-flight requests settle. That
+        // one is a backoff signal, so it gets its own variant.
+        402 => {
+            if let Ok(body) = read_body(response, MAX_RESPONSE, control)
+                && record_quota_detail(&body) == QuotaKind::InFlight
+            {
+                return Err(ProviderError::CreditsInFlight);
+            }
+            return Err(ProviderError::Quota);
+        }
         status => return Err(status_error(status)),
     }
     read_body(response, MAX_RESPONSE, control)
@@ -262,13 +312,15 @@ fn read_response(
 ///
 /// No `response_format` or `structured_outputs` member is sent: strict
 /// application validation of the answer stays authoritative, exactly as on
-/// the Ollama Cloud path. No tools member is sent either.
+/// the Ollama Cloud path. No tools member is sent either. `max_tokens` is
+/// sent -- see [`MAX_OUTPUT_TOKENS`].
 fn request(model: &str, system: &str, user: &str) -> Result<Vec<u8>, ProviderError> {
     let body = serde_json::to_vec(&json!({
         "model": model,
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         "stream": false,
-        "provider": {"zdr": true}
+        "provider": {"zdr": true},
+        "max_tokens": MAX_OUTPUT_TOKENS
     }))
     .map_err(|_| ProviderError::InvalidResponse)?;
     if body.len() > MAX_REQUEST {
@@ -309,6 +361,13 @@ fn parse_chat(bytes: &[u8], selected: &str) -> Result<Zeroizing<String>, Provide
     let message = choice
         .get("message")
         .ok_or(ProviderError::InvalidResponse)?;
+    // The answer was cut off at `max_tokens` (a reasoning model's hidden
+    // thinking counts against the same ceiling), so what came back is
+    // never a complete document. Named separately from the other
+    // malformed-answer cases because the remedy is different.
+    if choice.get("finish_reason").and_then(Value::as_str) == Some("length") {
+        return Err(ProviderError::OutputTruncated);
+    }
     if choice
         .get("finish_reason")
         .is_some_and(|reason| reason.as_str() != Some("stop"))
@@ -558,7 +617,8 @@ mod tests {
         assert_eq!(sent["model"], MODEL);
         assert_eq!(sent["messages"][0]["role"], "system");
         assert_eq!(sent["messages"][1]["content"], "data");
-        assert_eq!(sent.as_object().unwrap().len(), 4);
+        assert_eq!(sent["max_tokens"], MAX_OUTPUT_TOKENS);
+        assert_eq!(sent.as_object().unwrap().len(), 5);
         for absent in ["response_format", "structured_outputs", "tools", "n"] {
             assert!(sent.get(absent).is_none(), "{absent} must not be sent");
         }
@@ -592,6 +652,30 @@ mod tests {
                 Err(expected)
             );
         }
+        // The one 402 that is a backoff signal, not a balance problem.
+        let (url, _captured) = loopback(http(
+            402,
+            br#"{"error":{"message":"This request would exceed your available credits given your current in-flight requests. Retry after in-flight requests settle, or add credits.","code":402}}"#,
+        ));
+        assert_eq!(
+            synthetic_provider().chat_at(&url, request(MODEL, "policy", "data").unwrap(), None),
+            Err(ProviderError::CreditsInFlight)
+        );
+    }
+
+    #[test]
+    fn an_answer_cut_off_at_max_tokens_is_reported_as_truncated() {
+        let body = json!({
+            "id": "gen-synthetic",
+            "model": MODEL,
+            "choices": [{"index": 0, "finish_reason": "length",
+                "message": {"role": "assistant", "content": "{\"version\":1,\"expec", "refusal": null}}]
+        })
+        .to_string();
+        assert_eq!(
+            parse_chat(body.as_bytes(), MODEL),
+            Err(ProviderError::OutputTruncated)
+        );
     }
 
     #[test]
@@ -614,9 +698,12 @@ mod tests {
             value["choices"][0]["message"][member] = replacement;
             rejected.push(value);
         }
-        let mut truncated: Value = serde_json::from_slice(&answer("{}")).unwrap();
-        truncated["choices"][0]["finish_reason"] = json!("length");
-        rejected.push(truncated);
+        // `finish_reason: "length"` is its own error now (see
+        // `an_answer_cut_off_at_max_tokens_is_reported_as_truncated`);
+        // any other non-"stop" reason stays a generic bad answer.
+        let mut filtered: Value = serde_json::from_slice(&answer("{}")).unwrap();
+        filtered["choices"][0]["finish_reason"] = json!("content_filter");
+        rejected.push(filtered);
         let mut two: Value = serde_json::from_slice(&answer("{}")).unwrap();
         two["choices"] = json!([two["choices"][0].clone(), two["choices"][0].clone()]);
         rejected.push(two);

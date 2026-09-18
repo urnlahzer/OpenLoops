@@ -23,7 +23,7 @@ use openloops_graph::live::{
 };
 use openloops_inference::{
     blocks::CanonicalBlock,
-    expectations::{Anchor, EventPassed, Expectation, Owner},
+    expectations::{Anchor, EventPassed, Expectation, Owner, ResolutionKind},
 };
 use slint::{ComponentHandle, Timer};
 
@@ -162,15 +162,20 @@ struct ReminderView {
 }
 
 fn reminder_state_view(record: &crate::loop_state::Record) -> ReminderView {
-    match record.reminder {
+    match &record.reminder {
         Reminder::None => ReminderView {
             state: "none",
             text: "",
             marker: String::new(),
         },
-        Reminder::Created => ReminderView {
+        Reminder::Created { .. } => ReminderView {
             state: "created",
-            text: "Reminder created in Microsoft To Do. Manage its alerts and completion there; marking this loop handled does not modify the task.",
+            text: "Reminder created in Microsoft To Do. Marking this loop Handled also marks the task complete there.",
+            marker: String::new(),
+        },
+        Reminder::Completed { .. } => ReminderView {
+            state: "created",
+            text: "The linked Microsoft To Do task was completed, which marked this loop Handled.",
             marker: String::new(),
         },
         Reminder::Attempted => ReminderView {
@@ -456,6 +461,10 @@ struct ReviewRowView {
 struct PillView {
     text: String,
     kind: &'static str,
+    /// Explains how the card reached this status, shown on hover. Empty when
+    /// the pill's own text already says everything relevant. See
+    /// `status_pill_hint`.
+    hint: String,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -503,6 +512,52 @@ fn owner_label(item: &Expectation, decision: Decision) -> &'static str {
     }
 }
 
+/// Explains, on hover, how a terminal card actually reached its status --
+/// specifically because `status_base_label`'s own doc comment establishes
+/// that a decision override (`Done`/`Dismissed`/`Moot`) always wins the pill
+/// *text* even when the model separately found closing evidence for the
+/// same item, or the reminder-sync check found the linked task already
+/// completed in Microsoft To Do, so "Handled" alone cannot say which of
+/// those actually happened -- more than one can be true at once. Empty for
+/// every other decision: `Mine`/`Watching` are already self-explanatory
+/// action names, and a `Review`-state resolution/event-passed label already
+/// names its own cause and points at the Completion/Event evidence sections
+/// below.
+fn status_pill_hint(decision: Decision, reminder: &Reminder, item: &Expectation) -> String {
+    match decision {
+        Decision::Done if matches!(reminder, Reminder::Completed { .. }) => {
+            "The linked Microsoft To Do task was completed, which marked this handled.".into()
+        }
+        Decision::Done if item.resolution.is_some() => {
+            let cause = match item.resolution_kind {
+                None => "closing evidence".to_owned(),
+                Some(ResolutionKind::Completed) => "evidence it was completed".to_owned(),
+                Some(ResolutionKind::Declined) => "evidence it was declined".to_owned(),
+                Some(ResolutionKind::Withdrawn) => "evidence the requester withdrew it".to_owned(),
+                Some(ResolutionKind::Superseded) => "evidence the requester replaced it".to_owned(),
+                Some(ResolutionKind::Agreed) => "evidence you agreed to it".to_owned(),
+            };
+            let where_found = if item.cross_thread {
+                "in another conversation"
+            } else {
+                "in a later reply"
+            };
+            format!(
+                "You marked this handled. The model had also found {cause} {where_found}; see Completion evidence below."
+            )
+        }
+        Decision::Done if item.event_passed.is_some() => {
+            "You marked this handled. The named event had also passed.".into()
+        }
+        Decision::Done => {
+            "You marked this handled; no closing evidence was found automatically.".into()
+        }
+        Decision::Dismissed => "You marked this \u{201c}not mine\u{201d}.".into(),
+        Decision::Moot => "You marked this \u{201c}no longer relevant\u{201d}.".into(),
+        Decision::Mine | Decision::Watching | Decision::Review => String::new(),
+    }
+}
+
 fn status_pill(item: &Expectation, card: &CardContext) -> PillView {
     let (text, kind): (String, &'static str) = match card.record.decision {
         Decision::Done => ("Handled".into(), "neutral"),
@@ -528,7 +583,8 @@ fn status_pill(item: &Expectation, card: &CardContext) -> PillView {
         }
         Decision::Review => ("Needs your review".into(), "brand"),
     };
-    PillView { text, kind }
+    let hint = status_pill_hint(card.record.decision, &card.record.reminder, item);
+    PillView { text, kind, hint }
 }
 
 fn pills_for(item: &Expectation, card: &CardContext) -> Vec<PillView> {
@@ -541,20 +597,91 @@ fn pills_for(item: &Expectation, card: &CardContext) -> Vec<PillView> {
             } else {
                 "brand"
             },
+            hint: String::new(),
         });
     }
-    match card.record.reminder {
+    match &card.record.reminder {
         Reminder::None => {}
-        Reminder::Created => pills.push(PillView {
+        Reminder::Created { .. } => pills.push(PillView {
             text: "To Do reminder set".into(),
             kind: "brand",
+            hint: String::new(),
+        }),
+        Reminder::Completed { .. } => pills.push(PillView {
+            text: "To Do task completed".into(),
+            kind: "success",
+            hint: String::new(),
         }),
         Reminder::Attempted => pills.push(PillView {
             text: "Reminder unconfirmed".into(),
             kind: "warning",
+            hint: String::new(),
         }),
     }
     pills
+}
+
+/// Case-insensitive substring filter over a card's visible text: action
+/// title, waiting party, subject, evidence quote, deadline text, and status
+/// pill text -- the same fields shown across the row and the detail pane. An
+/// empty `query` matches everything. Pure (plain strings only) so it is
+/// tested directly with synthetic text, independent of `Expectation`/
+/// `CardContext` construction.
+fn matches_search(
+    query: &str,
+    action: &str,
+    waiting_party: &str,
+    subject: &str,
+    evidence_quote: &str,
+    deadline_text: &str,
+    status: &str,
+) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let query = query.to_lowercase();
+    [
+        action,
+        waiting_party,
+        subject,
+        evidence_quote,
+        deadline_text,
+        status,
+    ]
+    .into_iter()
+    .any(|field| field.to_lowercase().contains(query.as_str()))
+}
+
+/// Gathers a card's visible text and applies [`matches_search`]. Split out
+/// from `matches_search` itself so that function can stay pure and directly
+/// testable, while this side does the (cheap) work of pulling the six fields
+/// out of `review`/`item`/`card`.
+fn card_matches_search(
+    review: &ReviewState,
+    item: &Expectation,
+    card: &CardContext,
+    query: &str,
+) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let subject = source_message(review, item).map_or_else(String::new, |source| {
+        source.input.message.subject.as_string()
+    });
+    let deadline_text = card
+        .deadline
+        .as_ref()
+        .map_or_else(|| "No deadline stated".to_owned(), deadline_label);
+    let status = status_pill(item, card).text;
+    matches_search(
+        query,
+        &item.action,
+        &item.waiting_party,
+        &subject,
+        &item.evidence.quote,
+        &deadline_text,
+        &status,
+    )
 }
 
 fn visible_handles(
@@ -562,6 +689,7 @@ fn visible_handles(
     cards: &[Option<CardContext>],
     filter: Filter,
     show_handled: bool,
+    search: &str,
 ) -> Vec<usize> {
     let Some(analysis) = &review.analysis else {
         return vec![];
@@ -579,7 +707,8 @@ fn visible_handles(
             let cards = &cards;
             move |&index| {
                 cards[index].as_ref().is_some_and(|card| {
-                    filter.matches(analysis.items[index].owner)
+                    let item = &analysis.items[index];
+                    filter.matches(item.owner)
                         && list_group(card) == group
                         && !card_hidden(
                             card.closed,
@@ -589,6 +718,7 @@ fn visible_handles(
                                 .as_ref()
                                 .is_some_and(|draft| draft.key == card.record.key),
                         )
+                        && card_matches_search(review, item, card, search)
                 })
             }
         })
@@ -620,13 +750,14 @@ fn review_rows(
     review: &ReviewState,
     filter: Filter,
     show_handled: bool,
+    search: &str,
     selected: Option<[u8; 32]>,
     cards: &[Option<CardContext>],
 ) -> Vec<ReviewRowView> {
     let Some(analysis) = &review.analysis else {
         return vec![];
     };
-    let visible = visible_handles(review, cards, filter, show_handled);
+    let visible = visible_handles(review, cards, filter, show_handled, search);
     let mut prior = None;
     visible
         .into_iter()
@@ -712,7 +843,7 @@ fn selected_view(
         can_watch: !card.closed
             && item.owner != Owner::You
             && card.record.decision != Decision::Watching,
-        can_remind: !card.closed && reminder_button_enabled(card.record.reminder, draft_open),
+        can_remind: !card.closed && reminder_button_enabled(&card.record.reminder, draft_open),
         draft: draft_view(
             review
                 .draft
@@ -947,6 +1078,8 @@ fn sync_review_inner(
     });
     window.set_show_handled(model.review.show_handled);
     window.set_show_handled_label(SHOW_HANDLED_LABEL.into());
+    window.set_review_search_query(model.review.search_query.clone().into());
+    window.set_can_sync_todo(!busy && model.reminder_sync_eligible_count(cards) > 0);
     strip = apply_scan_failure(strip, &model.review_status, model.review.scan_failed);
     window.set_scan_strip(strip);
     window.set_coverage_open(review_ui.coverage_open);
@@ -956,12 +1089,14 @@ fn sync_review_inner(
         cards,
         review_ui.filter,
         model.review.show_handled,
+        &model.review.search_query,
     );
     review_ui.selected = retained_selection(review_ui.selected, &visible, cards);
     let row_views = review_rows(
         &model.review,
         review_ui.filter,
         model.review.show_handled,
+        &model.review.search_query,
         review_ui.selected,
         cards,
     );
@@ -1044,6 +1179,7 @@ fn sync_review_inner(
             .map(|pill| ReviewPill {
                 text: pill.text.into(),
                 kind: pill.kind.into(),
+                hint: pill.hint.into(),
             })
             .collect::<Vec<_>>();
         sync_list_cached(&mut review_ui.cache.pills, pills, |m| {
@@ -1200,7 +1336,17 @@ pub(crate) fn sync_review(
 fn apply_reconcile(review: &mut ReviewState, key: [u8; 32], exists: bool) {
     let record = review.decisions.get(&key);
     let reminder = if exists {
-        Reminder::Created
+        // The user is manually confirming a task exists after an Uncertain
+        // outcome -- OpenLoops never received a confirmed task/list id for
+        // it, so there is nothing to store. Empty ids mean the later
+        // complete-on-Handled step (see `on_review_decision`) has nothing to
+        // address and skips silently, exactly as if no reminder existed for
+        // that purpose; the reminder still counts as Created for every other
+        // purpose (dedup, the pill, the button state).
+        Reminder::Created {
+            list_id: String::new(),
+            task_id: String::new(),
+        }
     } else {
         Reminder::None
     };
@@ -1421,6 +1567,42 @@ pub(crate) fn register_callbacks(
     {
         let model = Rc::clone(&model);
         let weak = window.as_weak();
+        window.on_sync_todo(move || {
+            let mut model_ref = model.borrow_mut();
+            if model_ref.pending.is_some() {
+                return;
+            }
+            let cards = model_ref
+                .review
+                .analysis
+                .as_ref()
+                .map(|analysis| model_ref.review.card_contexts(&analysis.items))
+                .unwrap_or_default();
+            let eligible = model_ref.reminder_sync_eligible_count(&cards);
+            if eligible == 0 {
+                model_ref.review.action_status =
+                    "Nothing to check: no tracked loop has a Microsoft To Do task attached.".into();
+                model_ref.review.action_status_succeeded = false;
+            } else {
+                model_ref.review.action_status = format!("Checking {eligible} To Do task(s)…");
+                model_ref.review.action_status_succeeded = true;
+                model_ref.dispatch_reminder_sync();
+            }
+            drop(model_ref);
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_review_search_edited(move |value| {
+            model.borrow_mut().review.search_query = value.to_string();
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
         window.on_review_filter_selected(move |index| {
             REVIEW_UI.with(|state| {
                 state.borrow_mut().filter = match index {
@@ -1488,6 +1670,7 @@ pub(crate) fn register_callbacks(
                     &cards,
                     state.filter,
                     model_ref.review.show_handled,
+                    &model_ref.review.search_query,
                 );
                 if !visible.is_empty() {
                     let current = state
@@ -1534,16 +1717,56 @@ pub(crate) fn register_callbacks(
             let Some(source) = source_message(&model_ref.review, item) else {
                 return;
             };
+            let account = source.account.clone();
             let key = model_ref.review.decisions.fingerprint(
                 &source.account,
                 &source.id,
+                item.evidence.block,
+                &item.evidence.quote,
                 &item.action_phrase,
             );
             let reminder = model_ref.review.decisions.get(&key).reminder;
             let decision = decision_from_code(value);
+            // Marking a card Handled also completes its linked Microsoft To
+            // Do task, if it has a real one -- never for Dismissed/Moot, and
+            // never for a reconcile-confirmed reminder with no known task id
+            // (see `apply_reconcile`). Captured before `apply_decision_change`
+            // moves `reminder` in; the completion call itself never reverts
+            // the decision or the reminder record on failure (see
+            // `reminders::complete()`), so it only ever affects the status
+            // line, dispatched after the decision is already saved.
+            let complete_task = if decision == Decision::Done {
+                match &reminder {
+                    Reminder::Created { list_id, task_id }
+                        if !list_id.is_empty() && !task_id.is_empty() =>
+                    {
+                        Some((list_id.clone(), task_id.clone()))
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
             model_ref
                 .review
                 .apply_decision_change(key, decision, reminder);
+            if let Some((list_id, task_id)) = complete_task
+                && let Ok(config) = ConnectionConfig::new(model_ref.client_id.trim(), None)
+            {
+                model_ref.start(
+                    Service::Review,
+                    "Marking the linked Microsoft To Do task complete",
+                    move || {
+                        Outcome::ReminderCompletion(
+                            key,
+                            openloops_graph::live::reminders::complete(
+                                &config, &account, &list_id, &task_id,
+                            ),
+                        )
+                    },
+                    || {},
+                );
+            }
             drop(model_ref);
             refresh(&model, &weak);
         });
@@ -1598,18 +1821,22 @@ pub(crate) fn register_callbacks(
             };
             let account = source.account.clone();
             let source_id = source.id.clone();
-            let action_phrase = item.action_phrase.clone();
-            let key = model_ref
-                .review
-                .decisions
-                .fingerprint(&account, &source_id, &action_phrase);
+            let evidence_block = item.evidence.block;
+            let evidence_quote = item.evidence.quote.clone();
+            let key = model_ref.review.decisions.fingerprint(
+                &account,
+                &source_id,
+                evidence_block,
+                &evidence_quote,
+                &item.action_phrase,
+            );
             let record = model_ref.review.decisions.get(&key);
             let draft_open_for_this_card = model_ref
                 .review
                 .draft
                 .as_ref()
                 .is_some_and(|draft| draft.key == key);
-            if reminder_button_enabled(record.reminder, draft_open_for_this_card) {
+            if reminder_button_enabled(&record.reminder, draft_open_for_this_card) {
                 let next = decision_after_setting_reminder(record.decision);
                 let title = reminder_title(record.decision, &item.action);
                 model_ref
@@ -1811,7 +2038,7 @@ mod tests {
         let review = crate::review_model::layout_fixture();
         let cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
         let selected = cards[0].as_ref().map(|card| card.record.key);
-        let rows = review_rows(&review, Filter::All, false, selected, &cards);
+        let rows = review_rows(&review, Filter::All, false, "", selected, &cards);
         assert_eq!(rows.len(), 3);
         assert!(rows[0].first_in_group);
         assert_ne!(rows[0].group, ListGroup::Closed);
@@ -1830,16 +2057,137 @@ mod tests {
         let review = crate::review_model::layout_fixture();
         let cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
         assert_eq!(
-            visible_handles(&review, &cards, Filter::All, false),
+            visible_handles(&review, &cards, Filter::All, false, ""),
             vec![0, 1, 2]
         );
         assert_eq!(
-            visible_handles(&review, &cards, Filter::Mine, false),
+            visible_handles(&review, &cards, Filter::Mine, false, ""),
             vec![0, 2]
         );
         assert_eq!(
-            visible_handles(&review, &cards, Filter::Team, false),
+            visible_handles(&review, &cards, Filter::Team, false, ""),
             vec![1]
+        );
+    }
+
+    #[test]
+    fn matches_search_is_case_insensitive_over_every_field_and_empty_matches_all() {
+        // Purely synthetic strings, standing in for the six visible fields
+        // `card_matches_search` gathers: action, waiting party, subject,
+        // evidence quote, deadline text, status pill text.
+        let fields = (
+            "Send the quarterly figures",
+            "Alex Example",
+            "Team sync notes",
+            "Could you send this over by Friday?",
+            "Due Friday",
+            "Needs your review",
+        );
+        assert!(matches_search(
+            "", fields.0, fields.1, fields.2, fields.3, fields.4, fields.5
+        ));
+        assert!(matches_search(
+            "QUARTERLY",
+            fields.0,
+            fields.1,
+            fields.2,
+            fields.3,
+            fields.4,
+            fields.5
+        ));
+        assert!(matches_search(
+            "alex example",
+            fields.0,
+            fields.1,
+            fields.2,
+            fields.3,
+            fields.4,
+            fields.5
+        ));
+        assert!(matches_search(
+            "sync notes",
+            fields.0,
+            fields.1,
+            fields.2,
+            fields.3,
+            fields.4,
+            fields.5
+        ));
+        assert!(matches_search(
+            "send this over",
+            fields.0,
+            fields.1,
+            fields.2,
+            fields.3,
+            fields.4,
+            fields.5
+        ));
+        assert!(matches_search(
+            "due friday",
+            fields.0,
+            fields.1,
+            fields.2,
+            fields.3,
+            fields.4,
+            fields.5
+        ));
+        assert!(matches_search(
+            "needs your review",
+            fields.0,
+            fields.1,
+            fields.2,
+            fields.3,
+            fields.4,
+            fields.5
+        ));
+        assert!(!matches_search(
+            "nonexistent-token",
+            fields.0,
+            fields.1,
+            fields.2,
+            fields.3,
+            fields.4,
+            fields.5
+        ));
+    }
+
+    #[test]
+    fn search_query_composes_with_the_owner_filter_and_show_handled() {
+        let review = crate::review_model::layout_fixture();
+        let cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
+        // "Vendor invoice" is card 2's subject and action alone; cards 0/1
+        // share the unrelated "Quarterly planning" subject.
+        assert_eq!(
+            visible_handles(&review, &cards, Filter::All, false, "vendor invoice"),
+            vec![2]
+        );
+        // Case-insensitive, and a single shared word ("vendor" also appears
+        // in card 0's "vendor renewal figures") can widen the match to more
+        // than one card -- unlike the two-word phrase above.
+        assert_eq!(
+            visible_handles(&review, &cards, Filter::All, false, "VENDOR"),
+            vec![0, 2]
+        );
+        // Card 2 is owned by `Owner::You` but composes with the Team filter
+        // (which only card 1 matches), same as every other predicate here:
+        // a search hit alone is not enough.
+        assert!(visible_handles(&review, &cards, Filter::Team, false, "vendor invoice").is_empty());
+        // "Quarterly planning" (the shared subject) matches cards 0 and 1,
+        // not card 2.
+        assert_eq!(
+            visible_handles(&review, &cards, Filter::All, false, "quarterly planning"),
+            vec![0, 1]
+        );
+        // No match anywhere.
+        assert!(
+            visible_handles(
+                &review,
+                &cards,
+                Filter::All,
+                false,
+                "no-such-token-anywhere"
+            )
+            .is_empty()
         );
     }
 
@@ -2153,10 +2501,75 @@ mod tests {
     }
 
     #[test]
+    fn status_pill_hint_explains_terminal_decisions_but_not_others() {
+        let review = crate::review_model::layout_fixture();
+        let mut item = review.analysis.as_ref().unwrap().items[0].clone();
+        // The fixture item starts with resolution: Some(..), resolution_kind:
+        // Some(Completed), cross_thread: true (see layout_fixture's card 1).
+        assert_eq!(
+            status_pill_hint(Decision::Done, &Reminder::None, &item),
+            "You marked this handled. The model had also found evidence it was completed in another conversation; see Completion evidence below."
+        );
+        item.cross_thread = false;
+        assert_eq!(
+            status_pill_hint(Decision::Done, &Reminder::None, &item),
+            "You marked this handled. The model had also found evidence it was completed in a later reply; see Completion evidence below."
+        );
+        item.resolution = None;
+        item.resolution_kind = None;
+        item.event_passed = Some(EventPassed {
+            name: "planning meeting".into(),
+            end: 1,
+            message_handle: "m0".into(),
+            from_subject: true,
+        });
+        assert_eq!(
+            status_pill_hint(Decision::Done, &Reminder::None, &item),
+            "You marked this handled. The named event had also passed."
+        );
+        item.event_passed = None;
+        assert_eq!(
+            status_pill_hint(Decision::Done, &Reminder::None, &item),
+            "You marked this handled; no closing evidence was found automatically."
+        );
+        // Reminder::Completed wins over everything else -- the sync check
+        // found the linked task already done, regardless of what other
+        // evidence the model separately found.
+        item.resolution = review.analysis.as_ref().unwrap().items[0]
+            .resolution
+            .clone();
+        assert_eq!(
+            status_pill_hint(
+                Decision::Done,
+                &Reminder::Completed {
+                    list_id: "list".into(),
+                    task_id: "task".into()
+                },
+                &item
+            ),
+            "The linked Microsoft To Do task was completed, which marked this handled."
+        );
+        item.resolution = None;
+        assert_eq!(
+            status_pill_hint(Decision::Dismissed, &Reminder::None, &item),
+            "You marked this \u{201c}not mine\u{201d}."
+        );
+        assert_eq!(
+            status_pill_hint(Decision::Moot, &Reminder::None, &item),
+            "You marked this \u{201c}no longer relevant\u{201d}."
+        );
+        for decision in [Decision::Mine, Decision::Watching, Decision::Review] {
+            assert_eq!(status_pill_hint(decision, &Reminder::None, &item), "");
+        }
+    }
+
+    #[test]
     fn status_pills_cover_resolution_and_terminal_decisions() {
         let review = crate::review_model::layout_fixture();
         let mut item = review.analysis.as_ref().unwrap().items[0].clone();
-        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0].unwrap();
+        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0]
+            .clone()
+            .unwrap();
         let base = CardContext {
             record: Record {
                 decision: Decision::Review,
@@ -2173,7 +2586,7 @@ mod tests {
             let card = CardContext {
                 record: Record {
                     decision,
-                    ..base.record
+                    ..base.record.clone()
                 },
                 terminal: true,
                 closed: true,
@@ -2193,7 +2606,8 @@ mod tests {
             status_pill(&item, &resolved),
             PillView {
                 text: "Resolved — later reply found".into(),
-                kind: "success"
+                kind: "success",
+                hint: String::new(),
             }
         );
     }
@@ -2202,7 +2616,9 @@ mod tests {
     fn status_pill_uses_the_model_label_for_an_event_passed_closure() {
         let review = crate::review_model::layout_fixture();
         let mut item = review.analysis.as_ref().unwrap().items[0].clone();
-        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0].unwrap();
+        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0]
+            .clone()
+            .unwrap();
         let card = CardContext {
             record: Record {
                 decision: Decision::Review,
@@ -2224,6 +2640,7 @@ mod tests {
             PillView {
                 text: crate::review_model::status_base_label(Decision::Review, &item),
                 kind: "neutral",
+                hint: String::new(),
             }
         );
         assert!(
@@ -2237,7 +2654,9 @@ mod tests {
     fn status_pill_appends_the_cross_thread_suffix_only_when_the_model_sets_it() {
         let review = crate::review_model::layout_fixture();
         let mut item = review.analysis.as_ref().unwrap().items[0].clone();
-        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0].unwrap();
+        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0]
+            .clone()
+            .unwrap();
         let card = CardContext {
             record: Record {
                 decision: Decision::Review,
@@ -2264,7 +2683,9 @@ mod tests {
     fn deadline_pills_omit_missing_and_do_not_mark_closed_cards_danger() {
         let review = crate::review_model::layout_fixture();
         let item = &review.analysis.as_ref().unwrap().items[0];
-        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0].unwrap();
+        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0]
+            .clone()
+            .unwrap();
         let base = CardContext {
             record: Record {
                 decision: Decision::Review,
@@ -2275,7 +2696,7 @@ mod tests {
         };
         let no_deadline = CardContext {
             deadline: None,
-            ..base
+            ..base.clone()
         };
         assert_eq!(pills_for(item, &no_deadline).len(), 1);
         let past = DeadlineView::PastDue {
@@ -2284,7 +2705,7 @@ mod tests {
         };
         let open = CardContext {
             deadline: Some(past),
-            ..base
+            ..base.clone()
         };
         assert_eq!(pills_for(item, &open)[1].kind, "danger");
         let closed = CardContext {
@@ -2300,25 +2721,27 @@ mod tests {
         let mut review = crate::review_model::layout_fixture();
         let original = review.analysis.as_ref().unwrap().items[0].clone();
         review.analysis.as_mut().unwrap().items = vec![original.clone(); 4];
-        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0].unwrap();
+        let base = review.card_contexts(&review.analysis.as_ref().unwrap().items)[0]
+            .clone()
+            .unwrap();
         let cards = vec![
             Some(CardContext {
                 deadline: Some(DeadlineView::PastDue {
                     boundary: 0,
                     offset_seconds: 0,
                 }),
-                ..base
+                ..base.clone()
             }),
             Some(CardContext {
                 deadline: Some(DeadlineView::Due {
                     boundary: i64::MAX,
                     offset_seconds: 0,
                 }),
-                ..base
+                ..base.clone()
             }),
             Some(CardContext {
                 deadline: None,
-                ..base
+                ..base.clone()
             }),
             Some(CardContext {
                 record: Record {
@@ -2330,7 +2753,7 @@ mod tests {
                 deadline: None,
             }),
         ];
-        let handles = visible_handles(&review, &cards, Filter::All, true);
+        let handles = visible_handles(&review, &cards, Filter::All, true, "");
         assert_eq!(handles, vec![0, 1, 2, 3]);
         let groups: Vec<_> = handles
             .into_iter()
@@ -2523,10 +2946,21 @@ mod tests {
         let mut review = crate::review_model::layout_fixture();
         let item = review.analysis.as_ref().unwrap().items[0].clone();
         let source = source_message(&review, &item).unwrap();
-        let key = review
-            .decisions
-            .fingerprint(&source.account, &source.id, &item.action_phrase);
-        review.apply_decision_change(key, Decision::Mine, Reminder::Created);
+        let key = review.decisions.fingerprint(
+            &source.account,
+            &source.id,
+            item.evidence.block,
+            &item.evidence.quote,
+            &item.action_phrase,
+        );
+        review.apply_decision_change(
+            key,
+            Decision::Mine,
+            Reminder::Created {
+                list_id: "list".into(),
+                task_id: "task".into(),
+            },
+        );
         let cards = review.card_contexts(review.analysis.as_ref().map_or(&[], |a| &a.items));
         let pills = pills_for(&item, cards[0].as_ref().unwrap());
         assert_eq!(pills[0].text, "Tracking");
@@ -2588,7 +3022,10 @@ mod tests {
             updated: 0,
         };
         assert_eq!(reminder_state_view(&record).state, "none");
-        record.reminder = Reminder::Created;
+        record.reminder = Reminder::Created {
+            list_id: "list".into(),
+            task_id: "task".into(),
+        };
         let created = reminder_state_view(&record);
         assert_eq!(created.state, "created");
         assert!(
@@ -2747,9 +3184,13 @@ mod tests {
     #[test]
     fn reconcile_keeps_the_error_status_when_the_decision_update_is_rejected() {
         let mut review = crate::review_model::layout_fixture();
-        let key = review
-            .decisions
-            .fingerprint("synthetic", "synthetic-0", "send the draft budget");
+        let key = review.decisions.fingerprint(
+            "synthetic",
+            "synthetic-0",
+            0,
+            "Could you send over the finalized draft budget before Thursday's sign-off meeting? I need to fold in the updated headcount numbers and the vendor renewal figures before we present it to the executive committee on Friday morning.",
+            "send the draft budget",
+        );
 
         apply_reconcile(&mut review, key, true);
         assert!(review.action_status_succeeded);
@@ -2757,23 +3198,29 @@ mod tests {
             review.action_status,
             "Decision saved on this Windows account. No mail text or names were stored."
         );
-        assert_eq!(review.decisions.get(&key).reminder, Reminder::Created);
+        assert!(matches!(
+            review.decisions.get(&key).reminder,
+            Reminder::Created { .. }
+        ));
         let before_rejected_call = review.decisions.get(&key);
 
         review.decisions.error = Some(
-            "The saved-decision limit (50) is reached. Existing decisions are preserved.".into(),
+            "The saved-decision limit (55) is reached. Existing decisions are preserved.".into(),
         );
         apply_reconcile(&mut review, key, false);
         assert!(!review.action_status_succeeded);
         assert_eq!(
             review.action_status,
-            "The saved-decision limit (50) is reached. Existing decisions are preserved."
+            "The saved-decision limit (55) is reached. Existing decisions are preserved."
         );
         // The rejected update (Created -> None) must not have taken effect.
         assert_eq!(
             review.decisions.get(&key).reminder,
             before_rejected_call.reminder
         );
-        assert_eq!(review.decisions.get(&key).reminder, Reminder::Created);
+        assert!(matches!(
+            review.decisions.get(&key).reminder,
+            Reminder::Created { .. }
+        ));
     }
 }

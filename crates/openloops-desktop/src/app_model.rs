@@ -5,12 +5,12 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, atomic::Ordering};
 use std::time::Instant;
 
-use crate::review_model::ReviewState;
+use crate::review_model::{CardContext, ReviewState};
 use crate::settings::{
     OllamaPlan, Provider, Settings, SettingsError, SettingsStore, max_parallel, production_store,
 };
 use openloops_graph::live::{
-    ConnectionError, ConnectionReport, clear_session,
+    ConnectionConfig, ConnectionError, ConnectionReport, clear_session,
     review::{LoadProgress, MailCache},
 };
 use openloops_inference::ollama::suggested_model;
@@ -40,6 +40,18 @@ pub(crate) enum Outcome {
         attempted: usize,
     },
     Reminder([u8; 32], openloops_graph::live::reminders::ReminderOutcome),
+    ReminderCompletion(
+        [u8; 32],
+        openloops_graph::live::reminders::ReminderCompletionOutcome,
+    ),
+    /// One `check_status` result per still-open, reminder-bearing decision
+    /// found at the end of a scan -- see `AppModel::dispatch_reminder_sync`.
+    ReminderSync(
+        Vec<(
+            [u8; 32],
+            openloops_graph::live::reminders::TaskStatusOutcome,
+        )>,
+    ),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -311,6 +323,26 @@ impl AppModel {
         });
     }
 
+    /// The pending job's worker went away without sending an outcome
+    /// (a panic, in practice): clear the job and report it on the service
+    /// that owned it.
+    fn pending_disconnected(&mut self) {
+        self.pending = None;
+        let status = Status {
+            lines: vec!["The operation stopped unexpectedly. Please try again.".into()],
+            succeeded: false,
+        };
+        match self.pending_service {
+            Service::Microsoft => self.microsoft = status,
+            Service::Model => self.model_status = status,
+            Service::Review => {
+                self.load_progress = None;
+                self.review_status = status;
+                self.review.scan_failed = true;
+            }
+        }
+    }
+
     /// Polls the pending job's channel, if any, applying its outcome.
     /// Returns whether an outcome was actually consumed (a result arrived,
     /// or the worker disconnected) -- `false` on an empty channel (still
@@ -326,20 +358,7 @@ impl AppModel {
             Ok(outcome) => outcome,
             Err(TryRecvError::Empty) => return false,
             Err(TryRecvError::Disconnected) => {
-                self.pending = None;
-                let status = Status {
-                    lines: vec!["The operation stopped unexpectedly. Please try again.".into()],
-                    succeeded: false,
-                };
-                match self.pending_service {
-                    Service::Microsoft => self.microsoft = status,
-                    Service::Model => self.model_status = status,
-                    Service::Review => {
-                        self.load_progress = None;
-                        self.review_status = status;
-                        self.review.scan_failed = true;
-                    }
-                }
+                self.pending_disconnected();
                 return true;
             }
         };
@@ -347,6 +366,12 @@ impl AppModel {
         match outcome {
             Outcome::Reminder(key, outcome) => {
                 self.reminder_outcome(key, outcome);
+            }
+            Outcome::ReminderCompletion(key, outcome) => {
+                self.reminder_completion_outcome(key, outcome);
+            }
+            Outcome::ReminderSync(results) => {
+                self.reminder_sync_outcome(results);
             }
             Outcome::Models(Ok(models)) => self.loaded_models(models),
             Outcome::ZdrModels(Ok(models)) => self.loaded_zdr_models(models),
@@ -439,6 +464,7 @@ impl AppModel {
                     Ok(scan) => {
                         self.review.set_scan(scan, model);
                         self.review_status = Status { lines: vec![if self.review.scan_incomplete { "Scan incomplete. Results from completed batches are shown below; check scan coverage and errors." } else { "Scan finished. Review the open loops and their evidence below." }.into()], succeeded: !self.review.scan_incomplete };
+                        self.dispatch_reminder_sync();
                     }
                     Err(error) => {
                         self.review.scan_failed = true;
@@ -525,7 +551,7 @@ impl AppModel {
         use openloops_graph::live::reminders::ReminderOutcome;
         let mut record = self.review.decisions.get(&key);
         let (text, outcome_succeeded)=match outcome {
-            ReminderOutcome::Created=>{record.reminder=Reminder::Created; ("Reminder created in your Microsoft To Do Tasks list.".to_owned(), true)},
+            ReminderOutcome::Created{list_id,task_id}=>{record.reminder=Reminder::Created{list_id,task_id}; ("Reminder created in your Microsoft To Do Tasks list.".to_owned(), true)},
             ReminderOutcome::NotCreated(reason)=>{record.reminder=Reminder::None;(format!("No reminder was created: {reason}"), false)},
             ReminderOutcome::Uncertain=>("Microsoft did not confirm the write. Check To Do before trying again; OpenLoops will not automatically retry.".to_owned(), false),
         };
@@ -536,6 +562,74 @@ impl AppModel {
             Ok(()) => text,
             Err(error) => format!("{text} {error}"),
         };
+    }
+
+    /// Reports whether the already-Handled card's linked To Do task was also
+    /// marked complete. Never reverts the local `Done` decision or the
+    /// `Reminder::Created` record on failure -- see `reminders::complete()`'s
+    /// doc comment -- so this only ever updates the status line, distinct
+    /// from `reminder_outcome`, which can revert a reminder to `None`.
+    fn reminder_completion_outcome(
+        &mut self,
+        _key: [u8; 32],
+        outcome: openloops_graph::live::reminders::ReminderCompletionOutcome,
+    ) {
+        use openloops_graph::live::reminders::ReminderCompletionOutcome;
+        self.review.action_status = match outcome {
+            ReminderCompletionOutcome::Completed => {
+                "Decision saved on this Windows account. The linked Microsoft To Do task was also marked complete.".to_owned()
+            }
+            ReminderCompletionOutcome::NotCompleted(error) => {
+                format!(
+                    "Decision saved on this Windows account. The linked Microsoft To Do task was not marked complete: {error}"
+                )
+            }
+            ReminderCompletionOutcome::Uncertain => {
+                "Decision saved on this Windows account. Microsoft did not confirm the To Do task was marked complete; check it there.".to_owned()
+            }
+        };
+        self.review.action_status_succeeded =
+            matches!(outcome, ReminderCompletionOutcome::Completed);
+    }
+
+    /// Applies the reverse direction of `reminder_completion_outcome`: a
+    /// task the user completed directly in Microsoft To Do, discovered by
+    /// `dispatch_reminder_sync`, marks its loop Handled in `OpenLoops`.
+    /// `NotCompleted`/`Unknown` results change nothing -- a task that's
+    /// still open, or one `OpenLoops` simply couldn't check this time, is not
+    /// evidence of anything; `Reminder::Completed` (rather than leaving it
+    /// `Created`) is what lets `status_pill_hint` say this loop was closed
+    /// by the To Do task specifically, not by the user clicking Handled.
+    fn reminder_sync_outcome(
+        &mut self,
+        results: Vec<(
+            [u8; 32],
+            openloops_graph::live::reminders::TaskStatusOutcome,
+        )>,
+    ) {
+        use crate::loop_state::{Decision, Reminder};
+        use openloops_graph::live::reminders::TaskStatusOutcome;
+        let mut completed = 0usize;
+        for (key, outcome) in results {
+            if !matches!(outcome, TaskStatusOutcome::Completed) {
+                continue;
+            }
+            let mut record = self.review.decisions.get(&key);
+            let Reminder::Created { list_id, task_id } = record.reminder.clone() else {
+                continue;
+            };
+            record.decision = Decision::Done;
+            record.reminder = Reminder::Completed { list_id, task_id };
+            record.updated = crate::loop_state::now();
+            if self.review.decisions.update(record).is_ok() {
+                completed += 1;
+            }
+        }
+        if completed > 0 {
+            self.review.scan_errors.push(format!(
+                "{completed} loop(s) marked handled because their linked Microsoft To Do task was already completed."
+            ));
+        }
     }
 
     /// Provider keys never contain whitespace. Trimming once, where the key
@@ -634,6 +728,53 @@ impl AppModel {
         );
     }
 
+    /// After a scan, checks whether any still-open, reminder-bearing
+    /// decision's linked Microsoft To Do task was completed outside
+    /// `OpenLoops` -- the reverse direction of `on_review_decision`'s
+    /// complete-on-Handled hook (`slint_review.rs`). Runs after
+    /// `Outcome::Scan` rather than before the mail download, because
+    /// matching a saved decision back to an account needs the freshly
+    /// loaded messages: `Decisions` never stores the account itself, only
+    /// folds it into the opaque fingerprint (see `loop_state.rs`'s module
+    /// doc), so `card_context()`'s live `source_message` lookup is the only
+    /// way to recover it. A no-op when nothing is eligible: only a
+    /// `Mine`/`Watching`/`Review` decision with a `Reminder::Created`
+    /// record carrying real (non-empty) ids has anything left to learn from
+    /// Graph.
+    pub(crate) fn dispatch_reminder_sync(&mut self) {
+        let Some(analysis) = &self.review.analysis else {
+            return;
+        };
+        let items = analysis.items.clone();
+        let cards = self.review.card_contexts(&items);
+        let checks = self.review.reminder_sync_checks(&items, &cards);
+        if checks.is_empty() {
+            return;
+        }
+        let Ok(config) = ConnectionConfig::new(self.client_id.trim(), None) else {
+            return;
+        };
+        self.start(
+            Service::Review,
+            "Checking Microsoft To Do for completed reminders",
+            move || {
+                let results = checks
+                    .into_iter()
+                    .map(|(account, key, list_id, task_id)| {
+                        (
+                            key,
+                            openloops_graph::live::reminders::check_status(
+                                &config, &account, &list_id, &task_id,
+                            ),
+                        )
+                    })
+                    .collect();
+                Outcome::ReminderSync(results)
+            },
+            || {},
+        );
+    }
+
     pub(crate) fn start_retry_scan(
         &mut self,
         conversations: BTreeSet<String>,
@@ -677,6 +818,21 @@ impl AppModel {
             lines: vec![format!("Retried {attempted}; {remaining} still failing.")],
             succeeded: remaining == 0,
         };
+    }
+
+    /// How many still-open, reminder-bearing decisions a "Sync To Do" click
+    /// would check right now, given `cards` the caller already computed
+    /// (typically the same `card_contexts` result a `sync`/`sync_review`
+    /// pass already built) -- see `ReviewState::reminder_sync_checks`.
+    /// Drives the Review toolbar button's enabled state and its "Checking N
+    /// To Do task(s)..." status line. Never calls `card_contexts` itself.
+    #[must_use]
+    pub(crate) fn reminder_sync_eligible_count(&self, cards: &[Option<CardContext>]) -> usize {
+        self.review.analysis.as_ref().map_or(0, |analysis| {
+            self.review
+                .reminder_sync_checks(&analysis.items, cards)
+                .len()
+        })
     }
 }
 
@@ -1200,6 +1356,76 @@ mod tests {
     }
 
     #[test]
+    fn reminder_sync_marks_completed_tasks_handled_and_leaves_others_alone() {
+        use crate::loop_state::{Decision, Record, Reminder, now};
+        use openloops_graph::live::reminders::TaskStatusOutcome;
+        let mut app = AppModel::new();
+        let completed_key = [1; 32];
+        let open_key = [2; 32];
+        let unknown_key = [3; 32];
+        for (key, decision) in [
+            (completed_key, Decision::Mine),
+            (open_key, Decision::Watching),
+            (unknown_key, Decision::Review),
+        ] {
+            app.review
+                .decisions
+                .update(Record {
+                    key,
+                    decision,
+                    reminder: Reminder::Created {
+                        list_id: "list".into(),
+                        task_id: "task".into(),
+                    },
+                    updated: now(),
+                })
+                .unwrap();
+        }
+        let (sender, receiver) = mpsc::channel();
+        app.pending = Some(receiver);
+        sender
+            .send(Outcome::ReminderSync(vec![
+                (completed_key, TaskStatusOutcome::Completed),
+                (open_key, TaskStatusOutcome::NotCompleted),
+                (
+                    unknown_key,
+                    TaskStatusOutcome::Unknown(ConnectionError::Timeout(1)),
+                ),
+            ]))
+            .unwrap();
+        app.poll(|| {});
+
+        let completed = app.review.decisions.get(&completed_key);
+        assert_eq!(completed.decision, Decision::Done);
+        assert!(matches!(completed.reminder, Reminder::Completed { .. }));
+
+        let open = app.review.decisions.get(&open_key);
+        assert_eq!(open.decision, Decision::Watching);
+        assert!(matches!(open.reminder, Reminder::Created { .. }));
+
+        let unknown = app.review.decisions.get(&unknown_key);
+        assert_eq!(unknown.decision, Decision::Review);
+        assert!(matches!(unknown.reminder, Reminder::Created { .. }));
+
+        assert!(
+            app.review
+                .scan_errors
+                .iter()
+                .any(|line| line.contains("1 loop(s) marked handled")),
+            "{:?}",
+            app.review.scan_errors
+        );
+    }
+
+    #[test]
+    fn dispatch_reminder_sync_is_a_noop_with_no_eligible_reminders() {
+        let mut app = AppModel::new();
+        // No analysis at all: nothing to check.
+        app.dispatch_reminder_sync();
+        assert!(app.pending.is_none());
+    }
+
+    #[test]
     fn reminder_outcome_maps_each_reason_to_exact_status_text() {
         use openloops_graph::live::reminders::{ReminderFailure, ReminderOutcome};
 
@@ -1238,5 +1464,38 @@ mod tests {
             assert_eq!(app.review.action_status, expected);
             assert!(!app.review.action_status_succeeded);
         }
+    }
+
+    #[test]
+    fn reminder_sync_eligible_count_matches_what_dispatch_would_check() {
+        use crate::loop_state::{Decision, Record, Reminder, now};
+        let mut app = AppModel::new();
+        // No analysis: the count is zero regardless of `cards`.
+        assert_eq!(app.reminder_sync_eligible_count(&[]), 0);
+
+        app.review = crate::review_model::layout_fixture();
+        let items = app.review.analysis.as_ref().unwrap().items.clone();
+        let cards = app.review.card_contexts(&items);
+        // The fixture already saves card 0 as `Mine` with a `Created`
+        // reminder carrying real ids -- exactly what `dispatch_reminder_sync`
+        // would check. Card 2 is `Watching`/`Attempted` (no confirmed task
+        // id) and card 1 has no saved decision at all, so neither counts.
+        assert_eq!(app.reminder_sync_eligible_count(&cards), 1);
+
+        let key = cards[1].as_ref().unwrap().record.key;
+        app.review
+            .decisions
+            .update(Record {
+                key,
+                decision: Decision::Watching,
+                reminder: Reminder::Created {
+                    list_id: "list-2".into(),
+                    task_id: "task-2".into(),
+                },
+                updated: now(),
+            })
+            .unwrap();
+        let cards = app.review.card_contexts(&items);
+        assert_eq!(app.reminder_sync_eligible_count(&cards), 2);
     }
 }

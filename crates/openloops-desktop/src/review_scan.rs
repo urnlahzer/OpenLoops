@@ -1,14 +1,21 @@
 use crate::deadline_view::{DeadlineView, EVENT_GENERIC_NOUNS, classify};
 use crate::settings::Provider;
 use chrono::{Datelike, TimeZone};
-use openloops_domain::deadline_parse::DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT;
+use openloops_contracts::{
+    AmbiguityCode, Claim, ClaimType, EvidenceComponent, Nullable, TemporalKind,
+};
+use openloops_domain::deadline::UnixSeconds;
+use openloops_domain::deadline_parse::{
+    DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT, ParseContext, TimezoneContext, Weekday,
+};
 use openloops_graph::live::{ConnectionError, review::MailItem};
 use openloops_inference::{
+    analysis::{AcceptedClaim, ClaimAnalysis, ReviewEvidence, analyze_claims, rejection_label},
     blocks::CanonicalBlock,
     canonical::canonicalize_plain,
     expectations::{
         Anchor, ConversationMessage, EventPassed, Expectation, Expectations, Owner, ResolutionKind,
-        closure as closure_pass, expectations as expectations_pass,
+        closure as closure_pass, expectations as expectations_pass, participant, resolve_owner,
     },
     message::CanonicalMessage,
     ollama::OllamaCloud,
@@ -18,6 +25,7 @@ use openloops_inference::{
         REPLY_HISTORY_CHUNK_MAX_CHARS, chunk_reply_history, is_underscore_separator,
         starts_with_ascii_ci,
     },
+    validation::{MessageContext, ParticipantHandle, ParticipantSlot, SuppliedContext},
     walker::canonicalize_html,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -1666,6 +1674,34 @@ fn block(text: &str) -> Result<CanonicalBlock, ConnectionError> {
 /// tracks the line index where the reply-history marker itself was found
 /// (not the unrelated `>`-prefix quoting rule), so the guard only fires
 /// when that marker was the very first line.
+/// Upper bound on body blocks one plain-text message contributes, leaving
+/// room under the 64-block message cap for the subject and up to
+/// `REPLY_HISTORY_MAX_CHUNKS` quote chunks. Paragraphs past the bound are
+/// folded into the last block rather than dropped: body text is evidence
+/// and is never discarded.
+const MAX_PLAIN_BODY_BLOCKS: usize = 40;
+
+/// Splits a plain-text body into blank-line-separated paragraph blocks, the
+/// way the HTML walker already yields one block per paragraph. A single
+/// whole-body block made "the whole email" the unit of evidence under the
+/// governed pipeline's whole-block rule -- a promise's card title started
+/// with the greeting -- and made every deadline, action, and fingerprint
+/// share one block ordinal.
+fn plain_body_blocks(body: &str) -> Vec<String> {
+    let normalized = body.replace("\r\n", "\n");
+    let mut paragraphs: Vec<String> = normalized
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    if paragraphs.len() > MAX_PLAIN_BODY_BLOCKS {
+        let tail = paragraphs.split_off(MAX_PLAIN_BODY_BLOCKS - 1);
+        paragraphs.push(tail.join("\n\n"));
+    }
+    paragraphs
+}
+
 fn plain_body(text: &str) -> (String, String) {
     let lines: Vec<&str> = text.lines().collect();
     let mut body = String::new();
@@ -1797,12 +1833,10 @@ pub fn prepare(
         )
     } else {
         let (body, quote) = plain_body(&item.body);
-        let trimmed_body = body.trim();
-        let body_blocks = if trimmed_body.is_empty() {
-            vec![]
-        } else {
-            vec![block(trimmed_body)?]
-        };
+        let body_blocks = plain_body_blocks(&body)
+            .iter()
+            .map(|s| block(s))
+            .collect::<Result<Vec<_>, _>>()?;
         // Bound the quote text the same way the HTML path bounds detected
         // reply history: split it into blank-line-separated paragraphs
         // (further splitting by line any paragraph that is itself over
@@ -1923,6 +1957,388 @@ fn connect(
     })
 }
 
+/// One participant slot's opaque governed handle (`"{m}-sender"`,
+/// `"{m}-to-{i}"`, `"{m}-cc-{i}"`), the message handle it belongs to, and
+/// which slot it names -- the per-conversation catalog
+/// [`governed_pass`] offers as `SuppliedContext::participants`.
+fn governed_participant_handles(
+    conversation: &[ConversationMessage],
+) -> Vec<(String, &str, ParticipantSlot)> {
+    let mut handles = Vec::new();
+    for m in conversation {
+        if m.message.sender.is_some() {
+            handles.push((
+                format!("{}-sender", m.handle),
+                m.handle.as_str(),
+                ParticipantSlot::Sender,
+            ));
+        }
+        for i in 0..m.message.to.len() {
+            handles.push((
+                format!("{}-to-{i}", m.handle),
+                m.handle.as_str(),
+                ParticipantSlot::To(i),
+            ));
+        }
+        for i in 0..m.message.cc.len() {
+            handles.push((
+                format!("{}-cc-{i}", m.handle),
+                m.handle.as_str(),
+                ParticipantSlot::Cc(i),
+            ));
+        }
+    }
+    handles
+}
+
+/// The [`ParseContext`] one message's temporal hypotheses reparse against:
+/// the same construction `deadline_view::classify` uses, so a governed
+/// deadline ages identically to one the old pipeline produced.
+fn governed_temporal_context(m: &ConversationMessage) -> ParseContext {
+    ParseContext {
+        message_timestamp: UnixSeconds(m.timestamp),
+        timezone: TimezoneContext {
+            base_offset_seconds: local_offset_seconds(m.timestamp, 0),
+            transition: None,
+        },
+        eod_seconds_since_midnight: DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT,
+        week_start: Weekday::Monday,
+    }
+}
+
+/// Runs one conversation through the ADR-007 governed pipeline
+/// ([`analyze_claims`]) and bridges its typed claims back onto the
+/// [`Expectation`] shape every downstream consumer (`close_passed_events`,
+/// `scan_closures`, the review UI, decision fingerprinting) already
+/// understands. This is [`scan`]'s only call site for its primary pass;
+/// nothing downstream of the returned [`Expectations`] changes.
+/// # Errors
+/// Returns the fixed provider or validation failure [`analyze_claims`] gave.
+fn governed_pass(
+    client: &dyn ModelClient,
+    conversation: &[ConversationMessage],
+    cancel: Option<&AtomicBool>,
+) -> Result<Expectations, ProviderError> {
+    let messages: Vec<MessageContext> = conversation
+        .iter()
+        .map(|m| MessageContext {
+            handle: m.handle.as_str(),
+            message: &m.message,
+            temporal_context: governed_temporal_context(m),
+        })
+        .collect();
+    let owned_handles = governed_participant_handles(conversation);
+    let participants: Vec<ParticipantHandle> = owned_handles
+        .iter()
+        .map(|(handle, message_handle, slot)| ParticipantHandle {
+            handle: handle.as_str(),
+            message_handle,
+            slot: *slot,
+        })
+        .collect();
+    let context = SuppliedContext {
+        messages: &messages,
+        participants: &participants,
+        loop_candidate_handles: &[],
+    };
+    let analysis = analyze_claims(client, &context, cancel)?;
+    Ok(map_claim_analysis(&analysis, conversation))
+}
+
+/// One of the two fixed reasons [`map_accepted_claim`] skips a claim
+/// instead of returning an [`Expectation`] (see [`map_claim_analysis`] for
+/// how each is counted and noted).
+enum ClaimSkip {
+    ClosureOrChange,
+    NonBodyEvidence,
+}
+
+/// The fixed note recorded once, no matter how many claims triggered it,
+/// when any claim was skipped because it would have closed or changed an
+/// existing loop but Phase 2a never offers `loop_candidate_handles` for it
+/// to name.
+const CLOSURE_OR_CHANGE_SKIPPED_NOTE: &str =
+    "Closure or change claims were skipped: no open loops were offered to attach them to.";
+/// The fixed note recorded once per claim skipped because its primary
+/// evidence did not cite a body or subject block.
+const NON_BODY_EVIDENCE_NOTE: &str = "Evidence cited a non-body component.";
+
+/// Bridges one conversation's [`ClaimAnalysis`] onto the [`Expectations`]
+/// shape every downstream consumer already understands.
+fn map_claim_analysis(
+    analysis: &ClaimAnalysis,
+    conversation: &[ConversationMessage],
+) -> Expectations {
+    let mut items = Vec::new();
+    let mut rejection_reasons: Vec<&'static str> = Vec::new();
+    let mut skipped = 0usize;
+    let mut skipped_closure_or_change = false;
+    for accepted in &analysis.accepted {
+        match map_accepted_claim(accepted, conversation) {
+            Ok(expectation) => push_unique_expectation(&mut items, expectation),
+            Err(ClaimSkip::ClosureOrChange) => {
+                skipped += 1;
+                skipped_closure_or_change = true;
+            }
+            Err(ClaimSkip::NonBodyEvidence) => {
+                skipped += 1;
+                rejection_reasons.push(NON_BODY_EVIDENCE_NOTE);
+            }
+        }
+    }
+    if skipped_closure_or_change {
+        rejection_reasons.push(CLOSURE_OR_CHANGE_SKIPPED_NOTE);
+    }
+    for reason in &analysis.rejected {
+        rejection_reasons.push(rejection_label(*reason));
+    }
+    Expectations {
+        items,
+        rejected: analysis.rejected.len() + skipped,
+        rejection_reasons,
+        degraded: 0,
+    }
+}
+
+/// The mapping Phase 2a applies to every claim type that can attach to an
+/// `Expectation`: its `kind` string, its deterministic `action` prefix, and
+/// the owner to start from before [`resolve_owner`] downgrades it.
+/// `PossibleClosure`, `DeadlineChange` and `Modification` return `None`:
+/// Phase 2a never offers `loop_candidate_handles`, so none of the three can
+/// ever legitimately attach to anything yet.
+fn claim_shape(claim_type: ClaimType) -> Option<(&'static str, &'static str, Owner)> {
+    match claim_type {
+        ClaimType::Request => Some(("request", "Requested: ", Owner::You)),
+        ClaimType::Question => Some(("request", "Answer: ", Owner::You)),
+        ClaimType::Promise => Some(("promise", "You promised: ", Owner::You)),
+        ClaimType::Delegation => Some(("request", "Delegated: ", Owner::You)),
+        ClaimType::Attribution => Some(("attributed", "Someone else owes: ", Owner::Unclear)),
+        ClaimType::PossibleClosure | ClaimType::DeadlineChange | ClaimType::Modification => None,
+    }
+}
+
+/// Builds one [`Expectation`] from an accepted claim, or reports which of
+/// the two fixed reasons it was skipped for instead.
+fn map_accepted_claim(
+    accepted: &AcceptedClaim,
+    conversation: &[ConversationMessage],
+) -> Result<Expectation, ClaimSkip> {
+    let claim = &accepted.claim;
+    let Some((kind, action_prefix, base_owner)) = claim_shape(claim.claim_type) else {
+        return Err(ClaimSkip::ClosureOrChange);
+    };
+    // `evidence` is never empty: the schema requires `minItems: 1`.
+    let primary = &accepted.evidence[0];
+    if !matches!(
+        primary.component,
+        EvidenceComponent::BodyBlock | EvidenceComponent::Subject
+    ) {
+        return Err(ClaimSkip::NonBodyEvidence);
+    }
+    // `validate()` step 4 already proved every evidence source_handle
+    // resolves against the messages this conversation supplied.
+    let Some(source_message) = conversation
+        .iter()
+        .find(|m| m.handle == primary.source_handle)
+    else {
+        return Err(ClaimSkip::NonBodyEvidence);
+    };
+    let action = format!("{action_prefix}{}", first_sentence(&primary.text));
+    let action_phrase = first_scalars(&primary.text, ACTION_PHRASE_MAX_SCALARS);
+    // The model saying it cannot tell who asks or who owes outranks the
+    // claim type's default owner: a card must not read "You (suggested)"
+    // next to an uncertainty note that says the opposite.
+    let base_owner = if claim.ambiguity_codes.contains(&AmbiguityCode::Identity) {
+        Owner::Unclear
+    } else {
+        base_owner
+    };
+    let owner = resolve_owner(base_owner, source_message);
+    let waiting_party = waiting_party_display(&claim.waiting_party_handle, conversation);
+    let (deadline, event) = temporal_anchors(claim, &accepted.evidence);
+    let evidence = Anchor {
+        message: primary.source_handle.clone(),
+        block: usize::from(primary.block_ordinal),
+        quote: primary.text.clone(),
+        context: primary.text.clone(),
+    };
+    Ok(Expectation {
+        action,
+        action_phrase,
+        owner,
+        waiting_party,
+        kind: kind.to_string(),
+        evidence,
+        deadline,
+        event,
+        event_time: None,
+        resolution: None,
+        resolution_kind: None,
+        uncertainty: uncertainty_text(claim),
+        unverified_deadline: false,
+        unverified_resolution: false,
+        cross_thread: false,
+        event_passed: None,
+    })
+}
+
+/// The `deadline`/`event` anchor pair for one claim's temporal hypothesis
+/// (if any): a `date`/`local_datetime`/`relative`/`soft_window` value
+/// anchors `deadline`; an `event_relative` one anchors `event` instead,
+/// leaving `deadline` `None`. `quote` is the model-normalized temporal
+/// value itself (never the surrounding evidence text), matching what
+/// `deadline_view::classify` and `close_passed_events` already expect to
+/// reparse.
+fn temporal_anchors(
+    claim: &Claim,
+    evidence: &[ReviewEvidence],
+) -> (Option<Anchor>, Option<Anchor>) {
+    let Nullable::Value(temporal) = &claim.temporal else {
+        return (None, None);
+    };
+    // Step 8 already proved this index addresses a real evidence entry.
+    let Some(source) = evidence.get(usize::from(temporal.text_evidence_index)) else {
+        return (None, None);
+    };
+    let anchor = Anchor {
+        message: source.source_handle.clone(),
+        block: usize::from(source.block_ordinal),
+        quote: temporal.value.clone(),
+        context: source.text.clone(),
+    };
+    match temporal.kind {
+        TemporalKind::Date
+        | TemporalKind::LocalDatetime
+        | TemporalKind::Relative
+        | TemporalKind::SoftWindow => (Some(anchor), None),
+        TemporalKind::EventRelative => (None, Some(anchor)),
+    }
+}
+
+/// One fixed label per ambiguity code, for [`uncertainty_text`].
+fn ambiguity_label(code: AmbiguityCode) -> &'static str {
+    match code {
+        AmbiguityCode::QuoteScope => "the cited text covers more than this item",
+        AmbiguityCode::Identity => "unclear who asks or who owes",
+        AmbiguityCode::Delegation => "may have been handed off",
+        AmbiguityCode::Deadline => "a time is implied but not stated",
+        AmbiguityCode::Relation => "unclear which loop this affects",
+        AmbiguityCode::CrossMessage => "evidence spans messages",
+        AmbiguityCode::InsufficientContext => "the conversation may not show enough",
+        AmbiguityCode::SemanticConflict => "messages disagree",
+    }
+}
+
+/// The fixed sentence a `delegation` claim always carries, ahead of any
+/// other ambiguity-code labels: it wins over the `delegation` ambiguity
+/// code's own ("may have been handed off") label when both apply, so that
+/// label is skipped rather than duplicated.
+const DELEGATION_UNCERTAINTY: &str =
+    "You handed this to someone else; the requester is still waiting on you.";
+
+/// `Expectation::uncertainty`: the `delegation`-type fixed sentence (if
+/// this claim is a delegation), followed by every other disclosed
+/// ambiguity code's fixed label, joined with "; ".
+fn uncertainty_text(claim: &Claim) -> String {
+    let is_delegation = claim.claim_type == ClaimType::Delegation;
+    let mut parts = Vec::new();
+    if is_delegation {
+        parts.push(DELEGATION_UNCERTAINTY);
+    }
+    for code in &claim.ambiguity_codes {
+        if is_delegation && *code == AmbiguityCode::Delegation {
+            continue;
+        }
+        parts.push(ambiguity_label(*code));
+    }
+    parts.join("; ")
+}
+
+/// `Expectation::waiting_party`: the display string
+/// [`openloops_inference::expectations::participant`] produces for the
+/// old-pipeline-format handle equivalent to `handle`, or "Not established"
+/// when `handle` is `null` or has no such equivalent (a `cc` slot: the old
+/// pipeline never offered one as a waiting party either, so `participant`
+/// has no case for it).
+fn waiting_party_display(
+    handle: &Nullable<String>,
+    conversation: &[ConversationMessage],
+) -> String {
+    let Nullable::Value(handle) = handle else {
+        return "Not established".to_string();
+    };
+    translate_participant_handle(handle)
+        .and_then(|old_handle| participant(&old_handle, conversation))
+        .unwrap_or_else(|| "Not established".to_string())
+}
+
+/// Rewrites one governed participant handle (`"{m}-sender"`, `"{m}-to-{i}"`,
+/// `"{m}-cc-{i}"`) to the old pipeline's own format (`"{m}:sender"`,
+/// `"{m}:to:{i}"`), or `None` for a `cc` handle, which has no old-pipeline
+/// equivalent.
+fn translate_participant_handle(handle: &str) -> Option<String> {
+    if let Some(m) = handle.strip_suffix("-sender") {
+        return Some(format!("{m}:sender"));
+    }
+    if let Some((m, index)) = handle.split_once("-to-") {
+        return Some(format!("{m}:to:{index}"));
+    }
+    None
+}
+
+/// The maximum Unicode scalars `action`'s first-sentence extract keeps
+/// before it is cut with a trailing "…".
+const ACTION_SENTENCE_MAX_SCALARS: usize = 140;
+/// The maximum Unicode scalars `action_phrase` keeps (dedup/fingerprint
+/// input only; never displayed as the card's own title).
+const ACTION_PHRASE_MAX_SCALARS: usize = 200;
+
+/// `text`'s first sentence -- up to and including the first `.`, `?` or
+/// `!` followed by whitespace or the text's end -- capped to
+/// [`ACTION_SENTENCE_MAX_SCALARS`] Unicode scalars with a trailing "…"
+/// appended only when that cap, not the sentence boundary, is what cut it.
+fn first_sentence(text: &str) -> String {
+    let scalars: Vec<char> = text.chars().collect();
+    let mut end = scalars.len();
+    for (i, &c) in scalars.iter().enumerate() {
+        if (c == '.' || c == '?' || c == '!')
+            && scalars.get(i + 1).is_none_or(|next| next.is_whitespace())
+        {
+            end = i + 1;
+            break;
+        }
+    }
+    let truncated = end > ACTION_SENTENCE_MAX_SCALARS;
+    if truncated {
+        end = ACTION_SENTENCE_MAX_SCALARS;
+    }
+    let sentence: String = scalars[..end].iter().collect();
+    let sentence = sentence.trim();
+    if truncated {
+        format!("{sentence}…")
+    } else {
+        sentence.to_string()
+    }
+}
+
+/// `text` trimmed to its first `max` Unicode scalars.
+fn first_scalars(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
+}
+
+/// Pushes `item` unless an item with the same action (case-insensitively)
+/// and the same evidence message is already present -- the same dedup rule
+/// `expectations::push_unique` applies to the old pipeline's own items.
+fn push_unique_expectation(items: &mut Vec<Expectation>, item: Expectation) {
+    let is_duplicate = items.iter().any(|existing| {
+        existing.action.eq_ignore_ascii_case(&item.action)
+            && existing.evidence.message == item.evidence.message
+    });
+    if !is_duplicate {
+        items.push(item);
+    }
+}
+
 /// Analyzes `messages`, running up to `parallel` model requests at once.
 ///
 /// Conversations are independent of one another and so are the closure
@@ -1956,7 +2372,7 @@ pub fn scan(
         progress,
         &pass,
         conversation_filter,
-        &|conversation| expectations_pass(client, conversation, Some(&progress.cancel)),
+        &|conversation| governed_pass(client, conversation, Some(&progress.cancel)),
     );
     close_passed_events(&mut result, messages, chrono::Utc::now().timestamp());
     scan_closures(
@@ -2091,14 +2507,27 @@ fn conversations_by_size<'a>(
 /// unreachable or unusable, rather than this one conversation being
 /// rejected: both `scan_conversations` and `scan_closures` stop the whole
 /// pass early on one of these instead of continuing past it.
+///
+/// `Quota` (HTTP 402) is deliberately excluded: live scans have repeatedly
+/// shown it fired for one specific conversation while a dozen others on the
+/// same account, key, and model succeeded around it, so it is evidence
+/// about that one request, not about the provider's health. Treating it as
+/// a stop condition cost every not-yet-dispatched conversation behind it
+/// for no reason -- it is handled like any other per-conversation failure
+/// instead (falls to `job_signal`'s `_ => JobSignal::Ok`).
+///
+/// `Timeout` is excluded for the same reason: the request deadline is per
+/// request, and a slow model on a large conversation hits it while the
+/// same model answers every smaller conversation around it. Treating it as
+/// a stop condition also set `primary_scan_transport_error`, which skipped
+/// the whole closure pass -- so one slow thread silently cost every
+/// "already handled" detection in the scan.
 fn is_transport_error(error: ProviderError) -> bool {
     matches!(
         error,
         ProviderError::Unauthorized
             | ProviderError::RateLimited
-            | ProviderError::Quota
             | ProviderError::Network
-            | ProviderError::Timeout
             | ProviderError::ServerError(_)
     )
 }
@@ -2118,7 +2547,9 @@ enum JobSignal {
     /// The provider answered. Whether that answer was usable says nothing
     /// about provider health, so a rejected analysis counts here too.
     Ok,
-    /// Rate limited: narrow the concurrency. The request is NOT resent --
+    /// Rate limited (HTTP 429), or `OpenRouter`'s in-flight credit
+    /// reservation (an HTTP 402 that says to retry after in-flight requests
+    /// settle): narrow the concurrency. The request is NOT resent --
     /// `network_policy.retries`
     /// forbids automatically retrying any request that carried content --
     /// so the conversation is reported as failed instead.
@@ -2258,16 +2689,17 @@ impl ParallelPass {
     }
 }
 
-/// How one finished job's answer steers the limiter. Rate limiting narrows
-/// the pass; quota and the other transport-class errors stop it; a
-/// cancelled request stops it too (the caller's flag is normally already
-/// set, but a provider may answer `Cancelled` on its own).
+/// How one finished job's answer steers the limiter. Rate limiting and
+/// `OpenRouter`'s in-flight credit reservation narrow the pass; the
+/// transport-class errors stop it; a cancelled request stops it too (the
+/// caller's flag is normally already set, but a provider may answer
+/// `Cancelled` on its own). A plain quota 402 is per-conversation.
 fn job_signal<T>(outcome: &Result<T, ProviderError>) -> JobSignal {
     let Err(error) = outcome else {
         return JobSignal::Ok;
     };
     match *error {
-        ProviderError::RateLimited => JobSignal::Backoff,
+        ProviderError::RateLimited | ProviderError::CreditsInFlight => JobSignal::Backoff,
         ProviderError::Cancelled => JobSignal::Stop,
         error if is_transport_error(error) => JobSignal::Stop,
         // Any other failure is about this one request, not the provider:
@@ -2409,6 +2841,16 @@ fn failure_line(index: usize, conversation: &[&ReviewMessage], error: ProviderEr
         ProviderError::RateLimited => {
             format!("{head}: The provider rate-limited this request; it was not resent.")
         }
+        ProviderError::CreditsInFlight => {
+            format!("{head}: {error} This request was not resent.")
+        }
+        // Append OpenRouter's own stated reason when one was captured, so a
+        // 402 is diagnosable from the failure line itself -- see
+        // `provider::record_quota_detail` for the boundary this crosses.
+        ProviderError::Quota => match openloops_inference::provider::last_quota_detail() {
+            Some(detail) => format!("{head}: {error} OpenRouter's reason: {detail}"),
+            None => format!("{head}: {error}"),
+        },
         error => format!("{head}: {error}"),
     }
 }
@@ -2416,7 +2858,9 @@ fn failure_line(index: usize, conversation: &[&ReviewMessage], error: ProviderEr
 fn failure_reason(error: ProviderError) -> FailureReason {
     match error {
         ProviderError::Timeout => FailureReason::Timeout,
-        ProviderError::RateLimited => FailureReason::RateLimited,
+        // OpenRouter's in-flight credit reservation is a too-many-at-once
+        // condition, retried the same way a rate limit is.
+        ProviderError::RateLimited | ProviderError::CreditsInFlight => FailureReason::RateLimited,
         ProviderError::Network => FailureReason::Transport,
         ProviderError::Quota => FailureReason::Quota,
         error => FailureReason::Provider(error.to_string()),
@@ -3190,17 +3634,24 @@ fn attempt_closure(
 }
 
 /// After the primary per-conversation scan, attempts to close any
-/// remaining open "you owe someone" requests. Each item is checked first
-/// against later replies the user sent in the same conversation, then
-/// against messages sent to the waiting party in a different conversation.
-/// Mutates `result.analysis.items` in place; only the latter resolutions set
-/// `cross_thread: true` and increment `result.cross_thread_closures`.
+/// remaining open "you owe someone" expectations -- both a `request`
+/// someone made of the user and a `promise` the user made unprompted are
+/// eligible: the other party's expectation is the same either way, and
+/// closure is decided the same way for both (later evidence the waiting
+/// party's address received, wherever it was sent). `attributed` is not
+/// eligible: it does not name the signed-in user as the one who owes the
+/// action. Each item is checked first against later replies the user sent
+/// in the same conversation, then against messages sent to the waiting
+/// party in a different conversation. Mutates `result.analysis.items` in
+/// place; only the latter resolutions set `cross_thread: true` and
+/// increment `result.cross_thread_closures`.
 ///
 /// Skipped entirely when `result.primary_scan_transport_error` is set: the
 /// provider is already known to be unreachable or unauthorized, so per-item
 /// closure calls would fail identically. Before running, the count of
-/// eligible items (open, `request`-kind, `You`-owned) is added to
-/// `progress.total`, and `progress.processed` is incremented once per
+/// eligible items (open, `request`- or `promise`-kind, `You`-owned) is
+/// added to `progress.total`, and `progress.processed` is incremented once
+/// per
 /// eligible item as it is processed, including one skipped for having no
 /// candidates, a shared-mailbox/list waiting party (see
 /// [`is_shared_mailbox_address`]), the [`MAX_CLOSURE_CALLS`] cap binding, or
@@ -3232,7 +3683,7 @@ fn scan_closures(
         .filter(|(_, item)| {
             item.resolution.is_none()
                 && item.event_passed.is_none()
-                && item.kind == "request"
+                && matches!(item.kind.as_str(), "request" | "promise")
                 && item.owner == Owner::You
         })
         .map(|(index, _)| index)
@@ -3308,7 +3759,9 @@ fn merge_closures(
                 }
             }
             JobOutcome::Completed(Err(ProviderError::Cancelled)) => result.cancelled = true,
-            JobOutcome::Completed(Err(ProviderError::RateLimited)) => rate_limited += 1,
+            JobOutcome::Completed(Err(
+                ProviderError::RateLimited | ProviderError::CreditsInFlight,
+            )) => rate_limited += 1,
             JobOutcome::Completed(Err(error)) if is_stop_error(error) => {
                 if result.closure_pass_failure.is_none() {
                     result.closure_pass_failure = Some(format!("Closure pass stopped: {error}"));
@@ -4385,6 +4838,189 @@ mod tests {
         chrono::DateTime::parse_from_rfc3339(value)
             .unwrap()
             .timestamp()
+    }
+
+    /// A synthetic [`ModelClient`] that always answers with the fixed body
+    /// it was constructed with, standing in for a real provider so
+    /// [`governed_pass`] can be exercised against a hand-written governed
+    /// answer instead of a network call.
+    struct FixedAnalysisClient(String);
+
+    impl ModelClient for FixedAnalysisClient {
+        fn model(&self) -> &'static str {
+            "fixed"
+        }
+
+        fn max_parallel(&self) -> usize {
+            1
+        }
+
+        fn complete(
+            &self,
+            _system: &str,
+            _user: &str,
+            _cancel: Option<&AtomicBool>,
+        ) -> Result<zeroize::Zeroizing<String>, ProviderError> {
+            Ok(zeroize::Zeroizing::new(self.0.clone()))
+        }
+    }
+
+    /// The fixed sender text of the synthetic `m0` message in
+    /// [`governed_pass_fixture`], reused by the test's own assertions.
+    const FIXTURE_SENDER: &str = "Alex <alex@example.invalid>";
+
+    /// Builds the two-message synthetic conversation and the hand-written
+    /// `analysis-output-v1` document
+    /// [`governed_pass_maps_claims_and_reports_skips_and_rejections`]
+    /// exercises: a request with a `relative` deadline and a named waiting
+    /// party, a question, a promise with a `local_datetime` deadline, a
+    /// delegation whose ambiguity codes include the redundant `delegation`
+    /// code, an attribution, a `possible_closure` with no offered loop
+    /// handles (must be skipped), a claim citing a `sender` component (must
+    /// be skipped), and a claim the validator rejects on range bounds.
+    fn governed_pass_fixture() -> ([ConversationMessage; 2], String) {
+        let m0_body = "Please send the report. Can you confirm receipt?";
+        let m1_body = "I will send the deck by 2026-09-01T21:00. I asked Sam to \
+            handle the appendix, but you are still on the hook for the deck. \
+            Already sent the earlier draft.";
+        let m0 = ConversationMessage {
+            handle: "m0".into(),
+            message: CanonicalMessage {
+                subject: CanonicalBlock::new("Synthetic thread").unwrap(),
+                body_blocks: vec![CanonicalBlock::new(m0_body).unwrap()],
+                quote_blocks: vec![],
+                sender: Some(CanonicalBlock::new(FIXTURE_SENDER).unwrap()),
+                to: vec![CanonicalBlock::new("User <user@example.invalid>").unwrap()],
+                cc: vec![],
+                attachment_names: vec![],
+                link_labels: vec![],
+            },
+            timestamp: timestamp("2026-08-28T12:00:00Z"),
+            from_user: false,
+            to_user: true,
+            team: false,
+        };
+        let m1 = ConversationMessage {
+            handle: "m1".into(),
+            message: CanonicalMessage {
+                subject: CanonicalBlock::new("Synthetic thread").unwrap(),
+                body_blocks: vec![CanonicalBlock::new(m1_body).unwrap()],
+                quote_blocks: vec![],
+                sender: Some(CanonicalBlock::new("User <user@example.invalid>").unwrap()),
+                to: vec![CanonicalBlock::new(FIXTURE_SENDER).unwrap()],
+                cc: vec![],
+                attachment_names: vec![],
+                link_labels: vec![],
+            },
+            timestamp: timestamp("2026-08-29T09:00:00Z"),
+            from_user: true,
+            to_user: false,
+            team: false,
+        };
+        let m0_len = m0_body.chars().count();
+        let m1_len = m1_body.chars().count();
+        let sender_len = FIXTURE_SENDER.chars().count();
+        let bad_range = m1_len + 500;
+        let body = format!(
+            r#"{{"schema_version":1,"claims":[
+                {{"claim_type":"request","evidence":[{{"source_handle":"m0","component":"body_block","block_ordinal":0,"range_start":0,"range_end":{m0_len}}}],"waiting_party_handle":"m0-sender","related_loop_handles":[],"temporal":{{"text_evidence_index":0,"kind":"relative","value":"friday"}},"confidence_micros":900000,"ambiguity_codes":[]}},
+                {{"claim_type":"question","evidence":[{{"source_handle":"m0","component":"body_block","block_ordinal":0,"range_start":0,"range_end":{m0_len}}}],"waiting_party_handle":null,"related_loop_handles":[],"temporal":null,"confidence_micros":900000,"ambiguity_codes":[]}},
+                {{"claim_type":"promise","evidence":[{{"source_handle":"m1","component":"body_block","block_ordinal":0,"range_start":0,"range_end":{m1_len}}}],"waiting_party_handle":null,"related_loop_handles":[],"temporal":{{"text_evidence_index":0,"kind":"local_datetime","value":"2026-09-01T21:00"}},"confidence_micros":900000,"ambiguity_codes":[]}},
+                {{"claim_type":"delegation","evidence":[{{"source_handle":"m1","component":"body_block","block_ordinal":0,"range_start":0,"range_end":{m1_len}}}],"waiting_party_handle":null,"related_loop_handles":[],"temporal":null,"confidence_micros":900000,"ambiguity_codes":["delegation","insufficient_context"]}},
+                {{"claim_type":"attribution","evidence":[{{"source_handle":"m0","component":"body_block","block_ordinal":0,"range_start":0,"range_end":{m0_len}}}],"waiting_party_handle":null,"related_loop_handles":[],"temporal":null,"confidence_micros":900000,"ambiguity_codes":[]}},
+                {{"claim_type":"possible_closure","evidence":[{{"source_handle":"m1","component":"body_block","block_ordinal":0,"range_start":0,"range_end":{m1_len}}}],"waiting_party_handle":null,"related_loop_handles":[],"temporal":null,"confidence_micros":900000,"ambiguity_codes":[]}},
+                {{"claim_type":"request","evidence":[{{"source_handle":"m0","component":"sender","block_ordinal":0,"range_start":0,"range_end":{sender_len}}}],"waiting_party_handle":null,"related_loop_handles":[],"temporal":null,"confidence_micros":900000,"ambiguity_codes":[]}},
+                {{"claim_type":"attribution","evidence":[{{"source_handle":"m1","component":"body_block","block_ordinal":0,"range_start":0,"range_end":{bad_range}}}],"waiting_party_handle":null,"related_loop_handles":[],"temporal":null,"confidence_micros":900000,"ambiguity_codes":[]}}
+            ]}}"#
+        );
+        ([m0, m1], body)
+    }
+
+    /// Exercises [`governed_pass`] end to end against
+    /// [`governed_pass_fixture`]'s hand-written governed answer, covering
+    /// every mapping branch described there.
+    #[test]
+    fn governed_pass_maps_claims_and_reports_skips_and_rejections() {
+        let (conversation, body) = governed_pass_fixture();
+        let m0_timestamp = conversation[0].timestamp;
+        let m1_timestamp = conversation[1].timestamp;
+        let client = FixedAnalysisClient(body);
+        let result = governed_pass(&client, &conversation, None).unwrap();
+
+        assert_eq!(
+            result.items.len(),
+            5,
+            "{:?}",
+            result.items.iter().map(|i| &i.action).collect::<Vec<_>>()
+        );
+        assert_eq!(result.rejected, 3);
+        assert!(
+            result
+                .rejection_reasons
+                .contains(&CLOSURE_OR_CHANGE_SKIPPED_NOTE)
+        );
+        assert!(result.rejection_reasons.contains(&NON_BODY_EVIDENCE_NOTE));
+        assert!(
+            result
+                .rejection_reasons
+                .contains(&"Evidence range fell outside its block.")
+        );
+
+        let request_item = result
+            .items
+            .iter()
+            .find(|i| i.action.starts_with("Requested: "))
+            .expect("request item");
+        assert!(request_item.owner == Owner::You);
+        assert_eq!(request_item.waiting_party, FIXTURE_SENDER);
+        let deadline = request_item.deadline.as_ref().expect("request deadline");
+        assert_eq!(deadline.quote, "friday");
+        assert_ne!(
+            classify(&deadline.quote, m0_timestamp, m0_timestamp + 86_400, 0),
+            DeadlineView::Unknown
+        );
+
+        let question_item = result
+            .items
+            .iter()
+            .find(|i| i.action.starts_with("Answer: "))
+            .expect("question item");
+        assert!(question_item.owner == Owner::You);
+
+        let promise_item = result
+            .items
+            .iter()
+            .find(|i| i.action.starts_with("You promised: "))
+            .expect("promise item");
+        assert!(promise_item.owner == Owner::You);
+        let promise_deadline = promise_item.deadline.as_ref().expect("promise deadline");
+        assert_eq!(promise_deadline.quote, "2026-09-01T21:00");
+        assert_ne!(
+            classify(
+                &promise_deadline.quote,
+                m1_timestamp,
+                m1_timestamp + 86_400,
+                0
+            ),
+            DeadlineView::Unknown
+        );
+
+        let delegation_item = result
+            .items
+            .iter()
+            .find(|i| i.action.starts_with("Delegated: "))
+            .expect("delegation item");
+        assert_eq!(
+            delegation_item.uncertainty,
+            format!("{DELEGATION_UNCERTAINTY}; the conversation may not show enough")
+        );
+
+        let attribution_item = result
+            .items
+            .iter()
+            .find(|i| i.action.starts_with("Someone else owes: "))
+            .expect("attribution item");
+        assert_eq!(attribution_item.kind, "attributed");
     }
 
     #[test]
@@ -5815,6 +6451,92 @@ at the downtown courthouse. Let me know if that works.",
     }
 
     #[test]
+    fn plain_text_bodies_become_one_block_per_paragraph_and_never_drop_text() {
+        let blocks =
+            super::plain_body_blocks("Hi there,\r\n\r\nFriday at 11:30 works.\r\n\r\n\r\nThanks");
+        assert_eq!(
+            blocks,
+            vec!["Hi there,", "Friday at 11:30 works.", "Thanks"]
+        );
+        assert!(super::plain_body_blocks("  \n\n  ").is_empty());
+        let many: Vec<String> = (0..50).map(|i| format!("Paragraph {i}")).collect();
+        let blocks = super::plain_body_blocks(&many.join("\n\n"));
+        assert_eq!(blocks.len(), super::MAX_PLAIN_BODY_BLOCKS);
+        assert!(blocks.last().unwrap().contains("Paragraph 49"));
+        assert!(blocks.last().unwrap().contains("Paragraph 39"));
+    }
+
+    /// A slow answer on one large conversation is that conversation's
+    /// failure, not a provider outage: the scan neither stops dispatching
+    /// nor skips the closure pass because of it.
+    #[test]
+    fn a_timeout_fails_only_its_conversation_and_keeps_the_closure_pass() {
+        assert!(!super::is_transport_error(ProviderError::Timeout));
+        assert!(!super::is_stop_error(ProviderError::Timeout));
+        assert_eq!(
+            super::job_signal::<()>(&Err(ProviderError::Timeout)),
+            JobSignal::Ok
+        );
+    }
+
+    /// `OpenRouter`'s "would exceed your available credits given your current
+    /// in-flight requests" 402 is a too-many-at-once condition, so it steers
+    /// the limiter exactly like a 429: the scan narrows and continues, and
+    /// the request is not resent. A plain quota 402 stays per-conversation.
+    #[test]
+    fn an_in_flight_credit_402_narrows_concurrency_like_a_rate_limit() {
+        assert_eq!(
+            super::job_signal::<()>(&Err(ProviderError::CreditsInFlight)),
+            JobSignal::Backoff
+        );
+        assert_eq!(
+            super::job_signal::<()>(&Err(ProviderError::Quota)),
+            JobSignal::Ok
+        );
+        assert!(!super::is_transport_error(ProviderError::CreditsInFlight));
+
+        let messages = parallel_corpus(24);
+        let positions = handle_positions(&messages);
+        let calls: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
+        let pass = ParallelPass::new(8);
+        let result = super::scan_conversations(&messages, &ScanProgress::default(), &pass, &|c| {
+            *calls
+                .lock()
+                .unwrap()
+                .entry(c[0].handle.clone())
+                .or_default() += 1;
+            std::thread::sleep(Duration::from_millis(20));
+            if positions[&c[0].handle] % 12 == 1 {
+                return Err(ProviderError::CreditsInFlight);
+            }
+            Ok(no_expectations())
+        });
+        let calls = calls.into_inner().unwrap();
+        assert_eq!(calls.len(), 24, "every conversation is still attempted");
+        assert!(
+            calls.values().all(|count| *count == 1),
+            "a deferred request is never resent: {calls:?}"
+        );
+        assert_eq!(result.failures.len(), 2);
+        assert!(
+            result.failures.iter().all(|line| {
+                line.contains("requests already in flight")
+                    && line.ends_with("This request was not resent.")
+            }),
+            "{:?}",
+            result.failures
+        );
+        assert!(!result.primary_scan_transport_error);
+        assert!(!result.cancelled);
+        assert_eq!(result.analyzed, 22);
+        let allowed = pass.limiter_state().0;
+        assert!(
+            (1..=8).contains(&allowed),
+            "allowed concurrency stays inside 1..=max: {allowed}"
+        );
+    }
+
+    #[test]
     fn halving_never_falls_below_one_worker_and_widening_never_passes_the_ceiling() {
         let pass = ParallelPass::new(8);
         for expected in [4, 2, 1, 1, 1] {
@@ -5955,29 +6677,46 @@ at the downtown courthouse. Let me know if that works.",
     }
 
     #[test]
-    fn quota_stops_dispatch_and_records_every_unanalyzed_conversation() {
+    fn quota_is_a_per_conversation_failure_and_does_not_stop_dispatch() {
         let messages = parallel_corpus(8);
         let progress = ScanProgress::default();
         let calls = AtomicUsize::new(0);
-        let first_wave = std::sync::Barrier::new(4);
         let result =
             super::scan_conversations(&messages, &progress, &ParallelPass::new(4), &|_| {
                 calls.fetch_add(1, Ordering::SeqCst);
-                first_wave.wait();
                 Err(ProviderError::Quota)
             });
-        assert_eq!(calls.load(Ordering::SeqCst), 4);
-        assert!(result.primary_scan_transport_error);
-        assert_eq!(result.failures.len(), 8);
-        assert!(result.failures[0].contains("HTTP 402"));
-        assert_eq!(result.failed_conversations, 4);
-        assert_eq!(result.not_started_conversations, 4);
-        assert_eq!(progress.processed.load(Ordering::Relaxed), 4);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            8,
+            "every conversation is still dispatched; a quota error is about that one request"
+        );
+        assert!(!result.primary_scan_transport_error);
+        assert_eq!(result.failed_conversations, 8);
+        assert_eq!(result.not_started_conversations, 0);
+        assert_eq!(
+            result
+                .failures
+                .iter()
+                .filter(|line| line.contains("HTTP 402"))
+                .count(),
+            8,
+            "each occurrence gets its own line, none collapsed: {:?}",
+            result.failures
+        );
+        assert_eq!(progress.processed.load(Ordering::Relaxed), 8);
+        assert_eq!(
+            result.failures.len(),
+            result.failed_conversations_detail.len(),
+            "every failure line has a matching retry detail"
+        );
     }
 
-    /// Owner's live-scan symptom (2026-09-11): a quota error on conversation
-    /// 2 of 6 leaves conversations 3-6 with no `JobOutcome` at all --
-    /// `run_worker`'s single worker sees `stop` before it ever calls
+    /// Owner's live-scan symptom (2026-09-11, originally reproduced with a
+    /// quota error -- now a genuine transport error, since quota no longer
+    /// stops the pass; see `is_transport_error`): a stop-class error on
+    /// conversation 2 of 6 leaves conversations 3-6 with no `JobOutcome` at
+    /// all -- `run_worker`'s single worker sees `stop` before it ever calls
     /// `next_job` for them, so they are absent from `run_jobs`'s answers,
     /// not merely marked failed. Every one of the 6 must still be
     /// accounted for, and the 4 that were never dispatched must read as one
@@ -5989,7 +6728,7 @@ at the downtown courthouse. Let me know if that works.",
         let progress = ScanProgress::default();
         let result = super::scan_conversations(&messages, &progress, &ParallelPass::new(1), &|c| {
             if positions[&c[0].handle] == 1 {
-                return Err(ProviderError::Quota);
+                return Err(ProviderError::Network);
             }
             Ok(no_expectations())
         });
@@ -6001,10 +6740,10 @@ at the downtown courthouse. Let me know if that works.",
             result
                 .failures
                 .iter()
-                .filter(|line| line.contains("HTTP 402"))
+                .filter(|line| line.contains("Could not establish or complete a secure connection"))
                 .count(),
             1,
-            "one conversation reached quota: {:?}",
+            "exactly one Network line: {:?}",
             result.failures
         );
         assert_eq!(
@@ -6023,28 +6762,33 @@ at the downtown courthouse. Let me know if that works.",
         );
     }
 
-    /// A quota error answered by every worker in the same first wave still
-    /// records each in-flight conversation as genuinely attempted and failed --
-    /// none of them were ever queued past the stop, so this is pure
-    /// `failed_conversations` accounting, no aggregated not-started line.
+    /// A stop-class error answered by every worker in the same first wave is
+    /// fully accounted for as failed, not not-started: each of those
+    /// conversations was genuinely dispatched and attempted before the pass
+    /// ever saw the stop signal, so this is pure `failed_conversations`
+    /// accounting, with no aggregated not-started line -- nothing was left
+    /// behind. Unlike a quota error (see
+    /// `quota_is_a_per_conversation_failure_and_does_not_stop_dispatch`),
+    /// each occurrence here gets its own line rather than collapsing,
+    /// because that dedup was quota-specific.
     #[test]
-    fn quota_failures_in_flight_each_have_matching_detail() {
+    fn stop_error_failures_in_flight_are_each_counted_as_failed_not_not_started() {
         let messages = parallel_corpus(3);
         let progress = ScanProgress::default();
         let first_wave = std::sync::Barrier::new(3);
         let result =
             super::scan_conversations(&messages, &progress, &ParallelPass::new(3), &|_| {
                 first_wave.wait();
-                Err(ProviderError::Quota)
+                Err(ProviderError::Network)
             });
         assert_eq!(
             result
                 .failures
                 .iter()
-                .filter(|line| line.contains("HTTP 402"))
+                .filter(|line| line.contains("Could not establish or complete a secure connection"))
                 .count(),
             3,
-            "one Quota line per conversation: {:?}",
+            "each in-flight conversation gets its own line: {:?}",
             result.failures
         );
         assert_eq!(result.unanalyzed_conversations(), 3);
@@ -8537,8 +9281,8 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
 
         let mut already_resolved = base_item.clone();
         already_resolved.resolution = Some(already_resolved.evidence.clone());
-        let mut not_a_request = base_item.clone();
-        not_a_request.kind = "promise".into();
+        let mut not_owed_by_the_user = base_item.clone();
+        not_owed_by_the_user.kind = "attributed".into();
         let mut not_owned_by_you = base_item.clone();
         not_owned_by_you.owner = Owner::Team;
         let mut unresolvable_address = base_item.clone();
@@ -8548,7 +9292,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
             analysis: Expectations {
                 items: vec![
                     already_resolved,
-                    not_a_request,
+                    not_owed_by_the_user,
                     not_owned_by_you,
                     unresolvable_address,
                 ],
@@ -8581,6 +9325,40 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         });
         assert_eq!(calls, 0, "none of these items should reach the provider");
         assert_eq!(result.cross_thread_closures, 0);
+    }
+
+    /// A `promise` the user made unprompted is exactly as eligible for
+    /// cross-thread closure as a `request` someone made of the user: the
+    /// waiting party's expectation is the same either way. Mirrors
+    /// `scan_closures_resolves_open_request_and_counts_it` with the item's
+    /// only difference being `kind`.
+    #[test]
+    fn scan_closures_treats_an_open_promise_the_same_as_an_open_request() {
+        let (mut all, mut item) = closure_test_messages();
+        item.kind = "promise".into();
+        let valid = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
+        all.push(prepare(&valid, "Sent", all.len()).unwrap());
+
+        let mut result = super::empty_result(1);
+        result.analysis.items = vec![item];
+        result.analyzed = 1;
+        result.conversation_count = 1;
+        result.analyzed_conversations = 1;
+        let resolved_anchor = Anchor {
+            message: all.last().unwrap().input.handle.clone(),
+            block: 0,
+            quote: "Sure, let's do it.".into(),
+            context: "Sure, let's do it.".into(),
+        };
+        let mut calls = 0;
+        scan_closures(&all, &ScanProgress::default(), &mut result, |_, _, _| {
+            calls += 1;
+            Ok(Some((resolved_anchor.clone(), ResolutionKind::Completed)))
+        });
+        assert_eq!(calls, 1, "a promise must reach the closure provider call");
+        assert_eq!(result.cross_thread_closures, 1);
+        assert!(result.analysis.items[0].resolution.is_some());
+        assert!(result.analysis.items[0].cross_thread);
     }
 
     #[test]

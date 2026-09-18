@@ -55,7 +55,7 @@ pub(crate) struct ReminderDraft {
 
 /// Per-card decision and urgency facts, independent of the source mail or
 /// expectation item.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct CardContext {
     pub(crate) record: Record,
     pub(crate) terminal: bool,
@@ -127,6 +127,12 @@ pub struct ReviewState {
     /// tracking" is also the safer default of the two silent outcomes.
     pub(crate) draft: Option<ReminderDraft>,
     pub(crate) show_handled: bool,
+    /// Case-insensitive substring filter over each card's visible text (see
+    /// `slint_review.rs`'s `matches_search`/`card_matches_search`). Empty
+    /// means no filtering. Reset along with everything else in this struct
+    /// by "Clear results and mail" (`ReviewState::default()`), same as
+    /// `show_handled`.
+    pub(crate) search_query: String,
     /// Set when the most recent scan/mail-load attempt failed outright
     /// (a worker disconnect, or a `ProviderError`/`ConnectionError` from
     /// `Outcome::Mail`/`Outcome::Scan`) rather than completing -- even
@@ -187,6 +193,7 @@ impl ReviewState {
             let mut issue_count =
                 usize::from(source.partial) + source.errors.len() + source.message_errors.len();
             let mut notes = Vec::new();
+            let mut prepare_failures = std::collections::BTreeMap::new();
             if source.failed {
                 self.failed_sources.insert(label.clone());
             } else {
@@ -200,17 +207,24 @@ impl ReviewState {
                 {
                     continue;
                 }
-                if let Ok(m) = scanning::prepare(&item, &label, self.messages.len()) {
-                    appended_handles.insert(m.input.handle.clone());
-                    self.messages.push(m);
-                    count += 1;
-                } else {
-                    issue_count += 1;
-                    notes.push(format!(
-                        "{label}: a message exceeded preparation limits or lacked required context."
-                    ));
+                match scanning::prepare(&item, &label, self.messages.len()) {
+                    Ok(m) => {
+                        appended_handles.insert(m.input.handle.clone());
+                        self.messages.push(m);
+                        count += 1;
+                    }
+                    Err(error) => {
+                        issue_count += 1;
+                        *prepare_failures.entry(error.to_string()).or_insert(0usize) += 1;
+                    }
                 }
             }
+            notes.extend(prepare_failures.into_iter().map(|(reason, count)| {
+                format!(
+                    "{label}: {count} message(s) skipped during preparation ({}).",
+                    reason.trim_end_matches('.')
+                )
+            }));
             notes.push(format!(
                 "{}: {count} messages{}{}",
                 label,
@@ -545,9 +559,13 @@ impl ReviewState {
             .messages
             .iter()
             .find(|m| m.input.handle == item.evidence.message)?;
-        let key = self
-            .decisions
-            .fingerprint(&source.account, &source.id, &item.action_phrase);
+        let key = self.decisions.fingerprint(
+            &source.account,
+            &source.id,
+            item.evidence.block,
+            &item.evidence.quote,
+            &item.action_phrase,
+        );
         let record = self.decisions.get(&key);
         let terminal = matches!(
             record.decision,
@@ -581,6 +599,54 @@ impl ReviewState {
             .iter()
             .map(|item| {
                 self.card_context(item, clock.timestamp(), clock.offset().local_minus_utc())
+            })
+            .collect()
+    }
+
+    /// Still-open, reminder-bearing decisions eligible for a To Do sync
+    /// right now: a `Mine`/`Watching`/`Review` decision with a
+    /// `Reminder::Created` record carrying real (non-empty) ids, matched
+    /// back to the account that carries evidence for it. `cards` is the
+    /// caller's own `card_contexts(items)` result -- passed in rather than
+    /// recomputed here so a caller that already has it (every `sync`/
+    /// `sync_review` pass) never pays for a second HMAC fingerprint pass
+    /// just to learn how many cards are eligible. Shared by
+    /// `AppModel::dispatch_reminder_sync` (the actual Graph call) and
+    /// `AppModel::reminder_sync_eligible_count` (the Review toolbar's "Sync
+    /// To Do" button), so the two can never disagree about what counts as
+    /// eligible.
+    pub(crate) fn reminder_sync_checks(
+        &self,
+        items: &[Expectation],
+        cards: &[Option<CardContext>],
+    ) -> Vec<(String, [u8; 32], String, String)> {
+        items
+            .iter()
+            .zip(cards.iter())
+            .filter_map(|(item, card)| {
+                let card = card.as_ref()?;
+                if !matches!(
+                    card.record.decision,
+                    Decision::Mine | Decision::Watching | Decision::Review
+                ) {
+                    return None;
+                }
+                let Reminder::Created { list_id, task_id } = &card.record.reminder else {
+                    return None;
+                };
+                if list_id.is_empty() || task_id.is_empty() {
+                    return None;
+                }
+                let source = self
+                    .messages
+                    .iter()
+                    .find(|m| m.input.handle == item.evidence.message)?;
+                Some((
+                    source.account.clone(),
+                    card.record.key,
+                    list_id.clone(),
+                    task_id.clone(),
+                ))
             })
             .collect()
     }
@@ -790,8 +856,8 @@ pub(crate) fn expectations_summary(
 /// so `closed` is not (and must not be) a parameter here: `draft_open_here`
 /// is the only thing that can additionally disable the button, guarding
 /// against silently replacing a draft the user may have already edited.
-pub(crate) fn reminder_button_enabled(reminder: Reminder, draft_open_here: bool) -> bool {
-    reminder == Reminder::None && !draft_open_here
+pub(crate) fn reminder_button_enabled(reminder: &Reminder, draft_open_here: bool) -> bool {
+    matches!(reminder, Reminder::None) && !draft_open_here
 }
 /// Decision implied by opening a reminder draft on a card whose current
 /// decision is `current`. Setting a reminder implies personal tracking, so
@@ -1252,22 +1318,31 @@ pub fn layout_fixture() -> ReviewState {
         // "... · {model}") wraps at 1100 px.
         "anthropic/claude-sonnet-4.6-20260315:extended-thinking-zero-data-retention".into(),
     );
-    let first_key =
-        state
-            .decisions
-            .fingerprint("synthetic", "synthetic-0", "send the draft budget");
+    let first_key = state.decisions.fingerprint(
+        "synthetic",
+        "synthetic-0",
+        0,
+        "Could you send over the finalized draft budget before Thursday's sign-off meeting? I need to fold in the updated headcount numbers and the vendor renewal figures before we present it to the executive committee on Friday morning.",
+        "send the draft budget",
+    );
     let second_key =
         state
             .decisions
-            .fingerprint("synthetic", "synthetic-1", "send the draft budget");
-    let third_key =
-        state
-            .decisions
-            .fingerprint("synthetic", "synthetic-3", "confirm the vendor invoice");
+            .fingerprint("synthetic", "synthetic-1", 0, body, "send the draft budget");
+    let third_key = state.decisions.fingerprint(
+        "synthetic",
+        "synthetic-3",
+        0,
+        "Please confirm the vendor invoice by end of day Friday.",
+        "confirm the vendor invoice",
+    );
     state.decisions.records.push(Record {
         key: first_key,
         decision: Decision::Mine,
-        reminder: Reminder::Created,
+        reminder: Reminder::Created {
+            list_id: "list".into(),
+            task_id: "task".into(),
+        },
         updated: now(),
     });
     state.decisions.records.push(Record {
@@ -1357,9 +1432,13 @@ mod tests {
                 .iter()
                 .find(|message| message.input.handle == item.evidence.message)
                 .unwrap();
-            state
-                .decisions
-                .fingerprint(&message.account, &message.id, &item.action_phrase)
+            state.decisions.fingerprint(
+                &message.account,
+                &message.id,
+                item.evidence.block,
+                &item.evidence.quote,
+                &item.action_phrase,
+            )
         });
         let records = keys.map(|key| state.decisions.get(&key));
         let mut retry = empty_scan_result();
@@ -1772,9 +1851,13 @@ mod tests {
 
         let (mut state, item) = aging_fixture();
         let source = &state.messages[0];
-        let key = state
-            .decisions
-            .fingerprint(&source.account, &source.id, &item.action_phrase);
+        let key = state.decisions.fingerprint(
+            &source.account,
+            &source.id,
+            item.evidence.block,
+            &item.evidence.quote,
+            &item.action_phrase,
+        );
         for decision in [Decision::Done, Decision::Dismissed, Decision::Moot] {
             let mut record = state.decisions.get(&key);
             record.decision = decision;
@@ -1847,16 +1930,20 @@ mod tests {
 
     #[test]
     fn reminder_button_enabled_without_a_reminder_or_an_open_draft() {
+        let created = || Reminder::Created {
+            list_id: "list".into(),
+            task_id: "task".into(),
+        };
         for (reminder, draft_open_here, expected) in [
             (Reminder::None, false, true),
             (Reminder::Attempted, false, false),
-            (Reminder::Created, false, false),
+            (created(), false, false),
             (Reminder::None, true, false),
             (Reminder::Attempted, true, false),
-            (Reminder::Created, true, false),
+            (created(), true, false),
         ] {
             assert_eq!(
-                reminder_button_enabled(reminder, draft_open_here),
+                reminder_button_enabled(&reminder, draft_open_here),
                 expected,
                 "reminder={reminder:?} draft_open_here={draft_open_here}"
             );
@@ -1916,9 +2003,13 @@ mod tests {
     fn set_scan_reverts_an_open_drafts_implied_mine_back_to_review() {
         let (mut state, item) = aging_fixture();
         let source = state.messages[0].clone();
-        let key = state
-            .decisions
-            .fingerprint(&source.account, &source.id, &item.action_phrase);
+        let key = state.decisions.fingerprint(
+            &source.account,
+            &source.id,
+            item.evidence.block,
+            &item.evidence.quote,
+            &item.action_phrase,
+        );
         // Simulate "Set To Do reminder..." having been clicked on this
         // `Review` card: `decision_after_setting_reminder` implied `Mine`.
         let mut record = state.decisions.get(&key);

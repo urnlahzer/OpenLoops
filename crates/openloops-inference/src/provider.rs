@@ -133,10 +133,23 @@ pub enum ProviderError {
     Network,
     RateLimited,
     Quota,
+    /// `OpenRouter`'s HTTP 402 whose stated reason is that this request
+    /// "would exceed your available credits given your current in-flight
+    /// requests" -- a too-many-at-once condition ("retry after in-flight
+    /// requests settle"), not an exhausted balance. Distinguished from
+    /// [`ProviderError::Quota`] so the scan can narrow concurrency on it
+    /// exactly as it does for HTTP 429, instead of failing every
+    /// remaining conversation at full concurrency.
+    CreditsInFlight,
     RequestRejected(u16),
     ServerError(u16),
     ModelUnavailable,
     InvalidResponse,
+    /// The provider reported `finish_reason: "length"`: the model hit the
+    /// request's output ceiling before finishing its answer, so what came
+    /// back cannot be a complete document. A reasoning model's hidden
+    /// thinking counts against the same ceiling.
+    OutputTruncated,
     InputTooLarge,
     ResponseTooLarge,
     InvalidAnalysis,
@@ -158,10 +171,12 @@ impl std::fmt::Display for ProviderError {
             Self::Network => "Could not establish or complete a secure connection to the selected provider. Check connectivity.",
             Self::RateLimited => "The provider returned HTTP 429 (rate limit). Wait before trying again.",
             Self::Quota => "The provider returned HTTP 402. Check your plan or usage balance.",
+            Self::CreditsInFlight => "OpenRouter deferred this request: it would exceed the available credits given the requests already in flight. The scan narrowed how many requests it keeps in flight.",
             Self::RequestRejected(status) => return write!(f, "The provider rejected the request (HTTP {status}). An unsupported request parameter or model capability is the usual cause; try another model."),
             Self::ServerError(status) => return write!(f, "The provider returned a server error (HTTP {status}). Try again later or choose another model."),
             Self::ModelUnavailable => "The selected model is not in the provider's selectable model list.",
             Self::InvalidResponse => "The provider returned an incomplete or unsupported response.",
+            Self::OutputTruncated => "The model ran out of output room before finishing its answer (a reasoning model's thinking counts against the same limit). Try a model that thinks less, or a faster one.",
             Self::InputTooLarge => "The selected message projection exceeds the analysis limits.",
             Self::ResponseTooLarge => "The provider's response exceeds the allowed size.",
             Self::InvalidAnalysis => "The model output did not pass OpenLoops validation.",
@@ -444,6 +459,109 @@ pub(crate) fn transport_error(error: &reqwest::Error) -> ProviderError {
         ProviderError::Timeout
     } else {
         ProviderError::Network
+    }
+}
+
+/// The most recent HTTP 402 body's `error.message`, bounded and stripped of
+/// control characters. A deliberate, narrow exception to `ProviderError`'s
+/// "no upstream error text escapes" boundary: a 402 reason is the
+/// provider's billing text ("Insufficient credits", "key limit exceeded",
+/// ...), never mailbox content, and without it every 402 has to be
+/// diagnosed by guesswork against a provider that would simply have said
+/// why. Only the `error.message` field of the documented error JSON shape
+/// is kept -- never the raw body -- so the boundary against prompts,
+/// keys, and message text still holds.
+static LAST_QUOTA_DETAIL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+const MAX_QUOTA_DETAIL_CHARS: usize = 240;
+
+/// How a 402 body reads, decided from its `error.message` alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuotaKind {
+    /// "would exceed your available credits given your current in-flight
+    /// requests" -- `OpenRouter` reserves credit per open request and says to
+    /// retry after in-flight requests settle. A backoff signal.
+    InFlight,
+    /// Anything else, including an unreadable body.
+    Other,
+}
+
+pub(crate) fn record_quota_detail(body: &[u8]) -> QuotaKind {
+    let detail = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .map(|message| {
+            message
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(MAX_QUOTA_DETAIL_CHARS)
+                .collect::<String>()
+        })
+        .filter(|message| !message.trim().is_empty());
+    let kind = match &detail {
+        Some(message) if message.to_ascii_lowercase().contains("in-flight") => QuotaKind::InFlight,
+        _ => QuotaKind::Other,
+    };
+    if let Ok(mut slot) = LAST_QUOTA_DETAIL.lock() {
+        *slot = detail;
+    }
+    kind
+}
+
+/// See [`record_quota_detail`]. `None` when the last 402 carried no
+/// readable `error.message`, or no 402 has been seen.
+#[must_use]
+pub fn last_quota_detail() -> Option<String> {
+    LAST_QUOTA_DETAIL.lock().ok().and_then(|slot| slot.clone())
+}
+
+#[cfg(test)]
+mod quota_detail_tests {
+    use super::*;
+
+    // One test, not several: the slot is process-global, so separate tests
+    // would race each other on it.
+    #[test]
+    fn quota_detail_keeps_only_a_bounded_sanitized_error_message() {
+        assert_eq!(
+            record_quota_detail(
+                br#"{"error":{"message":"Insufficient credits.\nAdd more.","code":402}}"#
+            ),
+            QuotaKind::Other
+        );
+        assert_eq!(
+            last_quota_detail().as_deref(),
+            Some("Insufficient credits.Add more.")
+        );
+
+        // OpenRouter's per-request credit reservation, verbatim from a live
+        // 402: the one 402 that is a backoff signal rather than a balance.
+        assert_eq!(
+            record_quota_detail(br#"{"error":{"message":"This request would exceed your available credits given your current in-flight requests. Retry after in-flight requests settle, or add credits.","code":402}}"#),
+            QuotaKind::InFlight
+        );
+        assert!(last_quota_detail().is_some_and(|d| d.starts_with("This request would exceed")));
+
+        let long = format!(r#"{{"error":{{"message":"{}"}}}}"#, "x".repeat(1000));
+        record_quota_detail(long.as_bytes());
+        assert_eq!(
+            last_quota_detail().map(|d| d.chars().count()),
+            Some(MAX_QUOTA_DETAIL_CHARS)
+        );
+
+        // Not the documented error shape, or unreadable: nothing is kept,
+        // and a stale earlier detail is cleared rather than left to mislead.
+        record_quota_detail(br#"{"message":"top-level, wrong shape"}"#);
+        assert_eq!(last_quota_detail(), None);
+        record_quota_detail(b"not json at all");
+        assert_eq!(last_quota_detail(), None);
+        record_quota_detail(br#"{"error":{"message":"   "}}"#);
+        assert_eq!(last_quota_detail(), None);
     }
 }
 

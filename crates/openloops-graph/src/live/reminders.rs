@@ -1,5 +1,8 @@
 //! Explicit personal To Do creation. No automatic retry, email sending or shared task writes.
-use super::{Client, ConnectionConfig, ConnectionError, Url, bounded_body, review, with_scopes};
+use super::{
+    Client, ConnectionConfig, ConnectionError, GRAPH_TIMEOUT_SECONDS, Url, bounded_body,
+    request_error, review, with_scopes,
+};
 use serde_json::{Value, json};
 
 pub struct ReminderRequest {
@@ -45,11 +48,33 @@ impl std::fmt::Display for ReminderFailure {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReminderOutcome {
-    Created,
+    /// The task list and task id Graph reported, so a later action (e.g.
+    /// marking it complete once the review card is Handled) can address the
+    /// same task without re-resolving the default list.
+    Created {
+        list_id: String,
+        task_id: String,
+    },
     NotCreated(ReminderFailure),
     Uncertain,
+}
+
+/// Outcome of marking an already-created task complete. Mirrors
+/// [`ReminderOutcome`]'s three-way shape: `create()`'s caller cannot tell a
+/// genuine failure from an unconfirmed one either, so neither can this.
+#[derive(Clone, Copy)]
+pub enum ReminderCompletionOutcome {
+    Completed,
+    NotCompleted(ConnectionError),
+    Uncertain,
+}
+
+/// A Graph task-list or task id: non-empty, not `.`/`..`, and bounded, same
+/// as the id check `create()` already applies to the resolved list id.
+fn valid_graph_id(id: &str) -> bool {
+    !id.is_empty() && id != "." && id != ".." && id.len() <= 2048
 }
 
 fn task_body(request: &ReminderRequest) -> Result<Vec<u8>, ReminderFailure> {
@@ -68,7 +93,14 @@ fn task_body(request: &ReminderRequest) -> Result<Vec<u8>, ReminderFailure> {
         .ok_or(ReminderFailure::InvalidDraft)?
         .format("%Y-%m-%dT%H:%M:%S")
         .to_string();
-    serde_json::to_vec(&json!({"title":request.title,"body":{"contentType":"text","content":format!("Created after review in OpenLoops.\nOpenLoops reference: {}",request.marker)},"isReminderOn":true,"reminderDateTime":{"dateTime":when,"timeZone":"UTC"}})).map_err(|_|ReminderFailure::InvalidDraft)
+    // dueDateTime and reminderDateTime are independent concepts in Microsoft
+    // To Do -- a due date with no reminder, or vice versa, is a normal task
+    // shape. This app only ever collects one date/time from the user (the
+    // reminder draft's own "when"), so there is nothing else to derive a due
+    // date from; using that same instant for both means the task at least
+    // shows up as due on the day it was set to alert, rather than carrying
+    // no due date at all.
+    serde_json::to_vec(&json!({"title":request.title,"body":{"contentType":"text","content":format!("Created after review in OpenLoops.\nOpenLoops reference: {}",request.marker)},"isReminderOn":true,"reminderDateTime":{"dateTime":when,"timeZone":"UTC"},"dueDateTime":{"dateTime":when,"timeZone":"UTC"}})).map_err(|_|ReminderFailure::InvalidDraft)
 }
 
 /// Creates exactly one reviewed task, with an independently authorized session.
@@ -104,9 +136,15 @@ fn create_after_sign_in(
             ReminderFailure::AccountMismatch,
         ));
     }
-    let Ok(url) = Url::parse(graph_origin)
-        .and_then(|url| url.join("v1.0/me/todo/lists?$select=id,wellknownListName&$top=100"))
-    else {
+    // No $select/$top: Microsoft's own documented example for this
+    // endpoint (learn.microsoft.com/graph/api/todo-list-lists) is a bare
+    // GET with no query parameters, and its example response already
+    // includes both `id` and `wellknownListName` on every list without
+    // selecting them. A live HTTP 400 traced to this call when
+    // `$select=id,wellknownListName&$top=100` was present; this endpoint's
+    // OData query support is documented only as "some" parameters, not
+    // confirmed to include either of these two.
+    let Ok(url) = Url::parse(graph_origin).and_then(|url| url.join("v1.0/me/todo/lists")) else {
         return Err(ConnectionError::InvalidConfiguration);
     };
     let (lists, partial) = review::pages_from_origin(http, token, &url, 100, graph_origin)?;
@@ -119,10 +157,7 @@ fn create_after_sign_in(
             ReminderFailure::DefaultListNotFound,
         ));
     }
-    let Some(id) = matches[0]["id"]
-        .as_str()
-        .filter(|id| !id.is_empty() && *id != "." && *id != ".." && id.len() <= 2048)
-    else {
+    let Some(id) = matches[0]["id"].as_str().filter(|id| valid_graph_id(id)) else {
         return Ok(ReminderOutcome::NotCreated(
             ReminderFailure::DefaultListNotFound,
         ));
@@ -155,10 +190,129 @@ fn create_after_sign_in(
     let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
         return Ok(ReminderOutcome::Uncertain);
     };
-    if value["id"].as_str().is_none_or(str::is_empty) {
-        Ok(ReminderOutcome::Uncertain)
-    } else {
-        Ok(ReminderOutcome::Created)
+    match value["id"]
+        .as_str()
+        .filter(|task_id| valid_graph_id(task_id))
+    {
+        Some(task_id) => Ok(ReminderOutcome::Created {
+            list_id: id.to_owned(),
+            task_id: task_id.to_owned(),
+        }),
+        None => Ok(ReminderOutcome::Uncertain),
+    }
+}
+
+/// Marks an already-created task complete. Never called until a card is
+/// marked Handled locally, and never reverts that local decision on
+/// failure -- see `on_review_decision` in `slint_review.rs`: the task
+/// genuinely exists either way, so a failed completion here only means the
+/// user may need to complete it manually in Microsoft To Do, not that
+/// anything about the saved decision was wrong.
+#[must_use]
+pub fn complete(
+    config: &ConnectionConfig,
+    account: &str,
+    list_id: &str,
+    task_id: &str,
+) -> ReminderCompletionOutcome {
+    if !valid_graph_id(list_id) || !valid_graph_id(task_id) {
+        return ReminderCompletionOutcome::NotCompleted(ConnectionError::InvalidConfiguration);
+    }
+    let mut dispatched = false;
+    let result = with_scopes(config, true, |http, token, _| {
+        let (signed_in, _) = review::identity(http, token)?;
+        if signed_in != account {
+            return Err(ConnectionError::InvalidConfiguration);
+        }
+        let mut url = Url::parse("https://graph.microsoft.com/v1.0/me/todo/lists/")
+            .map_err(|_| ConnectionError::InvalidConfiguration)?;
+        url.path_segments_mut()
+            .map_err(|()| ConnectionError::InvalidConfiguration)?
+            .pop_if_empty()
+            .push(list_id)
+            .push("tasks")
+            .push(task_id);
+        dispatched = true;
+        let response = http
+            .patch(url)
+            .bearer_auth(token)
+            .header("Content-Type", "application/json")
+            .body(
+                serde_json::to_vec(&json!({"status": "completed"}))
+                    .map_err(|_| ConnectionError::InvalidConfiguration)?,
+            )
+            .send()
+            .map_err(|error| request_error(&error, GRAPH_TIMEOUT_SECONDS))?;
+        match response.status().as_u16() {
+            200 => Ok(()),
+            404 => Err(ConnectionError::NotFound),
+            _ => Err(ConnectionError::ResourceUnavailable),
+        }
+    });
+    match result {
+        Ok(()) => ReminderCompletionOutcome::Completed,
+        Err(_) if dispatched => ReminderCompletionOutcome::Uncertain,
+        Err(e) => ReminderCompletionOutcome::NotCompleted(e),
+    }
+}
+
+/// Whether a previously created task's `status` currently reads as
+/// completed. Read-only: never writes anything back to Graph. A task
+/// deleted since creation (404), or any other failure, is `Unknown` rather
+/// than `NotCompleted` -- the caller must not treat "couldn't check" the
+/// same as "confirmed still open".
+pub enum TaskStatusOutcome {
+    Completed,
+    NotCompleted,
+    Unknown(ConnectionError),
+}
+
+#[must_use]
+pub fn check_status(
+    config: &ConnectionConfig,
+    account: &str,
+    list_id: &str,
+    task_id: &str,
+) -> TaskStatusOutcome {
+    if !valid_graph_id(list_id) || !valid_graph_id(task_id) {
+        return TaskStatusOutcome::Unknown(ConnectionError::InvalidConfiguration);
+    }
+    let result = with_scopes(config, true, |http, token, _| {
+        let (signed_in, _) = review::identity(http, token)?;
+        if signed_in != account {
+            return Err(ConnectionError::InvalidConfiguration);
+        }
+        let mut url = Url::parse("https://graph.microsoft.com/v1.0/me/todo/lists/")
+            .map_err(|_| ConnectionError::InvalidConfiguration)?;
+        url.path_segments_mut()
+            .map_err(|()| ConnectionError::InvalidConfiguration)?
+            .pop_if_empty()
+            .push(list_id)
+            .push("tasks")
+            .push(task_id);
+        // No $select: the lists lookup's own HTTP 400 traced to $select
+        // combined with $top on that collection endpoint; a single-resource
+        // GET is a different, more standard shape, but there's no need to
+        // take the same risk twice for one small field on one object.
+        let response = http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .map_err(|error| request_error(&error, GRAPH_TIMEOUT_SECONDS))?;
+        match response.status().as_u16() {
+            200 => {
+                let value: Value = serde_json::from_slice(&bounded_body(response)?)
+                    .map_err(|_| ConnectionError::ResourceUnavailable)?;
+                Ok(value["status"] == "completed")
+            }
+            404 => Err(ConnectionError::NotFound),
+            _ => Err(ConnectionError::ResourceUnavailable),
+        }
+    });
+    match result {
+        Ok(true) => TaskStatusOutcome::Completed,
+        Ok(false) => TaskStatusOutcome::NotCompleted,
+        Err(e) => TaskStatusOutcome::Unknown(e),
     }
 }
 
@@ -221,7 +375,7 @@ mod tests {
         let value: Value = serde_json::from_slice(&task_body(&request).unwrap()).unwrap();
         assert_eq!(value["title"], "Send the draft");
         assert_eq!(value["isReminderOn"], true);
-        assert!(value.get("dueDateTime").is_none());
+        assert_eq!(value["dueDateTime"], value["reminderDateTime"]);
         let mut bad = request;
         bad.at_utc = 1;
         assert_eq!(task_body(&bad), Err(ReminderFailure::InvalidDraft));
@@ -342,5 +496,38 @@ mod tests {
         ));
         server.join().unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 3);
+    }
+    #[test]
+    fn valid_graph_id_rejects_empty_dot_and_oversized_ids() {
+        assert!(valid_graph_id("AAMkAGI1AAA="));
+        assert!(!valid_graph_id(""));
+        assert!(!valid_graph_id("."));
+        assert!(!valid_graph_id(".."));
+        assert!(!valid_graph_id(&"a".repeat(2049)));
+        assert!(valid_graph_id(&"a".repeat(2048)));
+    }
+    #[test]
+    fn complete_rejects_invalid_ids_before_any_request() {
+        let config = ConnectionConfig::new("11111111-1111-1111-1111-111111111111", None).unwrap();
+        assert!(matches!(
+            complete(&config, "acct", "", "task"),
+            ReminderCompletionOutcome::NotCompleted(ConnectionError::InvalidConfiguration)
+        ));
+        assert!(matches!(
+            complete(&config, "acct", "list", ".."),
+            ReminderCompletionOutcome::NotCompleted(ConnectionError::InvalidConfiguration)
+        ));
+    }
+    #[test]
+    fn check_status_rejects_invalid_ids_before_any_request() {
+        let config = ConnectionConfig::new("11111111-1111-1111-1111-111111111111", None).unwrap();
+        assert!(matches!(
+            check_status(&config, "acct", "", "task"),
+            TaskStatusOutcome::Unknown(ConnectionError::InvalidConfiguration)
+        ));
+        assert!(matches!(
+            check_status(&config, "acct", "list", ".."),
+            TaskStatusOutcome::Unknown(ConnectionError::InvalidConfiguration)
+        ));
     }
 }
