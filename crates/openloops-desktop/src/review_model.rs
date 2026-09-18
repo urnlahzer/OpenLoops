@@ -482,7 +482,7 @@ impl ReviewState {
             conversation_quality: self.conversation_quality.clone(),
             conversation_notes_by_id: self.conversation_notes_by_id.clone(),
             conversation_rejection_reasons: self.conversation_rejection_reasons.clone(),
-            cross_thread_closures: result.cross_thread_closures,
+            suggested_updates: result.suggested_updates,
             event_closures: 0,
             primary_scan_transport_error: result.primary_scan_transport_error,
             conversation_count,
@@ -797,7 +797,7 @@ pub(crate) fn resolution_anchor_label(
 /// corresponds to. `cross_thread_closed` is the subset of `resolved` whose
 /// resolution came from the cross-thread closure pass (`item.cross_thread`),
 /// surfaced as its own segment alongside the "Scan coverage and errors"
-/// panel note (`scanning::scan_closures`'s own conversation note).
+/// panel note (`review_scan::scan_closures`'s own conversation note).
 pub(crate) fn expectations_summary(
     analysis: &Expectations,
     cards: &[Option<CardContext>],
@@ -837,13 +837,23 @@ pub(crate) fn expectations_summary(
     } else {
         String::new()
     };
+    let suggested = analysis
+        .items
+        .iter()
+        .filter(|item| item.suggested_update.is_some())
+        .count();
+    let suggested_note = if suggested > 0 {
+        format!(" · {suggested} with a suggested update to review")
+    } else {
+        String::new()
+    };
     let event_note = if event_closed > 0 {
         format!(" · {event_closed} closed because the event passed")
     } else {
         String::new()
     };
     format!(
-        "{open} expectations · {resolved} resolved by later evidence · {} rejected for invalid evidence{degraded_note}{cross_thread_note}{event_note} · {model}",
+        "{open} expectations · {resolved} resolved by later evidence · {} rejected for invalid evidence{degraded_note}{cross_thread_note}{suggested_note}{event_note} · {model}",
         analysis.rejected
     )
 }
@@ -1031,7 +1041,7 @@ pub fn scan_strip(progress: Option<&ScanProgress>, review: &ReviewState) -> Scan
         };
     };
     let phase = if progress.closure_phase.load(Ordering::Relaxed) {
-        "Cross-thread closure check"
+        "Checking for updates to open loops"
     } else {
         "Finding open loops"
     };
@@ -1216,6 +1226,7 @@ pub fn layout_fixture() -> ReviewState {
             unverified_resolution: false,
             cross_thread: true,
             event_passed: None,
+            suggested_update: None,
         },
         // Card 2: still needs a decision, no reminder -- this is the card
         // the preview's open draft attaches to. Its evidence message (m1)
@@ -1249,6 +1260,7 @@ pub fn layout_fixture() -> ReviewState {
             unverified_resolution: false,
             cross_thread: false,
             event_passed: None,
+            suggested_update: None,
         },
         // Card 3: a reminder attempt with no confirmed outcome, so the
         // preview also exercises the "attempted" marker callout and its two
@@ -1280,6 +1292,7 @@ pub fn layout_fixture() -> ReviewState {
             unverified_resolution: false,
             cross_thread: false,
             event_passed: None,
+            suggested_update: None,
         },
     ];
     // T7 (brief §5): `source_failures` must be set before `set_scan` runs --
@@ -1305,7 +1318,7 @@ pub fn layout_fixture() -> ReviewState {
             conversation_quality: BTreeMap::new(),
             conversation_notes_by_id: BTreeMap::new(),
             conversation_rejection_reasons: BTreeMap::new(),
-            cross_thread_closures: 0,
+            suggested_updates: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
             conversation_count: 4,
@@ -1729,6 +1742,7 @@ mod tests {
             unverified_resolution: false,
             cross_thread: false,
             event_passed: None,
+            suggested_update: None,
         };
         (state, item)
     }
@@ -2041,7 +2055,7 @@ mod tests {
                 conversation_quality: BTreeMap::new(),
                 conversation_notes_by_id: BTreeMap::new(),
                 conversation_rejection_reasons: BTreeMap::new(),
-                cross_thread_closures: 0,
+                suggested_updates: 0,
                 event_closures: 0,
                 primary_scan_transport_error: false,
                 conversation_count: 1,
@@ -2380,7 +2394,7 @@ mod tests {
             conversation_quality: BTreeMap::new(),
             conversation_notes_by_id: BTreeMap::new(),
             conversation_rejection_reasons: BTreeMap::new(),
-            cross_thread_closures: 0,
+            suggested_updates: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
             conversation_count: 0,
@@ -2468,7 +2482,7 @@ the scan stopped after a provider error."
                 conversation_quality: BTreeMap::new(),
                 conversation_notes_by_id: BTreeMap::new(),
                 conversation_rejection_reasons: BTreeMap::new(),
-                cross_thread_closures: 0,
+                suggested_updates: 0,
                 event_closures: 0,
                 primary_scan_transport_error: false,
                 conversation_count: 1,
@@ -2739,7 +2753,7 @@ the scan stopped after a provider error."
         progress.closure_phase.store(true, Ordering::Relaxed);
         match scan_strip(Some(&progress), &review) {
             ScanStrip::Scanning { phase, .. } => {
-                assert_eq!(phase, "Cross-thread closure check");
+                assert_eq!(phase, "Checking for updates to open loops");
             }
             other => panic!("expected Scanning, got {other:?}"),
         }
