@@ -69,7 +69,9 @@ in the normal application.
    meeting-recap and call-transcription services (Fathom, Otter, Fireflies,
    Read.ai, tl;dv, Grain, Avoma, Gong, Chorus, and notetaker bots on Zoom,
    Teams, or Meet) are treated as records of a past meeting: their action
-   items still become loops, but their meetings never close loops. Corrections that
+   items still become loops, but their meetings never close loops. Recap action items
+   default to **Responsible: You (suggested)** when the reported waiting party is the
+   owner or recap service, unless the action names a counterparty. Corrections that
    leave the action owed keep the card open with updated terms. If a quoted deadline or
    completion could not be validated against the mail, the card says so and
    keeps the item open.
