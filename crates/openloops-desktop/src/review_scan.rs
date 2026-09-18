@@ -1649,6 +1649,34 @@ fn block(text: &str) -> Result<CanonicalBlock, ConnectionError> {
 /// tracks the line index where the reply-history marker itself was found
 /// (not the unrelated `>`-prefix quoting rule), so the guard only fires
 /// when that marker was the very first line.
+/// Upper bound on body blocks one plain-text message contributes, leaving
+/// room under the 64-block message cap for the subject and up to
+/// `REPLY_HISTORY_MAX_CHUNKS` quote chunks. Paragraphs past the bound are
+/// folded into the last block rather than dropped: body text is evidence
+/// and is never discarded.
+const MAX_PLAIN_BODY_BLOCKS: usize = 40;
+
+/// Splits a plain-text body into blank-line-separated paragraph blocks, the
+/// way the HTML walker already yields one block per paragraph. A single
+/// whole-body block made "the whole email" the unit of evidence under the
+/// governed pipeline's whole-block rule -- a promise's card title started
+/// with the greeting -- and made every deadline, action, and fingerprint
+/// share one block ordinal.
+fn plain_body_blocks(body: &str) -> Vec<String> {
+    let normalized = body.replace("\r\n", "\n");
+    let mut paragraphs: Vec<String> = normalized
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    if paragraphs.len() > MAX_PLAIN_BODY_BLOCKS {
+        let tail = paragraphs.split_off(MAX_PLAIN_BODY_BLOCKS - 1);
+        paragraphs.push(tail.join("\n\n"));
+    }
+    paragraphs
+}
+
 fn plain_body(text: &str) -> (String, String) {
     let lines: Vec<&str> = text.lines().collect();
     let mut body = String::new();
@@ -1780,12 +1808,10 @@ pub fn prepare(
         )
     } else {
         let (body, quote) = plain_body(&item.body);
-        let trimmed_body = body.trim();
-        let body_blocks = if trimmed_body.is_empty() {
-            vec![]
-        } else {
-            vec![block(trimmed_body)?]
-        };
+        let body_blocks = plain_body_blocks(&body)
+            .iter()
+            .map(|s| block(s))
+            .collect::<Result<Vec<_>, _>>()?;
         // Bound the quote text the same way the HTML path bounds detected
         // reply history: split it into blank-line-separated paragraphs
         // (further splitting by line any paragraph that is itself over
@@ -2094,6 +2120,14 @@ fn map_accepted_claim(
     };
     let action = format!("{action_prefix}{}", first_sentence(&primary.text));
     let action_phrase = first_scalars(&primary.text, ACTION_PHRASE_MAX_SCALARS);
+    // The model saying it cannot tell who asks or who owes outranks the
+    // claim type's default owner: a card must not read "You (suggested)"
+    // next to an uncertainty note that says the opposite.
+    let base_owner = if claim.ambiguity_codes.contains(&AmbiguityCode::Identity) {
+        Owner::Unclear
+    } else {
+        base_owner
+    };
     let owner = resolve_owner(base_owner, source_message);
     let waiting_party = waiting_party_display(&claim.waiting_party_handle, conversation);
     let (deadline, event) = temporal_anchors(claim, &accepted.evidence);
@@ -2439,13 +2473,19 @@ fn conversations_by_size(messages: &[ReviewMessage]) -> Vec<Vec<&ReviewMessage>>
 /// a stop condition cost every not-yet-dispatched conversation behind it
 /// for no reason -- it is handled like any other per-conversation failure
 /// instead (falls to `job_signal`'s `_ => JobSignal::Ok`).
+///
+/// `Timeout` is excluded for the same reason: the request deadline is per
+/// request, and a slow model on a large conversation hits it while the
+/// same model answers every smaller conversation around it. Treating it as
+/// a stop condition also set `primary_scan_transport_error`, which skipped
+/// the whole closure pass -- so one slow thread silently cost every
+/// "already handled" detection in the scan.
 fn is_transport_error(error: ProviderError) -> bool {
     matches!(
         error,
         ProviderError::Unauthorized
             | ProviderError::RateLimited
             | ProviderError::Network
-            | ProviderError::Timeout
             | ProviderError::ServerError(_)
     )
 }
@@ -6196,6 +6236,35 @@ at the downtown courthouse. Let me know if that works.",
         assert!(
             (1..=8).contains(&allowed),
             "allowed concurrency stays inside 1..=max: {allowed}"
+        );
+    }
+
+    #[test]
+    fn plain_text_bodies_become_one_block_per_paragraph_and_never_drop_text() {
+        let blocks =
+            super::plain_body_blocks("Hi there,\r\n\r\nFriday at 11:30 works.\r\n\r\n\r\nThanks");
+        assert_eq!(
+            blocks,
+            vec!["Hi there,", "Friday at 11:30 works.", "Thanks"]
+        );
+        assert!(super::plain_body_blocks("  \n\n  ").is_empty());
+        let many: Vec<String> = (0..50).map(|i| format!("Paragraph {i}")).collect();
+        let blocks = super::plain_body_blocks(&many.join("\n\n"));
+        assert_eq!(blocks.len(), super::MAX_PLAIN_BODY_BLOCKS);
+        assert!(blocks.last().unwrap().contains("Paragraph 49"));
+        assert!(blocks.last().unwrap().contains("Paragraph 39"));
+    }
+
+    /// A slow answer on one large conversation is that conversation's
+    /// failure, not a provider outage: the scan neither stops dispatching
+    /// nor skips the closure pass because of it.
+    #[test]
+    fn a_timeout_fails_only_its_conversation_and_keeps_the_closure_pass() {
+        assert!(!super::is_transport_error(ProviderError::Timeout));
+        assert!(!super::is_stop_error(ProviderError::Timeout));
+        assert_eq!(
+            super::job_signal::<()>(&Err(ProviderError::Timeout)),
+            JobSignal::Ok
         );
     }
 
