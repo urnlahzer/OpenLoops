@@ -621,11 +621,75 @@ fn pills_for(item: &Expectation, card: &CardContext) -> Vec<PillView> {
     pills
 }
 
+/// Case-insensitive substring filter over a card's visible text: action
+/// title, waiting party, subject, evidence quote, deadline text, and status
+/// pill text -- the same fields shown across the row and the detail pane. An
+/// empty `query` matches everything. Pure (plain strings only) so it is
+/// tested directly with synthetic text, independent of `Expectation`/
+/// `CardContext` construction.
+fn matches_search(
+    query: &str,
+    action: &str,
+    waiting_party: &str,
+    subject: &str,
+    evidence_quote: &str,
+    deadline_text: &str,
+    status: &str,
+) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let query = query.to_lowercase();
+    [
+        action,
+        waiting_party,
+        subject,
+        evidence_quote,
+        deadline_text,
+        status,
+    ]
+    .into_iter()
+    .any(|field| field.to_lowercase().contains(query.as_str()))
+}
+
+/// Gathers a card's visible text and applies [`matches_search`]. Split out
+/// from `matches_search` itself so that function can stay pure and directly
+/// testable, while this side does the (cheap) work of pulling the six fields
+/// out of `review`/`item`/`card`.
+fn card_matches_search(
+    review: &ReviewState,
+    item: &Expectation,
+    card: &CardContext,
+    query: &str,
+) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let subject = source_message(review, item).map_or_else(String::new, |source| {
+        source.input.message.subject.as_string()
+    });
+    let deadline_text = card
+        .deadline
+        .as_ref()
+        .map_or_else(|| "No deadline stated".to_owned(), deadline_label);
+    let status = status_pill(item, card).text;
+    matches_search(
+        query,
+        &item.action,
+        &item.waiting_party,
+        &subject,
+        &item.evidence.quote,
+        &deadline_text,
+        &status,
+    )
+}
+
 fn visible_handles(
     review: &ReviewState,
     cards: &[Option<CardContext>],
     filter: Filter,
     show_handled: bool,
+    search: &str,
 ) -> Vec<usize> {
     let Some(analysis) = &review.analysis else {
         return vec![];
@@ -643,7 +707,8 @@ fn visible_handles(
             let cards = &cards;
             move |&index| {
                 cards[index].as_ref().is_some_and(|card| {
-                    filter.matches(analysis.items[index].owner)
+                    let item = &analysis.items[index];
+                    filter.matches(item.owner)
                         && list_group(card) == group
                         && !card_hidden(
                             card.closed,
@@ -653,6 +718,7 @@ fn visible_handles(
                                 .as_ref()
                                 .is_some_and(|draft| draft.key == card.record.key),
                         )
+                        && card_matches_search(review, item, card, search)
                 })
             }
         })
@@ -684,13 +750,14 @@ fn review_rows(
     review: &ReviewState,
     filter: Filter,
     show_handled: bool,
+    search: &str,
     selected: Option<[u8; 32]>,
     cards: &[Option<CardContext>],
 ) -> Vec<ReviewRowView> {
     let Some(analysis) = &review.analysis else {
         return vec![];
     };
-    let visible = visible_handles(review, cards, filter, show_handled);
+    let visible = visible_handles(review, cards, filter, show_handled, search);
     let mut prior = None;
     visible
         .into_iter()
@@ -1008,6 +1075,8 @@ fn sync_review_inner(
     });
     window.set_show_handled(model.review.show_handled);
     window.set_show_handled_label(SHOW_HANDLED_LABEL.into());
+    window.set_review_search_query(model.review.search_query.clone().into());
+    window.set_can_sync_todo(!busy && model.reminder_sync_eligible_count(cards) > 0);
     strip = apply_scan_failure(strip, &model.review_status, model.review.scan_failed);
     window.set_scan_strip(strip);
     window.set_coverage_open(review_ui.coverage_open);
@@ -1017,12 +1086,14 @@ fn sync_review_inner(
         cards,
         review_ui.filter,
         model.review.show_handled,
+        &model.review.search_query,
     );
     review_ui.selected = retained_selection(review_ui.selected, &visible, cards);
     let row_views = review_rows(
         &model.review,
         review_ui.filter,
         model.review.show_handled,
+        &model.review.search_query,
         review_ui.selected,
         cards,
     );
@@ -1417,6 +1488,42 @@ pub(crate) fn register_callbacks(
     {
         let model = Rc::clone(&model);
         let weak = window.as_weak();
+        window.on_sync_todo(move || {
+            let mut model_ref = model.borrow_mut();
+            if model_ref.pending.is_some() {
+                return;
+            }
+            let cards = model_ref
+                .review
+                .analysis
+                .as_ref()
+                .map(|analysis| model_ref.review.card_contexts(&analysis.items))
+                .unwrap_or_default();
+            let eligible = model_ref.reminder_sync_eligible_count(&cards);
+            if eligible == 0 {
+                model_ref.review.action_status =
+                    "Nothing to check: no tracked loop has a Microsoft To Do task attached.".into();
+                model_ref.review.action_status_succeeded = false;
+            } else {
+                model_ref.review.action_status = format!("Checking {eligible} To Do task(s)…");
+                model_ref.review.action_status_succeeded = true;
+                model_ref.dispatch_reminder_sync();
+            }
+            drop(model_ref);
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_review_search_edited(move |value| {
+            model.borrow_mut().review.search_query = value.to_string();
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
         window.on_review_filter_selected(move |index| {
             REVIEW_UI.with(|state| {
                 state.borrow_mut().filter = match index {
@@ -1476,6 +1583,7 @@ pub(crate) fn register_callbacks(
                     &cards,
                     state.filter,
                     model_ref.review.show_handled,
+                    &model_ref.review.search_query,
                 );
                 if !visible.is_empty() {
                     let current = state
@@ -1814,7 +1922,7 @@ mod tests {
         let review = crate::review_model::layout_fixture();
         let cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
         let selected = cards[0].as_ref().map(|card| card.record.key);
-        let rows = review_rows(&review, Filter::All, false, selected, &cards);
+        let rows = review_rows(&review, Filter::All, false, "", selected, &cards);
         assert_eq!(rows.len(), 3);
         assert!(rows[0].first_in_group);
         assert_ne!(rows[0].group, ListGroup::Closed);
@@ -1833,16 +1941,137 @@ mod tests {
         let review = crate::review_model::layout_fixture();
         let cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
         assert_eq!(
-            visible_handles(&review, &cards, Filter::All, false),
+            visible_handles(&review, &cards, Filter::All, false, ""),
             vec![0, 1, 2]
         );
         assert_eq!(
-            visible_handles(&review, &cards, Filter::Mine, false),
+            visible_handles(&review, &cards, Filter::Mine, false, ""),
             vec![0, 2]
         );
         assert_eq!(
-            visible_handles(&review, &cards, Filter::Team, false),
+            visible_handles(&review, &cards, Filter::Team, false, ""),
             vec![1]
+        );
+    }
+
+    #[test]
+    fn matches_search_is_case_insensitive_over_every_field_and_empty_matches_all() {
+        // Purely synthetic strings, standing in for the six visible fields
+        // `card_matches_search` gathers: action, waiting party, subject,
+        // evidence quote, deadline text, status pill text.
+        let fields = (
+            "Send the quarterly figures",
+            "Alex Example",
+            "Team sync notes",
+            "Could you send this over by Friday?",
+            "Due Friday",
+            "Needs your review",
+        );
+        assert!(matches_search(
+            "", fields.0, fields.1, fields.2, fields.3, fields.4, fields.5
+        ));
+        assert!(matches_search(
+            "QUARTERLY",
+            fields.0,
+            fields.1,
+            fields.2,
+            fields.3,
+            fields.4,
+            fields.5
+        ));
+        assert!(matches_search(
+            "alex example",
+            fields.0,
+            fields.1,
+            fields.2,
+            fields.3,
+            fields.4,
+            fields.5
+        ));
+        assert!(matches_search(
+            "sync notes",
+            fields.0,
+            fields.1,
+            fields.2,
+            fields.3,
+            fields.4,
+            fields.5
+        ));
+        assert!(matches_search(
+            "send this over",
+            fields.0,
+            fields.1,
+            fields.2,
+            fields.3,
+            fields.4,
+            fields.5
+        ));
+        assert!(matches_search(
+            "due friday",
+            fields.0,
+            fields.1,
+            fields.2,
+            fields.3,
+            fields.4,
+            fields.5
+        ));
+        assert!(matches_search(
+            "needs your review",
+            fields.0,
+            fields.1,
+            fields.2,
+            fields.3,
+            fields.4,
+            fields.5
+        ));
+        assert!(!matches_search(
+            "nonexistent-token",
+            fields.0,
+            fields.1,
+            fields.2,
+            fields.3,
+            fields.4,
+            fields.5
+        ));
+    }
+
+    #[test]
+    fn search_query_composes_with_the_owner_filter_and_show_handled() {
+        let review = crate::review_model::layout_fixture();
+        let cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
+        // "Vendor invoice" is card 2's subject and action alone; cards 0/1
+        // share the unrelated "Quarterly planning" subject.
+        assert_eq!(
+            visible_handles(&review, &cards, Filter::All, false, "vendor invoice"),
+            vec![2]
+        );
+        // Case-insensitive, and a single shared word ("vendor" also appears
+        // in card 0's "vendor renewal figures") can widen the match to more
+        // than one card -- unlike the two-word phrase above.
+        assert_eq!(
+            visible_handles(&review, &cards, Filter::All, false, "VENDOR"),
+            vec![0, 2]
+        );
+        // Card 2 is owned by `Owner::You` but composes with the Team filter
+        // (which only card 1 matches), same as every other predicate here:
+        // a search hit alone is not enough.
+        assert!(visible_handles(&review, &cards, Filter::Team, false, "vendor invoice").is_empty());
+        // "Quarterly planning" (the shared subject) matches cards 0 and 1,
+        // not card 2.
+        assert_eq!(
+            visible_handles(&review, &cards, Filter::All, false, "quarterly planning"),
+            vec![0, 1]
+        );
+        // No match anywhere.
+        assert!(
+            visible_handles(
+                &review,
+                &cards,
+                Filter::All,
+                false,
+                "no-such-token-anywhere"
+            )
+            .is_empty()
         );
     }
 
@@ -2408,7 +2637,7 @@ mod tests {
                 deadline: None,
             }),
         ];
-        let handles = visible_handles(&review, &cards, Filter::All, true);
+        let handles = visible_handles(&review, &cards, Filter::All, true, "");
         assert_eq!(handles, vec![0, 1, 2, 3]);
         let groups: Vec<_> = handles
             .into_iter()
