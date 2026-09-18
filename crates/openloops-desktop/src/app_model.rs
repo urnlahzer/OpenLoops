@@ -1,5 +1,6 @@
 //! Toolkit-free setup/connection state: job start/poll machinery, saved
 //! settings, and provider/account pure logic used by the native adapter.
+use std::collections::BTreeSet;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, atomic::Ordering};
 use std::time::Instant;
@@ -27,6 +28,17 @@ pub(crate) enum Outcome {
         Result<crate::review_model::ScanResult, ProviderError>,
         String,
     ),
+    RetryMail {
+        sources: Result<Vec<openloops_graph::live::review::SourceReview>, ConnectionError>,
+        source_keys: BTreeSet<String>,
+        conversations: BTreeSet<String>,
+        attempted: usize,
+    },
+    RetryScan {
+        result: Result<crate::review_model::ScanResult, ProviderError>,
+        conversations: BTreeSet<String>,
+        attempted: usize,
+    },
     Reminder([u8; 32], openloops_graph::live::reminders::ReminderOutcome),
 }
 
@@ -305,6 +317,7 @@ impl AppModel {
     /// running) or when nothing is pending. The native adapter's busy-tick
     /// timer uses this to decide between a full `refresh` (something
     /// changed) and the lightweight `sync_busy` (nothing did).
+    #[allow(clippy::too_many_lines)]
     pub fn poll(&mut self, respawn: impl Fn() + Send + Clone + 'static) -> bool {
         let Some(receiver) = &self.pending else {
             return false;
@@ -386,6 +399,40 @@ impl AppModel {
                     succeeded: false,
                 };
             }
+            Outcome::RetryMail {
+                sources,
+                source_keys,
+                mut conversations,
+                attempted,
+            } => {
+                self.load_progress = None;
+                match sources {
+                    Ok(sources) => {
+                        Arc::make_mut(&mut self.mail_cache).extend(
+                            sources
+                                .iter()
+                                .flat_map(|source| &source.messages)
+                                .map(|message| {
+                                    (
+                                        (message.account.clone(), message.id.clone()),
+                                        message.clone(),
+                                    )
+                                }),
+                        );
+                        conversations.extend(self.review.replace_sources(&source_keys, sources));
+                    }
+                    Err(ConnectionError::Cancelled) => {
+                        self.finish_retry_status(attempted);
+                        return true;
+                    }
+                    Err(_) => {}
+                }
+                if conversations.is_empty() {
+                    self.finish_retry_status(attempted);
+                } else {
+                    self.start_retry_scan(conversations, attempted, respawn.clone());
+                }
+            }
             Outcome::Scan(result, model) => {
                 self.scan_progress = None;
                 match result {
@@ -401,6 +448,17 @@ impl AppModel {
                         }
                     }
                 }
+            }
+            Outcome::RetryScan {
+                result,
+                conversations,
+                attempted,
+            } => {
+                self.scan_progress = None;
+                if let Ok(scan) = result {
+                    self.review.merge_scan(scan, &conversations);
+                }
+                self.finish_retry_status(attempted);
             }
         }
         true
@@ -567,12 +625,58 @@ impl AppModel {
                         parallel,
                         &messages,
                         &progress,
+                        None,
                     ),
                     model,
                 )
             },
             on_done,
         );
+    }
+
+    pub(crate) fn start_retry_scan(
+        &mut self,
+        conversations: BTreeSet<String>,
+        attempted: usize,
+        on_done: impl FnOnce() + Send + 'static,
+    ) {
+        let messages = self.review.messages.clone();
+        let key = self.active_key().clone();
+        let model = self.selected_model().to_owned();
+        let provider = self.provider;
+        let parallel = self.max_parallel();
+        let progress = Arc::new(crate::review_model::ScanProgress::default());
+        self.scan_progress = Some(progress.clone());
+        self.review_status = Status::default();
+        self.start(
+            Service::Review,
+            match provider {
+                Provider::OllamaCloud => "Finding open loops with Ollama Cloud",
+                Provider::OpenRouter => "Finding open loops with OpenRouter",
+            },
+            move || Outcome::RetryScan {
+                result: crate::review_model::scan(
+                    provider,
+                    key.to_string(),
+                    &model,
+                    parallel,
+                    &messages,
+                    &progress,
+                    Some(&conversations),
+                ),
+                conversations,
+                attempted,
+            },
+            on_done,
+        );
+    }
+
+    fn finish_retry_status(&mut self, attempted: usize) {
+        let remaining = self.review.retryable_failures();
+        self.review_status = Status {
+            lines: vec![format!("Retried {attempted}; {remaining} still failing.")],
+            succeeded: remaining == 0,
+        };
     }
 }
 
@@ -909,6 +1013,7 @@ mod tests {
             errors: vec![],
             message_errors: vec![],
             partial: false,
+            failed: false,
         }];
         let (sender, receiver) = mpsc::channel();
         app.pending = Some(receiver);
@@ -947,6 +1052,31 @@ mod tests {
             app.review_status.lines,
             ["Download stopped before the scan began."]
         );
+    }
+
+    #[test]
+    fn retry_completion_uses_review_status_without_touching_action_status() {
+        let mut app = AppModel::with_store(Ok(None));
+        app.review.action_status = "Synthetic decision status".into();
+        app.review.action_status_succeeded = false;
+        app.review.failed_conversations_detail = vec![crate::review_model::ConversationFailure {
+            conversation: "synthetic-timeout".into(),
+            subject_short: "Synthetic subject".into(),
+            reason: crate::review_model::FailureReason::Timeout,
+        }];
+
+        app.finish_retry_status(3);
+
+        assert_eq!(app.review.action_status, "Synthetic decision status");
+        assert!(!app.review.action_status_succeeded);
+        assert_eq!(app.review_status.lines, ["Retried 3; 1 still failing."]);
+        assert!(!app.review_status.succeeded);
+
+        app.review.failed_conversations_detail.clear();
+        app.finish_retry_status(1);
+        assert_eq!(app.review.action_status, "Synthetic decision status");
+        assert_eq!(app.review_status.lines, ["Retried 1; 0 still failing."]);
+        assert!(app.review_status.succeeded);
     }
 
     #[test]
