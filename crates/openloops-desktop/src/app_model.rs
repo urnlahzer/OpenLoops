@@ -526,7 +526,7 @@ impl AppModel {
         let mut record = self.review.decisions.get(&key);
         let (text, outcome_succeeded)=match outcome {
             ReminderOutcome::Created=>{record.reminder=Reminder::Created; ("Reminder created in your Microsoft To Do Tasks list.".to_owned(), true)},
-            ReminderOutcome::NotCreated(error)=>{record.reminder=Reminder::None;(format!("No reminder was created: {error} Sign in with the same account used for the scan."), false)},
+            ReminderOutcome::NotCreated(reason)=>{record.reminder=Reminder::None;(format!("No reminder was created: {reason}"), false)},
             ReminderOutcome::Uncertain=>("Microsoft did not confirm the write. Check To Do before trying again; OpenLoops will not automatically retry.".to_owned(), false),
         };
         record.updated = now();
@@ -1197,5 +1197,46 @@ mod tests {
         sender.send(Outcome::Generation(Ok(()))).unwrap();
         app.poll(|| {});
         assert!(app.model_status.succeeded);
+    }
+
+    #[test]
+    fn reminder_outcome_maps_each_reason_to_exact_status_text() {
+        use openloops_graph::live::reminders::{ReminderFailure, ReminderOutcome};
+
+        let cases = [
+            (
+                ReminderFailure::AccountMismatch,
+                "No reminder was created: The browser signed into a different account than the one that was scanned. Sign in with the scanned account and try again.",
+            ),
+            (
+                ReminderFailure::InvalidDraft,
+                "No reminder was created: The reminder draft is not valid: the title needs 3 to 320 plain characters and the time must be in the future.",
+            ),
+            (
+                ReminderFailure::DefaultListNotFound,
+                "No reminder was created: Microsoft To Do did not return a single default Tasks list for this account. Open To Do once so the account's lists exist, then try again.",
+            ),
+            (
+                ReminderFailure::Rejected(ConnectionError::Transport),
+                "No reminder was created: Microsoft could not be reached over a secure connection.",
+            ),
+            (
+                ReminderFailure::Rejected(ConnectionError::AccessDenied),
+                "No reminder was created: Microsoft refused the To Do write. The app registration needs the delegated Tasks.ReadWrite permission and the signed-in account must consent to it. Microsoft Graph returned HTTP 403. Check consent and this signed-in account's access to the selected mailbox or group; an administrator role alone does not grant content access.",
+            ),
+            (
+                ReminderFailure::Rejected(ConnectionError::Unauthorized),
+                "No reminder was created: Microsoft refused the To Do write. The app registration needs the delegated Tasks.ReadWrite permission and the signed-in account must consent to it. Microsoft Graph returned HTTP 401. Sign in again; if it persists, check the organization's access policies.",
+            ),
+        ];
+
+        for (index, (reason, expected)) in cases.into_iter().enumerate() {
+            let mut app = AppModel::with_store(Ok(None));
+            let mut key = [0_u8; 32];
+            key[0] = u8::try_from(index).unwrap();
+            app.reminder_outcome(key, ReminderOutcome::NotCreated(reason));
+            assert_eq!(app.review.action_status, expected);
+            assert!(!app.review.action_status_succeeded);
+        }
     }
 }

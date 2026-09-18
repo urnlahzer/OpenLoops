@@ -274,7 +274,7 @@ pub(super) fn fetch(http: &Client, token: &str, url: &Url) -> Result<Vec<u8>, Co
 /// harness below, which points a real loopback listener's own origin at
 /// `fetch_from_origin` directly -- production code always goes through
 /// [`fetch`], which hardcodes this constant.
-const GRAPH_ORIGIN: &str = "https://graph.microsoft.com/";
+pub(super) const GRAPH_ORIGIN: &str = "https://graph.microsoft.com/";
 
 /// Read-only bounded fetch, checked against `expected_origin` (scheme, host,
 /// and port together, via [`Url::origin`]) rather than an inline literal, so
@@ -282,7 +282,7 @@ const GRAPH_ORIGIN: &str = "https://graph.microsoft.com/";
 /// classification and the response-size bound -- is exercisable end to end
 /// against a real, local mock server in tests without weakening the fixed
 /// production check: [`fetch`] always supplies [`GRAPH_ORIGIN`].
-fn fetch_from_origin(
+pub(super) fn fetch_from_origin(
     http: &Client,
     token: &str,
     url: &Url,
@@ -370,9 +370,18 @@ pub(super) fn identity(
     http: &Client,
     token: &str,
 ) -> Result<(String, Vec<String>), ConnectionError> {
-    let url = Url::parse("https://graph.microsoft.com/v1.0/me?$select=id,mail,userPrincipalName")
+    identity_from_origin(http, token, GRAPH_ORIGIN)
+}
+
+pub(super) fn identity_from_origin(
+    http: &Client,
+    token: &str,
+    origin: &str,
+) -> Result<(String, Vec<String>), ConnectionError> {
+    let url = Url::parse(origin)
+        .and_then(|url| url.join("v1.0/me?$select=id,mail,userPrincipalName"))
         .map_err(|_| ConnectionError::InvalidConfiguration)?;
-    let value: Value = serde_json::from_slice(&fetch(http, token, &url)?)
+    let value: Value = serde_json::from_slice(&fetch_from_origin(http, token, &url, origin)?)
         .map_err(|_| ConnectionError::ResourceUnavailable)?;
     let id = text(&value, "id", 512)?;
     let addresses: Vec<_> = ["mail", "userPrincipalName"]
@@ -438,10 +447,20 @@ pub(super) fn pages(
     original: &Url,
     cap: usize,
 ) -> Result<(Vec<Value>, bool), ConnectionError> {
+    pages_from_origin(http, token, original, cap, GRAPH_ORIGIN)
+}
+
+pub(super) fn pages_from_origin(
+    http: &Client,
+    token: &str,
+    original: &Url,
+    cap: usize,
+    origin: &str,
+) -> Result<(Vec<Value>, bool), ConnectionError> {
     let mut url = original.clone();
     let mut all = vec![];
     for _ in 0..10 {
-        let bytes = fetch(http, token, &url)?;
+        let bytes = fetch_from_origin(http, token, &url, origin)?;
         let value: Value =
             serde_json::from_slice(&bytes).map_err(|_| ConnectionError::ResourceUnavailable)?;
         let (rows, _) = page(&bytes)?;
