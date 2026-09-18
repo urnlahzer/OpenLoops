@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, atomic::Ordering};
 use std::time::Instant;
 
-use crate::review_model::ReviewState;
+use crate::review_model::{CardContext, ReviewState};
 use crate::settings::{
     OllamaPlan, Provider, Settings, SettingsError, SettingsStore, max_parallel, production_store,
 };
@@ -742,42 +742,12 @@ impl AppModel {
     /// record carrying real (non-empty) ids has anything left to learn from
     /// Graph.
     pub(crate) fn dispatch_reminder_sync(&mut self) {
-        use crate::loop_state::{Decision, Reminder};
         let Some(analysis) = &self.review.analysis else {
             return;
         };
         let items = analysis.items.clone();
         let cards = self.review.card_contexts(&items);
-        let mut checks: Vec<(String, [u8; 32], String, String)> = vec![];
-        for (item, card) in items.iter().zip(cards.iter()) {
-            let Some(card) = card else { continue };
-            if !matches!(
-                card.record.decision,
-                Decision::Mine | Decision::Watching | Decision::Review
-            ) {
-                continue;
-            }
-            let Reminder::Created { list_id, task_id } = &card.record.reminder else {
-                continue;
-            };
-            if list_id.is_empty() || task_id.is_empty() {
-                continue;
-            }
-            let Some(source) = self
-                .review
-                .messages
-                .iter()
-                .find(|m| m.input.handle == item.evidence.message)
-            else {
-                continue;
-            };
-            checks.push((
-                source.account.clone(),
-                card.record.key,
-                list_id.clone(),
-                task_id.clone(),
-            ));
-        }
+        let checks = self.review.reminder_sync_checks(&items, &cards);
         if checks.is_empty() {
             return;
         }
@@ -848,6 +818,21 @@ impl AppModel {
             lines: vec![format!("Retried {attempted}; {remaining} still failing.")],
             succeeded: remaining == 0,
         };
+    }
+
+    /// How many still-open, reminder-bearing decisions a "Sync To Do" click
+    /// would check right now, given `cards` the caller already computed
+    /// (typically the same `card_contexts` result a `sync`/`sync_review`
+    /// pass already built) -- see `ReviewState::reminder_sync_checks`.
+    /// Drives the Review toolbar button's enabled state and its "Checking N
+    /// To Do task(s)..." status line. Never calls `card_contexts` itself.
+    #[must_use]
+    pub(crate) fn reminder_sync_eligible_count(&self, cards: &[Option<CardContext>]) -> usize {
+        self.review.analysis.as_ref().map_or(0, |analysis| {
+            self.review
+                .reminder_sync_checks(&analysis.items, cards)
+                .len()
+        })
     }
 }
 
@@ -1479,5 +1464,38 @@ mod tests {
             assert_eq!(app.review.action_status, expected);
             assert!(!app.review.action_status_succeeded);
         }
+    }
+
+    #[test]
+    fn reminder_sync_eligible_count_matches_what_dispatch_would_check() {
+        use crate::loop_state::{Decision, Record, Reminder, now};
+        let mut app = AppModel::new();
+        // No analysis: the count is zero regardless of `cards`.
+        assert_eq!(app.reminder_sync_eligible_count(&[]), 0);
+
+        app.review = crate::review_model::layout_fixture();
+        let items = app.review.analysis.as_ref().unwrap().items.clone();
+        let cards = app.review.card_contexts(&items);
+        // The fixture already saves card 0 as `Mine` with a `Created`
+        // reminder carrying real ids -- exactly what `dispatch_reminder_sync`
+        // would check. Card 2 is `Watching`/`Attempted` (no confirmed task
+        // id) and card 1 has no saved decision at all, so neither counts.
+        assert_eq!(app.reminder_sync_eligible_count(&cards), 1);
+
+        let key = cards[1].as_ref().unwrap().record.key;
+        app.review
+            .decisions
+            .update(Record {
+                key,
+                decision: Decision::Watching,
+                reminder: Reminder::Created {
+                    list_id: "list-2".into(),
+                    task_id: "task-2".into(),
+                },
+                updated: now(),
+            })
+            .unwrap();
+        let cards = app.review.card_contexts(&items);
+        assert_eq!(app.reminder_sync_eligible_count(&cards), 2);
     }
 }

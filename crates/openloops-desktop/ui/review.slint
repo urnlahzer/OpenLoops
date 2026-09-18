@@ -1,6 +1,6 @@
 import { Tokens } from "tokens.slint";
 import { PrimaryButton, SecondaryButton, SubtleButton, OutlineButton, LinkButton, Segmented, Pill, Callout, Field, Disclosure, Avatar, ProgressBar, Checkbox, WrappedText } from "widgets.slint";
-import { ScrollView } from "std-widgets.slint";
+import { ScrollView, LineEdit } from "std-widgets.slint";
 
 export struct ReviewRow {
     handle: int,
@@ -75,9 +75,11 @@ export component ReviewScreen {
     in property <bool> can-rescan;
     in property <bool> can-retry-failed;
     in property <int> retry-failed-count;
+    in property <bool> can-sync-todo;
     in-out property <int> filter-index;
     in-out property <bool> show-handled;
     in property <string> show-handled-label;
+    in-out property <string> search-query;
     in property <[ReviewRow]> rows;
     in property <int> open-count;
     in property <ScanStripModel> scan-strip;
@@ -119,9 +121,11 @@ export component ReviewScreen {
     callback stop-scan;
     callback rescan;
     callback retry-failed;
+    callback sync-todo;
     callback clear-results;
     callback filter-selected(int);
     callback show-handled-toggled(bool);
+    callback search-edited(string);
     callback coverage-toggled(bool);
     callback sources-link;
     callback select-row(int);
@@ -147,6 +151,7 @@ export component ReviewScreen {
                 if root.review-scanning: SecondaryButton { text: "■ Stop scan"; accessible-name: "Stop scan"; clicked => { root.stop-scan(); } }
                 if !root.review-scanning: PrimaryButton { text: "Scan inboxes"; enabled: root.can-scan; clicked => { root.scan-inboxes(); } }
                 SubtleButton { text: "Rescan loaded mail"; enabled: root.can-rescan; clicked => { root.rescan(); } }
+                SubtleButton { text: "Sync To Do"; enabled: root.can-sync-todo; clicked => { root.sync-todo(); } }
                 SubtleButton { text: "Clear results and mail"; enabled: !root.busy; clicked => { root.clear-results(); } }
                 Rectangle { horizontal-stretch: 1; }
                 Segmented { width: Tokens.review-filter-width; options: ["All", "Mine", "Team"]; selected-index <=> root.filter-index; accessible-name: "Review filter"; enabled: !root.busy; selected(index) => { root.filter-selected(index); } }
@@ -236,8 +241,14 @@ export component ReviewScreen {
                 VerticalLayout { spacing: 0px;
                     Rectangle { min-height: Tokens.command-height;
                         HorizontalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; spacing: Tokens.space-2;
-                            Text { text: "Who is waiting on you · " + root.open-count + " open"; color: Tokens.text-1; font-size: Tokens.font-16; font-weight: 600; vertical-alignment: center; }
-                            Rectangle { horizontal-stretch: 1; }
+                            Text { text: "Who is waiting on you · " + root.open-count + " open"; color: Tokens.text-1; font-size: Tokens.font-16; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; min-width: 0px; overflow: elide; }
+                            search-input := LineEdit {
+                                width: Tokens.review-search-width;
+                                text <=> root.search-query;
+                                placeholder-text: "Search";
+                                accessible-label: "Search review list";
+                                edited(value) => { root.search-edited(value); }
+                            }
                         }
                         // N3: one bottom hairline, not a four-side border.
                         Rectangle { y: parent.height - Tokens.hairline; height: Tokens.hairline; background: Tokens.stroke-1; }
