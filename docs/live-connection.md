@@ -74,11 +74,12 @@ content-free.
   requests do not consume the legitimate pending sign-in.
 - Errors and progress contain no identifiers, server payloads, or OAuth values.
   Browser callback responses disable caching and referrer transmission.
-- The default executable remains the synthetic build probe. Existing Phase 0
-  checkers deliberately reject activated network dependencies. This slice does
-  not change or weaken those checkers, claim release readiness, or enable product
-  capability flags. Their transition to runtime confinement checks needs explicit
-  review before integration into the canonical source-build path.
+- The default executable remains the synthetic build probe. The authentication
+  and synchronization checkers now assert confinement: network dependencies may
+  exist only in `openloops-graph`, behind `live-connection`, at the contract pins.
+  (`reqwest` also serves the model providers in `openloops-inference`, behind their
+  features.)
+  This does not claim release readiness or enable product capability flags.
 - A process-local guard serializes calls. The [native review](inbox-review.md)
   adds account binding, saved abstract decisions, and separately authorized
   personal To Do writes. Protected token renewal, discovered mailbox selection,

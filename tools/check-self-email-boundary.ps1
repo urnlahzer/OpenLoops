@@ -144,9 +144,10 @@ if($null-ne$build){
 $adr=Text $AdrPath 'P0-SELFMAIL-CROSS-CONTRACT-001';$threat=Text $ThreatPath 'P0-SELFMAIL-CROSS-CONTRACT-001';$spec=Text $ProductSpecPath 'P0-SELFMAIL-INVENTORY-001';$plan=Text $ImplementationPlanPath 'P0-SELFMAIL-INVENTORY-001';$trace=Text $TraceabilityPath 'P0-SELFMAIL-INVENTORY-001'
 if((NHash $adr)-ne'72ab899003f74468b73e85d3117afb4b85db6dea3bb0361551d69431e08f463b'){Fail 'P0-SELFMAIL-CROSS-CONTRACT-001'}
 if((NHash $threat)-ne'8e0354bec777b277b7ba8c4a2f7e8095034d33f987f40da6c5e0a515ea4f21d0'){Fail 'P0-SELFMAIL-CROSS-CONTRACT-001'}
-if((NHash $spec)-ne'c0a7718d78bde3804142e5b79a937a8d66a372bfe35406e2c8b2ce96d4c7ed54'){Fail 'P0-SELFMAIL-INVENTORY-001'}
+# Product spec revised by PR #9, traceability rows revised by the confinement re-scope (2026-09-14).
+if((NHash $spec)-ne'f0428f9c8ac77a14ed645afe7a30cd4b8a3b1e16783c487100c19499b4470ca9'){Fail 'P0-SELFMAIL-INVENTORY-001'}
 if((NHash $plan)-ne'bc857151555cf9be61a0e075c40907e5b9750ac62293b9a5bddf13efe6cbe575'){Fail 'P0-SELFMAIL-INVENTORY-001'}
-if((NHash $trace)-ne'a5dc80035f1e0b447ec1f1c2f2ed3896eb9d433bd87a515a5c473878c3062fea'){Fail 'P0-SELFMAIL-INVENTORY-001'}
+if((NHash $trace)-ne'dad106cd8df478768af02ff3775b077eca92ec118bac632873f4b68b712d9ad8'){Fail 'P0-SELFMAIL-INVENTORY-001'}
 Has $adr @('Status:** Accepted','P0-WI-16','OWN-10','G-SELFMAIL, G-PRIV','the only legal recipient of a self-email is the canonical contract-tested','address of the authenticated account','separate explicit enablement of the feature and a','separate incremental `Mail.Send` consent','no summary copy, draft, or template output is stored','a verified OpenLoops-generated marker must accompany every self-email','never carries summary content, an identifier, or a secret','a suppression failure is a no-send, not a best-effort filter','a pending encrypted operation-ledger entry is committed before any send request','no catch-up burst','unresolved_pending_G-SELFMAIL') 'P0-SELFMAIL-CROSS-CONTRACT-001'
 Has $threat @('Self-email','wrong-recipient','duplicate summary after a lost response','recursion loop','marker forgery by hostile inbound mail','consent creep','summary content leak','scheduled send while disconnected') 'P0-SELFMAIL-CROSS-CONTRACT-001'
 $ids=[regex]::Matches($trace,'(?m)^\| (P0-SELFMAIL-[A-Z-]+-001) \|')|ForEach-Object{$_.Groups[1].Value};Exact @($ids) $checks 'P0-SELFMAIL-INVENTORY-001';foreach($id in $checks){if(([regex]::Matches($trace,'\b'+[regex]::Escape($id)+'\b')).Count-ne 1){Fail 'P0-SELFMAIL-INVENTORY-001'}}

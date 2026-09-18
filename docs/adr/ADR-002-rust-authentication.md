@@ -125,3 +125,15 @@ P0-AUTH-DISCONNECT-001, P0-AUTH-DEPENDENCIES-001,
 P0-AUTH-CLAIMS-001, and P0-AUTH-FRESH-CHECKER-001. It completes no
 acceptance criterion, enables or advertises no capability, requests no scope,
 and passes no gate.
+
+## Amendment (2026-09-14)
+
+The six reviewed dependencies are activated at the contract pins behind the
+`live-connection` feature of `openloops-graph` only. `reqwest` is additionally
+activated at the same pin in `openloops-inference`, behind its `ollama-cloud` and
+`openrouter` provider features, per the ADR-007 amendment. Tokio remains a
+transitive-only dependency of blocking reqwest; its Phase 0 direct-selection
+version and async feature list document the unused direct candidate rather than
+an activated direct dependency. The P0-AUTH-DEPENDENCIES-001 checker asserts their
+confinement to `openloops-graph` and their exact locked pins. This amendment does
+not advance a gate, capability, support row, or acceptance criterion.
