@@ -98,8 +98,10 @@ cargo build -p openloops-desktop --bin openloops-ui --features native-ui --locke
 ```
 
 The window/taskbar icon is set at runtime from `ui/assets/openloops-256.png` via
-Slint's `icon` property on the window; a pinned taskbar shortcut's own icon
-would need an embedded exe resource, which is out of scope here.
+Slint's `icon` property on the window. The icon is embedded as a resource at build
+time from `ui/assets/openloops.ico` by `build.rs` on MSVC targets, so pinned shortcuts
+show it. Windows caches shortcut icons, so a shortcut pinned before this build may
+need to be unpinned and re-pinned (or `ie4uinit.exe -show` run) once.
 
 The native window uses Slint 1.17.1 with the Fluent style and native renderer. A narrow
 `settings.rs` module uses pinned `keyring-core` and `windows-native-keyring-store`
