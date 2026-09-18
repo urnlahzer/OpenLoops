@@ -109,9 +109,10 @@ if($null-ne$build){if($build.runtime_boundary.addin_manifest-ne$false-or$build.r
 $adr=Text $AdrPath 'P0-BRIDGE-CROSS-CONTRACT-001';$threat=Text $ThreatPath 'P0-BRIDGE-CROSS-CONTRACT-001';$spec=Text $ProductSpecPath 'P0-BRIDGE-INVENTORY-001';$plan=Text $ImplementationPlanPath 'P0-BRIDGE-INVENTORY-001';$trace=Text $TraceabilityPath 'P0-BRIDGE-INVENTORY-001'
 if((NHash $adr)-ne'4522e71c18247b157fa15997b00ff60e4ee10b5ad1ea307ca832c14ba3ee8ba1'){Fail 'P0-BRIDGE-CROSS-CONTRACT-001'}
 if((NHash $threat)-ne'5f476f5096703aab139505a4f01ef20a2e1fd3c0fd358661152d3da1e8515987'){Fail 'P0-BRIDGE-CROSS-CONTRACT-001'}
-if((NHash $spec)-ne'c0a7718d78bde3804142e5b79a937a8d66a372bfe35406e2c8b2ce96d4c7ed54'){Fail 'P0-BRIDGE-INVENTORY-001'}
+# Product spec revised by PR #9, traceability rows revised by the confinement re-scope (2026-09-14).
+if((NHash $spec)-ne'f0428f9c8ac77a14ed645afe7a30cd4b8a3b1e16783c487100c19499b4470ca9'){Fail 'P0-BRIDGE-INVENTORY-001'}
 if((NHash $plan)-ne'bc857151555cf9be61a0e075c40907e5b9750ac62293b9a5bddf13efe6cbe575'){Fail 'P0-BRIDGE-INVENTORY-001'}
-if((NHash $trace)-ne'a5dc80035f1e0b447ec1f1c2f2ed3896eb9d433bd87a515a5c473878c3062fea'){Fail 'P0-BRIDGE-INVENTORY-001'}
+if((NHash $trace)-ne'dad106cd8df478768af02ff3775b077eca92ec118bac632873f4b68b712d9ad8'){Fail 'P0-BRIDGE-INVENTORY-001'}
 Has $adr @('Status:** Accepted','P0-WI-13','OWN-01','Named pipes are preferred','same-user loopback web bridge','no unpaired command exists','least-authority and command-scoped','It MUST NOT install machine-wide certificate trust','one random, non-secret,','opaque loop handle and no authority','No mailbox content, identifier, token, or URL carrying','never a silent substitute','introduces no new persisted database record') 'P0-BRIDGE-CROSS-CONTRACT-001'
 Has $threat @('Add-in bridge','Pairing bootstrap race between two first-pair attempts','Replayed pairing nonce','DNS-rebinding a hostname to 127.0.0.1','CSRF from the add-in WebView or another page','Certificate/trust abuse','Uninstall/disconnect cleanup failure','Same-user malware') 'P0-BRIDGE-CROSS-CONTRACT-001'
 $ids=[regex]::Matches($trace,'(?m)^\| (P0-BRIDGE-[A-Z-]+-001) \|')|ForEach-Object{$_.Groups[1].Value};Exact @($ids) $checks 'P0-BRIDGE-INVENTORY-001';foreach($id in $checks){if(([regex]::Matches($trace,'\b'+[regex]::Escape($id)+'\b')).Count-ne 1){Fail 'P0-BRIDGE-INVENTORY-001'}}

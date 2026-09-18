@@ -117,7 +117,7 @@
       "crate": "oauth2",
       "version": "5.0.0",
       "default_features": false,
-      "features": ["reqwest", "timing-resistant-secret-traits"],
+      "features": ["timing-resistant-secret-traits"],
       "license": "MIT OR Apache-2.0",
       "purpose": "typed OAuth authorization-code, PKCE, state, and token protocol primitives"
     },
@@ -125,7 +125,7 @@
       "crate": "reqwest",
       "version": "0.12.28",
       "default_features": false,
-      "features": ["rustls-tls-native-roots"],
+      "features": ["blocking", "rustls-tls-native-roots"],
       "license": "MIT OR Apache-2.0",
       "purpose": "future token HTTP client with redirects disabled and bounded requests"
     },
@@ -135,6 +135,7 @@
       "default_features": false,
       "features": ["io-util", "net", "rt", "sync", "time"],
       "license": "MIT",
+      "activation": "transitive_only",
       "purpose": "future bounded loopback listener and cancellation primitives"
     },
     {
@@ -163,8 +164,8 @@
     }
   ],
   "dependency_policy": {
-    "activation": "selected_not_activated",
-    "cargo_lock_status": "required_before_activation",
+    "activation": "activated_behind_live_connection_feature",
+    "cargo_lock_status": "locked_at_contract_pins",
     "git_dependencies": "prohibited",
     "wildcard_versions": "prohibited",
     "ad_hoc_oauth_or_crypto": "prohibited",

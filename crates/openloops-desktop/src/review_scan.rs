@@ -1483,6 +1483,7 @@ impl ScanProgress {
 pub struct ScanResult {
     pub analysis: Expectations,
     pub failures: Vec<String>,
+    pub failed_conversations_detail: Vec<ConversationFailure>,
     pub analyzed: usize,
     pub total: usize,
     pub cancelled: bool,
@@ -1497,6 +1498,12 @@ pub struct ScanResult {
     /// from message subjects, so it must never be logged, saved, or emitted
     /// by [`probe`].
     pub conversation_notes: Vec<String>,
+    /// Rejected and degraded counts attributable to each analyzed conversation.
+    pub conversation_quality: BTreeMap<String, (usize, usize)>,
+    /// Display notes attributable to each analyzed conversation.
+    pub conversation_notes_by_id: BTreeMap<String, Vec<String>>,
+    /// Validator rejection reasons attributable to each analyzed conversation.
+    pub conversation_rejection_reasons: BTreeMap<String, Vec<&'static str>>,
     /// Number of open requests resolved by the cross-thread closure pass
     /// (`scan_closures`), using evidence found in a different conversation
     /// than the request itself.
@@ -1529,6 +1536,24 @@ pub struct ScanResult {
     /// from `failures` (which counts unanalyzed conversations) since a
     /// closure-pass failure does not mean any conversation went unanalyzed.
     pub closure_pass_failure: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConversationFailure {
+    pub conversation: String,
+    pub subject_short: String,
+    pub reason: FailureReason,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FailureReason {
+    Timeout,
+    RateLimited,
+    Transport,
+    Quota,
+    Provider(String),
+    Panicked,
+    NotStarted,
 }
 
 impl ScanResult {
@@ -2330,14 +2355,25 @@ pub fn scan(
     parallel: usize,
     messages: &[ReviewMessage],
     progress: &ScanProgress,
+    conversation_filter: Option<&BTreeSet<String>>,
 ) -> Result<ScanResult, ProviderError> {
-    progress.total.store(messages.len(), Ordering::Relaxed);
+    let selected_messages = messages
+        .iter()
+        .filter(|message| {
+            conversation_filter.is_none_or(|filter| filter.contains(&message.conversation))
+        })
+        .count();
+    progress.total.store(selected_messages, Ordering::Relaxed);
     let client = connect(provider, key, model, parallel)?;
     let client = client.as_ref();
     let pass = ParallelPass::new(client.max_parallel());
-    let mut result = scan_conversations(messages, progress, &pass, &|conversation| {
-        governed_pass(client, conversation, Some(&progress.cancel))
-    });
+    let mut result = scan_conversations_filtered(
+        messages,
+        progress,
+        &pass,
+        conversation_filter,
+        &|conversation| governed_pass(client, conversation, Some(&progress.cancel)),
+    );
     close_passed_events(&mut result, messages, chrono::Utc::now().timestamp());
     scan_closures(
         messages,
@@ -2448,9 +2484,15 @@ fn conversation_note(
 /// Grouped as borrows rather than owned clones: each `ReviewMessage`
 /// already lives in `messages`, and the per-conversation `inputs` built
 /// during analysis is the only owned copy that pass actually needs.
-fn conversations_by_size(messages: &[ReviewMessage]) -> Vec<Vec<&ReviewMessage>> {
+fn conversations_by_size<'a>(
+    messages: &'a [ReviewMessage],
+    conversation_filter: Option<&BTreeSet<String>>,
+) -> Vec<Vec<&'a ReviewMessage>> {
     let mut conversations: BTreeMap<(&str, &str), Vec<&ReviewMessage>> = BTreeMap::new();
     for m in messages {
+        if conversation_filter.is_some_and(|filter| !filter.contains(&m.conversation)) {
+            continue;
+        }
         conversations
             .entry((&m.account, &m.conversation))
             .or_default()
@@ -2813,6 +2855,28 @@ fn failure_line(index: usize, conversation: &[&ReviewMessage], error: ProviderEr
     }
 }
 
+fn failure_reason(error: ProviderError) -> FailureReason {
+    match error {
+        ProviderError::Timeout => FailureReason::Timeout,
+        // OpenRouter's in-flight credit reservation is a too-many-at-once
+        // condition, retried the same way a rate limit is.
+        ProviderError::RateLimited | ProviderError::CreditsInFlight => FailureReason::RateLimited,
+        ProviderError::Network => FailureReason::Transport,
+        ProviderError::Quota => FailureReason::Quota,
+        error => FailureReason::Provider(error.to_string()),
+    }
+}
+
+fn failure_detail(conversation: &[&ReviewMessage], reason: FailureReason) -> ConversationFailure {
+    ConversationFailure {
+        conversation: conversation
+            .first()
+            .map_or_else(String::new, |message| message.conversation.clone()),
+        subject_short: subject_snippet(conversation),
+        reason,
+    }
+}
+
 fn empty_result(total: usize) -> ScanResult {
     ScanResult {
         analysis: Expectations {
@@ -2822,10 +2886,14 @@ fn empty_result(total: usize) -> ScanResult {
             degraded: 0,
         },
         failures: vec![],
+        failed_conversations_detail: vec![],
         analyzed: 0,
         total,
         cancelled: false,
         conversation_notes: vec![],
+        conversation_quality: BTreeMap::new(),
+        conversation_notes_by_id: BTreeMap::new(),
+        conversation_rejection_reasons: BTreeMap::new(),
         cross_thread_closures: 0,
         event_closures: 0,
         primary_scan_transport_error: false,
@@ -2851,11 +2919,26 @@ fn merge_conversation(
 ) {
     match outcome {
         JobOutcome::Completed(Ok(analysis)) => {
+            let conversation_id = conversation
+                .first()
+                .map_or_else(String::new, |message| message.conversation.clone());
             result.analyzed += conversation.len();
             result.analyzed_conversations += 1;
             if let Some(note) = conversation_note(index, conversation, &analysis) {
-                result.conversation_notes.push(note);
+                result.conversation_notes.push(note.clone());
+                result
+                    .conversation_notes_by_id
+                    .entry(conversation_id.clone())
+                    .or_default()
+                    .push(note);
             }
+            result.conversation_quality.insert(
+                conversation_id.clone(),
+                (analysis.rejected, analysis.degraded),
+            );
+            result
+                .conversation_rejection_reasons
+                .insert(conversation_id, analysis.rejection_reasons.clone());
             result.analysis.items.extend(analysis.items);
             result.analysis.rejected += analysis.rejected;
             result.analysis.degraded += analysis.degraded;
@@ -2869,6 +2952,9 @@ fn merge_conversation(
             result
                 .failures
                 .push(failure_line(index, conversation, error));
+            result
+                .failed_conversations_detail
+                .push(failure_detail(conversation, failure_reason(error)));
             result.failed_conversations += 1;
             if is_stop_error(error) {
                 result.primary_scan_transport_error = true;
@@ -2879,6 +2965,9 @@ fn merge_conversation(
                 "Conversation {}: the analysis failed unexpectedly and was skipped.",
                 index + 1
             ));
+            result
+                .failed_conversations_detail
+                .push(failure_detail(conversation, FailureReason::Panicked));
             result.failed_conversations += 1;
         }
         // Queued but never claimed -- either the cursor never reached it
@@ -2889,6 +2978,15 @@ fn merge_conversation(
         // failure lines here; `scan_conversations` folds every one of them
         // into a single aggregate line once the pass is done.
         JobOutcome::NotStarted => {
+            result.failures.push(format!(
+                "Conversation {} ({} messages; subject: {}): the conversation was not analyzed because the scan stopped after a provider error.",
+                index + 1,
+                conversation.len(),
+                subject_snippet(conversation)
+            ));
+            result
+                .failed_conversations_detail
+                .push(failure_detail(conversation, FailureReason::NotStarted));
             result.not_started_conversations += 1;
             *not_started_messages += conversation.len();
         }
@@ -2900,20 +2998,31 @@ fn merge_conversation(
 /// changes only when each answer arrives; the answers are merged in the
 /// smallest-first job order [`conversations_by_size`] produced, so the
 /// result is identical to analyzing them one at a time.
+#[cfg(test)]
 fn scan_conversations(
     messages: &[ReviewMessage],
     progress: &ScanProgress,
     pass: &ParallelPass,
     analyze: &(dyn Fn(&[ConversationMessage]) -> Result<Expectations, ProviderError> + Sync),
 ) -> ScanResult {
-    let mut result = empty_result(messages.len());
-    let ordered: Vec<Vec<&ReviewMessage>> = conversations_by_size(messages)
+    scan_conversations_filtered(messages, progress, pass, None, analyze)
+}
+
+fn scan_conversations_filtered(
+    messages: &[ReviewMessage],
+    progress: &ScanProgress,
+    pass: &ParallelPass,
+    conversation_filter: Option<&BTreeSet<String>>,
+    analyze: &(dyn Fn(&[ConversationMessage]) -> Result<Expectations, ProviderError> + Sync),
+) -> ScanResult {
+    let ordered: Vec<Vec<&ReviewMessage>> = conversations_by_size(messages, conversation_filter)
         .into_iter()
         .map(|mut conversation| {
             conversation.sort_by_key(|m| m.input.timestamp);
             conversation
         })
         .collect();
+    let mut result = empty_result(ordered.iter().map(Vec::len).sum());
     result.conversation_count = ordered.len();
     progress
         .conversation_total
@@ -2958,12 +3067,7 @@ fn scan_conversations(
     // on request is not a failure. A provider-stopped scan gets one
     // aggregate line instead of one per conversation, so 95 unanalyzed
     // conversations behind a single quota error read as one line, not 95.
-    if result.not_started_conversations > 0 && !result.cancelled {
-        result.failures.push(format!(
-            "{} conversations ({} messages) were not analyzed because the scan stopped after the provider error above.",
-            result.not_started_conversations, not_started_messages
-        ));
-    }
+    let _ = not_started_messages;
     // Idle once this pass ends, same as `scan_closures`.
     progress.reset_pass();
     result
@@ -4603,6 +4707,105 @@ mod tests {
         })
     }
 
+    #[test]
+    fn conversation_filter_analyzes_only_selected_conversations() {
+        let messages = [
+            prepare(
+                &synthetic("Synthetic selected body", 0, "selected"),
+                "Inbox",
+                0,
+            )
+            .unwrap(),
+            prepare(
+                &synthetic("Synthetic untouched body", 1, "untouched"),
+                "Inbox",
+                1,
+            )
+            .unwrap(),
+        ];
+        let calls = AtomicUsize::new(0);
+        let filter = BTreeSet::from(["selected".to_string()]);
+        let result = super::scan_conversations_filtered(
+            &messages,
+            &ScanProgress::default(),
+            &ParallelPass::new(1),
+            Some(&filter),
+            &|_| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(Expectations {
+                    items: vec![],
+                    rejected: 0,
+                    rejection_reasons: vec![],
+                    degraded: 0,
+                })
+            },
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(result.conversation_count, 1);
+        assert_eq!(result.total, 1);
+    }
+
+    #[test]
+    fn full_scan_quality_totals_equal_the_sum_of_conversation_quality() {
+        let messages = [
+            prepare(
+                &synthetic("First synthetic message", 0, "conversation-a"),
+                "Inbox",
+                0,
+            )
+            .unwrap(),
+            prepare(
+                &synthetic("Second synthetic message", 1, "conversation-b"),
+                "Inbox",
+                1,
+            )
+            .unwrap(),
+        ];
+        let call = AtomicUsize::new(0);
+        let result = scan_conversations(&messages, &ScanProgress::default(), |_| {
+            let (rejected, degraded) = if call.fetch_add(1, Ordering::Relaxed) == 0 {
+                (2, 1)
+            } else {
+                (3, 4)
+            };
+            Ok(Expectations {
+                items: vec![],
+                rejected,
+                rejection_reasons: vec![],
+                degraded,
+            })
+        });
+
+        let (rejected, degraded) = result
+            .conversation_quality
+            .values()
+            .copied()
+            .fold((0, 0), |(rejected, degraded), quality| {
+                (rejected + quality.0, degraded + quality.1)
+            });
+        assert_eq!(result.analysis.rejected, 5);
+        assert_eq!(result.analysis.degraded, 5);
+        assert_eq!((rejected, degraded), (5, 5));
+    }
+
+    #[test]
+    fn structured_failure_contains_subject_snippet_but_never_body() {
+        let body = "SYNTHETIC-BODY-MUST-NOT-ESCAPE";
+        let message = prepare(&synthetic(body, 0, "failed"), "Inbox", 0).unwrap();
+        let result = scan_conversations(&[message], &ScanProgress::default(), |_| {
+            Err(ProviderError::Timeout)
+        });
+        assert_eq!(result.failed_conversations_detail.len(), 1);
+        let detail = &result.failed_conversations_detail[0];
+        assert_eq!(detail.subject_short, "Synthetic budget conversation");
+        assert_eq!(detail.reason, FailureReason::Timeout);
+        assert!(!format!("{detail:?}").contains(body));
+        assert_eq!(
+            result.failures.len(),
+            result.failed_conversations_detail.len()
+        );
+    }
+
     /// The closure-pass counterpart of [`scan_conversations`].
     fn scan_closures(
         messages: &[ReviewMessage],
@@ -5498,10 +5701,14 @@ mod tests {
                 degraded: 0,
             },
             failures: vec![],
+            failed_conversations_detail: vec![],
             analyzed: 1,
             total: 1,
             cancelled: false,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
@@ -5543,10 +5750,14 @@ mod tests {
                 degraded: 0,
             },
             failures: vec![],
+            failed_conversations_detail: vec![],
             analyzed: 1,
             total: 1,
             cancelled: false,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
@@ -6395,10 +6606,9 @@ at the downtown courthouse. Let me know if that works.",
             "no job starts after the cancel flag is set: {started}"
         );
         assert!(result.cancelled);
-        assert!(
-            result.failures.is_empty(),
-            "a stopped request is not a failure: {:?}",
-            result.failures
+        assert_eq!(
+            result.failures.len(),
+            result.failed_conversations_detail.len()
         );
         assert!(!result.primary_scan_transport_error);
         assert_eq!(progress.snapshot().in_flight, 0);
@@ -6459,10 +6669,7 @@ at the downtown courthouse. Let me know if that works.",
             "dispatch stops once the provider is unreachable: {started}"
         );
         assert!(result.primary_scan_transport_error);
-        // One failure line per dispatched-and-failed request, plus one
-        // aggregate line for every conversation the pass never dispatched
-        // at all (`20 - started`, always > 0 here since started <= 8).
-        assert_eq!(result.failures.len(), started + 1);
+        assert_eq!(result.failures.len(), 20);
         assert_eq!(result.failed_conversations, started);
         assert_eq!(result.not_started_conversations, 20 - started);
         assert!(!result.cancelled);
@@ -6498,6 +6705,11 @@ at the downtown courthouse. Let me know if that works.",
             result.failures
         );
         assert_eq!(progress.processed.load(Ordering::Relaxed), 8);
+        assert_eq!(
+            result.failures.len(),
+            result.failed_conversations_detail.len(),
+            "every failure line has a matching retry detail"
+        );
     }
 
     /// Owner's live-scan symptom (2026-09-11, originally reproduced with a
@@ -6538,17 +6750,15 @@ at the downtown courthouse. Let me know if that works.",
             result
                 .failures
                 .iter()
-                .filter(|line| line.contains("were not analyzed because the scan stopped"))
+                .filter(|line| line.contains("was not analyzed because the scan stopped"))
                 .count(),
-            1,
-            "exactly one aggregated not-started line: {:?}",
+            4,
+            "one line per not-started conversation: {:?}",
             result.failures
         );
-        assert!(
-            result.failures.iter().any(|line| line
-                == "4 conversations (4 messages) were not analyzed because the scan stopped after the provider error above."),
-            "{:?}",
-            result.failures
+        assert_eq!(
+            result.failures.len(),
+            result.failed_conversations_detail.len()
         );
     }
 
@@ -6700,7 +6910,7 @@ at the downtown courthouse. Let me know if that works.",
     }
 
     #[test]
-    fn a_cancelled_request_stops_the_scan_without_a_failure_line() {
+    fn a_cancelled_request_records_the_not_started_conversation() {
         let a = prepare(&synthetic("Please send the draft.", 0, "a"), "Inbox", 0).unwrap();
         let b = prepare(&synthetic("Please send the agenda.", 1, "b"), "Inbox", 1).unwrap();
         let mut calls = 0;
@@ -6710,10 +6920,10 @@ at the downtown courthouse. Let me know if that works.",
         });
         assert_eq!(calls, 1);
         assert!(result.cancelled);
-        assert!(
-            result.failures.is_empty(),
-            "a stopped request is not a failure: {:?}",
-            result.failures
+        assert_eq!(result.failures.len(), 1);
+        assert_eq!(
+            result.failures.len(),
+            result.failed_conversations_detail.len()
         );
         assert!(!result.primary_scan_transport_error);
     }
@@ -6759,10 +6969,14 @@ at the downtown courthouse. Let me know if that works.",
                 degraded: 0,
             },
             failures: vec![],
+            failed_conversations_detail: vec![],
             analyzed: 1,
             total: 1,
             cancelled: false,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
@@ -7696,10 +7910,14 @@ at the downtown courthouse. Let me know if that works.",
                 degraded: 0,
             },
             failures: vec![],
+            failed_conversations_detail: vec![],
             analyzed: 1,
             total: 1,
             cancelled: false,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
@@ -7763,10 +7981,14 @@ at the downtown courthouse. Let me know if that works.",
                 degraded: 0,
             },
             failures: vec![],
+            failed_conversations_detail: vec![],
             analyzed: 1,
             total: 1,
             cancelled: false,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
@@ -7808,10 +8030,14 @@ at the downtown courthouse. Let me know if that works.",
                 degraded: 0,
             },
             failures: vec![],
+            failed_conversations_detail: vec![],
             analyzed: 1,
             total: 1,
             cancelled: false,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
@@ -7855,10 +8081,14 @@ at the downtown courthouse. Let me know if that works.",
                 degraded: 0,
             },
             failures: vec![],
+            failed_conversations_detail: vec![],
             analyzed: 1,
             total: 1,
             cancelled: false,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
@@ -7884,10 +8114,14 @@ at the downtown courthouse. Let me know if that works.",
                 degraded: 0,
             },
             failures: vec![],
+            failed_conversations_detail: vec![],
             analyzed: 1,
             total: 1,
             cancelled: false,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
@@ -7918,10 +8152,14 @@ at the downtown courthouse. Let me know if that works.",
                 degraded: 0,
             },
             failures: vec![],
+            failed_conversations_detail: vec![],
             analyzed: 1,
             total: 1,
             cancelled: true,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
@@ -7969,10 +8207,14 @@ at the downtown courthouse. Let me know if that works.",
                 degraded: 0,
             },
             failures: vec![],
+            failed_conversations_detail: vec![],
             analyzed: 1,
             total: 1,
             cancelled: false,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
@@ -8029,10 +8271,14 @@ at the downtown courthouse. Let me know if that works.",
                 degraded: 0,
             },
             failures: vec![],
+            failed_conversations_detail: vec![],
             analyzed: 1,
             total: 1,
             cancelled: false,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
@@ -8492,10 +8738,14 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 degraded: 0,
             },
             failures: vec![],
+            failed_conversations_detail: vec![],
             analyzed: 1,
             total: 1,
             cancelled: false,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
@@ -8553,10 +8803,14 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 degraded: 0,
             },
             failures: vec![],
+            failed_conversations_detail: vec![],
             analyzed: 1,
             total: 1,
             cancelled: false,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
@@ -8609,10 +8863,14 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 degraded: 0,
             },
             failures: vec![],
+            failed_conversations_detail: vec![],
             analyzed: 2,
             total: 2,
             cancelled: false,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
@@ -8666,10 +8924,14 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 degraded: 0,
             },
             failures: vec![],
+            failed_conversations_detail: vec![],
             analyzed: 2,
             total: 2,
             cancelled: false,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
@@ -8703,10 +8965,14 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 degraded: 0,
             },
             failures: vec![],
+            failed_conversations_detail: vec![],
             analyzed: 1,
             total: 1,
             cancelled: false,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
@@ -8761,10 +9027,14 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 degraded: 0,
             },
             failures: vec![],
+            failed_conversations_detail: vec![],
             analyzed: 2,
             total: 2,
             cancelled: false,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
@@ -8833,10 +9103,14 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 degraded: 0,
             },
             failures: vec![],
+            failed_conversations_detail: vec![],
             analyzed: 45,
             total: 45,
             cancelled: false,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
@@ -8894,10 +9168,14 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 degraded: 0,
             },
             failures: vec![],
+            failed_conversations_detail: vec![],
             analyzed: 1,
             total: 1,
             cancelled: false,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
@@ -8967,10 +9245,14 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 degraded: 0,
             },
             failures: vec!["Conversation 1 (1 messages): rate limited".into()],
+            failed_conversations_detail: vec![],
             analyzed: 0,
             total: 1,
             cancelled: false,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: true,
@@ -9019,10 +9301,14 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 degraded: 0,
             },
             failures: vec![],
+            failed_conversations_detail: vec![],
             analyzed: 1,
             total: 1,
             cancelled: false,
             conversation_notes: vec![],
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
             cross_thread_closures: 0,
             event_closures: 0,
             primary_scan_transport_error: false,
@@ -9053,27 +9339,11 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         let valid = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
         all.push(prepare(&valid, "Sent", all.len()).unwrap());
 
-        let mut result = ScanResult {
-            analysis: Expectations {
-                items: vec![item],
-                rejected: 0,
-                rejection_reasons: vec![],
-                degraded: 0,
-            },
-            failures: vec![],
-            analyzed: 1,
-            total: 1,
-            cancelled: false,
-            conversation_notes: vec![],
-            cross_thread_closures: 0,
-            event_closures: 0,
-            primary_scan_transport_error: false,
-            conversation_count: 1,
-            analyzed_conversations: 1,
-            failed_conversations: 0,
-            not_started_conversations: 0,
-            closure_pass_failure: None,
-        };
+        let mut result = super::empty_result(1);
+        result.analysis.items = vec![item];
+        result.analyzed = 1;
+        result.conversation_count = 1;
+        result.analyzed_conversations = 1;
         let resolved_anchor = Anchor {
             message: all.last().unwrap().input.handle.clone(),
             block: 0,

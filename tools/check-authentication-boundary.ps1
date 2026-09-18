@@ -47,7 +47,8 @@ function Test-Empty([object[]]$Values, [string]$FailureId) {
 
 $script:failures = [Collections.Generic.List[string]]::new()
 $script:failureSet = @{}
-$expectedCanonicalHash = '6cc6ea196c063d28c264d0d3d8ca47a365875c994d199480793d9f561efe439a'
+# Recomputed 2026-09-14 after the dependency-activation amendment (ADR-002).
+$expectedCanonicalHash = 'f701e65a8273dc678dd6b1388429228ebae6184291ad6aa4cb4d5c81045836f0'
 $expectedTraceIds = @(
     'P0-AUTH-INVENTORY-001', 'P0-AUTH-FLOW-001', 'P0-AUTH-REDIRECT-001',
     'P0-AUTH-ACCOUNT-001', 'P0-AUTH-TOKEN-001', 'P0-AUTH-CONCURRENCY-001',
@@ -172,9 +173,9 @@ Test-ExactSet $dependencyKeys @(
 ) 'P0-AUTH-DEPENDENCIES-001'
 $expectedDependencyContracts = [ordered]@{
     httparse = @{ version = '1.10.1'; license = 'MIT OR Apache-2.0'; features = @('std') }
-    oauth2 = @{ version = '5.0.0'; license = 'MIT OR Apache-2.0'; features = @('reqwest', 'timing-resistant-secret-traits') }
-    reqwest = @{ version = '0.12.28'; license = 'MIT OR Apache-2.0'; features = @('rustls-tls-native-roots') }
-    tokio = @{ version = '1.53.0'; license = 'MIT'; features = @('io-util', 'net', 'rt', 'sync', 'time') }
+    oauth2 = @{ version = '5.0.0'; license = 'MIT OR Apache-2.0'; features = @('timing-resistant-secret-traits') }
+    reqwest = @{ version = '0.12.28'; license = 'MIT OR Apache-2.0'; features = @('blocking', 'rustls-tls-native-roots') }
+    tokio = @{ version = '1.53.0'; license = 'MIT'; features = @('io-util', 'net', 'rt', 'sync', 'time'); activation = 'transitive_only' }
     url = @{ version = '2.5.8'; license = 'MIT OR Apache-2.0'; features = @('std') }
     webbrowser = @{ version = '1.2.1'; license = 'MIT OR Apache-2.0'; features = @('hardened') }
 }
@@ -191,26 +192,96 @@ foreach ($dependency in @($manifest.dependency_decisions)) {
         Add-Failure 'P0-AUTH-DEPENDENCIES-001'
     }
     Test-ExactSet @($dependency.features) @($expectedDependency.features) 'P0-AUTH-DEPENDENCIES-001'
+    if ($crate -eq 'tokio' -and [string]$dependency.activation -ne [string]$expectedDependency.activation) {
+        Add-Failure 'P0-AUTH-DEPENDENCIES-001'
+    }
 }
-if ($manifest.dependency_policy.activation -ne 'selected_not_activated' -or
-    $manifest.dependency_policy.cargo_lock_status -ne 'required_before_activation' -or
+if ($manifest.dependency_policy.activation -ne 'activated_behind_live_connection_feature' -or
+    $manifest.dependency_policy.cargo_lock_status -ne 'locked_at_contract_pins' -or
     $manifest.dependency_policy.git_dependencies -ne 'prohibited' -or
     $manifest.dependency_policy.wildcard_versions -ne 'prohibited' -or
     $manifest.dependency_policy.ad_hoc_oauth_or_crypto -ne 'prohibited') {
     Add-Failure 'P0-AUTH-DEPENDENCIES-001'
 }
 $cargoLockText = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'Cargo.lock')
-foreach ($inactivePackage in @('httparse', 'oauth2', 'reqwest', 'tokio', 'webbrowser')) {
-    if ($cargoLockText -match "(?m)^name = `"$([regex]::Escape($inactivePackage))`"$") {
+$activatedPins = [ordered]@{
+    httparse = '1.10.1'
+    oauth2 = '5.0.0'
+    reqwest = '0.12.28'
+    url = '2.5.8'
+    webbrowser = '1.2.1'
+}
+foreach ($pinName in $activatedPins.Keys) {
+    $lockMatches = @([regex]::Matches(
+        $cargoLockText,
+        ('(?ms)\[\[package\]\]\s+name\s*=\s*"' + [regex]::Escape($pinName) + '"\s+version\s*=\s*"([^"]+)"')
+    ))
+    if ($lockMatches.Count -ne 1 -or $lockMatches[0].Groups[1].Value -ne $activatedPins[$pinName]) {
         Add-Failure 'P0-AUTH-DEPENDENCIES-001'
     }
+}
+
+$cargoManifests = @(Get-ChildItem -LiteralPath $repoRoot -Filter Cargo.toml -Recurse -File |
+    Where-Object { $_.FullName -notmatch '[\\/]target[\\/]' })
+$directDependencyPins = $activatedPins
+$graphManifestPath = [IO.Path]::GetFullPath((Join-Path $repoRoot 'crates/openloops-graph/Cargo.toml'))
+$graphManifestText = Get-Content -Raw -LiteralPath $graphManifestPath
+$inferenceManifestPath = [IO.Path]::GetFullPath((Join-Path $repoRoot 'crates/openloops-inference/Cargo.toml'))
+$dependencyLinePattern = '(?im)^\s*(oauth2|reqwest|tokio|webbrowser|httparse|url)\s*=\s*(.+)$'
+foreach ($cargoManifest in $cargoManifests) {
+    $manifestText = Get-Content -Raw -LiteralPath $cargoManifest.FullName
+    foreach ($dependencyMatch in [regex]::Matches($manifestText, $dependencyLinePattern)) {
+        $dependencyName = $dependencyMatch.Groups[1].Value.ToLowerInvariant()
+        $dependencyDeclaration = $dependencyMatch.Groups[2].Value
+        # reqwest is also sanctioned in openloops-inference (model providers, ADR-007
+        # amendment 2026-09-08), optional behind the ollama-cloud/openrouter features.
+        $isSanctionedManifest = $cargoManifest.FullName -eq $graphManifestPath -or
+            ($dependencyName -eq 'reqwest' -and $cargoManifest.FullName -eq $inferenceManifestPath)
+        if (-not $isSanctionedManifest -or $dependencyName -eq 'tokio' -or
+            -not $directDependencyPins.Contains($dependencyName) -or
+            $dependencyDeclaration -notmatch ('\bversion\s*=\s*"=' + [regex]::Escape($directDependencyPins[$dependencyName]) + '"') -or
+            $dependencyDeclaration -notmatch '\boptional\s*=\s*true\b' -or
+            $dependencyDeclaration -notmatch '\bdefault-features\s*=\s*false\b') {
+            Add-Failure 'P0-AUTH-DEPENDENCIES-001'
+        }
+    }
+}
+$liveFeatureMatch = [regex]::Match($graphManifestText, '(?m)^\s*live-connection\s*=\s*\[([^\]]+)\]')
+foreach ($pinName in $directDependencyPins.Keys) {
+    $declarationCount = [regex]::Matches($graphManifestText, ('(?im)^\s*' + [regex]::Escape($pinName) + '\s*=')).Count
+    $featureCount = if ($liveFeatureMatch.Success) {
+        [regex]::Matches($liveFeatureMatch.Groups[1].Value, ('"dep:' + [regex]::Escape($pinName) + '"')).Count
+    } else { 0 }
+    if ($declarationCount -ne 1 -or $featureCount -ne 1) { Add-Failure 'P0-AUTH-DEPENDENCIES-001' }
+}
+# reqwest is additionally sanctioned for model-provider transport in openloops-inference.
+# ADR-007 requires its optional activation through both provider features.
+$inferenceManifestText = Get-Content -Raw -LiteralPath $inferenceManifestPath
+$inferenceReqwestCount = [regex]::Matches($inferenceManifestText, '(?im)^\s*reqwest\s*=').Count
+$ollamaCloudFeatureMatch = [regex]::Match($inferenceManifestText, '(?m)^\s*ollama-cloud\s*=\s*\[([^\]]+)\]')
+$openrouterFeatureMatch = [regex]::Match($inferenceManifestText, '(?m)^\s*openrouter\s*=\s*\[([^\]]+)\]')
+$ollamaCloudReqwestCount = if ($ollamaCloudFeatureMatch.Success) {
+    [regex]::Matches($ollamaCloudFeatureMatch.Groups[1].Value, '"dep:reqwest"').Count
+} else { 0 }
+$openrouterReqwestCount = if ($openrouterFeatureMatch.Success) {
+    [regex]::Matches($openrouterFeatureMatch.Groups[1].Value, '"dep:reqwest"').Count
+} else { 0 }
+if ($inferenceReqwestCount -gt 1 -or $ollamaCloudReqwestCount -ne 1 -or $openrouterReqwestCount -ne 1) {
+    Add-Failure 'P0-AUTH-DEPENDENCIES-001'
+}
+# Tokio is transitive-only through blocking reqwest: no Cargo.toml may declare it
+# directly, and Cargo.lock is the committed transitive record used with --locked.
+if (Select-String -LiteralPath @($cargoManifests.FullName) -Pattern '(?im)^\s*tokio\s*=' -Quiet) {
+    Add-Failure 'P0-AUTH-DEPENDENCIES-001'
 }
 
 $adrText = Get-Content -Raw -LiteralPath (Resolve-RepositoryInput $AdrPath)
 $adrNormalized = $adrText -replace '\s+', ' '
 foreach ($required in @('Status:** Accepted', 'P0-WI-05', 'OWN-00, OWN-02', 'PKCE S256',
         'OL-AUTH-001–002, OL-AUTH-004–006', 'unresolved_pending_G-ID',
-        'selected_not_activated', 'requests no permission',
+        'activated at the contract pins behind the `live-connection` feature',
+        'checker asserts their confinement to `openloops-graph` and their exact locked pins',
+        'requests no permission',
         'completes no acceptance criterion')) {
     if ($adrNormalized -notmatch [regex]::Escape($required)) { Add-Failure 'P0-AUTH-INVENTORY-001' }
 }

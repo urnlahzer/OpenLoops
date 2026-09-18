@@ -19,7 +19,7 @@ use crate::{
 };
 use openloops_graph::live::{
     ConnectionConfig,
-    review::{LoadProgress, load_recent_with},
+    review::{LoadProgress, load_recent_with, load_sources_with},
 };
 use openloops_inference::{
     blocks::CanonicalBlock,
@@ -1001,6 +1001,9 @@ fn sync_review_inner(
             && !model.active_key().is_empty()
             && !model.selected_model().is_empty(),
     );
+    let (retry_count, can_retry) = retry_failed_button(model, busy);
+    window.set_retry_failed_count(i32::try_from(retry_count).unwrap_or(i32::MAX));
+    window.set_can_retry_failed(can_retry);
     window.set_review_filter_index(match review_ui.filter {
         Filter::All => 0,
         Filter::Mine => 1,
@@ -1222,6 +1225,14 @@ fn sync_review_inner(
     );
 }
 
+fn retry_failed_button(model: &AppModel, busy: bool) -> (usize, bool) {
+    let count = model.review.retryable_failures();
+    (
+        count,
+        count > 0 && !busy && !model.active_key().is_empty() && !model.selected_model().is_empty(),
+    )
+}
+
 pub(crate) fn sync_review(
     model: &AppModel,
     window: &AppWindow,
@@ -1360,6 +1371,74 @@ pub(crate) fn register_callbacks(
     {
         let model = Rc::clone(&model);
         let weak = window.as_weak();
+        let timer = Rc::clone(&timer);
+        window.on_retry_failed(move || {
+            if model.borrow().pending.is_some() {
+                return;
+            }
+            let (sources, conversations, attempted) = {
+                let model = model.borrow();
+                (
+                    model.review.failed_sources.clone(),
+                    model.review.retryable_conversations(),
+                    model.review.retryable_failures(),
+                )
+            };
+            if attempted == 0 {
+                return;
+            }
+            if sources.is_empty() {
+                model
+                    .borrow_mut()
+                    .start_retry_scan(conversations, attempted, || {});
+            } else {
+                let config = {
+                    let model = model.borrow();
+                    ConnectionConfig::new(model.client_id.trim(), Some(&model.shared))
+                        .and_then(|config| config.with_groups(Some(&model.groups)))
+                };
+                match config {
+                    Ok(config) => {
+                        let mut model_ref = model.borrow_mut();
+                        let progress = std::sync::Arc::new(LoadProgress::default());
+                        let cache = std::sync::Arc::clone(&model_ref.mail_cache);
+                        model_ref.load_progress = Some(std::sync::Arc::clone(&progress));
+                        model_ref.start(
+                            Service::Review,
+                            if openloops_graph::live::has_session() {
+                                "Downloading recent messages"
+                            } else {
+                                "Complete Microsoft sign-in; then downloading recent messages"
+                            },
+                            move || Outcome::RetryMail {
+                                sources: load_sources_with(
+                                    &config,
+                                    &cache,
+                                    &progress,
+                                    Some(&sources),
+                                ),
+                                source_keys: sources,
+                                conversations,
+                                attempted,
+                            },
+                            || {},
+                        );
+                    }
+                    Err(error) => {
+                        model.borrow_mut().review_status = Status {
+                            lines: vec![error.to_string()],
+                            succeeded: false,
+                        };
+                    }
+                }
+            }
+            start_timer(&timer);
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
         window.on_stop_scan(move || {
             let model_ref = model.borrow();
             if model_ref.pending_service == Service::Review {
@@ -1439,6 +1518,14 @@ pub(crate) fn register_callbacks(
     window.on_coverage_toggled(|open| {
         REVIEW_UI.with(|state| state.borrow_mut().coverage_open = open);
     });
+    // Preview-fixture only: `OPENLOOPS_PREVIEW_COVERAGE=1` starts with the
+    // coverage panel open so a `--preview-review` screenshot shows its
+    // contents (notes, "Retry failed (N)") without a click.
+    #[cfg(feature = "ui-screenshot")]
+    if std::env::var("OPENLOOPS_PREVIEW_COVERAGE").as_deref() == Ok("1") {
+        REVIEW_UI.with(|state| state.borrow_mut().coverage_open = true);
+        window.set_coverage_open(true);
+    }
     {
         let model = Rc::clone(&model);
         let weak = window.as_weak();
@@ -1807,6 +1894,35 @@ mod tests {
 
     fn model() -> AppModel {
         AppModel::with_store(Ok(None))
+    }
+
+    #[test]
+    fn retry_failed_button_count_and_enable_rules_exclude_rate_limit_and_quota() {
+        use crate::review_model::{ConversationFailure, FailureReason};
+        let mut app = model();
+        app.key = zeroize::Zeroizing::new("synthetic-key".into());
+        app.selected = "synthetic-model".into();
+        app.review.failed_conversations_detail = vec![
+            ConversationFailure {
+                conversation: "timeout".into(),
+                subject_short: "Synthetic".into(),
+                reason: FailureReason::Timeout,
+            },
+            ConversationFailure {
+                conversation: "rate".into(),
+                subject_short: "Synthetic".into(),
+                reason: FailureReason::RateLimited,
+            },
+            ConversationFailure {
+                conversation: "quota".into(),
+                subject_short: "Synthetic".into(),
+                reason: FailureReason::Quota,
+            },
+        ];
+        assert_eq!(retry_failed_button(&app, false), (1, true));
+        assert_eq!(retry_failed_button(&app, true), (1, false));
+        app.review.failed_conversations_detail.clear();
+        assert_eq!(retry_failed_button(&app, false), (0, false));
     }
 
     #[test]

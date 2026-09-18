@@ -190,3 +190,7 @@ API references: [messages](https://learn.microsoft.com/en-us/graph/api/user-list
 [Group posts](https://learn.microsoft.com/en-us/graph/api/conversationthread-list-posts?view=graph-rest-1.0),
 [To Do creation](https://learn.microsoft.com/en-us/graph/api/todotasklist-post-tasks?view=graph-rest-1.0),
 [Ollama structured-output limits](https://docs.ollama.com/capabilities/structured-outputs).
+
+# Retry failed conversations and sources
+
+After a Review scan, **Retry failed (N)** reloads only sources whose listing failed and re-analyzes only conversations that timed out, hit a transport or retryable provider failure, panicked, or were not started; newly loaded conversations from those sources are included automatically. It never resends rate-limited or quota-blocked conversations, and decisions on untouched conversations—as well as decisions whose retried item keeps the same fingerprint—are preserved.

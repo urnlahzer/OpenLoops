@@ -59,8 +59,22 @@ local reminder time, quick picks) and, on confirmation, creates one task in
 the signed-in account's default personal Tasks list; a missing or uncertain
 write is never retried automatically and instead waits for the user to
 reconcile it ("I checked: the task exists" / "I checked: no task was
-created") against Microsoft To Do directly. The Ollama
-test sends a fixed content-free request. Successful generation confirms that
+created") against Microsoft To Do directly.
+
+### If no task appears in Microsoft To Do
+
+- The app registration must list the delegated permission `Tasks.ReadWrite`.
+  The first reminder adds it through one extra browser sign-in; later reminders
+  reuse the session.
+- The browser must sign in as the same account that was scanned.
+- The task is created in the account's default **Tasks** list with a reminder
+  time and no due date, so look under Tasks, not Planned or a custom list.
+- The card's status line names the cause. "No reminder was created: …" means
+  nothing was sent and the reason follows. "Microsoft did not confirm the
+  write…" means a task may exist, so check To Do before trying again. "Reminder
+  created…" confirms the task was created.
+
+The Ollama test sends a fixed content-free request. Successful generation confirms that
 request's validity, not a model's extraction quality.
 
 The title bar's account element shows "Signed in · Microsoft 365" once the
@@ -84,8 +98,10 @@ cargo build -p openloops-desktop --bin openloops-ui --features native-ui --locke
 ```
 
 The window/taskbar icon is set at runtime from `ui/assets/openloops-256.png` via
-Slint's `icon` property on the window; a pinned taskbar shortcut's own icon
-would need an embedded exe resource, which is out of scope here.
+Slint's `icon` property on the window. The icon is embedded as a resource at build
+time from `ui/assets/openloops.ico` by `build.rs` on MSVC targets, so pinned shortcuts
+show it. Windows caches shortcut icons, so a shortcut pinned before this build may
+need to be unpinned and re-pinned (or `ie4uinit.exe -show` run) once.
 
 The native window uses Slint 1.17.1 with the Fluent style and native renderer. A narrow
 `settings.rs` module uses pinned `keyring-core` and `windows-native-keyring-store`
