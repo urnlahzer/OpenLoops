@@ -6,7 +6,8 @@ use openloops_graph::live::{
     review::{LoadProgress, SourceReview},
 };
 use openloops_inference::expectations::{
-    EventPassed, Expectation, Expectations, Owner, ResolutionKind,
+    Anchor, EventPassed, Expectation, Expectations, Owner, ResolutionKind, SuggestedUpdate,
+    SuggestedUpdateKind,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::Ordering;
@@ -89,6 +90,20 @@ pub(crate) fn card_order(cards: &[Option<CardContext>]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..cards.len()).collect();
     order.sort_by_key(|&i| (card_rank(cards[i].as_ref()), i));
     order
+}
+
+/// What resolving a suggested update asks the caller to do next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SuggestionOutcome {
+    /// Nothing to resolve (no suggestion, or an action the kind does not offer).
+    Ignored,
+    /// The suggestion was removed and nothing else changed.
+    Cleared,
+    /// An accepted deadline change replaced the deadline anchor.
+    DeadlineApplied,
+    /// An accepted closure; the caller applies the same `Done` decision as the
+    /// Handled button.
+    MarkHandled,
 }
 
 #[derive(Default)]
@@ -589,6 +604,76 @@ impl ReviewState {
             closed,
             deadline,
         })
+    }
+
+    /// Accepts or rejects the pending suggested update on item `index`.
+    ///
+    /// Session-only: nothing is written to the decisions store, and a
+    /// rejection is not remembered across rescans, so a later scan can offer
+    /// the same suggestion again. An accepted deadline change replaces the
+    /// item's deadline anchor in memory (the card re-classifies it on the
+    /// next projection). An accepted closure only clears the suggestion and
+    /// returns [`SuggestionOutcome::MarkHandled`]; the caller then takes the
+    /// ordinary Handled path. A modification offers no accept.
+    pub(crate) fn resolve_suggested_update(
+        &mut self,
+        index: usize,
+        accept: bool,
+    ) -> SuggestionOutcome {
+        let Some(item) = self
+            .analysis
+            .as_mut()
+            .and_then(|analysis| analysis.items.get_mut(index))
+        else {
+            return SuggestionOutcome::Ignored;
+        };
+        let Some(update) = &item.suggested_update else {
+            return SuggestionOutcome::Ignored;
+        };
+        if accept && update.kind == SuggestedUpdateKind::Modification {
+            return SuggestionOutcome::Ignored;
+        }
+        let Some(update) = item.suggested_update.take() else {
+            return SuggestionOutcome::Ignored;
+        };
+        if !accept {
+            return SuggestionOutcome::Cleared;
+        }
+        match (update.kind, update.temporal_value) {
+            (SuggestedUpdateKind::Closure, _) => SuggestionOutcome::MarkHandled,
+            (SuggestedUpdateKind::DeadlineChange, Some(value)) if !value.trim().is_empty() => {
+                item.deadline = Some(Anchor {
+                    message: update.source_message,
+                    block: update.source_block,
+                    quote: value,
+                    context: update.evidence_text,
+                });
+                item.unverified_deadline = false;
+                SuggestionOutcome::DeadlineApplied
+            }
+            _ => SuggestionOutcome::Cleared,
+        }
+    }
+
+    /// Classifies a suggested deadline change's new time against its own
+    /// source message.
+    pub(crate) fn suggested_deadline_view(&self, update: &SuggestedUpdate) -> Option<DeadlineView> {
+        let value = update.temporal_value.as_deref()?;
+        let message = self
+            .messages
+            .iter()
+            .find(|m| m.input.handle == update.source_message)?;
+        let clock = chrono::Local::now();
+        let offset = scanning::local_offset_seconds(
+            message.input.timestamp,
+            clock.offset().local_minus_utc(),
+        );
+        Some(classify(
+            value,
+            message.input.timestamp,
+            clock.timestamp(),
+            offset,
+        ))
     }
 
     pub(crate) fn card_contexts(&self, items: &[Expectation]) -> Vec<Option<CardContext>> {
