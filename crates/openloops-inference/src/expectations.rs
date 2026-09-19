@@ -155,7 +155,12 @@ pub fn expectations(
     cancel: Option<&AtomicBool>,
 ) -> Result<Expectations, ProviderError> {
     let input = projection(messages)?;
-    let answer = client.complete(INSTRUCTIONS, &input, cancel)?;
+    let answer = client.complete(
+        INSTRUCTIONS,
+        &input,
+        cancel,
+        crate::provider::deadline_for(messages.len()),
+    )?;
     parse(answer.as_bytes(), messages)
 }
 

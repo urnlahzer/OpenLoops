@@ -2954,6 +2954,10 @@ fn failure_line(index: usize, conversation: &[&ReviewMessage], error: ProviderEr
         ProviderError::CreditsInFlight => {
             format!("{head}: {error} This request was not resent.")
         }
+        ProviderError::Timeout => format!(
+            "{head}: {error} Request size: {} messages.",
+            conversation.len()
+        ),
         // Append OpenRouter's own stated reason when one was captured, so a
         // 402 is diagnosable from the failure line itself -- see
         // `provider::record_quota_detail` for the boundary this crosses.
@@ -5080,6 +5084,7 @@ mod tests {
             _system: &str,
             _user: &str,
             _cancel: Option<&AtomicBool>,
+            _deadline: std::time::Duration,
         ) -> Result<zeroize::Zeroizing<String>, ProviderError> {
             Ok(zeroize::Zeroizing::new(self.0.clone()))
         }
@@ -6290,6 +6295,25 @@ at the downtown courthouse. Let me know if that works.",
             "failure line: {}",
             result.failures[0]
         );
+    }
+
+    #[test]
+    fn timeout_failure_line_appends_the_content_free_message_count() {
+        let first = prepare(
+            &synthetic("Please send the synthetic draft.", 0, "a"),
+            "Inbox",
+            0,
+        )
+        .unwrap();
+        let second = prepare(
+            &synthetic("The synthetic draft is ready.", 1, "a"),
+            "Sent",
+            1,
+        )
+        .unwrap();
+        let line = failure_line(0, &[&first, &second], ProviderError::Timeout);
+        assert!(line.contains(&ProviderError::Timeout.to_string()));
+        assert!(line.ends_with("Request size: 2 messages."));
     }
     #[test]
     fn quoted_plain_history_is_not_current_evidence() {
@@ -8815,6 +8839,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
             _system: &str,
             user: &str,
             _cancel: Option<&AtomicBool>,
+            _deadline: std::time::Duration,
         ) -> Result<zeroize::Zeroizing<String>, ProviderError> {
             let index = self.calls.fetch_add(1, Ordering::Relaxed);
             self.payloads
