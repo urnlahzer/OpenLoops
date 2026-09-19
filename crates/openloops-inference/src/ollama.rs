@@ -14,10 +14,6 @@ use crate::provider::{
 
 pub use crate::provider::ProviderError;
 
-/// The conversation passes live in [`crate::expectations`] because they are
-/// provider-neutral; this re-export keeps the original path working.
-pub use crate::expectations;
-
 /// The governed `analysis-output-v1` path lives in [`crate::analysis`]
 /// because it is provider-neutral; `OllamaCloud::analyze` and
 /// `OllamaCloud::analyze_for_review` are thin delegates defined there.

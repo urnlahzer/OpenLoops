@@ -190,8 +190,10 @@ cover ZDR menu parsing, model revalidation, request shape, terminal HTTP 402,
 and concurrency narrowing after HTTP 429. Live
 authentication and generation require your own key, entered locally.
 
-`openloops-ui.exe --probe-saved-model` runs the semantic smoke suite against
-whichever provider is saved, including OpenRouter.
+`openloops-ui.exe --probe-saved-model` runs the ADR-007 governed semantic smoke
+suite against whichever provider is saved, including OpenRouter. Its synthetic
+update cases use only opaque loop handles and report content-free counts and
+fixed validation reasons.
 
 References: [zero data retention](https://openrouter.ai/docs/features/zdr),
 [API overview](https://openrouter.ai/docs/api-reference/overview).

@@ -1,6 +1,6 @@
 use crate::claim_view::{
-    Anchor, EventPassed, LoopItem, LoopItems, Owner, SuggestedUpdate, SuggestedUpdateKind,
-    action_phrase, card_action, claim_shape, resolve_owner, uncertainty_text,
+    Anchor, ConversationMessage, EventPassed, LoopItem, LoopItems, Owner, SuggestedUpdate,
+    SuggestedUpdateKind, action_phrase, card_action, claim_shape, resolve_owner, uncertainty_text,
     waiting_party_display,
 };
 use crate::deadline_view::{DeadlineView, EVENT_GENERIC_NOUNS, classify};
@@ -18,10 +18,6 @@ use openloops_inference::{
     analysis::{AcceptedClaim, ClaimAnalysis, ReviewEvidence, analyze_claims, rejection_label},
     blocks::CanonicalBlock,
     canonical::canonicalize_plain,
-    expectations::{
-        ConversationMessage, ResolutionKind as LegacyResolutionKind,
-        expectations as expectations_pass,
-    },
     message::CanonicalMessage,
     ollama::OllamaCloud,
     openrouter::OpenRouter,
@@ -2101,7 +2097,7 @@ fn governed_participant_handles(
 
 /// The [`ParseContext`] one message's temporal hypotheses reparse against:
 /// the same construction `deadline_view::classify` uses, so a governed
-/// deadline ages identically to one the old pipeline produced.
+/// deadline uses the same deterministic aging rules as every review card.
 fn governed_temporal_context(m: &ConversationMessage) -> ParseContext {
     ParseContext {
         message_timestamp: UnixSeconds(m.timestamp),
@@ -2330,8 +2326,7 @@ fn temporal_anchors(
 }
 
 /// Pushes `item` unless an item with the same action (case-insensitively)
-/// and the same evidence message is already present -- the same dedup rule
-/// `expectations::push_unique` applies to the old pipeline's own items.
+/// and the same evidence message is already present.
 fn push_unique_expectation(items: &mut Vec<LoopItem>, item: LoopItem) {
     let is_duplicate = items.iter().any(|existing| {
         existing.action.eq_ignore_ascii_case(&item.action)
@@ -3385,9 +3380,7 @@ fn close_from_stated_time(
         name,
         end,
         message_handle: event_time.message.clone(),
-        // `event_time` is an `Anchor`, which the model can only ground in a
-        // message's `body_blocks` (never its subject -- see
-        // `expectations::anchor`), so this path is always body prose.
+        // Governed `event_time` anchors in this path come from body prose.
         from_subject: false,
     });
     true
@@ -4542,40 +4535,26 @@ const SEMANTIC_CASES: [(&str, bool, bool, bool, usize); 7] = [
     ),
 ];
 // Live semantic probe: a request that asked for the user's agreement or
-// decision, and got it, one message later must still be recognized as
-// closure evidence, with resolution_kind Agreed rather than a plain
-// completion. The reply is a paraphrase of the resolution_kind agreed
-// example quoted in INSTRUCTIONS, not a literal copy, so this exercises
-// genuine semantic recognition rather than an echo of the prompt's own
-// example text.
+// decision, and got it one message later, must produce a governed closure
+// suggestion for the offered loop.
 const AGREEMENT_CASE: (&str, &str) = (
     "Can we move our meeting to a different time?",
     "Yes, happy to push it back an hour.",
 );
-// A correction that leaves the underlying action owed -- only the amount
-// changed -- must NOT resolve the request: it must stay open, with the
-// corrected amount reflected in `action`, citing the original request as
-// evidence.
+// A correction that leaves the underlying action owed must produce a
+// governed modification suggestion rather than a closure.
 const AMENDMENT_CASE: (&str, &str) = (
     "My fee for the call is 359 USD, to be paid any time before our call.",
     "Apologies, the fee for the call is 350, not 359.",
 );
-// A plain completion must still resolve to resolution_kind Completed now
-// that resolution_kind distinguishes several closure kinds.
+// A plain completion must produce a governed closure suggestion.
 const COMPLETED_RESOLUTION_CASE: (&str, &str) = (
     "Please send me the signed engagement letter.",
     "Attached is the signed engagement letter.",
 );
-fn resolution_kind_name(kind: Option<LegacyResolutionKind>) -> &'static str {
-    match kind {
-        None => "none",
-        Some(LegacyResolutionKind::Completed) => "completed",
-        Some(LegacyResolutionKind::Declined) => "declined",
-        Some(LegacyResolutionKind::Withdrawn) => "withdrawn",
-        Some(LegacyResolutionKind::Superseded) => "superseded",
-        Some(LegacyResolutionKind::Agreed) => "agreed",
-    }
-}
+
+const PROBE_LOOP_HANDLE: &str = "probe-loop";
+
 /// Runs the fixed synthetic probe cases one at a time. The probe measures
 /// whether a model understands the cases at all, so it stays sequential:
 /// concurrency would only change how fast a diagnostic finishes.
@@ -4594,7 +4573,7 @@ pub fn probe(provider: Provider, key: String, model: &str) -> Result<usize, Prov
         if from_user {
             set_outgoing(&mut m);
         }
-        let result = expectations_pass(client, &[m], None)?;
+        let result = governed_pass(client, &[m], None)?;
         println!(
             "Semantic case {}: {} accepted, {} rejected, {} degraded; expected {}.",
             passed + 1,
@@ -4610,14 +4589,10 @@ pub fn probe(provider: Provider, key: String, model: &str) -> Result<usize, Prov
             return Err(ProviderError::InvalidAnalysis);
         }
         if expected > 0
-            && result.items.iter().any(|item| {
-                item.owner
-                    != if team {
-                        openloops_inference::expectations::Owner::Team
-                    } else {
-                        openloops_inference::expectations::Owner::You
-                    }
-            })
+            && result
+                .items
+                .iter()
+                .any(|item| item.owner != if team { Owner::Team } else { Owner::You })
         {
             return Err(ProviderError::InvalidAnalysis);
         }
@@ -4625,7 +4600,7 @@ pub fn probe(provider: Provider, key: String, model: &str) -> Result<usize, Prov
             && result.items[0]
                 .deadline
                 .as_ref()
-                .is_none_or(|d| !d.quote.contains("Friday"))
+                .is_none_or(|d| !d.quote.to_ascii_lowercase().contains("friday"))
         {
             return Err(ProviderError::InvalidAnalysis);
         }
@@ -4634,37 +4609,36 @@ pub fn probe(provider: Provider, key: String, model: &str) -> Result<usize, Prov
         }
         passed += 1;
     }
-    let first = synthetic("Please send the draft budget.", 0, "b");
-    let second = synthetic(
-        "I have sent the completed draft budget as requested.",
-        1,
-        "b",
-    );
-    let mut a = prepare(&first, "Synthetic", 0)
-        .map_err(|_| ProviderError::InvalidAnalysis)?
-        .input;
-    a.to_user = true;
-    let mut b = prepare(&second, "Synthetic", 1)
-        .map_err(|_| ProviderError::InvalidAnalysis)?
-        .input;
-    b.from_user = true;
-    set_outgoing(&mut b);
-    let result = expectations_pass(client, &[a.clone(), b], None)?;
-    if result.items.len() != 1 || result.items[0].resolution.is_none() {
+    let completion = governed_probe_update(
+        client,
+        &synthetic("Please send the draft budget.", 0, "b"),
+        &synthetic(
+            "I have sent the completed draft budget as requested.",
+            1,
+            "b",
+        ),
+        true,
+    )?;
+    print_claim_probe(passed + 1, &completion);
+    if !has_governed_update(&completion, ClaimType::PossibleClosure)
+        || !completion.rejected.is_empty()
+    {
         return Err(ProviderError::InvalidAnalysis);
     }
     println!(
-        "Semantic case {}: later completion evidence identified.",
+        "Semantic case {}: suggested closure identified.",
         passed + 1
     );
-    let acknowledgement = synthetic("Thanks, I will take a look at this later.", 1, "b");
-    let mut ack = prepare(&acknowledgement, "Synthetic", 1)
-        .map_err(|_| ProviderError::InvalidAnalysis)?
-        .input;
-    ack.from_user = true;
-    set_outgoing(&mut ack);
-    let result = expectations_pass(client, &[a, ack], None)?;
-    if result.items.len() != 1 || result.items[0].resolution.is_some() {
+    let acknowledgement = governed_probe_update(
+        client,
+        &synthetic("Please send the draft budget.", 0, "b"),
+        &synthetic("Thanks, I will take a look at this later.", 1, "b"),
+        true,
+    )?;
+    print_claim_probe(passed + 2, &acknowledgement);
+    if has_governed_update(&acknowledgement, ClaimType::PossibleClosure)
+        || !acknowledgement.rejected.is_empty()
+    {
         return Err(ProviderError::InvalidAnalysis);
     }
     println!(
@@ -4677,146 +4651,109 @@ pub fn probe(provider: Provider, key: String, model: &str) -> Result<usize, Prov
     Ok(passed + 5)
 }
 
-/// Runs `AGREEMENT_CASE` against `client`: a request that asked for the
-/// user's agreement or decision, and got it, one message later must still
-/// be recognized as closure evidence, with `resolution_kind` Agreed. The
-/// reply may itself read as a new request, so 1 or 2 items are both
-/// acceptable; what matters is that the item anchored on the original
-/// request (`m0`) carries the expected resolution kind. `case_number` is
-/// only for print numbering. Prints counts and the observed kind name (both
-/// fixed strings) only; never returned content.
-fn probe_agreement_case(client: &dyn ModelClient, case_number: usize) -> Result<(), ProviderError> {
-    let (request, reply) = AGREEMENT_CASE;
-    let request_item = synthetic(request, 0, "c");
-    let mut request_message = prepare(&request_item, "Synthetic", 0)
+fn governed_probe_update(
+    client: &dyn ModelClient,
+    request: &MailItem,
+    reply: &MailItem,
+    reply_from_user: bool,
+) -> Result<ClaimAnalysis, ProviderError> {
+    let mut request_message = prepare(request, "Synthetic", 0)
         .map_err(|_| ProviderError::InvalidAnalysis)?
         .input;
     request_message.to_user = true;
-    let reply_item = synthetic(reply, 2, "c");
-    let mut reply_message = prepare(&reply_item, "Synthetic", 1)
+    let mut reply_message = prepare(reply, "Synthetic", 1)
         .map_err(|_| ProviderError::InvalidAnalysis)?
         .input;
-    reply_message.from_user = true;
-    set_outgoing(&mut reply_message);
-    let result = expectations_pass(client, &[request_message, reply_message], None)?;
-    let anchored = result
-        .items
-        .iter()
-        .find(|item| item.evidence.message == "m0");
-    println!(
-        "Semantic case {}: {} accepted, {} rejected, {} degraded.",
-        case_number,
-        result.items.len(),
-        result.rejected,
-        result.degraded
-    );
-    println!(
-        "Semantic case {}: observed resolution kind {}.",
-        case_number,
-        resolution_kind_name(anchored.and_then(|item| item.resolution_kind))
-    );
-    for reason in &result.rejection_reasons {
-        println!("{reason}");
+    reply_message.from_user = reply_from_user;
+    reply_message.to_user = !reply_from_user;
+    if reply_from_user {
+        set_outgoing(&mut reply_message);
     }
-    if !(1..=2).contains(&result.items.len()) || result.rejected != 0 || result.degraded != 0 {
+    governed_call(
+        client,
+        &[request_message, reply_message],
+        &[PROBE_LOOP_HANDLE],
+        None,
+    )
+}
+
+fn print_claim_probe(case_number: usize, result: &ClaimAnalysis) {
+    println!(
+        "Semantic case {}: {} accepted, {} rejected, 0 degraded.",
+        case_number,
+        result.accepted.len(),
+        result.rejected.len()
+    );
+    for reason in &result.rejected {
+        println!("{}", rejection_label(*reason));
+    }
+}
+
+fn has_governed_update(result: &ClaimAnalysis, kind: ClaimType) -> bool {
+    result.accepted.iter().any(|accepted| {
+        accepted.claim.claim_type == kind
+            && accepted
+                .claim
+                .related_loop_handles
+                .iter()
+                .any(|handle| handle == PROBE_LOOP_HANDLE)
+    })
+}
+
+/// Runs `AGREEMENT_CASE` through the governed update path.
+fn probe_agreement_case(client: &dyn ModelClient, case_number: usize) -> Result<(), ProviderError> {
+    let (request, reply) = AGREEMENT_CASE;
+    let result = governed_probe_update(
+        client,
+        &synthetic(request, 0, "c"),
+        &synthetic(reply, 2, "c"),
+        true,
+    )?;
+    print_claim_probe(case_number, &result);
+    if !has_governed_update(&result, ClaimType::PossibleClosure) || !result.rejected.is_empty() {
         return Err(ProviderError::InvalidAnalysis);
     }
-    let Some(item) = anchored else {
-        return Err(ProviderError::InvalidAnalysis);
-    };
-    if item.resolution.is_none()
-        || !matches!(item.resolution_kind, Some(LegacyResolutionKind::Agreed))
+    println!("Semantic case {case_number}: suggested closure identified.");
+    Ok(())
+}
+
+/// Runs `AMENDMENT_CASE` through the governed update path.
+fn probe_amendment_case(client: &dyn ModelClient, case_number: usize) -> Result<(), ProviderError> {
+    let (request, correction) = AMENDMENT_CASE;
+    let result = governed_probe_update(
+        client,
+        &synthetic(request, 0, "e"),
+        &synthetic(correction, 2, "e"),
+        false,
+    )?;
+    print_claim_probe(case_number, &result);
+    if !has_governed_update(&result, ClaimType::Modification)
+        || has_governed_update(&result, ClaimType::PossibleClosure)
+        || !result.rejected.is_empty()
     {
         return Err(ProviderError::InvalidAnalysis);
     }
+    println!("Semantic case {case_number}: suggested modification identified.");
     Ok(())
 }
 
-/// Runs `AMENDMENT_CASE` against `client`: a correction that leaves the
-/// underlying action owed (only the amount changed) must NOT resolve the
-/// request -- it must stay open, with the corrected amount reflected in
-/// `action`, citing the original request as evidence. `case_number` is only
-/// for print numbering. Prints counts only (fixed strings); the corrected
-/// amount is asserted, never printed, since `action` is model-supplied free
-/// text derived from message content.
-fn probe_amendment_case(client: &dyn ModelClient, case_number: usize) -> Result<(), ProviderError> {
-    let (request, correction) = AMENDMENT_CASE;
-    let request_item = synthetic(request, 0, "e");
-    let mut request_message = prepare(&request_item, "Synthetic", 0)
-        .map_err(|_| ProviderError::InvalidAnalysis)?
-        .input;
-    request_message.to_user = true;
-    let correction_item = synthetic(correction, 2, "e");
-    let mut correction_message = prepare(&correction_item, "Synthetic", 1)
-        .map_err(|_| ProviderError::InvalidAnalysis)?
-        .input;
-    correction_message.to_user = true;
-    let result = expectations_pass(client, &[request_message, correction_message], None)?;
-    println!(
-        "Semantic case {}: {} accepted, {} rejected, {} degraded.",
-        case_number,
-        result.items.len(),
-        result.rejected,
-        result.degraded
-    );
-    for reason in &result.rejection_reasons {
-        println!("{reason}");
-    }
-    if result.items.len() != 1 || result.rejected != 0 || result.degraded != 0 {
-        return Err(ProviderError::InvalidAnalysis);
-    }
-    let item = &result.items[0];
-    if item.resolution.is_some() || !item.action.contains("350") {
-        return Err(ProviderError::InvalidAnalysis);
-    }
-    Ok(())
-}
-
-/// Runs `COMPLETED_RESOLUTION_CASE` against `client`: a plain completion
-/// must still resolve to exactly one item with `resolution_kind` Completed.
-/// `case_number` is only for print numbering. Prints counts and the
-/// observed kind name (both fixed strings) only; never returned content.
+/// Runs `COMPLETED_RESOLUTION_CASE` through the governed update path.
 fn probe_completed_resolution_case(
     client: &dyn ModelClient,
     case_number: usize,
 ) -> Result<(), ProviderError> {
     let (request, reply) = COMPLETED_RESOLUTION_CASE;
-    let request_item = synthetic(request, 0, "d");
-    let mut request_message = prepare(&request_item, "Synthetic", 0)
-        .map_err(|_| ProviderError::InvalidAnalysis)?
-        .input;
-    request_message.to_user = true;
-    let reply_item = synthetic(reply, 2, "d");
-    let mut reply_message = prepare(&reply_item, "Synthetic", 1)
-        .map_err(|_| ProviderError::InvalidAnalysis)?
-        .input;
-    reply_message.from_user = true;
-    set_outgoing(&mut reply_message);
-    let result = expectations_pass(client, &[request_message, reply_message], None)?;
-    println!(
-        "Semantic case {}: {} accepted, {} rejected, {} degraded.",
-        case_number,
-        result.items.len(),
-        result.rejected,
-        result.degraded
-    );
-    println!(
-        "Semantic case {}: observed resolution kind {}.",
-        case_number,
-        resolution_kind_name(result.items.first().and_then(|item| item.resolution_kind))
-    );
-    for reason in &result.rejection_reasons {
-        println!("{reason}");
-    }
-    if result.items.len() != 1 || result.rejected != 0 || result.degraded != 0 {
+    let result = governed_probe_update(
+        client,
+        &synthetic(request, 0, "d"),
+        &synthetic(reply, 2, "d"),
+        true,
+    )?;
+    print_claim_probe(case_number, &result);
+    if !has_governed_update(&result, ClaimType::PossibleClosure) || !result.rejected.is_empty() {
         return Err(ProviderError::InvalidAnalysis);
     }
-    if !matches!(
-        result.items[0].resolution_kind,
-        Some(LegacyResolutionKind::Completed)
-    ) {
-        return Err(ProviderError::InvalidAnalysis);
-    }
+    println!("Semantic case {case_number}: suggested closure identified.");
     Ok(())
 }
 
@@ -6422,7 +6359,7 @@ at the downtown courthouse. Let me know if that works.",
             .collect()
     }
 
-    fn no_expectations() -> LoopItems {
+    fn no_loop_items() -> LoopItems {
         LoopItems {
             items: vec![],
             rejected: 0,
@@ -6499,7 +6436,7 @@ at the downtown courthouse. Let me know if that works.",
                 seen.enter();
                 std::thread::sleep(DELAY);
                 seen.leave();
-                Ok(no_expectations())
+                Ok(no_loop_items())
             });
         let elapsed = started.elapsed();
         assert_eq!(result.analyzed, 8);
@@ -6579,7 +6516,7 @@ at the downtown courthouse. Let me know if that works.",
             if positions[&c[0].handle] % 12 == 1 {
                 return Err(ProviderError::RateLimited);
             }
-            Ok(no_expectations())
+            Ok(no_loop_items())
         });
         let calls = calls.into_inner().unwrap();
         assert_eq!(calls.len(), 24);
@@ -6669,7 +6606,7 @@ at the downtown courthouse. Let me know if that works.",
             if positions[&c[0].handle] % 12 == 1 {
                 return Err(ProviderError::CreditsInFlight);
             }
-            Ok(no_expectations())
+            Ok(no_loop_items())
         });
         let calls = calls.into_inner().unwrap();
         assert_eq!(calls.len(), 24, "every conversation is still attempted");
@@ -6890,7 +6827,7 @@ at the downtown courthouse. Let me know if that works.",
             if positions[&c[0].handle] == 1 {
                 return Err(ProviderError::Network);
             }
-            Ok(no_expectations())
+            Ok(no_loop_items())
         });
         assert_eq!(result.analyzed, 1, "only conversation 0 completed");
         assert_eq!(result.unanalyzed_conversations(), 5);
@@ -6967,7 +6904,7 @@ at the downtown courthouse. Let me know if that works.",
             let index = positions[&conversation[0].handle];
             assert_ne!(index, 0, "synthetic provider panic");
             ran.fetch_add(1, Ordering::SeqCst);
-            Ok(no_expectations())
+            Ok(no_loop_items())
         });
         assert_eq!(ran.load(Ordering::SeqCst), 2);
         assert_eq!(progress.snapshot().in_flight, 0);
@@ -6992,7 +6929,7 @@ at the downtown courthouse. Let me know if that works.",
                 .lock()
                 .unwrap()
                 .push((snapshot.in_flight, snapshot.request_started_unix));
-            Ok(no_expectations())
+            Ok(no_loop_items())
         });
         let observed = observed.into_inner().unwrap();
         assert_eq!(observed.len(), 4);
@@ -7775,7 +7712,7 @@ at the downtown courthouse. Let me know if that works.",
     }
 
     #[test]
-    fn close_passed_events_marks_matching_open_expectations() {
+    fn close_passed_events_marks_matching_open_loops() {
         let mut event_mail = synthetic("Calendar invitation.", 1, "event");
         event_mail.subject =
             "Invitation: Design workshop @ Fri Aug 21, 2026 11am - 12pm (UTC)".into();

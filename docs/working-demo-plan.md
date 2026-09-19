@@ -3,10 +3,10 @@
 1. **Mail context:** extend the live Graph boundary to fetch authenticated
    identity, Inbox and Sent Items metadata and bounded history, group thread
    posts, and source-specific coverage. Preserve immutable IDs in memory.
-2. **Expectation extraction:** add a versioned live conversation contract beside
-   the legacy low-level extractor. Supply numbered text blocks and participant
-   handles. Resolve exact quotation anchors and validate ownership and temporal
-   relationships locally. Retain action/owner/waiting party/deadline/closure.
+2. **Governed claim extraction:** use the versioned ADR-007 conversation
+   contract. Supply numbered text blocks, participant handles, and bounded loop
+   handles. Resolve evidence ranges locally and validate ownership, temporal
+   hypotheses, and suggested-update relationships before review.
 3. **Review:** replace fragment cards with action-first results, ownership and
    status, expandable chronological evidence, and explicit user decisions.
    Separate unresolved team ownership and possible completion from active work.
