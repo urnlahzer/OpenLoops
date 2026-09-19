@@ -23,18 +23,18 @@ Failures distinguish timeouts, connection errors, rate limiting, account balance
 HTTP request/server status codes, malformed JSON, and invalid response fields.
 Raw upstream error bodies are not exposed.
 
-The opt-in `ollama-cloud` inference feature also provides `OllamaCloud::analyze`,
-which serializes bounded canonical message projections and sends them for
-analysis. It applies the existing schema/evidence validation before returning
-reviewable hypotheses. This is cloud processing: selected subjects, message
-blocks, participant text, attachment names, and link labels leave the computer.
-No attachment content is sent. The caller must provide only messages within the
-user-authorized scan scope and disclose the external transmission. The native
-[inbox review](inbox-review.md) now calls `expectations` with complete bounded
-conversations, recipient context, and signed-in ownership facts. Its separate
-live contract returns action summaries and exact source quotations resolved
-locally, rather than model-supplied character offsets. Scanning requires no
-manual message selection. Attachments are not sent by this path.
+The opt-in `ollama-cloud` inference feature uses the provider-neutral governed
+analysis path, which serializes bounded canonical message projections and sends
+them for analysis. It applies the ADR-007 schema, evidence, participant,
+temporal, and loop-handle validation before returning reviewable claims. This is
+cloud processing: selected subjects, message blocks, participant text,
+attachment names, and link labels leave the computer. No attachment content is
+sent. The caller must provide only messages within the user-authorized scan
+scope and disclose the external transmission. The native [inbox
+review](inbox-review.md) sends complete bounded conversations, recipient
+context, signed-in ownership facts, and only the opaque open-loop handles that
+the bounded suggested-update pass may reference. Source text and card titles
+are resolved locally. Scanning requires no manual message selection.
 The governed projection removes a quoted-history block only when collapsed
 Unicode whitespace makes it exactly duplicate an earlier message body or a
 quote already emitted; quotes with edits or inline replies remain.
@@ -115,12 +115,10 @@ For developer diagnosis, `openloops-ui.exe --probe-saved-model` runs twelve synt
 conversation cases with the saved model/key: requests, promises, non-actionable
 recaps, third-party promises, team responsibility, independent actions, quoted
 history, completion, acknowledgement, agreed closure, an amended request, and
-completed closure. The last three exercise `resolution_kind` and closure
-semantics: a request that asked for the user's agreement and got it must
-resolve to `Agreed`; a correction that leaves the action owed (only the
-amount changed) must stay open, with `resolution` null and the corrected
-amount reflected in `action`; and a plain completion must still resolve to
-`Completed`. It reads only OpenLoops setup
+completed closure. Every case uses the ADR-007 governed call used by scanning.
+The update cases offer one opaque synthetic loop handle and require the
+appropriate review-only closure or modification claim; acknowledgement must not
+produce a closure. It reads only OpenLoops setup
 credentials, never Microsoft mail, and reports fixed case/count/validation
 diagnostics. It does not start the GUI or persist provider output. This is a
 semantic smoke suite, not a held-out estimate of production accuracy.

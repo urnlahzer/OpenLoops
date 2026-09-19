@@ -1,24 +1,19 @@
 #![forbid(unsafe_code)]
 
-//! `openloops-inference`: the ADR-006 byte-deterministic content
-//! canonicalizer.
+//! `openloops-inference`: byte-deterministic canonicalization and the
+//! ADR-007 governed claim-analysis path.
 //!
 //! This crate turns a Graph-shaped message body (HTML or plain text) into
 //! the transient canonical block representation whose byte behavior the
 //! ADR-006 evidence anchors depend on, and the bounded
-//! [`message::CanonicalMessage`] projection a (still-disabled) model
-//! provider payload would use. Every function here is pure: no I/O, no
-//! clock, no network, no global state, and every error is typed and
-//! content-free (see [`error`]).
+//! [`message::CanonicalMessage`] projection the governed model path uses.
+//! Canonicalization and validation are pure; feature-gated providers perform
+//! explicitly requested network calls. Errors remain typed and content-free
+//! (see [`error`]).
 //!
-//! [`is_available`] answers a narrower, separate question: whether Phase 0
-//! has an active model-provider/content-analysis path. It does not, so it
-//! still returns `false` — `contracts/model/provider-boundary.json`
-//! `default_provider` is `"disabled"` and every profile is
-//! `disabled_pending_gates`/`optional_disabled_pending_adapter_gates`. The
-//! canonicalizer in this crate has no such gate: it is a deterministic
-//! transform with no provider, network, or persistence dependency, so it
-//! is implemented ahead of the (still-inactive) provider path it feeds.
+//! [`is_available`] answers the narrower compile-time question retained by
+//! the core crate; provider availability is selected and reported by the
+//! desktop application.
 
 pub mod blocks;
 pub mod canonical;
@@ -32,9 +27,6 @@ pub mod walker;
 pub mod provider;
 
 #[cfg(any(feature = "ollama-cloud", feature = "openrouter"))]
-pub mod expectations;
-
-#[cfg(any(feature = "ollama-cloud", feature = "openrouter"))]
 pub mod analysis;
 
 #[cfg(feature = "ollama-cloud")]
@@ -43,7 +35,7 @@ pub mod ollama;
 #[cfg(feature = "openrouter")]
 pub mod openrouter;
 
-/// Phase 0 supplies no model provider or content-analysis path.
+/// The core crate does not choose or activate a model provider by itself.
 #[must_use]
 pub const fn is_available() -> bool {
     false

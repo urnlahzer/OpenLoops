@@ -1,7 +1,18 @@
 //! Desktop-owned projection of governed claims into review cards.
 
 use openloops_contracts::{AmbiguityCode, ClaimType, Nullable};
-use openloops_inference::{blocks::CanonicalBlock, expectations::ConversationMessage};
+use openloops_inference::{blocks::CanonicalBlock, message::CanonicalMessage};
+
+/// One chronologically ordered message supplied to governed analysis.
+#[derive(Clone)]
+pub struct ConversationMessage {
+    pub handle: String,
+    pub message: CanonicalMessage,
+    pub timestamp: i64,
+    pub from_user: bool,
+    pub to_user: bool,
+    pub team: bool,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Owner {

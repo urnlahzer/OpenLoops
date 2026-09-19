@@ -1,4 +1,4 @@
-# Live expectation review
+# Live loop review
 
 ## Screen layout
 
@@ -58,8 +58,7 @@ in the normal application.
    deadline for the current session; rejecting clears the suggestion for the
    current session and is not remembered across rescans. A modification can
    only be dismissed. No suggestion is applied without your confirmation.
-   Expectations tied
-   to a passed event also close automatically; event times come from Graph
+   Loops tied to a passed event also close automatically; event times come from Graph
    meeting messages, calendar-invite subject lines, or a date or time stated
    in an email body. Requests in a meeting-metadata or subject event message,
    and event-worded requests elsewhere in a conversation containing exactly
@@ -146,10 +145,11 @@ The model sees canonical message bodies, subjects, quoted history, participants,
 timestamps and ownership facts. It never receives a token or raw Graph IDs.
 Attachments are not sent. HTML scripts and remote images are never executed.
 Outgoing user promises, incoming requests, and unassigned team work differ.
-The model supplies whole evidence quotations plus an exact atomic action phrase;
-the app resolves them against source blocks. It does not ask for character counts.
-Original evidence cannot come from quoted history. Participant references must
-exist, and possible resolution must be later than the original expectation.
+The model supplies governed claims with whole-block evidence ranges; the app
+resolves the cited source text locally and derives card titles and stable action
+phrases from it. Original evidence cannot come from quoted history. Participant
+and loop references must exist, temporal values must pass the deterministic
+parser, and suggested updates remain review-only.
 
 Structural evidence checks do not prove semantic correctness. Suggestions need
 review. Missing replies in these configured folders/window never prove that
@@ -180,9 +180,10 @@ containing a random HMAC key, up to 50 keyed per-account source/action
 fingerprints, decision enums, reminder-attempt enums, and timestamps. No names,
 mail addresses, subjects, descriptions, source quotations, or Graph identifiers
 are in that record. Descriptions are reconstructed after the next scan.
-Different model summaries of the same exact source action phrase match the same
-decision. Different action phrases remain independent. Semantic reassociation
-when the model selects a different source phrase is a later roadmap item.
+Different model wording over the same normalized source evidence matches the
+same decision. Distinct source evidence remains independent. Semantic
+reassociation when the model selects a different source range is a later
+roadmap item.
 
 An attempt is saved before a task write. A missing/uncertain response blocks
 another attempt until the user inspects To Do and explicitly reconciles it.

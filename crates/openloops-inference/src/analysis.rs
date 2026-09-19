@@ -1,10 +1,6 @@
 //! Provider-neutral ADR-007 governed analysis path, over any consented
-//! provider through the [`ModelClient`] trait -- the same shape
-//! [`crate::expectations`] uses for the live app's transient expectations
-//! path. Phase 0 wires no provider to the desktop app; this module only
-//! makes the already-built-and-tested `analysis-output-v1` pipeline
-//! provider-neutral so `OllamaCloud` and `OpenRouter` drive it through one
-//! implementation, with byte-identical requests to today's.
+//! provider through the [`ModelClient`] trait. `OllamaCloud` and
+//! `OpenRouter` drive the same `analysis-output-v1` implementation.
 //!
 //! Calling [`analyze`] or [`analyze_for_review`] explicitly opts into
 //! transmitting [`projection`]'s framed payload to the selected provider.
@@ -26,12 +22,8 @@ use crate::validation::{
 
 const SCHEMA: &str = include_str!("../../../contracts/model/analysis-output.schema.json");
 
-/// The conversation-length cap [`projection`] enforces: the old
-/// `expectations` pipeline's own cap (`expectations::projection` allows up
-/// to 40 messages), carried over here so a real multi-message thread that
-/// pipeline already handled does not regress under the governed one. The
-/// byte bound ([`crate::provider::MAX_REQUEST`]) is unaffected and still
-/// applies independently.
+/// The conversation-length cap [`projection`] enforces. The byte bound
+/// ([`crate::provider::MAX_REQUEST`]) applies independently.
 const MAX_CONVERSATION_MESSAGES: usize = 40;
 
 /// A review card contains only locally resolved source evidence, never invented model prose.
@@ -808,7 +800,7 @@ mod tests {
         );
 
         // The model-normalized datetime form the prompt asks for reparses;
-        // the prose the old pipeline used to pass through does not.
+        // unconstrained prose does not.
         let mut datetime = request.clone();
         datetime["temporal"] =
             json!({"text_evidence_index":0,"kind":"local_datetime","value":"2026-09-01T21:00"});
