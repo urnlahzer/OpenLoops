@@ -7,14 +7,15 @@ use crate::{
     loop_state::{Decision, Reminder, marker},
     review_model::{
         CardContext, Filter, ListGroup, ReminderDraft, ReviewState, SHOW_HANDLED_LABEL, ScanStrip,
-        card_hidden, card_order, decision_after_setting_reminder, default_reminder,
-        expectations_summary, list_group, open_badge_count, reminder_button_enabled, reminder_time,
-        resolution_anchor_label, status_base_label, status_label, status_shows_cross_thread,
+        SuggestionOutcome, card_hidden, card_order, decision_after_setting_reminder,
+        default_reminder, expectations_summary, list_group, open_badge_count,
+        reminder_button_enabled, reminder_time, resolution_anchor_label, status_base_label,
+        status_label, status_shows_cross_thread,
     },
     slint_ui::{
         AppWindow, CompletionCard, ConversationRow, EvidenceCard, MetaCell, ReminderStateView,
-        ReviewPill, ReviewRow, ScanStripModel, refresh, start_timer, sync_list_cached,
-        sync_value_cached,
+        ReviewPill, ReviewRow, ScanStripModel, SuggestedUpdateCard, refresh, start_timer,
+        sync_list_cached, sync_value_cached,
     },
 };
 use openloops_graph::live::{
@@ -23,7 +24,10 @@ use openloops_graph::live::{
 };
 use openloops_inference::{
     blocks::CanonicalBlock,
-    expectations::{Anchor, EventPassed, Expectation, Owner, ResolutionKind},
+    expectations::{
+        Anchor, EventPassed, Expectation, Owner, ResolutionKind, SuggestedUpdate,
+        SuggestedUpdateKind,
+    },
 };
 use slint::{ComponentHandle, Timer};
 
@@ -351,6 +355,70 @@ fn completion_card(
     }
 }
 
+/// Longest evidence text shown in the suggested-update block, in characters.
+const SUGGESTED_EVIDENCE_MAX_CHARS: usize = 240;
+
+/// Projection of a pending suggested update. `state` is empty when the item
+/// has none.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+struct SuggestedView {
+    state: &'static str,
+    label: &'static str,
+    evidence: String,
+    deadline: String,
+    sender: String,
+    time: String,
+    url: String,
+    can_accept: bool,
+    reject_label: &'static str,
+}
+
+fn suggested_kind_label(kind: SuggestedUpdateKind) -> &'static str {
+    match kind {
+        SuggestedUpdateKind::Closure => "Looks handled",
+        SuggestedUpdateKind::DeadlineChange => "Deadline may have changed",
+        SuggestedUpdateKind::Modification => "May have been modified",
+    }
+}
+
+fn truncated_evidence(text: &str) -> String {
+    if text.chars().count() <= SUGGESTED_EVIDENCE_MAX_CHARS {
+        text.to_owned()
+    } else {
+        let head: String = text.chars().take(SUGGESTED_EVIDENCE_MAX_CHARS).collect();
+        format!("{}…", head.trim_end())
+    }
+}
+
+fn suggested_view(review: &ReviewState, update: Option<&SuggestedUpdate>) -> SuggestedView {
+    let Some(update) = update else {
+        return SuggestedView::default();
+    };
+    let message = review
+        .messages
+        .iter()
+        .find(|message| message.input.handle == update.source_message);
+    let (state, can_accept, reject_label) = match update.kind {
+        SuggestedUpdateKind::Closure => ("closure", true, "Reject"),
+        SuggestedUpdateKind::DeadlineChange => ("deadline_change", true, "Reject"),
+        SuggestedUpdateKind::Modification => ("modification", false, "Dismiss"),
+    };
+    SuggestedView {
+        state,
+        label: suggested_kind_label(update.kind),
+        evidence: truncated_evidence(&update.evidence_text),
+        deadline: review
+            .suggested_deadline_view(update)
+            .map(|view| deadline_label(&view))
+            .unwrap_or_default(),
+        sender: message.map_or_else(String::new, sender_label),
+        time: message.map_or_else(String::new, |message| message.date_label.clone()),
+        url: message.map_or_else(String::new, |message| gated_outlook_url(&message.web_link)),
+        can_accept,
+        reject_label,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ConversationRowView {
     initials: String,
@@ -420,6 +488,7 @@ struct ProjectionCache {
     meta: Vec<MetaCell>,
     evidence: Vec<EvidenceCard>,
     completion: Option<CompletionCard>,
+    suggested: Option<SuggestedUpdateCard>,
     conversation: Vec<ConversationRow>,
 }
 
@@ -482,6 +551,7 @@ struct SelectedView {
     reminder: ReminderView,
     evidence: Vec<EvidenceView>,
     completion: CompletionView,
+    suggested: SuggestedView,
     conversation_title: String,
     conversation: Vec<ConversationRowView>,
 }
@@ -598,6 +668,13 @@ fn pills_for(item: &Expectation, card: &CardContext) -> Vec<PillView> {
                 "brand"
             },
             hint: String::new(),
+        });
+    }
+    if item.suggested_update.is_some() {
+        pills.push(PillView {
+            text: "Suggested update".into(),
+            kind: "warning",
+            hint: "A later message may change this loop. Review the suggestion below.".into(),
         });
     }
     match &card.record.reminder {
@@ -792,7 +869,11 @@ fn review_rows(
                     item.waiting_party,
                     source_short(&source.source)
                 ),
-                aging_status: format!("{aging} · {status}"),
+                aging_status: if item.suggested_update.is_some() {
+                    format!("{aging} · {status} · Suggested update")
+                } else {
+                    format!("{aging} · {status}")
+                },
                 date: source.date_label.clone(),
             })
         })
@@ -853,6 +934,7 @@ fn selected_view(
         reminder: reminder_state_view(&card.record),
         evidence: evidence_cards(item, &review.messages),
         completion: completion_card(item, &review.messages),
+        suggested: suggested_view(review, item.suggested_update.as_ref()),
         conversation_title: format!(
             "Full scanned conversation · {} · {} messages",
             source.input.message.subject.as_string(),
@@ -1237,6 +1319,20 @@ fn sync_review_inner(
         sync_value_cached(&mut review_ui.cache.completion, completion, |c| {
             window.set_completion_card(c);
         });
+        let suggested = SuggestedUpdateCard {
+            state: selected.suggested.state.into(),
+            label: selected.suggested.label.into(),
+            evidence: selected.suggested.evidence.into(),
+            deadline: selected.suggested.deadline.into(),
+            sender: selected.suggested.sender.into(),
+            time: selected.suggested.time.into(),
+            url: selected.suggested.url.into(),
+            can_accept: selected.suggested.can_accept,
+            reject_label: selected.suggested.reject_label.into(),
+        };
+        sync_value_cached(&mut review_ui.cache.suggested, suggested, |c| {
+            window.set_suggested_update(c);
+        });
         window.set_conversation_title(selected.conversation_title.into());
         let conversation = selected
             .conversation
@@ -1282,6 +1378,13 @@ fn sync_review_inner(
             CompletionCard::default(),
             |c| {
                 window.set_completion_card(c);
+            },
+        );
+        sync_value_cached(
+            &mut review_ui.cache.suggested,
+            SuggestedUpdateCard::default(),
+            |c| {
+                window.set_suggested_update(c);
             },
         );
         window.set_conversation_title("".into());
@@ -1382,6 +1485,121 @@ fn dispatch_pending_reminder(model: &mut AppModel) -> bool {
             false
         }
     }
+}
+
+/// Applies decision `value` to the card identified by `selected`, including
+/// the linked To Do completion when the decision is Handled. Shared by the
+/// decision buttons and by accepting a suggested closure, so both take the
+/// same path.
+fn decide_selected(model: &mut AppModel, selected: Option<[u8; 32]>, value: i32) {
+    let Some(analysis) = &model.review.analysis else {
+        return;
+    };
+    let cards = model.review.card_contexts(&analysis.items);
+    let Some(index) = selected.and_then(|selected| {
+        cards.iter().position(|card| {
+            card.as_ref()
+                .is_some_and(|card| card.record.key == selected)
+        })
+    }) else {
+        return;
+    };
+    let Some(item) = analysis.items.get(index) else {
+        return;
+    };
+    let Some(source) = source_message(&model.review, item) else {
+        return;
+    };
+    let account = source.account.clone();
+    let key = model.review.decisions.fingerprint(
+        &source.account,
+        &source.id,
+        item.evidence.block,
+        &item.evidence.quote,
+        &item.action_phrase,
+    );
+    let reminder = model.review.decisions.get(&key).reminder;
+    let decision = decision_from_code(value);
+    // Marking a card Handled also completes its linked Microsoft To
+    // Do task, if it has a real one -- never for Dismissed/Moot, and
+    // never for a reconcile-confirmed reminder with no known task id
+    // (see `apply_reconcile`). Captured before `apply_decision_change`
+    // moves `reminder` in; the completion call itself never reverts
+    // the decision or the reminder record on failure (see
+    // `reminders::complete()`), so it only ever affects the status
+    // line, dispatched after the decision is already saved.
+    let complete_task = if decision == Decision::Done {
+        match &reminder {
+            Reminder::Created { list_id, task_id }
+                if !list_id.is_empty() && !task_id.is_empty() =>
+            {
+                Some((list_id.clone(), task_id.clone()))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    model.review.apply_decision_change(key, decision, reminder);
+    if let Some((list_id, task_id)) = complete_task
+        && let Ok(config) = ConnectionConfig::new(model.client_id.trim(), None)
+    {
+        model.start(
+            Service::Review,
+            "Marking the linked Microsoft To Do task complete",
+            move || {
+                Outcome::ReminderCompletion(
+                    key,
+                    openloops_graph::live::reminders::complete(
+                        &config, &account, &list_id, &task_id,
+                    ),
+                )
+            },
+            || {},
+        );
+    }
+}
+
+/// Accepts or rejects the pending suggested update on the selected card.
+///
+/// Accepting a closure takes the ordinary Handled path
+/// ([`decide_selected`] with `DECISION_DONE`), including the To Do
+/// completion hook. Everything else stays in memory for this session: no
+/// decision is stored, and a rejection is not remembered across rescans.
+/// Status text carries no message content.
+fn resolve_selected_suggestion(
+    model: &mut AppModel,
+    selected: Option<[u8; 32]>,
+    accept: bool,
+) -> SuggestionOutcome {
+    let Some(analysis) = &model.review.analysis else {
+        return SuggestionOutcome::Ignored;
+    };
+    let cards = model.review.card_contexts(&analysis.items);
+    let Some(index) = selected.and_then(|selected| {
+        cards.iter().position(|card| {
+            card.as_ref()
+                .is_some_and(|card| card.record.key == selected)
+        })
+    }) else {
+        return SuggestionOutcome::Ignored;
+    };
+    let outcome = model.review.resolve_suggested_update(index, accept);
+    let status = match outcome {
+        SuggestionOutcome::Cleared => Some("Suggested update dismissed for this session."),
+        SuggestionOutcome::DeadlineApplied => {
+            Some("Deadline updated for this session. Saved decisions are unchanged.")
+        }
+        SuggestionOutcome::MarkHandled | SuggestionOutcome::Ignored => None,
+    };
+    if let Some(status) = status {
+        model.review.action_status = status.into();
+        model.review.action_status_succeeded = true;
+    }
+    if outcome == SuggestionOutcome::MarkHandled {
+        decide_selected(model, selected, DECISION_DONE);
+    }
+    outcome
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1698,76 +1916,16 @@ pub(crate) fn register_callbacks(
         let weak = window.as_weak();
         window.on_review_decision(move |value| {
             let selected = REVIEW_UI.with(|state| state.borrow().selected);
-            let mut model_ref = model.borrow_mut();
-            let Some(analysis) = &model_ref.review.analysis else {
-                return;
-            };
-            let cards = model_ref.review.card_contexts(&analysis.items);
-            let Some(index) = selected.and_then(|selected| {
-                cards.iter().position(|card| {
-                    card.as_ref()
-                        .is_some_and(|card| card.record.key == selected)
-                })
-            }) else {
-                return;
-            };
-            let Some(item) = analysis.items.get(index) else {
-                return;
-            };
-            let Some(source) = source_message(&model_ref.review, item) else {
-                return;
-            };
-            let account = source.account.clone();
-            let key = model_ref.review.decisions.fingerprint(
-                &source.account,
-                &source.id,
-                item.evidence.block,
-                &item.evidence.quote,
-                &item.action_phrase,
-            );
-            let reminder = model_ref.review.decisions.get(&key).reminder;
-            let decision = decision_from_code(value);
-            // Marking a card Handled also completes its linked Microsoft To
-            // Do task, if it has a real one -- never for Dismissed/Moot, and
-            // never for a reconcile-confirmed reminder with no known task id
-            // (see `apply_reconcile`). Captured before `apply_decision_change`
-            // moves `reminder` in; the completion call itself never reverts
-            // the decision or the reminder record on failure (see
-            // `reminders::complete()`), so it only ever affects the status
-            // line, dispatched after the decision is already saved.
-            let complete_task = if decision == Decision::Done {
-                match &reminder {
-                    Reminder::Created { list_id, task_id }
-                        if !list_id.is_empty() && !task_id.is_empty() =>
-                    {
-                        Some((list_id.clone(), task_id.clone()))
-                    }
-                    _ => None,
-                }
-            } else {
-                None
-            };
-            model_ref
-                .review
-                .apply_decision_change(key, decision, reminder);
-            if let Some((list_id, task_id)) = complete_task
-                && let Ok(config) = ConnectionConfig::new(model_ref.client_id.trim(), None)
-            {
-                model_ref.start(
-                    Service::Review,
-                    "Marking the linked Microsoft To Do task complete",
-                    move || {
-                        Outcome::ReminderCompletion(
-                            key,
-                            openloops_graph::live::reminders::complete(
-                                &config, &account, &list_id, &task_id,
-                            ),
-                        )
-                    },
-                    || {},
-                );
-            }
-            drop(model_ref);
+            decide_selected(&mut model.borrow_mut(), selected, value);
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_suggested_update_resolved(move |accept| {
+            let selected = REVIEW_UI.with(|state| state.borrow().selected);
+            resolve_selected_suggestion(&mut model.borrow_mut(), selected, accept);
             refresh(&model, &weak);
         });
     }
@@ -3222,5 +3380,158 @@ mod tests {
             review.decisions.get(&key).reminder,
             Reminder::Created { .. }
         ));
+    }
+
+    fn suggestion(kind: SuggestedUpdateKind, temporal: Option<&str>) -> SuggestedUpdate {
+        SuggestedUpdate {
+            kind,
+            evidence_text: "Synthetic later message text.".into(),
+            source_message: "m2".into(),
+            source_block: 0,
+            temporal_value: temporal.map(str::to_owned),
+            confidence_micros: 900_000,
+        }
+    }
+
+    /// A model whose third fixture card (index 2, no resolution) carries
+    /// `update`, plus that card's decision key.
+    fn model_with_suggestion(update: SuggestedUpdate) -> (AppModel, [u8; 32]) {
+        let mut app = model();
+        app.review = crate::review_model::layout_fixture();
+        app.review.analysis.as_mut().unwrap().items[2].suggested_update = Some(update);
+        let cards = app
+            .review
+            .card_contexts(&app.review.analysis.as_ref().unwrap().items);
+        let key = cards[2].as_ref().unwrap().record.key;
+        (app, key)
+    }
+
+    fn card_at(app: &AppModel, index: usize) -> CardContext {
+        app.review
+            .card_contexts(&app.review.analysis.as_ref().unwrap().items)[index]
+            .clone()
+            .unwrap()
+    }
+
+    #[test]
+    fn accepting_a_closure_takes_the_handled_path() {
+        let (mut app, key) = model_with_suggestion(suggestion(SuggestedUpdateKind::Closure, None));
+        assert_ne!(card_at(&app, 2).record.decision, Decision::Done);
+        let outcome = resolve_selected_suggestion(&mut app, Some(key), true);
+        assert_eq!(outcome, SuggestionOutcome::MarkHandled);
+        let card = card_at(&app, 2);
+        assert_eq!(card.record.decision, Decision::Done);
+        assert!(card.closed);
+        assert!(
+            app.review.analysis.as_ref().unwrap().items[2]
+                .suggested_update
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn accepting_a_deadline_change_reclassifies_without_saving() {
+        let (mut app, key) = model_with_suggestion(suggestion(
+            SuggestedUpdateKind::DeadlineChange,
+            Some("2099-01-15"),
+        ));
+        let before = card_at(&app, 2);
+        let outcome = resolve_selected_suggestion(&mut app, Some(key), true);
+        assert_eq!(outcome, SuggestionOutcome::DeadlineApplied);
+        let item = &app.review.analysis.as_ref().unwrap().items[2];
+        assert!(item.suggested_update.is_none());
+        assert_eq!(item.deadline.as_ref().unwrap().quote, "2099-01-15");
+        let after = card_at(&app, 2);
+        assert!(matches!(
+            after.deadline,
+            Some(DeadlineView::DueDate { past: false, .. })
+        ));
+        assert_ne!(before.deadline, after.deadline);
+        // The decision record and key are untouched.
+        assert_eq!(after.record.key, key);
+        assert_eq!(after.record.decision, before.record.decision);
+    }
+
+    #[test]
+    fn rejecting_clears_the_suggestion_and_changes_nothing_else() {
+        let (mut app, key) = model_with_suggestion(suggestion(
+            SuggestedUpdateKind::DeadlineChange,
+            Some("2099-01-15"),
+        ));
+        let before = card_at(&app, 2);
+        let outcome = resolve_selected_suggestion(&mut app, Some(key), false);
+        assert_eq!(outcome, SuggestionOutcome::Cleared);
+        let item = &app.review.analysis.as_ref().unwrap().items[2];
+        assert!(item.suggested_update.is_none());
+        assert_eq!(card_at(&app, 2).deadline, before.deadline);
+        assert_eq!(card_at(&app, 2).record.decision, before.record.decision);
+        assert!(!app.review.action_status.is_empty());
+        // Nothing left to resolve.
+        assert_eq!(
+            resolve_selected_suggestion(&mut app, Some(key), false),
+            SuggestionOutcome::Ignored
+        );
+    }
+
+    #[test]
+    fn a_modification_offers_dismiss_only() {
+        let (mut app, key) =
+            model_with_suggestion(suggestion(SuggestedUpdateKind::Modification, None));
+        let view = suggested_view(
+            &app.review,
+            app.review.analysis.as_ref().unwrap().items[2]
+                .suggested_update
+                .as_ref(),
+        );
+        assert!(!view.can_accept);
+        assert_eq!(view.reject_label, "Dismiss");
+        assert_eq!(view.label, "May have been modified");
+        assert_eq!(
+            resolve_selected_suggestion(&mut app, Some(key), true),
+            SuggestionOutcome::Ignored
+        );
+        assert!(
+            app.review.analysis.as_ref().unwrap().items[2]
+                .suggested_update
+                .is_some()
+        );
+        assert_eq!(
+            resolve_selected_suggestion(&mut app, Some(key), false),
+            SuggestionOutcome::Cleared
+        );
+    }
+
+    #[test]
+    fn card_model_exposes_suggested_update_fields_and_flags() {
+        let (app, key) = model_with_suggestion(suggestion(
+            SuggestedUpdateKind::DeadlineChange,
+            Some("2099-01-15"),
+        ));
+        let cards = app
+            .review
+            .card_contexts(&app.review.analysis.as_ref().unwrap().items);
+        let selected = selected_view(&app.review, Some(key), &cards).unwrap();
+        let view = &selected.suggested;
+        assert_eq!(view.state, "deadline_change");
+        assert_eq!(view.label, "Deadline may have changed");
+        assert_eq!(view.evidence, "Synthetic later message text.");
+        assert!(view.deadline.starts_with("Due by end of"));
+        assert!(view.can_accept);
+        assert_eq!(view.reject_label, "Reject");
+        assert!(view.url.starts_with("https://outlook.office.com/"));
+        assert!(!view.sender.is_empty());
+        assert!(
+            selected
+                .pills
+                .iter()
+                .any(|pill| pill.text == "Suggested update")
+        );
+        let rows = review_rows(&app.review, Filter::All, false, "", None, &cards);
+        assert!(
+            rows.iter()
+                .any(|row| row.handle == 2 && row.aging_status.ends_with("Suggested update"))
+        );
+        assert_eq!(suggested_view(&app.review, None), SuggestedView::default());
+        assert_eq!(truncated_evidence(&"x".repeat(300)).chars().count(), 241);
     }
 }

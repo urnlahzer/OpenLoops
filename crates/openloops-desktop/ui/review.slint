@@ -20,6 +20,7 @@ export struct MetaCell { label: string, value: string }
 export struct ReviewPill { text: string, kind: string, hint: string }
 export struct EvidenceCard { label: string, sender: string, time: string, quote: string, context: string, subject-note: string, url: string }
 export struct CompletionCard { state: string, label: string, sender: string, time: string, quote: string, cross-thread: bool, url: string }
+export struct SuggestedUpdateCard { state: string, label: string, evidence: string, deadline: string, sender: string, time: string, url: string, can-accept: bool, reject-label: string }
 export struct ConversationRow { initials: string, sender: string, meta: string, body: string, sent: bool, quoted-history: string }
 export struct ReminderStateView { state: string, text: string, marker: string }
 export struct ScanStripModel {
@@ -108,6 +109,7 @@ export component ReviewScreen {
     in property <string> todo-url;
     in property <[EvidenceCard]> evidence-cards;
     in property <CompletionCard> completion-card;
+    in property <SuggestedUpdateCard> suggested-update;
     in property <string> conversation-title;
     in property <[ConversationRow]> conversation-rows;
     // Set once at startup by the `--preview-review` screenshot fixture only;
@@ -132,6 +134,7 @@ export component ReviewScreen {
     callback move-selection(int);
     callback list-primary-action;
     callback decision(int);
+    callback suggested-update-resolved(bool);
     callback open-reminder;
     callback draft-title-edited(string);
     callback draft-when-edited(string);
@@ -353,6 +356,18 @@ export component ReviewScreen {
                                         uncertainty-layout := VerticalLayout { padding-left: Tokens.space-3; padding-right: Tokens.space-3; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-1; alignment: start;
                                             Text { text: "Uncertainty:"; color: Tokens.warning; font-size: Tokens.font-13; font-weight: 600; }
                                             WrappedText { text: root.uncertainty; text-color: Tokens.warning; }
+                                        }
+                                    }
+                                    // A model-proposed change to this loop. Nothing changes until
+                                    // the person accepts; Modification offers no accept.
+                                    if root.suggested-update.state != "": Callout { kind: "warning"; text: "Suggested update: " + root.suggested-update.label;
+                                        WrappedText { text: "“" + root.suggested-update.evidence + "”"; text-color: Tokens.text-1; size: Tokens.font-14; }
+                                        if !root.suggested-update.deadline.is-empty: WrappedText { text: "New deadline: " + root.suggested-update.deadline; text-color: Tokens.text-1; size: Tokens.font-13; weight: 600; }
+                                        WrappedText { text: root.suggested-update.sender + " · " + root.suggested-update.time; text-color: Tokens.text-2; size: Tokens.font-13; }
+                                        HorizontalLayout { spacing: Tokens.space-2; alignment: start;
+                                            if root.suggested-update.can-accept: PrimaryButton { text: "Accept"; enabled: !root.busy; clicked => { root.suggested-update-resolved(true); } }
+                                            SecondaryButton { text: root.suggested-update.reject-label; enabled: !root.busy; clicked => { root.suggested-update-resolved(false); } }
+                                            if !root.suggested-update.url.is-empty: LinkButton { text: "Open message in Outlook"; enabled: !root.busy; clicked => { root.open-external(root.suggested-update.url); } }
                                         }
                                     }
                                     VerticalLayout { width: 100%; spacing: Tokens.space-2; alignment: start;

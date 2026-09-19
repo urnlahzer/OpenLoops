@@ -43,11 +43,14 @@ in the normal application.
    due, a date range, tied to an event, or soft urgency); past-due open items
    sort first. Expand evidence to inspect original quotations and later
    replies. Resolved requests are closed and hidden by default; the show
-   toggle reveals them with the closing evidence. Every open request is
-   rechecked against later replies you sent in the same thread before any
-   cross-thread search. Closing evidence can also
-   come from a reply you sent the same person in a different conversation;
-   the card marks these "evidence in another conversation." Expectations tied
+   toggle reveals them with the closing evidence. Later messages that look
+   like they close an open request, change its deadline, or modify it appear
+   on the card as a **Suggested update** with Accept and Reject. Accepting a
+   closure takes the Handled path; accepting a deadline change replaces the
+   deadline for the current session; rejecting clears the suggestion for the
+   current session and is not remembered across rescans. A modification can
+   only be dismissed. No suggestion is applied without your confirmation.
+   Expectations tied
    to a passed event also close automatically; event times come from Graph
    meeting messages, calendar-invite subject lines, or a date or time stated
    in an email body. Requests in a meeting-metadata or subject event message,
@@ -153,11 +156,14 @@ affected conversation. Other conversation failures remain visible while the
 scan continues. There are no automatic request retries or silent model
 substitutions.
 
-After the per-conversation pass, a bounded closure pass checks each remaining
-open request against up to 8 newest later same-thread replies before checking
-still-open requests against later messages to the same person from other
-conversations; across both stages it makes at most 40 model calls per scan,
-and only the second stage shares conversations in one model request.
+After the per-conversation pass, a bounded closure pass makes one governed
+model call per conversation that can reach open requests: a later message you
+sent in the same thread, or a later message you sent to the waiting party in
+another conversation. Each call offers up to 8 open requests as opaque handles
+and accepts only closure, deadline-change and modification claims that name an
+offered handle; every accepted claim becomes a pending suggested update. A scan
+makes at most 40 such calls. Requests found earlier in the same scan are the
+only ones offered, because no mail text is stored between scans.
 
 ## Saved decisions and reminders
 
