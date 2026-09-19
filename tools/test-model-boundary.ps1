@@ -188,10 +188,10 @@ JsonCase 'source claim reordered' 'P0-MODEL-SOURCES-001' 'contracts/model/provid
 JsonCase 'cloud limitation claim weakened' 'P0-MODEL-SOURCES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.source_claims | Where-Object source -eq 'SRC-OLLAMA-STRUCTURED').claim = 'cloud enforces structured outputs' }
 JsonCase 'cloud disable claim removed' 'P0-MODEL-SOURCES-001' 'contracts/model/provider-boundary.json' { param($c) $c.source_claims = @($c.source_claims | Where-Object source -ne 'SRC-OLLAMA-FAQ') }
 
-JsonCase 'provider transport enabled' 'P0-MODEL-CLAIMS-001' 'contracts/model/provider-boundary.json' { param($c) $c.runtime_boundary.provider_transport = $true }
-JsonCase 'profile configured' 'P0-MODEL-CLAIMS-001' 'contracts/model/provider-boundary.json' { param($c) $c.runtime_boundary.configured_profiles = @('ollama_local') }
-JsonCase 'origin configured' 'P0-MODEL-CLAIMS-001' 'contracts/model/provider-boundary.json' { param($c) $c.runtime_boundary.network_origins = @('https://synthetic.invalid') }
-JsonCase 'credential accepted' 'P0-MODEL-CLAIMS-001' 'contracts/model/provider-boundary.json' { param($c) $c.runtime_boundary.credentials_accepted = $true }
+JsonCase 'provider transport disabled' 'P0-MODEL-CLAIMS-001' 'contracts/model/provider-boundary.json' { param($c) $c.runtime_boundary.provider_transport = $false }
+JsonCase 'profiles emptied' 'P0-MODEL-CLAIMS-001' 'contracts/model/provider-boundary.json' { param($c) $c.runtime_boundary.configured_profiles = @() }
+JsonCase 'origins emptied' 'P0-MODEL-CLAIMS-001' 'contracts/model/provider-boundary.json' { param($c) $c.runtime_boundary.network_origins = @() }
+JsonCase 'credential not accepted' 'P0-MODEL-CLAIMS-001' 'contracts/model/provider-boundary.json' { param($c) $c.runtime_boundary.credentials_accepted = $false }
 JsonCase 'scenario completed' 'P0-MODEL-CLAIMS-001' 'contracts/model/provider-boundary.json' { param($c) $c.runtime_boundary.acceptance_scenarios_completed = @('AS-22') }
 JsonCase 'provider call claimed' 'P0-MODEL-CLAIMS-001' 'contracts/model/provider-boundary.json' { param($c) $c.claims.provider_calls = @('synthetic') }
 JsonCase 'permission claimed' 'P0-MODEL-CLAIMS-001' 'contracts/model/provider-boundary.json' { param($c) $c.claims.permissions_requested = @('Synthetic.Scope') }
