@@ -7,7 +7,7 @@ Review icon carries a badge of how many open loops are `Review`, `Mine`, or
 `Watching` and not yet auto-resolved, hidden at zero. The Review screen's
 command bar holds **Scan inboxes** (becomes **Stop scan** while a scan runs),
 **Rescan loaded mail**, **Clear results and mail**, an **All / Mine / Team**
-filter, and the **Show resolved, handled and dismissed** checkbox. Directly
+filter, and the **Show resolved, handled, and dismissed** checkbox. Directly
 under it, the scan strip shows one of three states: scanning (phase, "Conversation
 i of n", "m / total messages", elapsed time, and a progress bar), finished
 (a summary line, and expanding "Coverage details" into the incomplete-source
@@ -92,7 +92,7 @@ in the normal application.
    widening the old egui build's terminal-only "Reopen"/auto-resolved-only
    "Still open" split to match spec §4.5 and the Companion; Enter on a
    selected closed card runs **Reopen for review**. The checkbox
-   **Show resolved, handled and dismissed** reveals closed cards. Model
+   **Show resolved, handled, and dismissed** reveals closed cards. Model
    summaries and source text are not saved locally.
 4. **Set To Do reminder** is available on any open card and does not require
    tracking or watching it first; setting a reminder on a card still under

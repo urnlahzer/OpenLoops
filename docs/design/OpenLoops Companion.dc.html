@@ -74,7 +74,7 @@ input::placeholder{color:#707070}
           <button onClick="{{ filterTeam }}" style="border:none;border-radius:3px;padding:3px 10px;cursor:pointer;font-weight:600;font-size:13px;background: {{ fTeamBg }};color:#242424">Team</button>
         </div>
         <div style="flex:1"></div>
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:#424242;font-size:13px;white-space:nowrap"><input type="checkbox" checked="{{ showResolved }}" onChange="{{ toggleResolved }}" style="width:16px;height:16px;accent-color:#0F6CBD;margin:0">Show resolved, handled and dismissed</label>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:#424242;font-size:13px;white-space:nowrap"><input type="checkbox" checked="{{ showResolved }}" onChange="{{ toggleResolved }}" style="width:16px;height:16px;accent-color:#0F6CBD;margin:0">Show resolved, handled, and dismissed</label>
       </div>
 
       <!-- Scan status bar -->
@@ -437,7 +437,7 @@ class Component extends DCLogic {
       ...mk('Past due', '#C50F1F', open.filter(l => l.aging === 'pastdue')),
       ...mk('Due', '#0F6CBD', open.filter(l => l.aging === 'due' || l.aging === 'range')),
       ...mk('No fixed deadline', '#8A8A8A', open.filter(l => ['event', 'soft', 'none'].includes(l.aging))),
-      ...mk('Resolved, handled or dismissed', '#0E700E', visible.filter(l => !isOpenLoop(l))),
+      ...mk('Resolved, handled, or dismissed', '#0E700E', visible.filter(l => !isOpenLoop(l))),
     ];
     const raw = s.loops.find(l => l.id === s.selectedId);
     let sel = null;
