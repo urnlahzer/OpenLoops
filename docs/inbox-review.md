@@ -20,7 +20,9 @@ The reading pane, top to bottom, shows: status/aging/reminder pills; the
 action-phrase title; a meta grid (Responsible, Waiting on this, Deadline
 stated in email, Source); an uncertainty callout when the model reported one;
 an **Open email** button for the first evidence message when Outlook provides
-an allowed link; the decision buttons for the selected card; the action-status line; an inline
+an allowed link, plus **Open conversation**, which opens the newest message in
+the thread so Outlook on the web shows the chain; the decision buttons for the
+selected card; the action-status line; an inline
 reminder-draft panel when one is open (task title, remind-at time, quick
 picks, the scheduled-instant line, and the disclosure copy below); the
 reminder's own state (created or attempted, with reconcile buttons in the

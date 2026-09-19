@@ -110,6 +110,7 @@ export component ReviewScreen {
     in property <ReminderStateView> reminder-state;
     in property <string> todo-url;
     in property <string> source-url;
+    in property <string> conversation-url;
     in property <string> source-unavailable-note;
     in property <[EvidenceCard]> evidence-cards;
     in property <CompletionCard> completion-card;
@@ -393,8 +394,14 @@ export component ReviewScreen {
                                                 enabled: !root.busy && !root.source-url.is-empty;
                                                 clicked => { root.open-external(root.source-url); }
                                             }
+                                            OutlineButton {
+                                                text: "Open conversation";
+                                                visible: !root.conversation-url.is-empty;
+                                                enabled: !root.busy && !root.conversation-url.is-empty;
+                                                clicked => { root.open-external(root.conversation-url); }
+                                            }
                                         }
-                                        if root.source-url.is-empty && !root.source-unavailable-note.is-empty: WrappedText {
+                                        if root.source-url.is-empty && root.conversation-url.is-empty && !root.source-unavailable-note.is-empty: WrappedText {
                                             text: root.source-unavailable-note;
                                             text-color: Tokens.text-3;
                                             size: Tokens.font-11;

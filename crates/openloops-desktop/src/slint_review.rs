@@ -490,6 +490,19 @@ fn conversation_rows(
         .collect()
 }
 
+fn conversation_url(
+    messages: &[crate::review_model::ReviewMessage],
+    source: &crate::review_model::ReviewMessage,
+) -> String {
+    messages
+        .iter()
+        .filter(|message| {
+            message.account == source.account && message.conversation == source.conversation
+        })
+        .max_by_key(|message| message.input.timestamp)
+        .map_or_else(String::new, |message| gated_outlook_url(&message.web_link))
+}
+
 /// The last projected `Vec<T>`/value actually pushed to each of
 /// `sync_review`'s Slint list/struct properties, so a resync that produces
 /// the same content can leave the existing model in place (see
@@ -565,6 +578,7 @@ struct SelectedView {
     draft: Option<DraftView>,
     reminder: ReminderView,
     source_url: String,
+    conversation_url: String,
     source_unavailable_note: String,
     evidence: Vec<EvidenceView>,
     completion: CompletionView,
@@ -958,15 +972,17 @@ fn selected_view(
     let source_url = evidence
         .first()
         .map_or_else(String::new, |card| card.url.clone());
-    let source_unavailable_note = if source_url.is_empty() && !evidence.is_empty() {
-        if source.input.team {
-            "Email link not available for group posts".into()
+    let conversation_url = conversation_url(&review.messages, source);
+    let source_unavailable_note =
+        if source_url.is_empty() && conversation_url.is_empty() && !evidence.is_empty() {
+            if source.input.team {
+                "Email link not available for group posts".into()
+            } else {
+                "Email link not available for this message".into()
+            }
         } else {
-            "Email link not available for this message".into()
-        }
-    } else {
-        String::new()
-    };
+            String::new()
+        };
     Some(SelectedView {
         title: item.action.clone(),
         meta,
@@ -987,6 +1003,7 @@ fn selected_view(
         ),
         reminder: reminder_state_view(&card.record),
         source_url,
+        conversation_url,
         source_unavailable_note,
         evidence,
         completion: completion_card(item, &review.messages),
@@ -1355,6 +1372,7 @@ fn sync_review_inner(
             marker: selected.reminder.marker.into(),
         });
         window.set_source_url(selected.source_url.into());
+        window.set_conversation_url(selected.conversation_url.into());
         window.set_source_unavailable_note(selected.source_unavailable_note.into());
         let evidence = selected
             .evidence
@@ -1436,6 +1454,7 @@ fn sync_review_inner(
         window.set_draft_valid(false);
         window.set_reminder_state(ReminderStateView::default());
         window.set_source_url("".into());
+        window.set_conversation_url("".into());
         window.set_source_unavailable_note("".into());
         sync_list_cached(&mut review_ui.cache.evidence, Vec::new(), |m| {
             window.set_evidence_cards(m);
@@ -2547,28 +2566,54 @@ mod tests {
     }
 
     #[test]
-    fn selected_source_link_uses_first_evidence_and_explains_group_post_absence() {
+    fn selected_links_keep_source_and_use_newest_message_in_source_conversation() {
         let mut review = crate::review_model::layout_fixture();
+        for message in &mut review.messages {
+            match message.input.handle.as_str() {
+                "m0" => message.input.timestamp = 100,
+                "m1" => message.input.timestamp = 200,
+                // This message is newer, but it belongs to another
+                // conversation and must never supply the conversation link.
+                "m2" => message.input.timestamp = 300,
+                _ => {}
+            }
+        }
         let cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
         let key = cards[0].as_ref().unwrap().record.key;
         let selected = selected_view(&review, Some(key), &cards).unwrap();
         assert_eq!(selected.source_url, selected.evidence[0].url);
-        assert!(!selected.source_url.is_empty());
+        assert_eq!(
+            selected.source_url,
+            "https://outlook.office.com/mail/synthetic-0"
+        );
+        assert_eq!(
+            selected.conversation_url,
+            "https://outlook.office.com/mail/synthetic-1"
+        );
         assert!(selected.source_unavailable_note.is_empty());
 
         let handle = review.analysis.as_ref().unwrap().items[0]
             .evidence
             .message
             .clone();
-        let source = review
+        let source_conversation = review
             .messages
-            .iter_mut()
+            .iter()
             .find(|message| message.input.handle == handle)
-            .unwrap();
-        source.web_link.clear();
-        source.input.team = true;
+            .unwrap()
+            .conversation
+            .clone();
+        for message in &mut review.messages {
+            if message.conversation == source_conversation {
+                message.web_link.clear();
+            }
+            if message.input.handle == handle {
+                message.input.team = true;
+            }
+        }
         let selected = selected_view(&review, Some(key), &cards).unwrap();
         assert!(selected.source_url.is_empty());
+        assert!(selected.conversation_url.is_empty());
         assert_eq!(
             selected.source_unavailable_note,
             "Email link not available for group posts"
