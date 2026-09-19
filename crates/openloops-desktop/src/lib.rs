@@ -3,6 +3,8 @@
 #[cfg(feature = "native-ui")]
 pub(crate) mod app_model;
 #[cfg(feature = "native-ui")]
+pub mod claim_view;
+#[cfg(feature = "native-ui")]
 pub(crate) mod deadline_view;
 #[cfg(feature = "native-ui")]
 pub(crate) mod loop_state;

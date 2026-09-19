@@ -1,3 +1,8 @@
+use crate::claim_view::{
+    Anchor, EventPassed, LoopItem, LoopItems, Owner, SuggestedUpdate, SuggestedUpdateKind,
+    action_phrase, card_action, claim_shape, resolve_owner, uncertainty_text,
+    waiting_party_display,
+};
 use crate::deadline_view::{DeadlineView, EVENT_GENERIC_NOUNS, classify};
 use crate::settings::Provider;
 use chrono::{Datelike, TimeZone};
@@ -14,9 +19,8 @@ use openloops_inference::{
     blocks::CanonicalBlock,
     canonical::canonicalize_plain,
     expectations::{
-        Anchor, ConversationMessage, EventPassed, Expectation, Expectations, Owner, ResolutionKind,
-        SuggestedUpdate, SuggestedUpdateKind, expectations as expectations_pass, participant,
-        resolve_owner,
+        ConversationMessage, ResolutionKind as LegacyResolutionKind,
+        expectations as expectations_pass,
     },
     message::CanonicalMessage,
     ollama::OllamaCloud,
@@ -1508,7 +1512,7 @@ impl ScanProgress {
     }
 }
 pub struct ScanResult {
-    pub analysis: Expectations,
+    pub analysis: LoopItems,
     pub failures: Vec<String>,
     pub failed_conversations_detail: Vec<ConversationFailure>,
     pub analyzed: usize,
@@ -1623,7 +1627,7 @@ fn participant_display_name(label: &str) -> Option<&str> {
 /// response has been parsed, while the source conversation and account
 /// addresses are still available. This is intentionally part of projection:
 /// every later closure and coverage pass sees the corrected item.
-fn correct_recap_attribution(analysis: &mut Expectations, conversation: &[&ReviewMessage]) {
+fn correct_recap_attribution(analysis: &mut LoopItems, conversation: &[&ReviewMessage]) {
     for item in &mut analysis.items {
         if item.waiting_party == "Not established" {
             continue;
@@ -1673,7 +1677,7 @@ fn correct_recap_attribution(analysis: &mut Expectations, conversation: &[&Revie
     }
 }
 
-fn tag_call_summaries(analysis: &mut Expectations, conversation: &[&ReviewMessage]) {
+fn tag_call_summaries(analysis: &mut LoopItems, conversation: &[&ReviewMessage]) {
     for item in &mut analysis.items {
         let Some(source) = conversation
             .iter()
@@ -1701,7 +1705,7 @@ fn tag_call_summaries(analysis: &mut Expectations, conversation: &[&ReviewMessag
 /// closure prompt stays small while favoring the most recent, most
 /// probative evidence over stale older messages.
 pub fn closure_candidates<'a>(
-    item: &Expectation,
+    item: &LoopItem,
     all: &'a [ReviewMessage],
     account: &str,
     evidence_conversation: &str,
@@ -2112,7 +2116,7 @@ fn governed_temporal_context(m: &ConversationMessage) -> ParseContext {
 
 /// Runs one conversation through the ADR-007 governed pipeline
 /// ([`analyze_claims`]) and bridges its typed claims back onto the
-/// [`Expectation`] shape every downstream consumer (`close_passed_events`,
+/// [`LoopItem`] shape every downstream consumer (`close_passed_events`,
 /// the review UI, decision fingerprinting) already understands. This is
 /// [`scan`]'s only call site for its primary pass, which offers no loop
 /// handles: closure, deadline-change and modification claims are the
@@ -2123,7 +2127,7 @@ fn governed_pass(
     client: &dyn ModelClient,
     conversation: &[ConversationMessage],
     cancel: Option<&AtomicBool>,
-) -> Result<Expectations, ProviderError> {
+) -> Result<LoopItems, ProviderError> {
     let analysis = governed_call(client, conversation, &[], cancel)?;
     Ok(map_claim_analysis(&analysis, conversation))
 }
@@ -2166,7 +2170,7 @@ fn governed_call(
 }
 
 /// One of the two fixed reasons [`map_accepted_claim`] skips a claim
-/// instead of returning an [`Expectation`] (see [`map_claim_analysis`] for
+/// instead of returning an [`LoopItem`] (see [`map_claim_analysis`] for
 /// how each is counted and noted).
 enum ClaimSkip {
     ClosureOrChange,
@@ -2183,12 +2187,9 @@ const CLOSURE_OR_CHANGE_SKIPPED_NOTE: &str =
 /// evidence did not cite a body or subject block.
 const NON_BODY_EVIDENCE_NOTE: &str = "Evidence cited a non-body component.";
 
-/// Bridges one conversation's [`ClaimAnalysis`] onto the [`Expectations`]
+/// Bridges one conversation's [`ClaimAnalysis`] onto the [`LoopItems`]
 /// shape every downstream consumer already understands.
-fn map_claim_analysis(
-    analysis: &ClaimAnalysis,
-    conversation: &[ConversationMessage],
-) -> Expectations {
+fn map_claim_analysis(analysis: &ClaimAnalysis, conversation: &[ConversationMessage]) -> LoopItems {
     let mut items = Vec::new();
     let mut rejection_reasons: Vec<&'static str> = Vec::new();
     let mut skipped = 0usize;
@@ -2212,7 +2213,7 @@ fn map_claim_analysis(
     for reason in &analysis.rejected {
         rejection_reasons.push(rejection_label(*reason));
     }
-    Expectations {
+    LoopItems {
         items,
         rejected: analysis.rejected.len() + skipped,
         rejection_reasons,
@@ -2221,28 +2222,17 @@ fn map_claim_analysis(
 }
 
 /// The mapping applied to every claim type that can attach to an
-/// `Expectation`: its `kind` string, its deterministic `action` prefix, and
+/// `LoopItem`: its `kind` string, its deterministic `action` prefix, and
 /// the owner to start from before [`resolve_owner`] downgrades it.
 /// `PossibleClosure`, `DeadlineChange` and `Modification` return `None`:
 /// they attach to an existing loop rather than create one, which only the
 /// closure pass (`scan_closures`) does.
-fn claim_shape(claim_type: ClaimType) -> Option<(&'static str, &'static str, Owner)> {
-    match claim_type {
-        ClaimType::Request => Some(("request", "Requested: ", Owner::You)),
-        ClaimType::Question => Some(("request", "Answer: ", Owner::You)),
-        ClaimType::Promise => Some(("promise", "You promised: ", Owner::You)),
-        ClaimType::Delegation => Some(("request", "Delegated: ", Owner::You)),
-        ClaimType::Attribution => Some(("attributed", "Someone else owes: ", Owner::Unclear)),
-        ClaimType::PossibleClosure | ClaimType::DeadlineChange | ClaimType::Modification => None,
-    }
-}
-
-/// Builds one [`Expectation`] from an accepted claim, or reports which of
+/// Builds one [`LoopItem`] from an accepted claim, or reports which of
 /// the two fixed reasons it was skipped for instead.
 fn map_accepted_claim(
     accepted: &AcceptedClaim,
     conversation: &[ConversationMessage],
-) -> Result<Expectation, ClaimSkip> {
+) -> Result<LoopItem, ClaimSkip> {
     let claim = &accepted.claim;
     let Some((kind, action_prefix, base_owner)) = claim_shape(claim.claim_type) else {
         return Err(ClaimSkip::ClosureOrChange);
@@ -2263,8 +2253,8 @@ fn map_accepted_claim(
     else {
         return Err(ClaimSkip::NonBodyEvidence);
     };
-    let action = format!("{action_prefix}{}", first_sentence(&primary.text));
-    let action_phrase = first_scalars(&primary.text, ACTION_PHRASE_MAX_SCALARS);
+    let action = card_action(action_prefix, &primary.text);
+    let action_phrase = action_phrase(&primary.text);
     // The model saying it cannot tell who asks or who owes outranks the
     // claim type's default owner: a card must not read "You (suggested)"
     // next to an uncertainty note that says the opposite.
@@ -2282,7 +2272,7 @@ fn map_accepted_claim(
         quote: primary.text.clone(),
         context: primary.text.clone(),
     };
-    Ok(Expectation {
+    Ok(LoopItem {
         action,
         action_phrase,
         owner,
@@ -2294,7 +2284,7 @@ fn map_accepted_claim(
         event_time: None,
         resolution: None,
         resolution_kind: None,
-        uncertainty: uncertainty_text(claim),
+        uncertainty: uncertainty_text(claim.claim_type, &claim.ambiguity_codes),
         unverified_deadline: false,
         unverified_resolution: false,
         cross_thread: false,
@@ -2339,121 +2329,10 @@ fn temporal_anchors(
     }
 }
 
-/// One fixed label per ambiguity code, for [`uncertainty_text`].
-fn ambiguity_label(code: AmbiguityCode) -> &'static str {
-    match code {
-        AmbiguityCode::QuoteScope => "the cited text covers more than this item",
-        AmbiguityCode::Identity => "unclear who asks or who owes",
-        AmbiguityCode::Delegation => "may have been handed off",
-        AmbiguityCode::Deadline => "a time is implied but not stated",
-        AmbiguityCode::Relation => "unclear which loop this affects",
-        AmbiguityCode::CrossMessage => "evidence spans messages",
-        AmbiguityCode::InsufficientContext => "the conversation may not show enough",
-        AmbiguityCode::SemanticConflict => "messages disagree",
-    }
-}
-
-/// The fixed sentence a `delegation` claim always carries, ahead of any
-/// other ambiguity-code labels: it wins over the `delegation` ambiguity
-/// code's own ("may have been handed off") label when both apply, so that
-/// label is skipped rather than duplicated.
-const DELEGATION_UNCERTAINTY: &str =
-    "You handed this to someone else; the requester is still waiting on you.";
-
-/// `Expectation::uncertainty`: the `delegation`-type fixed sentence (if
-/// this claim is a delegation), followed by every other disclosed
-/// ambiguity code's fixed label, joined with "; ".
-fn uncertainty_text(claim: &Claim) -> String {
-    let is_delegation = claim.claim_type == ClaimType::Delegation;
-    let mut parts = Vec::new();
-    if is_delegation {
-        parts.push(DELEGATION_UNCERTAINTY);
-    }
-    for code in &claim.ambiguity_codes {
-        if is_delegation && *code == AmbiguityCode::Delegation {
-            continue;
-        }
-        parts.push(ambiguity_label(*code));
-    }
-    parts.join("; ")
-}
-
-/// `Expectation::waiting_party`: the display string
-/// [`openloops_inference::expectations::participant`] produces for the
-/// old-pipeline-format handle equivalent to `handle`, or "Not established"
-/// when `handle` is `null` or has no such equivalent (a `cc` slot: the old
-/// pipeline never offered one as a waiting party either, so `participant`
-/// has no case for it).
-fn waiting_party_display(
-    handle: &Nullable<String>,
-    conversation: &[ConversationMessage],
-) -> String {
-    let Nullable::Value(handle) = handle else {
-        return "Not established".to_string();
-    };
-    translate_participant_handle(handle)
-        .and_then(|old_handle| participant(&old_handle, conversation))
-        .unwrap_or_else(|| "Not established".to_string())
-}
-
-/// Rewrites one governed participant handle (`"{m}-sender"`, `"{m}-to-{i}"`,
-/// `"{m}-cc-{i}"`) to the old pipeline's own format (`"{m}:sender"`,
-/// `"{m}:to:{i}"`), or `None` for a `cc` handle, which has no old-pipeline
-/// equivalent.
-fn translate_participant_handle(handle: &str) -> Option<String> {
-    if let Some(m) = handle.strip_suffix("-sender") {
-        return Some(format!("{m}:sender"));
-    }
-    if let Some((m, index)) = handle.split_once("-to-") {
-        return Some(format!("{m}:to:{index}"));
-    }
-    None
-}
-
-/// The maximum Unicode scalars `action`'s first-sentence extract keeps
-/// before it is cut with a trailing "…".
-const ACTION_SENTENCE_MAX_SCALARS: usize = 140;
-/// The maximum Unicode scalars `action_phrase` keeps (dedup/fingerprint
-/// input only; never displayed as the card's own title).
-const ACTION_PHRASE_MAX_SCALARS: usize = 200;
-
-/// `text`'s first sentence -- up to and including the first `.`, `?` or
-/// `!` followed by whitespace or the text's end -- capped to
-/// [`ACTION_SENTENCE_MAX_SCALARS`] Unicode scalars with a trailing "…"
-/// appended only when that cap, not the sentence boundary, is what cut it.
-fn first_sentence(text: &str) -> String {
-    let scalars: Vec<char> = text.chars().collect();
-    let mut end = scalars.len();
-    for (i, &c) in scalars.iter().enumerate() {
-        if (c == '.' || c == '?' || c == '!')
-            && scalars.get(i + 1).is_none_or(|next| next.is_whitespace())
-        {
-            end = i + 1;
-            break;
-        }
-    }
-    let truncated = end > ACTION_SENTENCE_MAX_SCALARS;
-    if truncated {
-        end = ACTION_SENTENCE_MAX_SCALARS;
-    }
-    let sentence: String = scalars[..end].iter().collect();
-    let sentence = sentence.trim();
-    if truncated {
-        format!("{sentence}…")
-    } else {
-        sentence.to_string()
-    }
-}
-
-/// `text` trimmed to its first `max` Unicode scalars.
-fn first_scalars(text: &str, max: usize) -> String {
-    text.chars().take(max).collect()
-}
-
 /// Pushes `item` unless an item with the same action (case-insensitively)
 /// and the same evidence message is already present -- the same dedup rule
 /// `expectations::push_unique` applies to the old pipeline's own items.
-fn push_unique_expectation(items: &mut Vec<Expectation>, item: Expectation) {
+fn push_unique_expectation(items: &mut Vec<LoopItem>, item: LoopItem) {
     let is_duplicate = items.iter().any(|existing| {
         existing.action.eq_ignore_ascii_case(&item.action)
             && existing.evidence.message == item.evidence.message
@@ -2545,7 +2424,7 @@ fn subject_snippet(conversation: &[&ReviewMessage]) -> String {
 fn conversation_note(
     index: usize,
     conversation: &[&ReviewMessage],
-    analysis: &Expectations,
+    analysis: &LoopItems,
 ) -> Option<String> {
     let len = conversation.len();
     let snippet = subject_snippet(conversation);
@@ -2993,7 +2872,7 @@ fn failure_detail(conversation: &[&ReviewMessage], reason: FailureReason) -> Con
 
 fn empty_result(total: usize) -> ScanResult {
     ScanResult {
-        analysis: Expectations {
+        analysis: LoopItems {
             items: vec![],
             rejected: 0,
             rejection_reasons: vec![],
@@ -3028,7 +2907,7 @@ fn merge_conversation(
     result: &mut ScanResult,
     index: usize,
     conversation: &[&ReviewMessage],
-    outcome: JobOutcome<Expectations>,
+    outcome: JobOutcome<LoopItems>,
     not_started_messages: &mut usize,
 ) {
     match outcome {
@@ -3119,7 +2998,7 @@ fn scan_conversations(
     messages: &[ReviewMessage],
     progress: &ScanProgress,
     pass: &ParallelPass,
-    analyze: &(dyn Fn(&[ConversationMessage]) -> Result<Expectations, ProviderError> + Sync),
+    analyze: &(dyn Fn(&[ConversationMessage]) -> Result<LoopItems, ProviderError> + Sync),
 ) -> ScanResult {
     scan_conversations_filtered(messages, progress, pass, None, analyze)
 }
@@ -3129,7 +3008,7 @@ fn scan_conversations_filtered(
     progress: &ScanProgress,
     pass: &ParallelPass,
     conversation_filter: Option<&BTreeSet<String>>,
-    analyze: &(dyn Fn(&[ConversationMessage]) -> Result<Expectations, ProviderError> + Sync),
+    analyze: &(dyn Fn(&[ConversationMessage]) -> Result<LoopItems, ProviderError> + Sync),
 ) -> ScanResult {
     let ordered: Vec<Vec<&ReviewMessage>> = conversations_by_size(messages, conversation_filter)
         .into_iter()
@@ -3223,7 +3102,7 @@ fn past_due_boundary(view: &DeadlineView) -> Option<i64> {
 /// deadline must never be closed as "event passed" just because the model
 /// separately filled in an `event_time` anchor.
 fn named_event_phrase(
-    item: &Expectation,
+    item: &LoopItem,
     message_timestamp: i64,
     now: i64,
     offset: i32,
@@ -3244,7 +3123,7 @@ fn named_event_phrase(
 /// then its `evidence.quote`, against the index with
 /// [`match_event_by_text`]'s proper-name-strength bar.
 fn text_matched_event<'a>(
-    item: &Expectation,
+    item: &LoopItem,
     source: &ReviewMessage,
     index: &'a [EventRef],
 ) -> Option<&'a EventRef> {
@@ -3255,7 +3134,7 @@ fn text_matched_event<'a>(
 /// Whether an otherwise unnamed request uses language that connects it to a
 /// gathering in its own conversation. Event nouns are matched as whole
 /// alphanumeric tokens; the timing phrases are intentionally narrow.
-fn has_scoped_event_language(item: &Expectation) -> bool {
+fn has_scoped_event_language(item: &LoopItem) -> bool {
     const EVENT_NOUN_FOLLOWERS: &[&str] = &[
         "notes",
         "minutes",
@@ -3287,7 +3166,7 @@ fn has_scoped_event_language(item: &Expectation) -> bool {
 /// an event. Reused by [`scoped_event`] to let its own-message branch accept
 /// a request that names no event and uses no [`has_scoped_event_language`]
 /// wording, but whose deadline itself says it is tied to a gathering.
-fn event_tied_deadline(item: &Expectation, message_timestamp: i64, now: i64) -> bool {
+fn event_tied_deadline(item: &LoopItem, message_timestamp: i64, now: i64) -> bool {
     let Some(deadline) = item.deadline.as_ref() else {
         return false;
     };
@@ -3311,7 +3190,7 @@ fn event_tied_deadline(item: &Expectation, message_timestamp: i64, now: i64) -> 
 /// when the request uses event-shaped language. Ambiguity between two
 /// conversation events leaves the item open.
 fn scoped_event<'a>(
-    item: &Expectation,
+    item: &LoopItem,
     source: &ReviewMessage,
     messages: &[ReviewMessage],
     index: &'a [EventRef],
@@ -3350,7 +3229,7 @@ fn scoped_event<'a>(
         })
 }
 
-fn deadline_boundary(item: &Expectation, messages: &[ReviewMessage], now: i64) -> Option<i64> {
+fn deadline_boundary(item: &LoopItem, messages: &[ReviewMessage], now: i64) -> Option<i64> {
     let deadline = item.deadline.as_ref()?;
     let message = messages
         .iter()
@@ -3376,7 +3255,7 @@ fn local_day(timestamp: i64, offset_seconds: i32) -> i64 {
 /// resolves to the same instant/local day as `event_end`. In either case the
 /// item is overdue work, not work made irrelevant by a passed event.
 fn deadline_is_event_time(
-    item: &Expectation,
+    item: &LoopItem,
     messages: &[ReviewMessage],
     now: i64,
     event_end: i64,
@@ -3423,12 +3302,7 @@ fn deadline_is_event_time(
 
 /// Rule 3 requires both a named-event anchor and a distinct event-time anchor.
 /// An own deadline at that same time/day remains overdue instead of closing.
-fn rule_3_applies(
-    item: &Expectation,
-    messages: &[ReviewMessage],
-    now: i64,
-    event_end: i64,
-) -> bool {
+fn rule_3_applies(item: &LoopItem, messages: &[ReviewMessage], now: i64, event_end: i64) -> bool {
     item.event.is_some()
         && item.event_time.is_some()
         && !deadline_is_event_time(item, messages, now, event_end)
@@ -3441,7 +3315,7 @@ fn rule_3_applies(
 /// thank-you note) can never be closed by that event, since the event is the
 /// source of the request, not its deadline. Returns whether it closed.
 fn close_from_index(
-    item: &mut Expectation,
+    item: &mut LoopItem,
     event: &EventRef,
     messages: &[ReviewMessage],
     now: i64,
@@ -3479,7 +3353,7 @@ fn close_from_index(
 /// time) can never close the item, even if it also reads as past relative to
 /// `now`. Returns whether it closed.
 fn close_from_stated_time(
-    item: &mut Expectation,
+    item: &mut LoopItem,
     messages: &[ReviewMessage],
     now: i64,
     source_timestamp: i64,
@@ -3517,6 +3391,39 @@ fn close_from_stated_time(
         from_subject: false,
     });
     true
+}
+
+/// Records the normalized end time supplied by a matched source event when
+/// the governed claim named that event but carried no separate time anchor.
+/// The normalized value follows the same local-date-time grammar used by the
+/// governed temporal contract and preserves the matched event's source handle.
+fn set_event_time_from_source(item: &mut LoopItem, event: &EventRef, messages: &[ReviewMessage]) {
+    if item.event.is_none() || item.event_time.is_some() {
+        return;
+    }
+    let Some(message) = messages
+        .iter()
+        .find(|message| message.input.handle == event.message_handle)
+    else {
+        return;
+    };
+    let offset = local_offset_seconds(event.end, 0);
+    let Some(offset) = chrono::FixedOffset::east_opt(offset) else {
+        return;
+    };
+    let Some(end) = chrono::Utc.timestamp_opt(event.end, 0).single() else {
+        return;
+    };
+    let event_anchor = item.event.as_ref().expect("checked above");
+    item.event_time = Some(Anchor {
+        message: message.input.handle.clone(),
+        block: event_anchor.block,
+        quote: end
+            .with_timezone(&offset)
+            .format("%Y-%m-%dT%H:%M")
+            .to_string(),
+        context: event.name.clone(),
+    });
 }
 
 /// Closes any open, unresolved expectation whose event has already ended,
@@ -3583,6 +3490,7 @@ pub fn close_passed_events(result: &mut ScanResult, messages: &[ReviewMessage], 
             let event_match = match_event(&phrase, source.input.timestamp, &index);
             matched += usize::from(event_match.is_some());
             if let Some(event) = event_match {
+                set_event_time_from_source(item, event, messages);
                 if close_from_index(item, event, messages, now, source.input.timestamp) {
                     closed_from_index += 1;
                     result.event_closures += 1;
@@ -3598,6 +3506,7 @@ pub fn close_passed_events(result: &mut ScanResult, messages: &[ReviewMessage], 
 
         if let Some(event) = scoped_event(item, source, messages, &index, now) {
             scoped += 1;
+            set_event_time_from_source(item, event, messages);
             if close_from_index(item, event, messages, now, source.input.timestamp) {
                 closed_from_index += 1;
                 result.event_closures += 1;
@@ -3672,7 +3581,7 @@ struct OfferedLoop<'a> {
 /// `attributed` items are excluded because they do not name the user as the
 /// one who owes the action. Handles are minted in item order, so a scan's
 /// handles are deterministic.
-fn offered_loops<'a>(items: &[Expectation], messages: &'a [ReviewMessage]) -> Vec<OfferedLoop<'a>> {
+fn offered_loops<'a>(items: &[LoopItem], messages: &'a [ReviewMessage]) -> Vec<OfferedLoop<'a>> {
     items
         .iter()
         .enumerate()
@@ -3714,7 +3623,7 @@ type ConversationKey<'a> = (&'a str, &'a str);
 /// suppresses only the cross-conversation route.
 fn loops_by_conversation<'a>(
     loops: &[OfferedLoop<'a>],
-    items: &[Expectation],
+    items: &[LoopItem],
     messages: &'a [ReviewMessage],
 ) -> BTreeMap<ConversationKey<'a>, Vec<usize>> {
     let (groups_per_account, address_group_counts) = conversation_group_address_counts(messages);
@@ -4657,14 +4566,14 @@ const COMPLETED_RESOLUTION_CASE: (&str, &str) = (
     "Please send me the signed engagement letter.",
     "Attached is the signed engagement letter.",
 );
-fn resolution_kind_name(kind: Option<ResolutionKind>) -> &'static str {
+fn resolution_kind_name(kind: Option<LegacyResolutionKind>) -> &'static str {
     match kind {
         None => "none",
-        Some(ResolutionKind::Completed) => "completed",
-        Some(ResolutionKind::Declined) => "declined",
-        Some(ResolutionKind::Withdrawn) => "withdrawn",
-        Some(ResolutionKind::Superseded) => "superseded",
-        Some(ResolutionKind::Agreed) => "agreed",
+        Some(LegacyResolutionKind::Completed) => "completed",
+        Some(LegacyResolutionKind::Declined) => "declined",
+        Some(LegacyResolutionKind::Withdrawn) => "withdrawn",
+        Some(LegacyResolutionKind::Superseded) => "superseded",
+        Some(LegacyResolutionKind::Agreed) => "agreed",
     }
 }
 /// Runs the fixed synthetic probe cases one at a time. The probe measures
@@ -4815,7 +4724,9 @@ fn probe_agreement_case(client: &dyn ModelClient, case_number: usize) -> Result<
     let Some(item) = anchored else {
         return Err(ProviderError::InvalidAnalysis);
     };
-    if item.resolution.is_none() || !matches!(item.resolution_kind, Some(ResolutionKind::Agreed)) {
+    if item.resolution.is_none()
+        || !matches!(item.resolution_kind, Some(LegacyResolutionKind::Agreed))
+    {
         return Err(ProviderError::InvalidAnalysis);
     }
     Ok(())
@@ -4902,7 +4813,7 @@ fn probe_completed_resolution_case(
     }
     if !matches!(
         result.items[0].resolution_kind,
-        Some(ResolutionKind::Completed)
+        Some(LegacyResolutionKind::Completed)
     ) {
         return Err(ProviderError::InvalidAnalysis);
     }
@@ -4934,6 +4845,7 @@ fn synthetic(body: &str, index: usize, conversation: &str) -> MailItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claim_view::DELEGATION_UNCERTAINTY;
     use std::time::Instant;
 
     /// Runs the primary pass with a single worker and an `FnMut` callback:
@@ -4943,7 +4855,7 @@ mod tests {
     fn scan_conversations(
         messages: &[ReviewMessage],
         progress: &ScanProgress,
-        analyze: impl FnMut(&[ConversationMessage]) -> Result<Expectations, ProviderError> + Send,
+        analyze: impl FnMut(&[ConversationMessage]) -> Result<LoopItems, ProviderError> + Send,
     ) -> ScanResult {
         sequential_conversations(messages, progress, analyze)
     }
@@ -4951,7 +4863,7 @@ mod tests {
     fn sequential_conversations(
         messages: &[ReviewMessage],
         progress: &ScanProgress,
-        analyze: impl FnMut(&[ConversationMessage]) -> Result<Expectations, ProviderError> + Send,
+        analyze: impl FnMut(&[ConversationMessage]) -> Result<LoopItems, ProviderError> + Send,
     ) -> ScanResult {
         let analyze = Mutex::new(analyze);
         super::scan_conversations(messages, progress, &ParallelPass::new(1), &|conversation| {
@@ -4984,7 +4896,7 @@ mod tests {
             Some(&filter),
             &|_| {
                 calls.fetch_add(1, Ordering::Relaxed);
-                Ok(Expectations {
+                Ok(LoopItems {
                     items: vec![],
                     rejected: 0,
                     rejection_reasons: vec![],
@@ -5020,7 +4932,7 @@ mod tests {
             } else {
                 (3, 4)
             };
-            Ok(Expectations {
+            Ok(LoopItems {
                 items: vec![],
                 rejected,
                 rejection_reasons: vec![],
@@ -5919,7 +5831,7 @@ mod tests {
         item.action = "Send the draft agreement to Alex".into();
         messages.push(event_message);
         let mut result = ScanResult {
-            analysis: Expectations {
+            analysis: LoopItems {
                 items: vec![item],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -5968,7 +5880,7 @@ mod tests {
         });
         messages.push(event_message);
         let mut result = ScanResult {
-            analysis: Expectations {
+            analysis: LoopItems {
                 items: vec![item],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -6260,7 +6172,7 @@ at the downtown courthouse. Let me know if that works.",
                     .windows(2)
                     .all(|w| w[0].timestamp <= w[1].timestamp)
             );
-            Ok(Expectations {
+            Ok(LoopItems {
                 items: vec![],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -6510,8 +6422,8 @@ at the downtown courthouse. Let me know if that works.",
             .collect()
     }
 
-    fn no_expectations() -> Expectations {
-        Expectations {
+    fn no_expectations() -> LoopItems {
+        LoopItems {
             items: vec![],
             rejected: 0,
             rejection_reasons: vec![],
@@ -6521,8 +6433,8 @@ at the downtown courthouse. Let me know if that works.",
 
     /// One expectation naming `handle`, so a merged `analysis.items` list
     /// records exactly which conversations contributed and in what order.
-    fn expectation_for(handle: &str) -> Expectation {
-        Expectation {
+    fn expectation_for(handle: &str) -> LoopItem {
+        LoopItem {
             action: "Send the draft".into(),
             action_phrase: "send the draft".into(),
             owner: Owner::You,
@@ -6612,7 +6524,7 @@ at the downtown courthouse. Let me know if that works.",
             if position == 3 {
                 return Err(ProviderError::InvalidJson);
             }
-            Ok(Expectations {
+            Ok(LoopItems {
                 items: vec![expectation_for(&handle)],
                 rejected: usize::from(position == 5),
                 rejection_reasons: vec![],
@@ -7102,7 +7014,7 @@ at the downtown courthouse. Let me know if that works.",
         let progress = ScanProgress::default();
         let result = scan_conversations(&[a.clone(), b.clone()], &progress, |_| {
             progress.cancel.store(true, Ordering::Relaxed);
-            Ok(Expectations {
+            Ok(LoopItems {
                 items: vec![],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -7186,7 +7098,7 @@ at the downtown courthouse. Let me know if that works.",
             observed_during = snapshot.request_started_unix;
             assert_eq!(snapshot.conversation_index, 1);
             assert_eq!(progress.conversation_total.load(Ordering::Relaxed), 1);
-            Ok(Expectations {
+            Ok(LoopItems {
                 items: vec![],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -7343,10 +7255,10 @@ at the downtown courthouse. Let me know if that works.",
         )
     }
 
-    fn closure_test_messages() -> (Vec<ReviewMessage>, Expectation) {
+    fn closure_test_messages() -> (Vec<ReviewMessage>, LoopItem) {
         let evidence = request_from("sam@example.invalid", "req-1", "c1", "acct", "Fee");
         let all = vec![prepare(&evidence, "Inbox", 0).unwrap()];
-        let item = Expectation {
+        let item = LoopItem {
             action: "Pay the 350 fee".into(),
             action_phrase: "pay the 350 fee".into(),
             owner: Owner::You,
@@ -7376,7 +7288,7 @@ at the downtown courthouse. Let me know if that works.",
         (all, item)
     }
 
-    fn recap_attribution_fixture(waiting_party: &str, recap: bool) -> (ReviewMessage, Expectation) {
+    fn recap_attribution_fixture(waiting_party: &str, recap: bool) -> (ReviewMessage, LoopItem) {
         let mut mail = synthetic(
             "Meeting Purpose\nReview the project update.\nAction Items\nSend the project update.",
             0,
@@ -7399,13 +7311,13 @@ at the downtown courthouse. Let me know if that works.",
         (message, item)
     }
 
-    fn projected_recap_item(waiting_party: &str, recap: bool) -> Expectation {
+    fn projected_recap_item(waiting_party: &str, recap: bool) -> LoopItem {
         let (message, item) = recap_attribution_fixture(waiting_party, recap);
         let result = scan_conversations(
             std::slice::from_ref(&message),
             &ScanProgress::default(),
             |_| {
-                Ok(Expectations {
+                Ok(LoopItems {
                     items: vec![item.clone()],
                     rejected: 0,
                     rejection_reasons: vec![],
@@ -7418,7 +7330,7 @@ at the downtown courthouse. Let me know if that works.",
 
     /// `count` open requests, each with a later reply in a different
     /// conversation, so every one of them is eligible for the closure pass.
-    fn parallel_closure_fixture(count: usize) -> (Vec<ReviewMessage>, Vec<Expectation>) {
+    fn parallel_closure_fixture(count: usize) -> (Vec<ReviewMessage>, Vec<LoopItem>) {
         let mut all = Vec::new();
         let mut items = Vec::new();
         for index in 0..count {
@@ -7441,7 +7353,7 @@ at the downtown courthouse. Let me know if that works.",
             );
             all.push(prepare(&reply, "Sent", all.len()).unwrap());
             let (_, template) = closure_test_messages();
-            items.push(Expectation {
+            items.push(LoopItem {
                 waiting_party: format!("Other <{address}>"),
                 evidence: Anchor {
                     message: evidence,
@@ -7453,7 +7365,7 @@ at the downtown courthouse. Let me know if that works.",
         (all, items)
     }
 
-    fn closure_result(items: Vec<Expectation>) -> ScanResult {
+    fn closure_result(items: Vec<LoopItem>) -> ScanResult {
         let mut result = empty_result(items.len());
         result.analyzed = items.len();
         result.analysis.items = items;
@@ -7474,12 +7386,12 @@ at the downtown courthouse. Let me know if that works.",
     }
 
     fn scoped_event_expectation(
-        template: &Expectation,
+        template: &LoopItem,
         message_handle: &str,
         action: &str,
         quote: &str,
-    ) -> Expectation {
-        Expectation {
+    ) -> LoopItem {
+        LoopItem {
             action: action.into(),
             action_phrase: action.into(),
             evidence: Anchor {
@@ -7492,7 +7404,7 @@ at the downtown courthouse. Let me know if that works.",
         }
     }
 
-    fn event_anchored_logistics_fixture() -> (ReviewMessage, Expectation) {
+    fn event_anchored_logistics_fixture() -> (ReviewMessage, LoopItem) {
         const SUBJECT: &str = "Claude Code Workshop SF | Anthropic x Tenex";
         const EVENT_TIME: &str = "Tuesday, September 2, 2026, 9:00 AM \u{2013} 12:00 PM PT";
         let body = format!(
@@ -7531,7 +7443,8 @@ at the downtown courthouse. Let me know if that works.",
 
     #[test]
     fn event_anchored_logistics_request_closes_after_the_event() {
-        let (message, item) = event_anchored_logistics_fixture();
+        let (message, mut item) = event_anchored_logistics_fixture();
+        item.event_time = None;
         let index = build_event_index(std::slice::from_ref(&message));
         assert_eq!(index.len(), 1);
         assert_eq!(index[0].source, EventSource::Prose);
@@ -7543,18 +7456,31 @@ at the downtown courthouse. Let me know if that works.",
         let passed = result.analysis.items[0].event_passed.as_ref().unwrap();
         assert_eq!(passed.name, "claude code workshop sf | anthropic x tenex");
         assert_eq!(passed.message_handle, message.input.handle);
+        let event_time = result.analysis.items[0].event_time.as_ref().unwrap();
+        assert_eq!(event_time.message, message.input.handle);
+        let offset = chrono::FixedOffset::east_opt(local_offset_seconds(event_end, 0)).unwrap();
+        let expected = chrono::Utc
+            .timestamp_opt(event_end, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&offset)
+            .format("%Y-%m-%dT%H:%M")
+            .to_string();
+        assert_eq!(event_time.quote, expected);
         assert_eq!(result.event_closures, 1);
     }
 
     #[test]
     fn event_anchored_request_stays_open_before_the_event() {
-        let (message, item) = event_anchored_logistics_fixture();
+        let (message, mut item) = event_anchored_logistics_fixture();
+        item.event_time = None;
         let event_start = build_event_index(std::slice::from_ref(&message))[0].start;
         let mut result = closure_result(vec![item]);
 
         close_passed_events(&mut result, std::slice::from_ref(&message), event_start - 1);
 
         assert!(result.analysis.items[0].event_passed.is_none());
+        assert!(result.analysis.items[0].event_time.is_some());
         assert_eq!(result.event_closures, 0);
     }
 
@@ -7693,7 +7619,7 @@ at the downtown courthouse. Let me know if that works.",
         );
         scoped_mail.received = "2026-08-02T12:00:00Z".into();
         let scoped_message = prepare(&scoped_mail, "Inbox", 1).unwrap();
-        let scoped_request = Expectation {
+        let scoped_request = LoopItem {
             action: "Bring the outline before the workshop".into(),
             evidence: Anchor {
                 message: scoped_message.input.handle.clone(),
@@ -7811,7 +7737,7 @@ at the downtown courthouse. Let me know if that works.",
         let mut unrelated_mail = synthetic("Please attend the workshop.", 1, "other-thread");
         unrelated_mail.received = "2026-08-02T12:00:00Z".into();
         let unrelated_message = prepare(&unrelated_mail, "Inbox", 1).unwrap();
-        let mut unrelated = Expectation {
+        let mut unrelated = LoopItem {
             action: "Attend the workshop".into(),
             evidence: Anchor {
                 message: unrelated_message.input.handle.clone(),
@@ -7825,7 +7751,7 @@ at the downtown courthouse. Let me know if that works.",
             synthetic("Claim the free month in the portal.", 1, "workshop-thread");
         same_thread_mail.received = "2026-08-02T12:00:00Z".into();
         let same_thread_message = prepare(&same_thread_mail, "Inbox", 2).unwrap();
-        let no_event_words = Expectation {
+        let no_event_words = LoopItem {
             action: "Claim the free month in the portal".into(),
             evidence: Anchor {
                 message: same_thread_message.input.handle.clone(),
@@ -7864,7 +7790,7 @@ at the downtown courthouse. Let me know if that works.",
         });
         messages.push(event_message);
         let mut result = ScanResult {
-            analysis: Expectations {
+            analysis: LoopItems {
                 items: vec![item],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -7935,7 +7861,7 @@ at the downtown courthouse. Let me know if that works.",
         });
         messages.push(event_message);
         let mut result = ScanResult {
-            analysis: Expectations {
+            analysis: LoopItems {
                 items: vec![item],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -7984,7 +7910,7 @@ at the downtown courthouse. Let me know if that works.",
         item.action = "Prepare materials for the Acme Contract Review".into();
         messages.push(event_message);
         let mut result = ScanResult {
-            analysis: Expectations {
+            analysis: LoopItems {
                 items: vec![item],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -8035,7 +7961,7 @@ at the downtown courthouse. Let me know if that works.",
         item.action = "Prepare the Acme budget".into();
         messages.push(event_message);
         let mut result = ScanResult {
-            analysis: Expectations {
+            analysis: LoopItems {
                 items: vec![item],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -8068,7 +7994,7 @@ at the downtown courthouse. Let me know if that works.",
     fn close_passed_events_always_pushes_a_coverage_note_even_when_nothing_is_learned() {
         let (messages, item) = closure_test_messages();
         let mut result = ScanResult {
-            analysis: Expectations {
+            analysis: LoopItems {
                 items: vec![item],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -8106,7 +8032,7 @@ at the downtown courthouse. Let me know if that works.",
     fn close_passed_events_skips_the_note_when_the_scan_was_cancelled() {
         let (messages, item) = closure_test_messages();
         let mut result = ScanResult {
-            analysis: Expectations {
+            analysis: LoopItems {
                 items: vec![item],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -8161,7 +8087,7 @@ at the downtown courthouse. Let me know if that works.",
         });
         let now = timestamp("2026-09-15T00:00:00Z"); // well past that Friday, any timezone
         let mut result = ScanResult {
-            analysis: Expectations {
+            analysis: LoopItems {
                 items: vec![item],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -8225,7 +8151,7 @@ at the downtown courthouse. Let me know if that works.",
         });
         let now = timestamp("2026-09-15T00:00:00Z");
         let mut result = ScanResult {
-            analysis: Expectations {
+            analysis: LoopItems {
                 items: vec![item],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -8942,7 +8868,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
 
     fn run_closures(
         all: &[ReviewMessage],
-        items: Vec<Expectation>,
+        items: Vec<LoopItem>,
         client: &dyn ModelClient,
         progress: &ScanProgress,
     ) -> ScanResult {
@@ -8953,7 +8879,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
 
     /// The closed request `closure_test_messages` builds in conversation
     /// `c1`, plus a later user reply to the same person in conversation `c2`.
-    fn cross_thread_fixture() -> (Vec<ReviewMessage>, Expectation) {
+    fn cross_thread_fixture() -> (Vec<ReviewMessage>, LoopItem) {
         let (mut all, item) = closure_test_messages();
         let reply = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
         all.push(prepare(&reply, "Sent", all.len()).unwrap());
@@ -9396,7 +9322,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
             std::slice::from_ref(&message),
             &ScanProgress::default(),
             |_| {
-                Ok(Expectations {
+                Ok(LoopItems {
                     items: vec![item.clone()],
                     rejected: 0,
                     rejection_reasons: vec![],
@@ -10034,7 +9960,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         let mut lengths = vec![];
         let result = scan_conversations(&messages, &ScanProgress::default(), |batch| {
             lengths.push(batch.len());
-            Ok(Expectations {
+            Ok(LoopItems {
                 items: vec![],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -10050,7 +9976,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         let a = prepare(&synthetic("Please send the draft.", 0, "a"), "Inbox", 0).unwrap();
         let b = prepare(&synthetic("Following up.", 1, "a"), "Inbox", 1).unwrap();
         let result = scan_conversations(&[a, b], &ScanProgress::default(), |_| {
-            Ok(Expectations {
+            Ok(LoopItems {
                 items: vec![],
                 rejected: 1,
                 rejection_reasons: vec!["Reason A.", "Reason B."],
@@ -10069,7 +9995,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         let a = prepare(&synthetic("Please send the draft.", 0, "a"), "Inbox", 0).unwrap();
         let b = prepare(&synthetic("Following up.", 1, "a"), "Inbox", 1).unwrap();
         let result = scan_conversations(&[a, b], &ScanProgress::default(), |_| {
-            Ok(Expectations {
+            Ok(LoopItems {
                 items: vec![],
                 rejected: 2,
                 rejection_reasons: vec!["Reason A.", "Reason A.", "Reason B."],
@@ -10089,7 +10015,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         let a = prepare(&request, "Inbox", 0).unwrap();
         let b = prepare(&reply, "Sent", 1).unwrap();
         let result = scan_conversations(&[a, b], &ScanProgress::default(), |_| {
-            Ok(Expectations {
+            Ok(LoopItems {
                 items: vec![],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -10121,7 +10047,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         let d = prepare(&from_dana, "Inbox", 1).unwrap();
         let b = prepare(&reply, "Sent", 2).unwrap();
         let result = scan_conversations(&[a, d, b], &ScanProgress::default(), |_| {
-            Ok(Expectations {
+            Ok(LoopItems {
                 items: vec![],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -10139,7 +10065,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         a.input.team = true;
         let b = prepare(&reply, "Sent", 1).unwrap();
         let result = scan_conversations(&[a, b], &ScanProgress::default(), |_| {
-            Ok(Expectations {
+            Ok(LoopItems {
                 items: vec![],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -10157,7 +10083,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         let a = prepare(&request, "Inbox", 0).unwrap();
         let b = prepare(&reply, "Sent", 1).unwrap();
         let result = scan_conversations(&[a, b], &ScanProgress::default(), |_| {
-            Ok(Expectations {
+            Ok(LoopItems {
                 items: vec![],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -10175,7 +10101,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         let a = prepare(&request, "Inbox", 0).unwrap();
         let b = prepare(&reply, "Sent", 1).unwrap();
         let result = scan_conversations(&[a, b], &ScanProgress::default(), |_| {
-            Ok(Expectations {
+            Ok(LoopItems {
                 items: vec![],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -10190,7 +10116,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         let a = prepare(&synthetic("Please send the draft.", 0, "a"), "Inbox", 0).unwrap();
         let b = prepare(&synthetic("Following up.", 1, "a"), "Inbox", 1).unwrap();
         let result = scan_conversations(&[a, b], &ScanProgress::default(), |_| {
-            Ok(Expectations {
+            Ok(LoopItems {
                 items: vec![],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -10237,7 +10163,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         let a = prepare(&request, "Inbox", 0).unwrap();
         let b = prepare(&reply, "Sent", 1).unwrap();
         let result = scan_conversations(&[a, b], &ScanProgress::default(), |_| {
-            Ok(Expectations {
+            Ok(LoopItems {
                 items: vec![],
                 rejected: 0,
                 rejection_reasons: vec![],

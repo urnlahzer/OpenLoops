@@ -41,52 +41,6 @@ pub struct Anchor {
 }
 
 #[derive(Clone)]
-pub struct EventPassed {
-    pub name: String,
-    pub end: i64,
-    /// The invitation, calendar-subject, or event-time-phrase message this
-    /// closure's evidence came from, so the card can render an anchor to it.
-    pub message_handle: String,
-    /// True when the closing time was read from the message's subject line
-    /// (a calendar-invite subject, or an event date/time named in the
-    /// subject's own prose) rather than from a meeting invite's own
-    /// metadata or an event-time phrase found in a message body.
-    pub from_subject: bool,
-}
-
-/// What a [`SuggestedUpdate`] proposes for the loop it is attached to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SuggestedUpdateKind {
-    /// A later message suggests the loop is no longer owed.
-    Closure,
-    /// A later message suggests the loop is due at a different time.
-    DeadlineChange,
-    /// A later message suggests the loop now requires something different.
-    Modification,
-}
-
-/// A pending, model-proposed change to an open loop. It never alters the
-/// loop by itself: a person accepts or rejects it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SuggestedUpdate {
-    pub kind: SuggestedUpdateKind,
-    /// The locally-verified source text of the claim's first evidence block.
-    pub evidence_text: String,
-    /// The handle of the message that evidence block belongs to.
-    pub source_message: String,
-    /// The evidence block's ordinal within its message component.
-    pub source_block: usize,
-    /// The model-normalized new time, set only for a deadline change.
-    pub temporal_value: Option<String>,
-    /// The model's confidence, 0 to 1,000,000. Never changes routing.
-    pub confidence_micros: u32,
-}
-
-#[derive(Clone)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "projection flags remain independent fields on the shared expectation model"
-)]
 pub struct Expectation {
     pub action: String,
     pub action_phrase: String,
@@ -111,16 +65,6 @@ pub struct Expectation {
     /// True when a resolution quote was supplied but did not resolve, and
     /// the expectation was kept anyway with `resolution: None`.
     pub unverified_resolution: bool,
-    /// True when `resolution` was found in a conversation other than this
-    /// one.
-    pub cross_thread: bool,
-    pub event_passed: Option<EventPassed>,
-    /// A pending suggestion from a later message; the loop itself is
-    /// unchanged until a person accepts it.
-    pub suggested_update: Option<SuggestedUpdate>,
-    pub from_call_summary: bool,
-    pub meeting_time: Option<i64>,
-    pub meeting_time_approx: bool,
 }
 
 pub struct Expectations {
@@ -537,12 +481,6 @@ fn candidate(v: &Value, messages: &[ConversationMessage]) -> Result<Expectation,
         uncertainty: string(v, "uncertainty", 400)?.into(),
         unverified_deadline: false,
         unverified_resolution: false,
-        cross_thread: false,
-        event_passed: None,
-        suggested_update: None,
-        from_call_summary: false,
-        meeting_time: None,
-        meeting_time_approx: false,
     })
 }
 

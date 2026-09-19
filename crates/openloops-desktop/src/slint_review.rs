@@ -3,6 +3,9 @@ use std::{cell::RefCell, rc::Rc, sync::atomic::Ordering};
 
 use crate::{
     app_model::{self, AppModel, Outcome, Service, Status},
+    claim_view::{
+        Anchor, EventPassed, LoopItem, Owner, ResolutionKind, SuggestedUpdate, SuggestedUpdateKind,
+    },
     deadline_view::label as deadline_label,
     loop_state::{Decision, Reminder, marker},
     review_model::{
@@ -22,13 +25,7 @@ use openloops_graph::live::{
     ConnectionConfig,
     review::{LoadProgress, load_recent_with, load_sources_with},
 };
-use openloops_inference::{
-    blocks::CanonicalBlock,
-    expectations::{
-        Anchor, EventPassed, Expectation, Owner, ResolutionKind, SuggestedUpdate,
-        SuggestedUpdateKind,
-    },
-};
+use openloops_inference::blocks::CanonicalBlock;
 use slint::{ComponentHandle, Timer};
 
 // Review decision callback codes used by `ui/review.slint`.
@@ -295,7 +292,7 @@ fn event_time_evidence_card(
 }
 
 fn evidence_cards(
-    item: &Expectation,
+    item: &LoopItem,
     messages: &[crate::review_model::ReviewMessage],
 ) -> Vec<EvidenceView> {
     let mut cards = vec![evidence_card(
@@ -331,7 +328,7 @@ struct CompletionView {
 }
 
 fn completion_card(
-    item: &Expectation,
+    item: &LoopItem,
     messages: &[crate::review_model::ReviewMessage],
 ) -> CompletionView {
     if let Some(anchor) = &item.resolution {
@@ -589,7 +586,7 @@ struct SelectedView {
 
 fn source_message<'a>(
     review: &'a ReviewState,
-    item: &Expectation,
+    item: &LoopItem,
 ) -> Option<&'a crate::review_model::ReviewMessage> {
     review
         .messages
@@ -601,7 +598,7 @@ fn source_short(source: &str) -> &str {
     source.rsplit_once(" / ").map_or(source, |(_, short)| short)
 }
 
-fn owner_label(item: &Expectation, decision: Decision) -> &'static str {
+fn owner_label(item: &LoopItem, decision: Decision) -> &'static str {
     if decision == Decision::Mine {
         "You (confirmed)"
     } else {
@@ -624,7 +621,7 @@ fn owner_label(item: &Expectation, decision: Decision) -> &'static str {
 /// action names, and a `Review`-state resolution/event-passed label already
 /// names its own cause and points at the Completion/Event evidence sections
 /// below.
-fn status_pill_hint(decision: Decision, reminder: &Reminder, item: &Expectation) -> String {
+fn status_pill_hint(decision: Decision, reminder: &Reminder, item: &LoopItem) -> String {
     match decision {
         Decision::Done if matches!(reminder, Reminder::Completed { .. }) => {
             "The linked Microsoft To Do task was completed, which marked this handled.".into()
@@ -659,7 +656,7 @@ fn status_pill_hint(decision: Decision, reminder: &Reminder, item: &Expectation)
     }
 }
 
-fn status_pill(item: &Expectation, card: &CardContext) -> PillView {
+fn status_pill(item: &LoopItem, card: &CardContext) -> PillView {
     let (text, kind): (String, &'static str) = match card.record.decision {
         Decision::Done => ("Handled".into(), "neutral"),
         Decision::Dismissed => ("Dismissed – not mine".into(), "neutral"),
@@ -688,7 +685,7 @@ fn status_pill(item: &Expectation, card: &CardContext) -> PillView {
     PillView { text, kind, hint }
 }
 
-fn pills_for(item: &Expectation, card: &CardContext) -> Vec<PillView> {
+fn pills_for(item: &LoopItem, card: &CardContext) -> Vec<PillView> {
     let mut pills = vec![status_pill(item, card)];
     if item.from_call_summary {
         pills.push(PillView {
@@ -740,7 +737,7 @@ fn pills_for(item: &Expectation, card: &CardContext) -> Vec<PillView> {
 /// title, waiting party, subject, evidence quote, deadline text, and status
 /// pill text -- the same fields shown across the row and the detail pane. An
 /// empty `query` matches everything. Pure (plain strings only) so it is
-/// tested directly with synthetic text, independent of `Expectation`/
+/// tested directly with synthetic text, independent of `LoopItem`/
 /// `CardContext` construction.
 fn matches_search(
     query: &str,
@@ -773,7 +770,7 @@ fn matches_search(
 /// out of `review`/`item`/`card`.
 fn card_matches_search(
     review: &ReviewState,
-    item: &Expectation,
+    item: &LoopItem,
     card: &CardContext,
     query: &str,
 ) -> bool {

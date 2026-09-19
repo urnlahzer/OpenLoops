@@ -192,13 +192,12 @@ impl Decisions {
         record.updated = now();
         self.update(record)
     }
-    /// `block` and `quote` must be the expectation's own evidence anchor
-    /// (`Expectation.evidence.block`/`.quote`) -- a canonicalizer-normalized,
+    /// `block` and `quote` must be the loop item's own evidence anchor
+    /// (`LoopItem.evidence.block`/`.quote`) -- a canonicalizer-normalized,
     /// exact-match-verified substring of the source message, never something
     /// else entirely. `action_phrase` must be the expectation's own
-    /// `action_phrase` (`expectations.rs::action_phrase_from` already
-    /// guarantees it is itself an exact substring of `quote`, so it is real
-    /// anchored text too, not free-generated prose) -- it stays part of the
+    /// `action_phrase` (`claim_view::action_phrase` derives it from the
+    /// locally resolved evidence text) -- it stays part of the
     /// key because two independent actions can share one evidence quote
     /// (e.g. "Please send the budget and schedule the meeting." backing both
     /// "send the budget" and "schedule the meeting" -- see
@@ -478,6 +477,7 @@ fn decode(bytes: &[u8]) -> Result<([u8; 32], Vec<Record>), ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claim_view::{Anchor, LoopItem, Owner};
     #[test]
     fn terminal_records_expire_unless_a_reminder_is_present() {
         for decision in [Decision::Done, Decision::Dismissed, Decision::Moot] {
@@ -586,6 +586,58 @@ mod tests {
         assert_ne!(
             first_action, second_action,
             "two distinct actions sharing one evidence quote must not collide"
+        );
+    }
+
+    #[test]
+    fn fixed_loop_item_keeps_the_v2_fingerprint_bytes() {
+        let item = LoopItem {
+            action: "Requested: Send the synthetic draft.".into(),
+            action_phrase: "Send the synthetic draft".into(),
+            owner: Owner::You,
+            waiting_party: "Synthetic recipient".into(),
+            kind: "request".into(),
+            evidence: Anchor {
+                message: "message-7".into(),
+                block: 2,
+                quote: "Please send the synthetic draft.".into(),
+                context: "Please send the synthetic draft.".into(),
+            },
+            deadline: None,
+            event: None,
+            event_time: None,
+            resolution: None,
+            resolution_kind: None,
+            uncertainty: String::new(),
+            unverified_deadline: false,
+            unverified_resolution: false,
+            cross_thread: false,
+            event_passed: None,
+            suggested_update: None,
+            from_call_summary: false,
+            meeting_time: None,
+            meeting_time_approx: false,
+        };
+        let state = Decisions {
+            secret: Zeroizing::new([7; 32]),
+            records: vec![],
+            entry: None,
+            previous: Zeroizing::new(vec![]),
+            error: None,
+        };
+        let actual = state.fingerprint(
+            "account-3",
+            &item.evidence.message,
+            item.evidence.block,
+            &item.evidence.quote,
+            &item.action_phrase,
+        );
+        assert_eq!(
+            actual,
+            [
+                20, 110, 109, 230, 7, 116, 14, 253, 16, 189, 205, 1, 240, 51, 36, 128, 201, 226,
+                29, 213, 150, 171, 137, 75, 126, 103, 119, 44, 217, 32, 65, 125,
+            ]
         );
     }
     #[test]
