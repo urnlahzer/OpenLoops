@@ -2,7 +2,7 @@
   "schema_version": 1,
   "work_item": "P0-WI-10",
   "adr": "ADR-007",
-  "decision_status": "accepted_contract_runtime_unimplemented",
+  "decision_status": "accepted_contract_wired_review_only_gates_pending",
   "snapshot_date": "2026-07-20",
   "owner_decisions": ["OWN-08"],
   "requirements": ["OL-SYNC-012", "OL-SYNC-013", "OL-TEST-003", "OL-MODEL-001", "OL-MODEL-002", "OL-MODEL-003", "OL-MODEL-004", "OL-MODEL-005", "OL-MODEL-006", "OL-MODEL-007", "OL-MODEL-008", "OL-MODEL-009", "OL-MODEL-010", "OL-MODEL-011", "OL-MODEL-012", "OL-MODEL-013", "OL-MODEL-014", "OL-MODEL-015", "OL-NFR-005", "OL-NFR-007", "OL-NFR-011"],
@@ -113,7 +113,7 @@
     "provider_sdk_logging": "disabled and source-sanitized before application exceptions",
     "canary_requirement": "zero in every application-controlled durable temporary diagnostic crash browser package CI and repository artifact; exact enabled provider request is the only test-time exception"
   },
-  "runtime_boundary": {"provider_transport":false,"configured_profiles":[],"network_origins":[],"credentials_accepted":false,"records_created":[],"acceptance_scenarios_completed":[],"gates_passed":[]},
+  "runtime_boundary": {"provider_transport":true,"configured_profiles":["ollama_cloud","openrouter"],"network_origins":["https://ollama.com","https://openrouter.ai"],"credentials_accepted":true,"records_created":[],"acceptance_scenarios_completed":[],"gates_passed":[]},
   "claims": {"provider_calls":[],"permissions_requested":[],"capabilities_enabled":[],"support_rows_advertised":[],"acceptance_criteria_completed":[]},
   "sources": [
     {"id":"SRC-SPEC-OWN-08","location":"docs/product-spec.md#31-approved-owner-decisions"},

@@ -95,10 +95,10 @@ if ($null -eq $m) {
 
 $canonical = $m | ConvertTo-Json -Depth 100 -Compress
 $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($canonical))).ToLowerInvariant()
-if ($hash -ne 'a1170aeab6b37cf5f4353d47b51cd79bc341a54317aa635a76cb3fb373fd7db4') { Fail 'P0-MODEL-INVENTORY-001' }
+if ($hash -ne 'b78f7229f95f9da8ed6c636e8f429368780b0e104826a9844d9bf613d52b7132') { Fail 'P0-MODEL-INVENTORY-001' }
 
 $requirements = @('OL-SYNC-012','OL-SYNC-013','OL-TEST-003','OL-MODEL-001','OL-MODEL-002','OL-MODEL-003','OL-MODEL-004','OL-MODEL-005','OL-MODEL-006','OL-MODEL-007','OL-MODEL-008','OL-MODEL-009','OL-MODEL-010','OL-MODEL-011','OL-MODEL-012','OL-MODEL-013','OL-MODEL-014','OL-MODEL-015','OL-NFR-005','OL-NFR-007','OL-NFR-011')
-if ($m.schema_version -ne 1 -or $m.work_item -ne 'P0-WI-10' -or $m.adr -ne 'ADR-007' -or $m.decision_status -ne 'accepted_contract_runtime_unimplemented' -or $m.snapshot_date -ne '2026-07-20') { Fail 'P0-MODEL-INVENTORY-001' }
+if ($m.schema_version -ne 1 -or $m.work_item -ne 'P0-WI-10' -or $m.adr -ne 'ADR-007' -or $m.decision_status -ne 'accepted_contract_wired_review_only_gates_pending' -or $m.snapshot_date -ne '2026-07-20') { Fail 'P0-MODEL-INVENTORY-001' }
 ExactOrdered @($m.owner_decisions) @('OWN-08') 'P0-MODEL-INVENTORY-001'
 ExactOrdered @($m.requirements) $requirements 'P0-MODEL-INVENTORY-001'
 ExactOrdered @($m.acceptance_scenarios) @('AS-12','AS-16','AS-22') 'P0-MODEL-INVENTORY-001'
@@ -142,7 +142,7 @@ if ($null -eq $adapterProperty) {
 }
 else {
     $adapter = $adapterProperty.Value
-    if ($adapter.id -ne 'openrouter' -or $adapter.authority -ne 'https://openrouter.ai' -or $adapter.chat_path -ne '/api/v1/chat/completions' -or $adapter.listing_path -ne '/api/v1/endpoints/zdr' -or $adapter.request_fields_in_order -ne 'model, messages, stream, provider' -or $adapter.substitution -ne 'cannot replace the required tested ollama_cloud path') { Fail 'P0-MODEL-PROFILES-001' }
+    if ($adapter.id -ne 'openrouter' -or $adapter.authority -ne 'https://openrouter.ai' -or $adapter.chat_path -ne '/api/v1/chat/completions' -or $adapter.listing_path -ne '/api/v1/endpoints/zdr' -or $adapter.request_fields_in_order -ne 'model, messages, stream, provider, max_tokens' -or $adapter.substitution -ne 'cannot replace the required tested ollama_cloud path') { Fail 'P0-MODEL-PROFILES-001' }
     Has (($adapter | ConvertTo-Json -Compress)) @('one bounded write-only OS-protected key','Authorization Bearer only to the exact authority after final authority validation','provider.zdr=true','ORs with the account setting','revalidates the selected model against the ZDR listing before any content is sent','content-free public GET /api/v1/endpoints/zdr with no credential and no mailbox projection','ignore unknown members','never persist the raw response','response_format and structured_outputs are not sent','application validation is authoritative','exactly one assistant choice from the exact selected model label') 'P0-MODEL-PROFILES-001'
 }
 $preflight = $m.provider_preflight
@@ -263,9 +263,9 @@ ExactOrdered @($m.source_claims.claim) @(
 ) 'P0-MODEL-SOURCES-001'
 
 $runtime = $m.runtime_boundary
-if ($runtime.provider_transport -ne $false -or $runtime.credentials_accepted -ne $false) { Fail 'P0-MODEL-CLAIMS-001' }
-Empty @($runtime.configured_profiles) 'P0-MODEL-CLAIMS-001'
-Empty @($runtime.network_origins) 'P0-MODEL-CLAIMS-001'
+if ($runtime.provider_transport -ne $true -or $runtime.credentials_accepted -ne $true) { Fail 'P0-MODEL-CLAIMS-001' }
+if (@($runtime.configured_profiles).Count -lt 1) { Fail 'P0-MODEL-CLAIMS-001' }
+if (@($runtime.network_origins).Count -lt 1) { Fail 'P0-MODEL-CLAIMS-001' }
 Empty @($runtime.records_created) 'P0-MODEL-CLAIMS-001'
 Empty @($runtime.acceptance_scenarios_completed) 'P0-MODEL-CLAIMS-001'
 Empty @($runtime.gates_passed) 'P0-MODEL-CLAIMS-001'
