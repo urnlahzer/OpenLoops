@@ -16,7 +16,7 @@ pub(crate) use scanning::{
     ConversationFailure, FailureReason, ReviewMessage, ScanProgress, ScanResult, probe, scan,
 };
 
-pub(crate) const SHOW_HANDLED_LABEL: &str = "Show resolved, handled and dismissed";
+pub(crate) const SHOW_HANDLED_LABEL: &str = "Show resolved, handled, and dismissed";
 
 // Test-only call counter for [`ReviewState::card_contexts`] -- the per-card
 // HMAC fingerprint pass the perf fix (owner round 3, 2026-09-10) moved out of
@@ -2828,6 +2828,6 @@ the scan stopped after a provider error."
 
     #[test]
     fn show_handled_label_matches_the_review_spec() {
-        assert_eq!(SHOW_HANDLED_LABEL, "Show resolved, handled and dismissed");
+        assert_eq!(SHOW_HANDLED_LABEL, "Show resolved, handled, and dismissed");
     }
 }

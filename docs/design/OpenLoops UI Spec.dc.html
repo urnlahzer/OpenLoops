@@ -90,7 +90,7 @@ pre{font-family:Consolas,'Cascadia Mono',Menlo,monospace;font-size:12px;backgrou
       <tr><td>Rescan loaded mail</td><td>Subtle</td><td><code>review.messages</code> non-empty and not busy → <code>start_scan</code>.</td></tr>
       <tr><td>Clear results and mail</td><td>Subtle</td><td>Always. Resets <code>ReviewState</code>; decisions and To Do tasks preserved (say so in the action status).</td></tr>
       <tr><td>Filter All / Mine / Team</td><td>Segmented</td><td>Client-side. Mine = owner is the signed-in user; Team = unassigned team request.</td></tr>
-      <tr><td>Show resolved, handled and dismissed</td><td>Checkbox, right-aligned</td><td>Maps to <code>show_handled</code>. Off by default.</td></tr>
+      <tr><td>Show resolved, handled, and dismissed</td><td>Checkbox, right-aligned</td><td>Maps to <code>show_handled</code>. Off by default.</td></tr>
     </tbody>
   </table>
 
@@ -110,7 +110,7 @@ pre{font-family:Consolas,'Cascadia Mono',Menlo,monospace;font-size:12px;backgrou
       <tr><td>Past due (danger)</td><td><code>PastDue*</code> variants — already sort first today</td></tr>
       <tr><td>Due (brand)</td><td><code>Due</code>, <code>DueEndOfDay</code>, <code>DueEndOfBusiness</code>, range variants</td></tr>
       <tr><td>No fixed deadline (text.3)</td><td><code>EventTied</code>, <code>Soft</code>, no deadline</td></tr>
-      <tr><td>Resolved, handled or dismissed (success)</td><td>Only when the checkbox is on: auto-resolved, Done, Dismissed, Moot</td></tr>
+      <tr><td>Resolved, handled, or dismissed (success)</td><td>Only when the checkbox is on: auto-resolved, Done, Dismissed, Moot</td></tr>
     </tbody>
   </table>
   <p style="margin-top:10px"><strong>Row</strong> — 3-px left bar (aging colour; brand when selected), action phrase (600, wraps), "Waiting: {party} · {source short}", third line "{aging label} · {status label}" (hidden in compact density), right-aligned date. Selected row bg brand.subtle; hover #F0F0F0. Single selection; keyboard ↑/↓ moves it. Empty state text: "No open expectations match this filter. Missing replies in the scanned folders never prove work is finished."</p>

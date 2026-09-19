@@ -1109,7 +1109,7 @@ fn sync_review_inner(
                 ListGroup::PastDue => "Past due",
                 ListGroup::Due => "Due",
                 ListGroup::NoFixedDeadline => "No fixed deadline",
-                ListGroup::Closed => "Resolved, handled or dismissed",
+                ListGroup::Closed => "Resolved, handled, or dismissed",
             }
             .into(),
             group_kind: match row.group {
