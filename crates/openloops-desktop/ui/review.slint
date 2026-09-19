@@ -146,19 +146,27 @@ export component ReviewScreen {
     callback open-external(string);
 
     VerticalLayout { spacing: 0px;
-        Rectangle { height: Tokens.command-height; background: Tokens.bg-bar;
-            HorizontalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-2;
-                // N1: the glyph lives inside the button's own label text, not
-                // as a sibling Text sitting outside the clickable/focusable
-                // area.
-                if root.review-scanning: SecondaryButton { text: "■ Stop scan"; accessible-name: "Stop scan"; clicked => { root.stop-scan(); } }
-                if !root.review-scanning: PrimaryButton { text: "Scan inboxes"; enabled: root.can-scan; clicked => { root.scan-inboxes(); } }
-                SubtleButton { text: "Rescan loaded mail"; enabled: root.can-rescan; clicked => { root.rescan(); } }
-                SubtleButton { text: "Sync To Do"; enabled: root.can-sync-todo; clicked => { root.sync-todo(); } }
-                SubtleButton { text: "Clear results and mail"; enabled: !root.busy; clicked => { root.clear-results(); } }
-                Rectangle { horizontal-stretch: 1; }
-                Segmented { width: Tokens.review-filter-width; options: ["All", "Mine", "Team"]; selected-index <=> root.filter-index; accessible-name: "Review filter"; enabled: !root.busy; selected(index) => { root.filter-selected(index); } }
-                Checkbox { text: root.show-handled-label; checked <=> root.show-handled; enabled: !root.busy; toggled(value) => { root.show-handled-toggled(value); } }
+        Rectangle { height: max(Tokens.command-height, command-bar.preferred-height); background: Tokens.bg-bar;
+            // The filter and the show-closed checkbox sit on a second row: one
+            // row's minimum width would otherwise exceed the window at its
+            // minimum size and push the whole screen past its right edge.
+            command-bar := VerticalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-2;
+                HorizontalLayout { spacing: Tokens.space-2;
+                    // N1: the glyph lives inside the button's own label text, not
+                    // as a sibling Text sitting outside the clickable/focusable
+                    // area.
+                    if root.review-scanning: SecondaryButton { text: "■ Stop scan"; accessible-name: "Stop scan"; clicked => { root.stop-scan(); } }
+                    if !root.review-scanning: PrimaryButton { text: "Scan inboxes"; enabled: root.can-scan; clicked => { root.scan-inboxes(); } }
+                    SubtleButton { text: "Rescan loaded mail"; enabled: root.can-rescan; clicked => { root.rescan(); } }
+                    SubtleButton { text: "Sync To Do"; enabled: root.can-sync-todo; clicked => { root.sync-todo(); } }
+                    SubtleButton { text: "Clear results and mail"; enabled: !root.busy; clicked => { root.clear-results(); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                HorizontalLayout { spacing: Tokens.space-4;
+                    Segmented { width: Tokens.review-filter-width; options: ["All", "Mine", "Team"]; selected-index <=> root.filter-index; accessible-name: "Review filter"; enabled: !root.busy; selected(index) => { root.filter-selected(index); } }
+                    Checkbox { text: root.show-handled-label; checked <=> root.show-handled; enabled: !root.busy; toggled(value) => { root.show-handled-toggled(value); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
             }
             // N3: one bottom hairline, not a four-side border.
             Rectangle { y: parent.height - Tokens.hairline; height: Tokens.hairline; background: Tokens.stroke-1; }
@@ -242,11 +250,12 @@ export component ReviewScreen {
         HorizontalLayout { spacing: 0px; vertical-stretch: 1;
             Rectangle { width: Tokens.review-list-width; background: Tokens.bg-list;
                 VerticalLayout { spacing: 0px;
-                    Rectangle { min-height: Tokens.command-height;
-                        HorizontalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; spacing: Tokens.space-2;
-                            Text { text: "Who is waiting on you · " + root.open-count + " open"; color: Tokens.text-1; font-size: Tokens.font-16; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; min-width: 0px; overflow: elide; }
+                    // The search box sits on its own row under the title so it never
+                    // covers or truncates the "Who is waiting on you" line.
+                    Rectangle { height: max(Tokens.command-height, list-header.preferred-height);
+                        list-header := VerticalLayout { padding-left: Tokens.space-4; padding-right: Tokens.space-4; padding-top: Tokens.space-2; padding-bottom: Tokens.space-2; spacing: Tokens.space-2;
+                            Text { text: "Who is waiting on you · " + root.open-count + " open"; color: Tokens.text-1; font-size: Tokens.font-16; font-weight: 600; vertical-alignment: center; min-width: 0px; overflow: elide; }
                             search-input := LineEdit {
-                                width: Tokens.review-search-width;
                                 text <=> root.search-query;
                                 placeholder-text: "Search";
                                 accessible-label: "Search review list";
