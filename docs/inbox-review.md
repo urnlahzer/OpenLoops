@@ -145,6 +145,7 @@ silently disappearing from the count.
 The model sees canonical message bodies, subjects, quoted history, participants,
 timestamps and ownership facts. It never receives a token or raw Graph IDs.
 Attachments are not sent. HTML scripts and remote images are never executed.
+Current-body evidence is paragraph-sized for HTML and plain-text mail alike.
 Outgoing user promises, incoming requests, and unassigned team work differ.
 The model supplies whole evidence quotations plus an exact atomic action phrase;
 the app resolves them against source blocks. It does not ask for character counts.
