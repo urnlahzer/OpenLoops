@@ -17,7 +17,9 @@ use std::sync::atomic::AtomicBool;
 
 use serde_json::{Value, json};
 
-use crate::provider::{ModelClient, ProviderError, json_document, parse_error};
+use crate::blocks::CanonicalBlock;
+use crate::message::CanonicalMessage;
+use crate::provider::{ModelClient, ProviderError, deadline_for, json_document, parse_error};
 use crate::validation::{
     AnalysisResult, ClaimDisposition, ParticipantSlot, SuppliedContext, resolve_block, validate,
 };
@@ -66,7 +68,7 @@ pub fn analyze(
     context: &SuppliedContext<'_>,
 ) -> Result<AnalysisResult, ProviderError> {
     let (system, user) = projection(context)?;
-    let answer = client.complete(&system, &user, None)?;
+    let answer = client.complete(&system, &user, None, deadline_for(context.messages.len()))?;
     let result = validate(json_document(answer.as_bytes())?, context);
     if matches!(result, AnalysisResult::AnalysisUnavailable) {
         return Err(ProviderError::InvalidAnalysis);
@@ -84,7 +86,7 @@ pub fn analyze_for_review(
     context: &SuppliedContext<'_>,
 ) -> Result<ReviewAnalysis, ProviderError> {
     let (system, user) = projection(context)?;
-    let answer = client.complete(&system, &user, None)?;
+    let answer = client.complete(&system, &user, None, deadline_for(context.messages.len()))?;
     review_analysis(answer.as_bytes(), context)
 }
 
@@ -116,7 +118,7 @@ pub fn analyze_claims(
     cancel: Option<&AtomicBool>,
 ) -> Result<ClaimAnalysis, ProviderError> {
     let (system, user) = projection(context)?;
-    let answer = client.complete(&system, &user, cancel)?;
+    let answer = client.complete(&system, &user, cancel, deadline_for(context.messages.len()))?;
     claim_analysis(answer.as_bytes(), context)
 }
 
@@ -305,6 +307,81 @@ fn review_analysis(
 /// builder turns it into that provider's HTTP body, so the bytes on the
 /// wire for a given context are the same regardless of which provider is
 /// selected.
+fn normalized_text(block: &CanonicalBlock) -> String {
+    block
+        .as_string()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn push_projected_block(
+    blocks: &mut Vec<Value>,
+    component: &str,
+    ordinal: usize,
+    block: &CanonicalBlock,
+    text_bytes: &mut usize,
+) -> Result<(), ProviderError> {
+    let text = block.as_string();
+    *text_bytes += text.len();
+    if *text_bytes > crate::provider::MAX_REQUEST {
+        return Err(ProviderError::InputTooLarge);
+    }
+    blocks.push(json!({"component":component,"block_ordinal":ordinal,"scalar_length":block.scalar_len(),"text":text}));
+    Ok(())
+}
+
+fn validate_block_sizes(message: &CanonicalMessage) -> Result<(), ProviderError> {
+    for items in [
+        std::slice::from_ref(&message.subject),
+        message.body_blocks.as_slice(),
+        message.quote_blocks.as_slice(),
+        message.sender.as_slice(),
+        message.to.as_slice(),
+        message.cc.as_slice(),
+        message.attachment_names.as_slice(),
+        message.link_labels.as_slice(),
+    ] {
+        if items.iter().any(|block| block.scalar_len() > 8192) {
+            return Err(ProviderError::InputTooLarge);
+        }
+    }
+    Ok(())
+}
+
+fn projected_message_blocks(
+    message: &CanonicalMessage,
+    earlier_body_text: &HashSet<String>,
+    emitted_quote_text: &mut HashSet<String>,
+    text_bytes: &mut usize,
+) -> Result<Vec<Value>, ProviderError> {
+    validate_block_sizes(message)?;
+    let mut blocks = Vec::new();
+    push_projected_block(&mut blocks, "subject", 0, &message.subject, text_bytes)?;
+    for (ordinal, block) in message.body_blocks.iter().enumerate() {
+        push_projected_block(&mut blocks, "body_block", ordinal, block, text_bytes)?;
+    }
+    for (ordinal, block) in message.quote_blocks.iter().enumerate() {
+        let normalized = normalized_text(block);
+        if earlier_body_text.contains(&normalized) || !emitted_quote_text.insert(normalized) {
+            continue;
+        }
+        push_projected_block(&mut blocks, "quote_block", ordinal, block, text_bytes)?;
+    }
+    for (component, items) in [
+        ("sender", message.sender.as_slice()),
+        ("to", message.to.as_slice()),
+        ("cc", message.cc.as_slice()),
+        ("attachment_name", message.attachment_names.as_slice()),
+        ("link_label", message.link_labels.as_slice()),
+    ] {
+        for (ordinal, block) in items.iter().enumerate() {
+            push_projected_block(&mut blocks, component, ordinal, block, text_bytes)?;
+        }
+    }
+    Ok(blocks)
+}
+
 fn projection(context: &SuppliedContext<'_>) -> Result<(String, String), ProviderError> {
     if context.messages.is_empty() || context.messages.len() > MAX_CONVERSATION_MESSAGES {
         return Err(ProviderError::InputTooLarge);
@@ -312,6 +389,8 @@ fn projection(context: &SuppliedContext<'_>) -> Result<(String, String), Provide
     let mut projections = Vec::new();
     let mut text_bytes = 0usize;
     let mut source_handles = HashSet::new();
+    let mut earlier_body_text = HashSet::new();
+    let mut emitted_quote_text = HashSet::new();
     for source in context.messages {
         if !valid_handle(source.handle) || !source_handles.insert(source.handle) {
             return Err(ProviderError::InvalidAnalysis);
@@ -324,30 +403,14 @@ fn projection(context: &SuppliedContext<'_>) -> Result<(String, String), Provide
         {
             return Err(ProviderError::InputTooLarge);
         }
-        let mut blocks = Vec::new();
-        for (component, items) in [
-            ("subject", std::slice::from_ref(&message.subject)),
-            ("body_block", message.body_blocks.as_slice()),
-            ("quote_block", message.quote_blocks.as_slice()),
-            ("sender", message.sender.as_slice()),
-            ("to", message.to.as_slice()),
-            ("cc", message.cc.as_slice()),
-            ("attachment_name", message.attachment_names.as_slice()),
-            ("link_label", message.link_labels.as_slice()),
-        ] {
-            for (ordinal, block) in items.iter().enumerate() {
-                if block.scalar_len() > 8192 {
-                    return Err(ProviderError::InputTooLarge);
-                }
-                let text = block.as_string();
-                text_bytes += text.len();
-                if text_bytes > crate::provider::MAX_REQUEST {
-                    return Err(ProviderError::InputTooLarge);
-                }
-                blocks.push(json!({"component":component,"block_ordinal":ordinal,"scalar_length":block.scalar_len(),"text":text}));
-            }
-        }
+        let blocks = projected_message_blocks(
+            message,
+            &earlier_body_text,
+            &mut emitted_quote_text,
+            &mut text_bytes,
+        )?;
         projections.push(json!({"source_handle":source.handle,"blocks":blocks}));
+        earlier_body_text.extend(message.body_blocks.iter().map(normalized_text));
     }
     let participants = participant_projections(context)?;
     let mut loop_handles = HashSet::new();
@@ -443,6 +506,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
     use zeroize::Zeroizing;
 
     /// A synthetic [`ModelClient`] that records the exact system/user pair
@@ -472,6 +536,7 @@ mod tests {
             system: &str,
             user: &str,
             _cancel: Option<&AtomicBool>,
+            _deadline: Duration,
         ) -> Result<Zeroizing<String>, ProviderError> {
             *self.seen.lock().unwrap() = Some((system.to_owned(), user.to_owned()));
             Ok(Zeroizing::new(
@@ -603,6 +668,25 @@ mod tests {
             attachment_names: vec![],
             link_labels: vec![],
         }
+    }
+
+    fn synthetic_message_with_quotes(body: &str, quotes: &[&str]) -> CanonicalMessage {
+        let mut message = synthetic_message(body, false);
+        message.quote_blocks = quotes
+            .iter()
+            .map(|text| CanonicalBlock::new(text).unwrap())
+            .collect();
+        message
+    }
+
+    fn projected_blocks(context: &SuppliedContext<'_>, message_index: usize) -> Vec<Value> {
+        let (_, frame) = projection(context).unwrap();
+        let (_, data) = frame.split_once('\n').unwrap();
+        let payload: Value = serde_json::from_str(data).unwrap();
+        payload["messages"][message_index]["blocks"]
+            .as_array()
+            .unwrap()
+            .clone()
     }
 
     fn parse_context(timestamp: i64) -> openloops_domain::deadline_parse::ParseContext {
@@ -835,6 +919,136 @@ mod tests {
         assert_eq!(projection(&forty_one), Err(ProviderError::InputTooLarge));
     }
 
+    #[test]
+    fn projection_drops_quote_matching_an_earlier_body_after_whitespace_normalization() {
+        let first = synthetic_message("Please send the synthetic report.", false);
+        let second = synthetic_message_with_quotes(
+            "Acknowledged.",
+            &["  Please\t send the synthetic\nreport.  "],
+        );
+        let messages = [
+            crate::validation::MessageContext {
+                handle: "message_0",
+                message: &first,
+                temporal_context: parse_context(0),
+            },
+            crate::validation::MessageContext {
+                handle: "message_1",
+                message: &second,
+                temporal_context: parse_context(1),
+            },
+        ];
+        let context = SuppliedContext {
+            messages: &messages,
+            participants: &[],
+            loop_candidate_handles: &[],
+        };
+        assert!(
+            projected_blocks(&context, 1)
+                .iter()
+                .all(|block| block["component"] != "quote_block")
+        );
+    }
+
+    #[test]
+    fn projection_keeps_quote_with_an_added_inline_line() {
+        let first = synthetic_message("Please send the synthetic report.", false);
+        let second = synthetic_message_with_quotes(
+            "Acknowledged.",
+            &["Please send the synthetic report.\nInline reply added here."],
+        );
+        let messages = [
+            crate::validation::MessageContext {
+                handle: "message_0",
+                message: &first,
+                temporal_context: parse_context(0),
+            },
+            crate::validation::MessageContext {
+                handle: "message_1",
+                message: &second,
+                temporal_context: parse_context(1),
+            },
+        ];
+        let context = SuppliedContext {
+            messages: &messages,
+            participants: &[],
+            loop_candidate_handles: &[],
+        };
+        assert_eq!(
+            projected_blocks(&context, 1)
+                .iter()
+                .filter(|block| block["component"] == "quote_block")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn projection_keeps_quote_matching_only_a_later_body() {
+        let first = synthetic_message_with_quotes("Initial reply.", &["Future body text."]);
+        let second = synthetic_message("Future body text.", false);
+        let messages = [
+            crate::validation::MessageContext {
+                handle: "message_0",
+                message: &first,
+                temporal_context: parse_context(0),
+            },
+            crate::validation::MessageContext {
+                handle: "message_1",
+                message: &second,
+                temporal_context: parse_context(1),
+            },
+        ];
+        let context = SuppliedContext {
+            messages: &messages,
+            participants: &[],
+            loop_candidate_handles: &[],
+        };
+        assert_eq!(
+            projected_blocks(&context, 0)
+                .iter()
+                .filter(|block| block["component"] == "quote_block")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn surviving_quote_ordinals_are_not_compacted() {
+        let first = synthetic_message("Repeated earlier text.", false);
+        let second = synthetic_message_with_quotes(
+            "Current body.",
+            &[
+                "Repeated earlier text.",
+                "First unique quote.",
+                "Second unique quote.",
+            ],
+        );
+        let messages = [
+            crate::validation::MessageContext {
+                handle: "message_0",
+                message: &first,
+                temporal_context: parse_context(0),
+            },
+            crate::validation::MessageContext {
+                handle: "message_1",
+                message: &second,
+                temporal_context: parse_context(1),
+            },
+        ];
+        let context = SuppliedContext {
+            messages: &messages,
+            participants: &[],
+            loop_candidate_handles: &[],
+        };
+        let ordinals: Vec<u64> = projected_blocks(&context, 1)
+            .iter()
+            .filter(|block| block["component"] == "quote_block")
+            .map(|block| block["block_ordinal"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ordinals, [1, 2]);
+    }
+
     /// A synthetic [`ModelClient`] that always answers with the fixed body
     /// it was constructed with, for exercising [`analyze_claims`] against a
     /// hand-written analysis document rather than a real provider.
@@ -854,9 +1068,56 @@ mod tests {
             _system: &str,
             _user: &str,
             _cancel: Option<&AtomicBool>,
+            _deadline: Duration,
         ) -> Result<Zeroizing<String>, ProviderError> {
             Ok(Zeroizing::new(self.0.clone()))
         }
+    }
+
+    #[test]
+    fn surviving_quote_evidence_validates_and_resolves_at_its_original_ordinal() {
+        let request = "Please complete the synthetic task.";
+        let retained_quote = "The synthetic task includes the revised section.";
+        let first = synthetic_message(request, false);
+        let second = synthetic_message_with_quotes(
+            "The synthetic task is complete.",
+            &[request, retained_quote],
+        );
+        let messages = [
+            crate::validation::MessageContext {
+                handle: "message_0",
+                message: &first,
+                temporal_context: parse_context(0),
+            },
+            crate::validation::MessageContext {
+                handle: "message_1",
+                message: &second,
+                temporal_context: parse_context(1),
+            },
+        ];
+        let context = SuppliedContext {
+            messages: &messages,
+            participants: &[],
+            loop_candidate_handles: &["loop-1"],
+        };
+        let claim = json!({
+            "claim_type":"possible_closure",
+            "evidence":[
+                whole_block("message_1", second.body_blocks[0].scalar_len()),
+                {"source_handle":"message_1","component":"quote_block","block_ordinal":1,
+                 "range_start":0,"range_end":retained_quote.chars().count()}
+            ],
+            "waiting_party_handle":null,
+            "related_loop_handles":["loop-1"],
+            "temporal":null,
+            "confidence_micros":800_000,
+            "ambiguity_codes":["relation"]
+        });
+        let response = json!({"schema_version":1,"claims":[claim]}).to_string();
+        let result = analyze_claims(&FixedClient(response), &context, None).unwrap();
+        assert_eq!(result.accepted.len(), 1);
+        assert_eq!(result.accepted[0].evidence[1].text, retained_quote);
+        assert_eq!(result.accepted[0].evidence[1].block_ordinal, 1);
     }
 
     #[test]

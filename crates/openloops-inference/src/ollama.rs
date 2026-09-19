@@ -1,14 +1,15 @@
 //! Opt-in Ollama Cloud adapter. Credentials and payloads are session-only.
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use reqwest::blocking::{Client, Response};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use crate::provider::{
-    MAX_PARALLEL_REQUESTS, MAX_REQUEST, ModelClient, RequestControl, https_client, json_document,
-    parse_error, read_body, send_with_control, status_error, valid_key, valid_model_name,
+    MAX_PARALLEL_REQUESTS, MAX_REQUEST, ModelClient, REQUEST_DEADLINE, RequestControl,
+    https_client, json_document, parse_error, read_body, send_with_control, status_error,
+    valid_key, valid_model_name,
 };
 
 pub use crate::provider::ProviderError;
@@ -92,7 +93,7 @@ impl OllamaCloud {
             "Return only this JSON object: {\"schema_version\":1,\"claims\":[]}",
             "Connection check; there is no message to analyze.",
         )?;
-        let content = self.chat(body, None)?;
+        let content = self.chat(body, None, REQUEST_DEADLINE)?;
         let parsed = openloops_contracts::parse_analysis_output(json_document(content.as_bytes())?)
             .map_err(parse_error)?;
         if !parsed.claims.is_empty() {
@@ -102,18 +103,19 @@ impl OllamaCloud {
     }
 
     /// Sends `body` and reads the answer. Records the start instant
-    /// immediately before `send()` so [`crate::provider::REQUEST_DEADLINE`]
-    /// bounds the whole request -- including the header wait, not just the
-    /// body -- rather than just an idle connection; `cancel`, when
+    /// immediately before `send()` so the supplied `deadline` bounds the
+    /// whole request -- including the header wait, not just the body --
+    /// rather than just an idle connection; `cancel`, when
     /// supplied, lets a Stop action abort the request in progress, whether
     /// it is still waiting on a response or partway through reading one.
     fn chat(
         &self,
         body: Vec<u8>,
         cancel: Option<&AtomicBool>,
+        deadline: Duration,
     ) -> Result<Zeroizing<String>, ProviderError> {
         let started = Instant::now();
-        let control = RequestControl::with_cancel(started, cancel);
+        let control = RequestControl::with_cancel_and_deadline(started, cancel, deadline);
         let request = self
             .client
             .post(CHAT)
@@ -139,8 +141,9 @@ impl ModelClient for OllamaCloud {
         system: &str,
         user: &str,
         cancel: Option<&AtomicBool>,
+        deadline: Duration,
     ) -> Result<Zeroizing<String>, ProviderError> {
-        self.chat(request(&self.model, system, user)?, cancel)
+        self.chat(request(&self.model, system, user)?, cancel, deadline)
     }
 }
 

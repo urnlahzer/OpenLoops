@@ -32,7 +32,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const READ_IDLE_GUARD: Duration = Duration::from_mins(1);
 
 /// Bounds the whole request -- from `send()` to the last body byte -- to
-/// [`REQUEST_DEADLINE`], and lets a Stop action abort it via `cancel`.
+/// its configured deadline, and lets a Stop action abort it via `cancel`.
 /// reqwest gives no way to observe either condition while blocked inside
 /// one `send()` or `read()` call, so both [`send_with_control`] and
 /// [`read_body`] run that blocking call on a background thread and poll
@@ -50,12 +50,12 @@ const READ_IDLE_GUARD: Duration = Duration::from_mins(1);
 /// tries to send and exits then, but its one blocking `send()`/`read()`
 /// call -- and the socket underneath it -- can still linger for up to
 /// reqwest's own per-call timeout (`https_client`'s `.timeout(...)`,
-/// currently 60 seconds) after that.
+/// currently [`MAX_REQUEST_DEADLINE`]) after that.
 pub struct RequestControl<'a> {
     pub started: Instant,
     pub cancel: Option<&'a AtomicBool>,
-    /// Test-only override of [`REQUEST_DEADLINE`] so a loopback test can
-    /// observe a deadline `Timeout` without waiting the real 150 seconds.
+    /// Per-request wall deadline. Conversation calls use [`deadline_for`];
+    /// content-free calls use [`REQUEST_DEADLINE`].
     deadline: Duration,
 }
 
@@ -77,6 +77,21 @@ impl<'a> RequestControl<'a> {
             started,
             cancel,
             deadline: REQUEST_DEADLINE,
+        }
+    }
+
+    /// Uses an explicit wall deadline while retaining the same cancellation
+    /// polling used by [`RequestControl::with_cancel`].
+    #[must_use]
+    pub fn with_cancel_and_deadline(
+        started: Instant,
+        cancel: Option<&'a AtomicBool>,
+        deadline: Duration,
+    ) -> Self {
+        Self {
+            started,
+            cancel,
+            deadline,
         }
     }
 
@@ -122,6 +137,29 @@ impl<'a> RequestControl<'a> {
 /// performing the blocking call underneath it -- see [`RequestControl`]'s
 /// residual-linger note.
 pub const REQUEST_DEADLINE: Duration = Duration::from_secs(150);
+
+/// Conversation sizes through this count use the base [`REQUEST_DEADLINE`].
+const DEADLINE_BASE_MESSAGES: usize = 3;
+/// Extra wall time allowed for each conversation message beyond the base.
+const DEADLINE_PER_MESSAGE: Duration = Duration::from_secs(15);
+/// Largest wall deadline assigned to a conversation request.
+pub const MAX_REQUEST_DEADLINE: Duration = Duration::from_mins(5);
+
+/// Returns the wall deadline for a conversation with `messages` messages:
+/// 150 seconds through three messages, then 15 seconds more per message,
+/// capped at 300 seconds.
+#[must_use]
+pub fn deadline_for(messages: usize) -> Duration {
+    let extra_messages = messages.saturating_sub(DEADLINE_BASE_MESSAGES);
+    let extra_seconds = u64::try_from(extra_messages)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(DEADLINE_PER_MESSAGE.as_secs());
+    let seconds = REQUEST_DEADLINE
+        .as_secs()
+        .saturating_add(extra_seconds)
+        .min(MAX_REQUEST_DEADLINE.as_secs());
+    Duration::from_secs(seconds)
+}
 
 /// Fixed error codes only; no upstream error text escapes this boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,6 +262,8 @@ pub trait ModelClient: Sync {
     /// in-flight request with [`ProviderError::Cancelled`] within about
     /// one poll tick instead of waiting for the request to finish or
     /// idle-time out.
+    /// `deadline` bounds this whole completion and is normally selected by
+    /// [`deadline_for`] from the conversation's message count.
     /// # Errors
     /// Returns a fixed provider error. No upstream text, header, or body
     /// escapes, and no alternate model or origin is attempted.
@@ -232,6 +272,7 @@ pub trait ModelClient: Sync {
         system: &str,
         user: &str,
         cancel: Option<&AtomicBool>,
+        deadline: Duration,
     ) -> Result<Zeroizing<String>, ProviderError>;
 }
 
@@ -259,7 +300,10 @@ pub(crate) fn https_client() -> Result<Client, ProviderError> {
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_mins(1))
+        // The transport timeout must not undercut the largest per-request
+        // deadline. `RequestControl` still enforces the selected deadline and
+        // the separate 60-second body idle guard still detects stalled reads.
+        .timeout(MAX_REQUEST_DEADLINE)
         .build()
         .map_err(|error| transport_error(&error))
 }
@@ -578,6 +622,19 @@ pub(crate) fn status_error(status: u16) -> ProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversation_deadline_scales_after_three_messages_and_caps_at_five_minutes() {
+        for messages in 1..=3 {
+            assert_eq!(deadline_for(messages), Duration::from_secs(150));
+        }
+        assert_eq!(deadline_for(4), Duration::from_secs(165));
+        assert_eq!(deadline_for(5), Duration::from_mins(3));
+        assert_eq!(deadline_for(12), Duration::from_secs(285));
+        assert_eq!(deadline_for(13), Duration::from_mins(5));
+        assert_eq!(deadline_for(40), Duration::from_mins(5));
+        assert_eq!(deadline_for(usize::MAX), Duration::from_mins(5));
+    }
 
     #[test]
     fn keys_and_model_labels_reject_whitespace_and_terminal_escapes() {

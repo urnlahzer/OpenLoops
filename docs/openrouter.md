@@ -57,6 +57,10 @@ configured for ZDR, and OpenLoops never relaxes it for an individual request.
 Before any message text is sent, connecting re-checks that the selected model
 still appears in the ZDR listing.
 
+The governed conversation projection omits a quoted-history block only when
+Unicode-whitespace normalization makes it exactly duplicate an earlier message
+body or a quote already emitted; edited quotes and inline replies remain.
+
 `max_tokens` is fixed, not user-configurable. OpenRouter's pre-request credit
 check reserves credit for each request that is still in flight, sized by the
 request's output ceiling. Without an explicit `max_tokens` that ceiling is
@@ -145,8 +149,8 @@ exact selected model label. Tool calls, refusals, generated images or audio, an
 rejected. Duplicate JSON members are rejected before validation.
 
 Requests use fixed HTTPS endpoints, disabled redirects and proxies, a 5-second
-connection limit, a 60-second per-read idle limit, no tools, no automatic
-retries, bounded request and response sizes, and at most your configured
+connection limit, a 300-second transport timeout, a 60-second response-body
+idle guard, no tools, no automatic retries, bounded request and response sizes, and at most your configured
 parallel requests in flight. The key and response buffers
 are held in zeroizing wrappers. Failures report fixed codes — invalid key,
 quota, rate limit, timeout, network, HTTP status, malformed JSON, invalid
@@ -155,15 +159,16 @@ fields — and never expose a raw upstream body.
 The ZDR listing is much larger than a completion (several hundred kilobytes),
 so it has its own larger read bound; the completion bound is unchanged.
 
-Every request — from the moment it is sent to the last byte of the response —
-is additionally bounded to 150 seconds of wall time, independently of the
-60-second per-read idle limit above. That per-read limit only bounds one
-`send()` or `read()` call and resets on every byte a connection sends, so a
-provider that trickles occasional keep-alive bytes while a slow model keeps
-working could otherwise hold a request open far longer than 60 seconds.
+Every conversation request — from the moment it is sent to the last byte of
+the response — has a size-scaled wall deadline: 150 seconds for up to three
+messages, plus 15 seconds for each message beyond three, capped at 300 seconds.
+Content-free checks and listings retain the 150-second default. These deadlines
+are independent of the 60-second response-body idle guard above. That guard
+detects a body that stops producing chunks, but it does not constrain the
+response-header wait and a provider can keep it armed by trickling bytes.
 OpenLoops runs the blocking `send()` (the connection and the full header
 wait) and the blocking body reads each on their own background thread and
-polls it every 250 milliseconds, so the 150-second bound is enforced within
+polls it every 250 milliseconds, so the selected deadline is enforced within
 about a quarter second of expiry whether the connection is silently
 withholding response headers, silently withholding body bytes, or trickling
 either — and reports `Timeout` once it is exceeded. A slow reasoning model
@@ -173,8 +178,8 @@ the rest of the scan continues. Clicking Stop abandons the request currently
 in flight — within about a second, not only between conversations. Abandoning
 a request this way does not instantly free the resources behind it: the
 background thread's one blocking `send()`/`read()` call, and the socket
-underneath it, can still linger for up to the 60-second per-read idle limit
-above, since that one call cannot be interrupted from outside.
+underneath it, can still linger for up to the 300-second transport timeout,
+since that one call cannot be interrupted from outside.
 
 ## Validation
 

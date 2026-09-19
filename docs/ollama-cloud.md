@@ -35,6 +35,9 @@ conversations, recipient context, and signed-in ownership facts. Its separate
 live contract returns action summaries and exact source quotations resolved
 locally, rather than model-supplied character offsets. Scanning requires no
 manual message selection. Attachments are not sent by this path.
+The governed projection removes a quoted-history block only when collapsed
+Unicode whitespace makes it exactly duplicate an earlier message body or a
+quote already emitted; quotes with edits or inline replies remain.
 
 ## Plan and concurrent requests
 
@@ -65,8 +68,8 @@ it does not save provider payloads or outputs. The launcher restores
 its process environment after exit. The key and raw response buffers are held
 in zeroizing wrappers, without claiming removal of every allocator, TLS, OS, or
 provider copy. Requests use fixed HTTPS endpoints, disabled redirects/proxies,
-a 5-second connection timeout and a 60-second per-read idle timeout, no tools,
-no automatic retries, bounded request/response sizes, and at most the plan's
+a 5-second connection timeout, a 300-second transport timeout, and a 60-second
+response-body idle guard, no tools, no automatic retries, bounded request/response sizes, and at most the plan's
 concurrent requests in flight. Model names are
 validated before display.
 Responses must match the selected model, complete normally, and contain no tool
@@ -78,17 +81,19 @@ to validated message slots before transmission, and source/loop handles are
 checked before constructing the request. The adapter does not enable automatic
 actions or pass a release gate.
 
-Every request — from the moment it is sent to the last byte of the response —
-is additionally bounded to 150 seconds of wall time, independently of the
-60-second per-read idle timeout above. That per-read timeout only bounds one
-`send()` or `read()` call and resets on every byte a connection sends, so a
-slow keep-alive connection could otherwise hold a request open far longer
-than 60 seconds. This matters especially for Ollama Cloud: a slow model can
+Every conversation request — from the moment it is sent to the last byte of
+the response — has a size-scaled wall deadline: 150 seconds for up to three
+messages, plus 15 seconds for each message beyond three, capped at 300 seconds.
+Content-free checks and listings retain the 150-second default. These deadlines
+are independent of the 60-second response-body idle guard above. That guard
+detects a body that stops producing chunks, but it does not constrain the
+response-header wait and a provider can keep it armed by trickling bytes. This
+matters especially for Ollama Cloud: a slow model can
 send no response headers at all until generation has finished, so a bound
 that only watched the body would never engage. OpenLoops runs the blocking
 `send()` (the connection and the full header wait) and the blocking body
 reads each on their own background thread and polls it every 250
-milliseconds, so the 150-second bound is enforced within about a quarter
+milliseconds, so the selected deadline is enforced within about a quarter
 second of expiry whether the connection is silently withholding headers,
 silently withholding body bytes, or trickling either, and reports a timeout
 once it is exceeded. A slow reasoning model working through a large
@@ -98,8 +103,8 @@ scan continues. Clicking Stop in the native setup window abandons the request
 currently in flight — within about a second, not only between conversations.
 Abandoning a request this way does not instantly free the resources behind
 it: the background thread's one blocking `send()`/`read()` call, and the
-socket underneath it, can still linger for up to the 60-second per-read idle
-timeout above, since that one call cannot be interrupted from outside.
+socket underneath it, can still linger for up to the 300-second transport
+timeout, since that one call cannot be interrupted from outside.
 
 Validation: `cargo test -p openloops-inference --features ollama-cloud --locked`.
 The unit tests do not contact Ollama; live authentication and generation require

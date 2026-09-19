@@ -3,7 +3,7 @@
 //! the public ZDR endpoint listing, and every completion asks `OpenRouter`
 //! to route to ZDR endpoints only.
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use reqwest::blocking::{Client, Response};
 use serde_json::{Value, json};
@@ -12,8 +12,8 @@ use zeroize::Zeroizing;
 use crate::analysis::{self, ReviewAnalysis};
 use crate::provider::{
     MAX_PARALLEL_REQUESTS, MAX_REQUEST, MAX_RESPONSE, ModelClient, ProviderError, QuotaKind,
-    RequestControl, https_client, json_document, parse_error, read_body, record_quota_detail,
-    send_with_control, status_error, valid_key, valid_model_name,
+    REQUEST_DEADLINE, RequestControl, https_client, json_document, parse_error, read_body,
+    record_quota_detail, send_with_control, status_error, valid_key, valid_model_name,
 };
 use crate::validation::{AnalysisResult, SuppliedContext};
 
@@ -125,6 +125,7 @@ impl OpenRouter {
             "Return only this JSON object: {\"schema_version\":1,\"claims\":[]}",
             "Connection check; there is no message to analyze.",
             None,
+            REQUEST_DEADLINE,
         )?;
         let parsed = openloops_contracts::parse_analysis_output(json_document(content.as_bytes())?)
             .map_err(parse_error)?;
@@ -135,9 +136,9 @@ impl OpenRouter {
     }
 
     /// Sends `body` and reads the answer. Records the start instant
-    /// immediately before `send()` so [`crate::provider::REQUEST_DEADLINE`]
-    /// bounds the whole request -- including the header wait, not just the
-    /// body -- rather than only an idle connection; `cancel`, when
+    /// immediately before `send()` so the supplied `deadline` bounds the
+    /// whole request -- including the header wait, not just the body --
+    /// rather than only an idle connection; `cancel`, when
     /// supplied, lets a Stop action abort the request in progress, whether
     /// it is still waiting on a response or partway through reading one.
     fn chat_at(
@@ -145,12 +146,13 @@ impl OpenRouter {
         url: &str,
         body: Vec<u8>,
         cancel: Option<&AtomicBool>,
+        deadline: Duration,
     ) -> Result<Zeroizing<String>, ProviderError> {
         // Only the adapter-fixed CHAT constant reaches here in a real build;
         // the loopback tests substitute their own origin.
         debug_assert!(cfg!(test) || url.starts_with(AUTHORITY));
         let started = Instant::now();
-        let control = RequestControl::with_cancel(started, cancel);
+        let control = RequestControl::with_cancel_and_deadline(started, cancel, deadline);
         let request = self
             .client
             .post(url)
@@ -176,8 +178,9 @@ impl ModelClient for OpenRouter {
         system: &str,
         user: &str,
         cancel: Option<&AtomicBool>,
+        deadline: Duration,
     ) -> Result<Zeroizing<String>, ProviderError> {
-        self.chat_at(CHAT, request(&self.model, system, user)?, cancel)
+        self.chat_at(CHAT, request(&self.model, system, user)?, cancel, deadline)
     }
 }
 
@@ -606,7 +609,12 @@ mod tests {
         let (url, captured) = loopback(http(200, &answer("{}")));
         let provider = synthetic_provider();
         let content = provider
-            .chat_at(&url, request(MODEL, "policy", "data").unwrap(), None)
+            .chat_at(
+                &url,
+                request(MODEL, "policy", "data").unwrap(),
+                None,
+                REQUEST_DEADLINE,
+            )
             .unwrap();
         assert_eq!(&*content, "{}");
         let raw = captured.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -632,12 +640,22 @@ mod tests {
     fn rejected_credentials_and_oversized_answers_report_fixed_codes() {
         let (url, _captured) = loopback(http(401, br#"{"error":{"message":"no"}}"#));
         assert_eq!(
-            synthetic_provider().chat_at(&url, request(MODEL, "policy", "data").unwrap(), None),
+            synthetic_provider().chat_at(
+                &url,
+                request(MODEL, "policy", "data").unwrap(),
+                None,
+                REQUEST_DEADLINE,
+            ),
             Err(ProviderError::InvalidKey)
         );
         let (url, _captured) = loopback(http(200, &vec![b'x'; MAX_RESPONSE + 1]));
         assert_eq!(
-            synthetic_provider().chat_at(&url, request(MODEL, "policy", "data").unwrap(), None),
+            synthetic_provider().chat_at(
+                &url,
+                request(MODEL, "policy", "data").unwrap(),
+                None,
+                REQUEST_DEADLINE,
+            ),
             Err(ProviderError::ResponseTooLarge)
         );
         for (status, expected) in [
@@ -648,7 +666,12 @@ mod tests {
         ] {
             let (url, _captured) = loopback(http(status, b"{}"));
             assert_eq!(
-                synthetic_provider().chat_at(&url, request(MODEL, "policy", "data").unwrap(), None),
+                synthetic_provider().chat_at(
+                    &url,
+                    request(MODEL, "policy", "data").unwrap(),
+                    None,
+                    REQUEST_DEADLINE,
+                ),
                 Err(expected)
             );
         }
@@ -658,7 +681,12 @@ mod tests {
             br#"{"error":{"message":"This request would exceed your available credits given your current in-flight requests. Retry after in-flight requests settle, or add credits.","code":402}}"#,
         ));
         assert_eq!(
-            synthetic_provider().chat_at(&url, request(MODEL, "policy", "data").unwrap(), None),
+            synthetic_provider().chat_at(
+                &url,
+                request(MODEL, "policy", "data").unwrap(),
+                None,
+                REQUEST_DEADLINE,
+            ),
             Err(ProviderError::CreditsInFlight)
         );
     }
