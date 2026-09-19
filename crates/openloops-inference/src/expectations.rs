@@ -83,6 +83,10 @@ pub struct SuggestedUpdate {
 }
 
 #[derive(Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "projection flags remain independent fields on the shared expectation model"
+)]
 pub struct Expectation {
     pub action: String,
     pub action_phrase: String,
@@ -114,6 +118,9 @@ pub struct Expectation {
     /// A pending suggestion from a later message; the loop itself is
     /// unchanged until a person accepts it.
     pub suggested_update: Option<SuggestedUpdate>,
+    pub from_call_summary: bool,
+    pub meeting_time: Option<i64>,
+    pub meeting_time_approx: bool,
 }
 
 pub struct Expectations {
@@ -528,6 +535,9 @@ fn candidate(v: &Value, messages: &[ConversationMessage]) -> Result<Expectation,
         cross_thread: false,
         event_passed: None,
         suggested_update: None,
+        from_call_summary: false,
+        meeting_time: None,
+        meeting_time_approx: false,
     })
 }
 

@@ -6,11 +6,11 @@ use crate::{
     deadline_view::label as deadline_label,
     loop_state::{Decision, Reminder, marker},
     review_model::{
-        CardContext, Filter, ListGroup, ReminderDraft, ReviewState, SHOW_HANDLED_LABEL, ScanStrip,
-        SuggestionOutcome, card_hidden, card_order, decision_after_setting_reminder,
-        default_reminder, expectations_summary, list_group, open_badge_count,
-        reminder_button_enabled, reminder_time, resolution_anchor_label, status_base_label,
-        status_label, status_shows_cross_thread,
+        CardContext, Filter, ListGroup, ReminderDraft, ReviewState, SHOW_CALL_SUMMARY_LABEL,
+        SHOW_HANDLED_LABEL, ScanStrip, SuggestionOutcome, call_summary_hidden, card_hidden,
+        card_order, decision_after_setting_reminder, default_reminder, expectations_summary,
+        list_group, open_badge_count, reminder_button_enabled, reminder_time,
+        resolution_anchor_label, status_base_label, status_label, status_shows_cross_thread,
     },
     slint_ui::{
         AppWindow, CompletionCard, ConversationRow, EvidenceCard, MetaCell, ReminderStateView,
@@ -114,6 +114,21 @@ fn scheduled_instant_line(value: &str) -> (String, bool) {
         ),
         true,
     )
+}
+
+fn meeting_time_label(timestamp: i64, approx: bool) -> String {
+    let mut label = chrono::DateTime::from_timestamp(timestamp, 0).map_or_else(
+        || timestamp.to_string(),
+        |time| {
+            time.with_timezone(&chrono::Local)
+                .format("%b %d, %Y %H:%M %:z")
+                .to_string()
+        },
+    );
+    if approx {
+        label.push_str(" (approx.)");
+    }
+    label
 }
 
 /// The reminder title rule, shared by [`draft_view`] (as-you-type validity)
@@ -659,6 +674,13 @@ fn status_pill(item: &Expectation, card: &CardContext) -> PillView {
 
 fn pills_for(item: &Expectation, card: &CardContext) -> Vec<PillView> {
     let mut pills = vec![status_pill(item, card)];
+    if item.from_call_summary {
+        pills.push(PillView {
+            text: "Call summary".into(),
+            kind: "neutral",
+            hint: String::new(),
+        });
+    }
     if let Some(deadline) = &card.deadline {
         pills.push(PillView {
             text: deadline_label(deadline),
@@ -766,6 +788,7 @@ fn visible_handles(
     cards: &[Option<CardContext>],
     filter: Filter,
     show_handled: bool,
+    show_call_summaries: bool,
     search: &str,
 ) -> Vec<usize> {
     let Some(analysis) = &review.analysis else {
@@ -795,6 +818,7 @@ fn visible_handles(
                                 .as_ref()
                                 .is_some_and(|draft| draft.key == card.record.key),
                         )
+                        && !call_summary_hidden(item.from_call_summary, show_call_summaries)
                         && card_matches_search(review, item, card, search)
                 })
             }
@@ -827,6 +851,7 @@ fn review_rows(
     review: &ReviewState,
     filter: Filter,
     show_handled: bool,
+    show_call_summaries: bool,
     search: &str,
     selected: Option<[u8; 32]>,
     cards: &[Option<CardContext>],
@@ -834,7 +859,14 @@ fn review_rows(
     let Some(analysis) = &review.analysis else {
         return vec![];
     };
-    let visible = visible_handles(review, cards, filter, show_handled, search);
+    let visible = visible_handles(
+        review,
+        cards,
+        filter,
+        show_handled,
+        show_call_summaries,
+        search,
+    );
     let mut prior = None;
     visible
         .into_iter()
@@ -905,17 +937,24 @@ fn selected_view(
         .draft
         .as_ref()
         .is_some_and(|draft| draft.key == card.record.key);
+    let mut meta = vec![
+        (
+            "Responsible".into(),
+            owner_label(item, card.record.decision).into(),
+        ),
+        ("Waiting on this".into(), item.waiting_party.clone()),
+        ("Deadline stated in email".into(), deadline),
+        ("Source".into(), source.source.clone()),
+    ];
+    if let Some(meeting_time) = item.meeting_time {
+        meta.push((
+            "Meeting time".into(),
+            meeting_time_label(meeting_time, item.meeting_time_approx),
+        ));
+    }
     Some(SelectedView {
         title: item.action.clone(),
-        meta: vec![
-            (
-                "Responsible".into(),
-                owner_label(item, card.record.decision).into(),
-            ),
-            ("Waiting on this".into(), item.waiting_party.clone()),
-            ("Deadline stated in email".into(), deadline),
-            ("Source".into(), source.source.clone()),
-        ],
+        meta,
         uncertainty: item.uncertainty.clone(),
         pills: pills_for(item, card),
         open: !card.closed,
@@ -1160,6 +1199,8 @@ fn sync_review_inner(
     });
     window.set_show_handled(model.review.show_handled);
     window.set_show_handled_label(SHOW_HANDLED_LABEL.into());
+    window.set_show_call_summaries(model.review.show_call_summaries);
+    window.set_show_call_summaries_label(SHOW_CALL_SUMMARY_LABEL.into());
     window.set_review_search_query(model.review.search_query.clone().into());
     window.set_can_sync_todo(!busy && model.reminder_sync_eligible_count(cards) > 0);
     strip = apply_scan_failure(strip, &model.review_status, model.review.scan_failed);
@@ -1171,6 +1212,7 @@ fn sync_review_inner(
         cards,
         review_ui.filter,
         model.review.show_handled,
+        model.review.show_call_summaries,
         &model.review.search_query,
     );
     review_ui.selected = retained_selection(review_ui.selected, &visible, cards);
@@ -1178,6 +1220,7 @@ fn sync_review_inner(
         &model.review,
         review_ui.filter,
         model.review.show_handled,
+        model.review.show_call_summaries,
         &model.review.search_query,
         review_ui.selected,
         cards,
@@ -1226,7 +1269,10 @@ fn sync_review_inner(
     sync_list_cached(&mut review_ui.cache.rows, rows, |m| {
         window.set_review_rows(m);
     });
-    window.set_review_open_count(i32::try_from(open_badge_count(cards)).unwrap_or(i32::MAX));
+    window.set_review_open_count(
+        i32::try_from(open_badge_count(cards, model.review.show_call_summaries))
+            .unwrap_or(i32::MAX),
+    );
     let (no_usable, no_usable_text) =
         model
             .review
@@ -1840,6 +1886,14 @@ pub(crate) fn register_callbacks(
             refresh(&model, &weak);
         });
     }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_show_call_summaries_toggled(move |show| {
+            model.borrow_mut().review.show_call_summaries = show;
+            refresh(&model, &weak);
+        });
+    }
     window.on_coverage_toggled(|open| {
         REVIEW_UI.with(|state| state.borrow_mut().coverage_open = open);
     });
@@ -1888,6 +1942,7 @@ pub(crate) fn register_callbacks(
                     &cards,
                     state.filter,
                     model_ref.review.show_handled,
+                    model_ref.review.show_call_summaries,
                     &model_ref.review.search_query,
                 );
                 if !visible.is_empty() {
@@ -2196,7 +2251,7 @@ mod tests {
         let review = crate::review_model::layout_fixture();
         let cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
         let selected = cards[0].as_ref().map(|card| card.record.key);
-        let rows = review_rows(&review, Filter::All, false, "", selected, &cards);
+        let rows = review_rows(&review, Filter::All, false, false, "", selected, &cards);
         assert_eq!(rows.len(), 3);
         assert!(rows[0].first_in_group);
         assert_ne!(rows[0].group, ListGroup::Closed);
@@ -2215,16 +2270,32 @@ mod tests {
         let review = crate::review_model::layout_fixture();
         let cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
         assert_eq!(
-            visible_handles(&review, &cards, Filter::All, false, ""),
+            visible_handles(&review, &cards, Filter::All, false, false, ""),
             vec![0, 1, 2]
         );
         assert_eq!(
-            visible_handles(&review, &cards, Filter::Mine, false, ""),
+            visible_handles(&review, &cards, Filter::Mine, false, false, ""),
             vec![0, 2]
         );
         assert_eq!(
-            visible_handles(&review, &cards, Filter::Team, false, ""),
+            visible_handles(&review, &cards, Filter::Team, false, false, ""),
             vec![1]
+        );
+    }
+
+    #[test]
+    fn visible_handles_hide_and_show_call_summary_cards() {
+        let mut review = crate::review_model::layout_fixture();
+        review.analysis.as_mut().unwrap().items[0].from_call_summary = true;
+        let cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
+
+        assert_eq!(
+            visible_handles(&review, &cards, Filter::All, false, false, ""),
+            vec![1, 2]
+        );
+        assert_eq!(
+            visible_handles(&review, &cards, Filter::All, false, true, ""),
+            vec![0, 1, 2]
         );
     }
 
@@ -2316,24 +2387,41 @@ mod tests {
         // "Vendor invoice" is card 2's subject and action alone; cards 0/1
         // share the unrelated "Quarterly planning" subject.
         assert_eq!(
-            visible_handles(&review, &cards, Filter::All, false, "vendor invoice"),
+            visible_handles(&review, &cards, Filter::All, false, false, "vendor invoice",),
             vec![2]
         );
         // Case-insensitive, and a single shared word ("vendor" also appears
         // in card 0's "vendor renewal figures") can widen the match to more
         // than one card -- unlike the two-word phrase above.
         assert_eq!(
-            visible_handles(&review, &cards, Filter::All, false, "VENDOR"),
+            visible_handles(&review, &cards, Filter::All, false, false, "VENDOR"),
             vec![0, 2]
         );
         // Card 2 is owned by `Owner::You` but composes with the Team filter
         // (which only card 1 matches), same as every other predicate here:
         // a search hit alone is not enough.
-        assert!(visible_handles(&review, &cards, Filter::Team, false, "vendor invoice").is_empty());
+        assert!(
+            visible_handles(
+                &review,
+                &cards,
+                Filter::Team,
+                false,
+                false,
+                "vendor invoice"
+            )
+            .is_empty()
+        );
         // "Quarterly planning" (the shared subject) matches cards 0 and 1,
         // not card 2.
         assert_eq!(
-            visible_handles(&review, &cards, Filter::All, false, "quarterly planning"),
+            visible_handles(
+                &review,
+                &cards,
+                Filter::All,
+                false,
+                false,
+                "quarterly planning",
+            ),
             vec![0, 1]
         );
         // No match anywhere.
@@ -2342,6 +2430,7 @@ mod tests {
                 &review,
                 &cards,
                 Filter::All,
+                false,
                 false,
                 "no-such-token-anywhere"
             )
@@ -2412,6 +2501,28 @@ mod tests {
         let selected = selected_view(&review, Some(key), &cards).unwrap();
         assert!(!selected.open && selected.terminal);
         assert!(!selected.can_track && !selected.can_watch && !selected.can_remind);
+    }
+
+    #[test]
+    fn selected_call_summary_appends_meeting_time_and_neutral_pill() {
+        let mut review = crate::review_model::layout_fixture();
+        let item = &mut review.analysis.as_mut().unwrap().items[0];
+        item.from_call_summary = true;
+        item.meeting_time = Some(0);
+        item.meeting_time_approx = true;
+        let cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
+        let key = cards[0].as_ref().unwrap().record.key;
+        let selected = selected_view(&review, Some(key), &cards).unwrap();
+
+        assert_eq!(selected.meta.len(), 5);
+        assert_eq!(selected.meta[4].0, "Meeting time");
+        assert!(selected.meta[4].1.ends_with(" (approx.)"));
+        assert!(
+            selected
+                .pills
+                .iter()
+                .any(|pill| pill.text == "Call summary" && pill.kind == "neutral")
+        );
     }
 
     // Every test in this crate that needs a real `AppWindow` lives in this
@@ -2749,6 +2860,7 @@ mod tests {
                 terminal: true,
                 closed: true,
                 deadline: base.deadline,
+                from_call_summary: false,
             };
             assert_eq!(status_pill(&item, &card).text, text);
         }
@@ -2909,9 +3021,10 @@ mod tests {
                 terminal: true,
                 closed: true,
                 deadline: None,
+                from_call_summary: false,
             }),
         ];
-        let handles = visible_handles(&review, &cards, Filter::All, true, "");
+        let handles = visible_handles(&review, &cards, Filter::All, true, false, "");
         assert_eq!(handles, vec![0, 1, 2, 3]);
         let groups: Vec<_> = handles
             .into_iter()
@@ -3526,7 +3639,7 @@ mod tests {
                 .iter()
                 .any(|pill| pill.text == "Suggested update")
         );
-        let rows = review_rows(&app.review, Filter::All, false, "", None, &cards);
+        let rows = review_rows(&app.review, Filter::All, false, false, "", None, &cards);
         assert!(
             rows.iter()
                 .any(|row| row.handle == 2 && row.aging_status.ends_with("Suggested update"))

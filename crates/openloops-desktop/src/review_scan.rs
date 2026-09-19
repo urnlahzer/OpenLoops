@@ -857,6 +857,7 @@ const RECAP_SENDER_DOMAINS: &[&str] = &[
     "otter.ai",
     "fireflies.ai",
     "read.ai",
+    "tactiq.io",
     "tldv.io",
     "grain.com",
     "grain.co",
@@ -869,7 +870,7 @@ const RECAP_SENDER_DOMAINS: &[&str] = &[
 /// notetaker/recap bot riding on a general-purpose platform address (Zoom,
 /// Google Meet) that cannot be identified by domain alone. Sufficient on
 /// their own, same as [`RECAP_SENDER_DOMAINS`].
-const RECAP_SENDER_NAME_HINTS: &[&str] = &["ai companion", "gemini"];
+const RECAP_SENDER_NAME_HINTS: &[&str] = &["ai companion", "gemini", "copilot"];
 
 /// Exact sender addresses (matched case-insensitively) belonging to a
 /// general-purpose platform (Zoom, Teams, Meet) rather than a dedicated
@@ -942,7 +943,7 @@ const RECAP_BODY_SCAN_CHARS: usize = 600;
 /// marker) is never mistaken for one. These are recognition hints, not the
 /// only defense against closing a request from a past-tense summary -- see
 /// [`close_from_index`]'s and [`close_from_stated_time`]'s temporal guard.
-fn is_meeting_recap_artifact(message: &ReviewMessage) -> bool {
+pub(crate) fn is_meeting_recap_artifact(message: &ReviewMessage) -> bool {
     let sender = message
         .input
         .message
@@ -992,6 +993,28 @@ fn is_meeting_recap_artifact(message: &ReviewMessage) -> bool {
         .any(|marker| body_prefix.contains(marker));
 
     subject_has_recap_pattern && body_has_marker
+}
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the display projection API explicitly represents an optional meeting time"
+)]
+pub(crate) fn recap_meeting_time(message: &ReviewMessage) -> Option<(i64, bool)> {
+    if let Some((start, _, false)) = message.event {
+        return Some((start, false));
+    }
+    let subject = message.input.message.subject.as_string();
+    if let Some((start, _)) = subject_event_time(&subject, message.input.timestamp) {
+        return Some((start, false));
+    }
+    if let Some(body) = message.input.message.body_blocks.first() {
+        let body = body.as_string();
+        let offset = local_offset_seconds(message.input.timestamp, 0);
+        if let Some((start, _, _)) = prose_event_time(&body, message.input.timestamp, offset) {
+            return Some((start, false));
+        }
+    }
+    Some((message.input.timestamp, true))
 }
 
 /// One message's contribution to the event index, per the priority order
@@ -1650,6 +1673,24 @@ fn correct_recap_attribution(analysis: &mut Expectations, conversation: &[&Revie
     }
 }
 
+fn tag_call_summaries(analysis: &mut Expectations, conversation: &[&ReviewMessage]) {
+    for item in &mut analysis.items {
+        let Some(source) = conversation
+            .iter()
+            .find(|message| message.input.handle == item.evidence.message)
+        else {
+            continue;
+        };
+        if is_meeting_recap_artifact(source) {
+            item.from_call_summary = true;
+            if let Some((meeting_time, approx)) = recap_meeting_time(source) {
+                item.meeting_time = Some(meeting_time);
+                item.meeting_time_approx = approx;
+            }
+        }
+    }
+}
+
 /// Candidate messages for the cross-thread closure pass: later messages
 /// the signed-in user sent to `item`'s waiting party, in a conversation
 /// other than `evidence_conversation`, for `account` -- the account the
@@ -2259,6 +2300,9 @@ fn map_accepted_claim(
         cross_thread: false,
         event_passed: None,
         suggested_update: None,
+        from_call_summary: false,
+        meeting_time: None,
+        meeting_time_approx: false,
     })
 }
 
@@ -2991,6 +3035,7 @@ fn merge_conversation(
             result.analyzed += conversation.len();
             result.analyzed_conversations += 1;
             correct_recap_attribution(&mut analysis, conversation);
+            tag_call_summaries(&mut analysis, conversation);
             if let Some(note) = conversation_note(index, conversation, &analysis) {
                 result.conversation_notes.push(note.clone());
                 result
@@ -6476,6 +6521,9 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread: false,
             event_passed: None,
             suggested_update: None,
+            from_call_summary: false,
+            meeting_time: None,
+            meeting_time_approx: false,
         }
     }
 
@@ -7297,6 +7345,9 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread: false,
             event_passed: None,
             suggested_update: None,
+            from_call_summary: false,
+            meeting_time: None,
+            meeting_time_approx: false,
         };
         (all, item)
     }
@@ -8348,6 +8399,8 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
 
         assert_eq!(item.waiting_party, "Not established");
         assert!(item.owner == Owner::You);
+        assert!(item.from_call_summary);
+        assert!(item.meeting_time.is_some());
     }
 
     #[test]
@@ -8372,6 +8425,8 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
 
         assert_eq!(item.waiting_party, "USER@EXAMPLE.INVALID");
         assert!(item.owner == Owner::Team);
+        assert!(!item.from_call_summary);
+        assert_eq!(item.meeting_time, None);
     }
 
     #[test]
@@ -8394,6 +8449,70 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         mail.sender_address = "notifications@notetaking-relay.example.invalid".into();
         let message = prepare(&mail, "Inbox", 0).unwrap();
         assert!(is_meeting_recap_artifact(&message));
+    }
+
+    #[test]
+    fn tactiq_domain_and_teams_copilot_name_mark_recap_artifacts() {
+        let mut tactiq = synthetic("Synthetic recap", 0, "tactiq-thread");
+        tactiq.sender = "Tactiq <notes@tactiq.io>".into();
+        tactiq.sender_address = "notes@tactiq.io".into();
+        assert!(is_meeting_recap_artifact(
+            &prepare(&tactiq, "Inbox", 0).unwrap()
+        ));
+
+        let mut copilot = synthetic("Synthetic recap", 1, "teams-thread");
+        copilot.sender = "Teams Copilot <notes@service.example.invalid>".into();
+        copilot.sender_address = "notes@service.example.invalid".into();
+        assert!(is_meeting_recap_artifact(
+            &prepare(&copilot, "Inbox", 1).unwrap()
+        ));
+    }
+
+    #[test]
+    fn recap_meeting_time_uses_event_subject_body_then_message_timestamp() {
+        let event_start = timestamp("2026-08-21T15:00:00Z");
+        let subject_start = timestamp("2026-08-21T16:30:00Z");
+
+        let mut mail = synthetic(
+            "The meeting was September 3, 2026 at 2pm.",
+            0,
+            "meeting-time",
+        );
+        mail.subject =
+            "Accepted: Design workshop @ Fri Aug 21, 2026 11:30am - 12:30pm (CDT)".into();
+        let mut message = prepare(&mail, "Inbox", 0).unwrap();
+        message.event = Some((event_start, event_start + 3600, false));
+        assert_eq!(recap_meeting_time(&message), Some((event_start, false)));
+
+        message.event = Some((event_start, event_start + 3600, true));
+        assert_eq!(recap_meeting_time(&message), Some((subject_start, false)));
+
+        let mut body_mail = synthetic(
+            "The meeting was September 3, 2026 at 2pm.",
+            0,
+            "meeting-time-body",
+        );
+        body_mail.subject = "Meeting recap".into();
+        let body_message = prepare(&body_mail, "Inbox", 0).unwrap();
+        let body_start = prose_event_time(
+            "The meeting was September 3, 2026 at 2pm.",
+            body_message.input.timestamp,
+            local_offset_seconds(body_message.input.timestamp, 0),
+        )
+        .unwrap()
+        .0;
+        assert_eq!(recap_meeting_time(&body_message), Some((body_start, false)));
+
+        let fallback = prepare(
+            &synthetic("No stated meeting time.", 1, "meeting-time-fallback"),
+            "Inbox",
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            recap_meeting_time(&fallback),
+            Some((fallback.input.timestamp, true))
+        );
     }
 
     #[test]
