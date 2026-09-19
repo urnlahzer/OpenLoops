@@ -27,6 +27,11 @@ attempted case); one evidence card per anchor; the possible-later-completion
 card or note; and the collapsed "Full scanned conversation" disclosure with
 one row per message.
 
+Loops extracted from recognized meeting-recap and call-summary mail carry a
+**Call summary** tag and are hidden by default. Turn on **Show loops from call
+summaries** to include them; their reading-pane metadata ends with a **Meeting
+time** cell, marked approximate when only the message timestamp was available.
+
 Open the native app and select **Review**. Saved connections restore
 automatically. This is a real Microsoft/Ollama flow; no synthetic cards appear
 in the normal application.

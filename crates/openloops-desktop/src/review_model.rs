@@ -18,6 +18,7 @@ pub(crate) use scanning::{
 };
 
 pub(crate) const SHOW_HANDLED_LABEL: &str = "Show resolved, handled, and dismissed";
+pub(crate) const SHOW_CALL_SUMMARY_LABEL: &str = "Show loops from call summaries";
 
 // Test-only call counter for [`ReviewState::card_contexts`] -- the per-card
 // HMAC fingerprint pass the perf fix (owner round 3, 2026-09-10) moved out of
@@ -66,6 +67,7 @@ pub(crate) struct CardContext {
     /// (`Decision::Mine` or `Decision::Watching`).
     pub(crate) closed: bool,
     pub(crate) deadline: Option<DeadlineView>,
+    pub(crate) from_call_summary: bool,
 }
 
 pub(crate) fn is_past_due(view: &DeadlineView) -> bool {
@@ -142,6 +144,7 @@ pub struct ReviewState {
     /// tracking" is also the safer default of the two silent outcomes.
     pub(crate) draft: Option<ReminderDraft>,
     pub(crate) show_handled: bool,
+    pub(crate) show_call_summaries: bool,
     /// Case-insensitive substring filter over each card's visible text (see
     /// `slint_review.rs`'s `matches_search`/`card_matches_search`). Empty
     /// means no filtering. Reset along with everything else in this struct
@@ -603,6 +606,7 @@ impl ReviewState {
             terminal,
             closed,
             deadline,
+            from_call_summary: item.from_call_summary,
         })
     }
 
@@ -998,6 +1002,10 @@ fn decision_after_cancel(prior: Decision, current: Decision) -> Option<Decision>
 pub(crate) fn card_hidden(closed: bool, show_handled: bool, draft_open_here: bool) -> bool {
     closed && !show_handled && !draft_open_here
 }
+
+pub(crate) fn call_summary_hidden(from_call_summary: bool, show_call_summaries: bool) -> bool {
+    from_call_summary && !show_call_summaries
+}
 pub(crate) fn default_reminder() -> String {
     (chrono::Local::now() + chrono::Duration::hours(1))
         .format("%Y-%m-%d %H:%M")
@@ -1070,12 +1078,13 @@ impl Filter {
 ///
 /// Consumed by the nav rail badge.
 #[must_use]
-pub fn open_badge_count(cards: &[Option<CardContext>]) -> usize {
+pub fn open_badge_count(cards: &[Option<CardContext>], show_call_summaries: bool) -> usize {
     cards
         .iter()
         .flatten()
         .filter(|card| {
             !card.closed
+                && !call_summary_hidden(card.from_call_summary, show_call_summaries)
                 && matches!(
                     card.record.decision,
                     Decision::Review | Decision::Mine | Decision::Watching
@@ -1312,6 +1321,9 @@ pub fn layout_fixture() -> ReviewState {
             cross_thread: true,
             event_passed: None,
             suggested_update: None,
+            from_call_summary: false,
+            meeting_time: None,
+            meeting_time_approx: false,
         },
         // Card 2: still needs a decision, no reminder -- this is the card
         // the preview's open draft attaches to. Its evidence message (m1)
@@ -1346,6 +1358,9 @@ pub fn layout_fixture() -> ReviewState {
             cross_thread: false,
             event_passed: None,
             suggested_update: None,
+            from_call_summary: false,
+            meeting_time: None,
+            meeting_time_approx: false,
         },
         // Card 3: a reminder attempt with no confirmed outcome, so the
         // preview also exercises the "attempted" marker callout and its two
@@ -1378,6 +1393,9 @@ pub fn layout_fixture() -> ReviewState {
             cross_thread: false,
             event_passed: None,
             suggested_update: None,
+            from_call_summary: false,
+            meeting_time: None,
+            meeting_time_approx: false,
         },
     ];
     // T7 (brief §5): `source_failures` must be set before `set_scan` runs --
@@ -1828,6 +1846,9 @@ mod tests {
             cross_thread: false,
             event_passed: None,
             suggested_update: None,
+            from_call_summary: false,
+            meeting_time: None,
+            meeting_time_approx: false,
         };
         (state, item)
     }
@@ -2174,6 +2195,14 @@ mod tests {
                 "closed={closed} show_handled={show_handled} draft_open_here={draft_open_here}"
             );
         }
+    }
+
+    #[test]
+    fn call_summary_hidden_follows_its_checkbox() {
+        assert!(!call_summary_hidden(false, false));
+        assert!(!call_summary_hidden(false, true));
+        assert!(call_summary_hidden(true, false));
+        assert!(!call_summary_hidden(true, true));
     }
 
     /// `closed` (together with whether a draft is open for the card) is what
@@ -2653,6 +2682,7 @@ the scan stopped after a provider error."
                 terminal: false,
                 closed,
                 deadline,
+                from_call_summary: false,
             };
             let expect = |deadline: Option<DeadlineView>, expected: ListGroup| {
                 let group = list_group(&card(deadline));
@@ -2759,12 +2789,13 @@ the scan stopped after a provider error."
             ),
             closed,
             deadline: None,
+            from_call_summary: false,
         }
     }
 
     #[test]
     fn open_badge_count_counts_untracked_and_tracked_but_not_closed_or_terminal() {
-        assert_eq!(open_badge_count(&[]), 0);
+        assert_eq!(open_badge_count(&[], false), 0);
         let cards = vec![
             None,
             Some(card_with(Decision::Review, true)),
@@ -2775,7 +2806,17 @@ the scan stopped after a provider error."
             Some(card_with(Decision::Dismissed, true)),
             Some(card_with(Decision::Moot, true)),
         ];
-        assert_eq!(open_badge_count(&cards), 3);
+        assert_eq!(open_badge_count(&cards, false), 3);
+    }
+
+    #[test]
+    fn open_badge_count_excludes_hidden_call_summaries() {
+        let mut call_summary = card_with(Decision::Review, false);
+        call_summary.from_call_summary = true;
+        let cards = vec![Some(card_with(Decision::Review, false)), Some(call_summary)];
+
+        assert_eq!(open_badge_count(&cards, false), 1);
+        assert_eq!(open_badge_count(&cards, true), 2);
     }
 
     #[test]
@@ -2928,5 +2969,10 @@ the scan stopped after a provider error."
     #[test]
     fn show_handled_label_matches_the_review_spec() {
         assert_eq!(SHOW_HANDLED_LABEL, "Show resolved, handled, and dismissed");
+    }
+
+    #[test]
+    fn show_call_summary_label_matches_the_review_spec() {
+        assert_eq!(SHOW_CALL_SUMMARY_LABEL, "Show loops from call summaries");
     }
 }

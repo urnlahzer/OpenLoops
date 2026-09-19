@@ -228,7 +228,10 @@ fn sync(model: &AppModel, window: &AppWindow) {
     let (strip_model, scan_chip) = crate::slint_review::scan_strip_view(&strip, model, &cards);
     window.set_review_scan_chip_text(scan_chip.into());
     window.set_account_signed_in(account.signed_in);
-    window.set_review_badge(i32::try_from(open_badge_count(&cards)).unwrap_or(i32::MAX));
+    window.set_review_badge(
+        i32::try_from(open_badge_count(&cards, model.review.show_call_summaries))
+            .unwrap_or(i32::MAX),
+    );
     window.set_provider_name(match model.provider {
         Provider::OllamaCloud => "Ollama".into(),
         Provider::OpenRouter => "OpenRouter".into(),
