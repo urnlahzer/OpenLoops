@@ -1,13 +1,13 @@
 //! Toolkit-free review state and pure decision/urgency/status logic.
+use crate::claim_view::{
+    Anchor, EventPassed, LoopItem, LoopItems, Owner, ResolutionKind, SuggestedUpdate,
+    SuggestedUpdateKind,
+};
 use crate::deadline_view::{DeadlineView, classify};
 use crate::loop_state::{Decision, Decisions, Record, Reminder, now};
 use openloops_graph::live::{
     reminders::ReminderRequest,
     review::{LoadProgress, SourceReview},
-};
-use openloops_inference::expectations::{
-    Anchor, EventPassed, Expectation, Expectations, Owner, ResolutionKind, SuggestedUpdate,
-    SuggestedUpdateKind,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::Ordering;
@@ -113,7 +113,7 @@ pub(crate) enum SuggestionOutcome {
 pub struct ReviewState {
     pub messages: Vec<ReviewMessage>,
     pub notices: Vec<String>,
-    pub analysis: Option<Expectations>,
+    pub analysis: Option<LoopItems>,
     pub analysis_model: String,
     pub scan_summary: String,
     pub scan_errors: Vec<String>,
@@ -445,7 +445,7 @@ impl ReviewState {
             .filter(|message| retried.contains(&message.conversation))
             .map(|message| message.input.handle.clone())
             .collect();
-        let analysis = self.analysis.get_or_insert_with(|| Expectations {
+        let analysis = self.analysis.get_or_insert_with(|| LoopItems {
             items: Vec::new(),
             rejected: 0,
             rejection_reasons: Vec::new(),
@@ -572,7 +572,7 @@ impl ReviewState {
             };
         }
     }
-    fn card_context(&self, item: &Expectation, now: i64, now_offset: i32) -> Option<CardContext> {
+    fn card_context(&self, item: &LoopItem, now: i64, now_offset: i32) -> Option<CardContext> {
         let source = self
             .messages
             .iter()
@@ -680,7 +680,7 @@ impl ReviewState {
         ))
     }
 
-    pub(crate) fn card_contexts(&self, items: &[Expectation]) -> Vec<Option<CardContext>> {
+    pub(crate) fn card_contexts(&self, items: &[LoopItem]) -> Vec<Option<CardContext>> {
         #[cfg(test)]
         CARD_CONTEXTS_CALLS.with(|calls| calls.set(calls.get() + 1));
         let clock = chrono::Local::now();
@@ -706,7 +706,7 @@ impl ReviewState {
     /// eligible.
     pub(crate) fn reminder_sync_checks(
         &self,
-        items: &[Expectation],
+        items: &[LoopItem],
         cards: &[Option<CardContext>],
     ) -> Vec<(String, [u8; 32], String, String)> {
         items
@@ -793,7 +793,7 @@ impl ReviewState {
 /// `item.resolution` is `Some` -- it must not flip back to resolved wording
 /// just because closure evidence exists. Only when there is no override at
 /// all does a resolution get to speak for itself.
-pub(crate) fn status_base_label(decision: Decision, item: &Expectation) -> String {
+pub(crate) fn status_base_label(decision: Decision, item: &LoopItem) -> String {
     match decision {
         Decision::Done => "Handled".into(),
         Decision::Dismissed => "Dismissed / not mine".into(),
@@ -888,7 +888,7 @@ pub(crate) fn resolution_anchor_label(
 /// surfaced as its own segment alongside the "Scan coverage and errors"
 /// panel note (`review_scan::scan_closures`'s own conversation note).
 pub(crate) fn expectations_summary(
-    analysis: &Expectations,
+    analysis: &LoopItems,
     cards: &[Option<CardContext>],
     model: &str,
 ) -> String {
@@ -1202,8 +1202,8 @@ type MessageFixture = (
 #[cfg(any(test, feature = "ui-screenshot"))]
 #[allow(clippy::too_many_lines)]
 pub fn layout_fixture() -> ReviewState {
+    use crate::claim_view::{Anchor, LoopItem};
     use openloops_graph::live::review::MailItem;
-    use openloops_inference::expectations::{Anchor, Expectation};
     let mut state = ReviewState::default();
     let body = "Please send the draft budget by Friday.";
     // m2 sits in its own conversation ("synthetic-thread-2") rather than
@@ -1277,7 +1277,7 @@ pub fn layout_fixture() -> ReviewState {
     let items = vec![
         // Card 1: tracked by you, a reminder already created, and completion
         // evidence found in another conversation (m2).
-        Expectation {
+        LoopItem {
             // T7 (brief §5): ~140 characters, long enough to wrap at 1100 px
             // in both the list row and the reading-pane title. `action_phrase`
             // (below) is untouched -- it feeds the decision-record
@@ -1330,7 +1330,7 @@ pub fn layout_fixture() -> ReviewState {
         // shares m0's conversation, so the expanded "Full scanned
         // conversation" disclosure shows both messages: the sent tint on
         // m1 and its nested quoted-history block.
-        Expectation {
+        LoopItem {
             action: "Confirm who will send the team budget".into(),
             action_phrase: "send the draft budget".into(),
             owner: Owner::Team,
@@ -1365,7 +1365,7 @@ pub fn layout_fixture() -> ReviewState {
         // Card 3: a reminder attempt with no confirmed outcome, so the
         // preview also exercises the "attempted" marker callout and its two
         // reconcile buttons.
-        Expectation {
+        LoopItem {
             action: "Confirm the vendor invoice by Friday".into(),
             action_phrase: "confirm the vendor invoice".into(),
             owner: Owner::You,
@@ -1406,7 +1406,7 @@ pub fn layout_fixture() -> ReviewState {
     state.source_failures = 5;
     state.set_scan(
         ScanResult {
-            analysis: Expectations {
+            analysis: LoopItems {
                 items,
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -1483,7 +1483,7 @@ pub fn layout_fixture() -> ReviewState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openloops_inference::expectations::Anchor;
+    use crate::claim_view::Anchor;
 
     fn failure(conversation: &str, reason: FailureReason) -> ConversationFailure {
         ConversationFailure {
@@ -1805,7 +1805,7 @@ mod tests {
         assert!(state.scan_summary.contains("1 failed, 1 not started"));
     }
 
-    fn aging_fixture() -> (ReviewState, Expectation) {
+    fn aging_fixture() -> (ReviewState, LoopItem) {
         let mut state = ReviewState::default();
         for (index, received) in ["2026-09-02T12:00:00Z", "2026-09-09T12:00:00Z"]
             .into_iter()
@@ -1828,7 +1828,7 @@ mod tests {
             quote: "Friday".into(),
             context: String::new(),
         };
-        let item = Expectation {
+        let item = LoopItem {
             action: "Send the draft".into(),
             action_phrase: "send the draft".into(),
             owner: Owner::You,
@@ -2146,7 +2146,7 @@ mod tests {
 
         state.set_scan(
             ScanResult {
-                analysis: Expectations {
+                analysis: LoopItems {
                     items: vec![item],
                     rejected: 0,
                     rejection_reasons: vec![],
@@ -2252,7 +2252,7 @@ mod tests {
         assert!(!overridden.closed);
         assert_eq!(status_base_label(Decision::Mine, &item), "Tracking");
 
-        let analysis = Expectations {
+        let analysis = LoopItems {
             items: vec![item],
             rejected: 0,
             rejection_reasons: vec![],
@@ -2404,7 +2404,7 @@ mod tests {
         let (mut state, mut item) = aging_fixture();
         item.resolution = Some(item.evidence.clone());
         item.resolution_kind = Some(ResolutionKind::Completed);
-        let analysis = Expectations {
+        let analysis = LoopItems {
             items: vec![item.clone()],
             rejected: 0,
             rejection_reasons: vec![],
@@ -2438,7 +2438,7 @@ mod tests {
         // closes the card, but says nothing about resolution.
         let (mut state, item) = aging_fixture();
         assert!(item.resolution.is_none());
-        let analysis = Expectations {
+        let analysis = LoopItems {
             items: vec![item.clone()],
             rejected: 0,
             rejection_reasons: vec![],
@@ -2464,7 +2464,7 @@ mod tests {
         item.resolution = Some(item.evidence.clone());
         item.resolution_kind = Some(ResolutionKind::Completed);
         item.cross_thread = true;
-        let analysis = Expectations {
+        let analysis = LoopItems {
             items: vec![item],
             rejected: 0,
             rejection_reasons: vec![],
@@ -2493,7 +2493,7 @@ mod tests {
 
     fn empty_scan_result() -> ScanResult {
         ScanResult {
-            analysis: Expectations {
+            analysis: LoopItems {
                 items: vec![],
                 rejected: 0,
                 rejection_reasons: vec![],
@@ -2581,7 +2581,7 @@ the scan stopped after a provider error."
         let mut state = ReviewState::default();
         state.set_scan(
             ScanResult {
-                analysis: Expectations {
+                analysis: LoopItems {
                     items: vec![],
                     rejected: 0,
                     rejection_reasons: vec![],
