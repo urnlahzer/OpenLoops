@@ -80,6 +80,8 @@ export component ReviewScreen {
     in-out property <int> filter-index;
     in-out property <bool> show-handled;
     in property <string> show-handled-label;
+    in-out property <bool> show-call-summaries;
+    in property <string> show-call-summaries-label;
     in-out property <string> search-query;
     in property <[ReviewRow]> rows;
     in property <int> open-count;
@@ -127,6 +129,7 @@ export component ReviewScreen {
     callback clear-results;
     callback filter-selected(int);
     callback show-handled-toggled(bool);
+    callback show-call-summaries-toggled(bool);
     callback search-edited(string);
     callback coverage-toggled(bool);
     callback sources-link;
@@ -165,6 +168,7 @@ export component ReviewScreen {
                 HorizontalLayout { spacing: Tokens.space-4;
                     Segmented { width: Tokens.review-filter-width; options: ["All", "Mine", "Team"]; selected-index <=> root.filter-index; accessible-name: "Review filter"; enabled: !root.busy; selected(index) => { root.filter-selected(index); } }
                     Checkbox { text: root.show-handled-label; checked <=> root.show-handled; enabled: !root.busy; toggled(value) => { root.show-handled-toggled(value); } }
+                    Checkbox { text: root.show-call-summaries-label; checked <=> root.show-call-summaries; enabled: !root.busy; toggled(value) => { root.show-call-summaries-toggled(value); } }
                     Rectangle { horizontal-stretch: 1; }
                 }
             }
