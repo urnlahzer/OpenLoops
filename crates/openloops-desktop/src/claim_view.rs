@@ -134,7 +134,7 @@ pub fn card_action(prefix: &str, evidence_text: &str) -> String {
         end = ACTION_SENTENCE_MAX_SCALARS;
     }
     let sentence: String = scalars[..end].iter().collect();
-    let sentence = sentence.trim();
+    let sentence = sentence.split_whitespace().collect::<Vec<_>>().join(" ");
     if truncated {
         format!("{prefix}{sentence}…")
     } else {
@@ -246,6 +246,17 @@ pub fn uncertainty_text(claim_type: ClaimType, codes: &[AmbiguityCode]) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn card_action_uses_the_first_sentence_and_collapses_whitespace() {
+        assert_eq!(
+            card_action(
+                "Requested: ",
+                "Please\n  send\t the synthetic report. A later sentence stays out."
+            ),
+            "Requested: Please send the synthetic report."
+        );
+    }
 
     #[test]
     fn every_ambiguity_code_has_a_fixed_label() {

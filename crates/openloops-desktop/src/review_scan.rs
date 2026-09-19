@@ -1777,32 +1777,38 @@ fn block(text: &str) -> Result<CanonicalBlock, ConnectionError> {
 /// tracks the line index where the reply-history marker itself was found
 /// (not the unrelated `>`-prefix quoting rule), so the guard only fires
 /// when that marker was the very first line.
-/// Upper bound on body blocks one plain-text message contributes, leaving
+/// Upper bound on body blocks one message contributes, leaving
 /// room under the 64-block message cap for the subject and up to
 /// `REPLY_HISTORY_MAX_CHUNKS` quote chunks. Paragraphs past the bound are
 /// folded into the last block rather than dropped: body text is evidence
 /// and is never discarded.
-const MAX_PLAIN_BODY_BLOCKS: usize = 40;
+const MAX_BODY_BLOCKS: usize = 40;
 
-/// Splits a plain-text body into blank-line-separated paragraph blocks, the
-/// way the HTML walker already yields one block per paragraph. A single
-/// whole-body block made "the whole email" the unit of evidence under the
-/// governed pipeline's whole-block rule -- a promise's card title started
-/// with the greeting -- and made every deadline, action, and fingerprint
-/// share one block ordinal.
-fn plain_body_blocks(body: &str) -> Vec<String> {
-    let normalized = body.replace("\r\n", "\n");
-    let mut paragraphs: Vec<String> = normalized
-        .split("\n\n")
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(ToOwned::to_owned)
-        .collect();
-    if paragraphs.len() > MAX_PLAIN_BODY_BLOCKS {
-        let tail = paragraphs.split_off(MAX_PLAIN_BODY_BLOCKS - 1);
+/// Splits one or more current-body blocks into blank-line-separated paragraph
+/// blocks. Applying this after the HTML walker as well as to plain text keeps
+/// the governed pipeline's whole-block evidence paragraph-sized. The cap is
+/// shared across all source blocks in one message.
+fn paragraph_body_blocks<'a>(source_blocks: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut paragraphs = Vec::new();
+    for source in source_blocks {
+        let normalized = source.replace("\r\n", "\n");
+        paragraphs.extend(
+            normalized
+                .split("\n\n")
+                .map(str::trim)
+                .filter(|paragraph| !paragraph.is_empty())
+                .map(ToOwned::to_owned),
+        );
+    }
+    if paragraphs.len() > MAX_BODY_BLOCKS {
+        let tail = paragraphs.split_off(MAX_BODY_BLOCKS - 1);
         paragraphs.push(tail.join("\n\n"));
     }
     paragraphs
+}
+
+fn plain_body_blocks(body: &str) -> Vec<String> {
+    paragraph_body_blocks([body])
 }
 
 fn plain_body(text: &str) -> (String, String) {
@@ -1918,8 +1924,7 @@ pub fn prepare(
         let walked =
             canonicalize_html(&item.body).map_err(|_| ConnectionError::ResourceUnavailable)?;
         (
-            walked
-                .body_blocks
+            paragraph_body_blocks(walked.body_blocks.iter().map(String::as_str))
                 .iter()
                 .map(|s| block(s))
                 .collect::<Result<Vec<_>, _>>()?,
@@ -5098,6 +5103,28 @@ mod tests {
     }
 
     #[test]
+    fn governed_pass_titles_an_html_request_from_its_paragraph_not_the_greeting() {
+        let mut item = synthetic(
+            "<p>Hello team,</p><p>Thanks for reviewing.</p><p>Please send the synthetic report.</p>",
+            0,
+            "paragraph-request",
+        );
+        item.body_is_html = true;
+        let prepared = prepare(&item, "Inbox", 0).unwrap();
+        let request = "Please send the synthetic report.";
+        let body = format!(
+            r#"{{"schema_version":1,"claims":[{{"claim_type":"request","evidence":[{{"source_handle":"m0","component":"body_block","block_ordinal":2,"range_start":0,"range_end":{}}}],"waiting_party_handle":null,"related_loop_handles":[],"temporal":null,"confidence_micros":900000,"ambiguity_codes":[]}}]}}"#,
+            request.chars().count()
+        );
+        let result = governed_pass(&FixedAnalysisClient(body), &[prepared.input], None).unwrap();
+
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].action, format!("Requested: {request}"));
+        assert_eq!(result.items[0].evidence.block, 2);
+        assert!(!result.items[0].action.contains("Hello team"));
+    }
+
+    #[test]
     fn subject_event_time_parses_timed_and_all_day_calendar_subjects() {
         let cases = [
             (
@@ -6558,9 +6585,88 @@ at the downtown courthouse. Let me know if that works.",
         assert!(super::plain_body_blocks("  \n\n  ").is_empty());
         let many: Vec<String> = (0..50).map(|i| format!("Paragraph {i}")).collect();
         let blocks = super::plain_body_blocks(&many.join("\n\n"));
-        assert_eq!(blocks.len(), super::MAX_PLAIN_BODY_BLOCKS);
+        assert_eq!(blocks.len(), super::MAX_BODY_BLOCKS);
         assert!(blocks.last().unwrap().contains("Paragraph 49"));
         assert!(blocks.last().unwrap().contains("Paragraph 39"));
+    }
+
+    #[test]
+    fn html_body_paragraphs_and_breaks_become_ordered_blocks() {
+        let mut item = synthetic(
+            "<p>Hello team,</p><p>Thanks for reviewing.</p><p>Please send the synthetic report.</p><div>First line.<br><br>Second line.</div>",
+            0,
+            "html-paragraphs",
+        );
+        item.body_is_html = true;
+        let prepared = prepare(&item, "Inbox", 0).unwrap();
+        let blocks: Vec<String> = prepared
+            .input
+            .message
+            .body_blocks
+            .iter()
+            .map(CanonicalBlock::as_string)
+            .collect();
+
+        assert_eq!(
+            blocks,
+            [
+                "Hello team,",
+                "Thanks for reviewing.",
+                "Please send the synthetic report.",
+                "First line.",
+                "Second line."
+            ]
+        );
+    }
+
+    #[test]
+    fn html_quote_blocks_are_not_paragraph_split() {
+        let html = "<p>Current note.</p><blockquote><p>Quoted first.</p><p>Quoted second.</p></blockquote>";
+        let walked = canonicalize_html(html).unwrap();
+        let mut item = synthetic(html, 0, "html-quotes");
+        item.body_is_html = true;
+        let prepared = prepare(&item, "Inbox", 0).unwrap();
+        let quote_blocks: Vec<String> = prepared
+            .input
+            .message
+            .quote_blocks
+            .iter()
+            .map(CanonicalBlock::as_string)
+            .collect();
+
+        assert_eq!(quote_blocks, walked.quote_blocks);
+    }
+
+    #[test]
+    fn html_body_overflow_is_folded_into_the_last_message_block() {
+        use std::fmt::Write as _;
+
+        let mut html = String::new();
+        for index in 0..50 {
+            write!(html, "<p>Paragraph {index}</p>").unwrap();
+        }
+        let mut item = synthetic(&html, 0, "html-overflow");
+        item.body_is_html = true;
+        let prepared = prepare(&item, "Inbox", 0).unwrap();
+        let blocks = &prepared.input.message.body_blocks;
+
+        assert_eq!(blocks.len(), super::MAX_BODY_BLOCKS);
+        let last = blocks.last().unwrap().as_string();
+        assert!(last.contains("Paragraph 39"));
+        assert!(last.contains("Paragraph 49"));
+
+        let first_source = (0..25)
+            .map(|index| format!("Source paragraph {index}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let second_source = (25..50)
+            .map(|index| format!("Source paragraph {index}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let blocks = super::paragraph_body_blocks([first_source.as_str(), second_source.as_str()]);
+        assert_eq!(blocks.len(), super::MAX_BODY_BLOCKS);
+        assert!(blocks.last().unwrap().contains("Source paragraph 39"));
+        assert!(blocks.last().unwrap().contains("Source paragraph 49"));
     }
 
     /// A slow answer on one large conversation is that conversation's
