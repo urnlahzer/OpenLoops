@@ -1112,6 +1112,10 @@ mod tests {
         assert!(url.query_pairs().any(|(k, v)| k == "$top" && v == "100"));
         let url = group_url("synthetic-group", Some("thread/id?query")).unwrap();
         assert!(url.path().contains("thread%2Fid%3Fquery/posts"));
+        // The Graph `post` resource has no `webLink`; selecting it risks a 400.
+        assert!(!url.query_pairs().any(|(key, value)| {
+            key == "$select" && value.split(',').any(|field| field == "webLink")
+        }));
         assert!(
             !url.query_pairs()
                 .any(|(k, _)| k == "$top" || k == "$orderby")
@@ -1185,6 +1189,27 @@ mod tests {
             Err(ConnectionError::MessageTooLarge)
         ));
         assert!(item(&serde_json::json!({}), None).is_err());
+    }
+    #[test]
+    fn group_post_web_link_is_optional() {
+        let base = serde_json::json!({
+            "body": {"contentType": "text", "content": "Synthetic request"},
+            "from": {"emailAddress": {"address": "sender@example.invalid"}},
+            "receivedDateTime": "2026-01-01T12:00:00Z"
+        });
+        assert!(
+            item(&base, Some("Synthetic topic"))
+                .unwrap()
+                .web_link
+                .is_empty()
+        );
+
+        let mut linked = base;
+        linked["webLink"] = Value::String("https://outlook.live.com/mail/synthetic".into());
+        assert_eq!(
+            item(&linked, Some("Synthetic topic")).unwrap().web_link,
+            "https://outlook.live.com/mail/synthetic"
+        );
     }
     #[test]
     fn message_too_large_has_a_distinct_message() {

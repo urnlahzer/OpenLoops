@@ -564,6 +564,8 @@ struct SelectedView {
     can_remind: bool,
     draft: Option<DraftView>,
     reminder: ReminderView,
+    source_url: String,
+    source_unavailable_note: String,
     evidence: Vec<EvidenceView>,
     completion: CompletionView,
     suggested: SuggestedView,
@@ -952,6 +954,19 @@ fn selected_view(
             meeting_time_label(meeting_time, item.meeting_time_approx),
         ));
     }
+    let evidence = evidence_cards(item, &review.messages);
+    let source_url = evidence
+        .first()
+        .map_or_else(String::new, |card| card.url.clone());
+    let source_unavailable_note = if source_url.is_empty() && !evidence.is_empty() {
+        if source.input.team {
+            "Email link not available for group posts".into()
+        } else {
+            "Email link not available for this message".into()
+        }
+    } else {
+        String::new()
+    };
     Some(SelectedView {
         title: item.action.clone(),
         meta,
@@ -971,7 +986,9 @@ fn selected_view(
                 .filter(|draft| draft.key == card.record.key),
         ),
         reminder: reminder_state_view(&card.record),
-        evidence: evidence_cards(item, &review.messages),
+        source_url,
+        source_unavailable_note,
+        evidence,
         completion: completion_card(item, &review.messages),
         suggested: suggested_view(review, item.suggested_update.as_ref()),
         conversation_title: format!(
@@ -1337,6 +1354,8 @@ fn sync_review_inner(
             text: selected.reminder.text.into(),
             marker: selected.reminder.marker.into(),
         });
+        window.set_source_url(selected.source_url.into());
+        window.set_source_unavailable_note(selected.source_unavailable_note.into());
         let evidence = selected
             .evidence
             .into_iter()
@@ -1416,6 +1435,8 @@ fn sync_review_inner(
         window.set_draft_scheduled_line("".into());
         window.set_draft_valid(false);
         window.set_reminder_state(ReminderStateView::default());
+        window.set_source_url("".into());
+        window.set_source_unavailable_note("".into());
         sync_list_cached(&mut review_ui.cache.evidence, Vec::new(), |m| {
             window.set_evidence_cards(m);
         });
@@ -2525,6 +2546,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn selected_source_link_uses_first_evidence_and_explains_group_post_absence() {
+        let mut review = crate::review_model::layout_fixture();
+        let cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
+        let key = cards[0].as_ref().unwrap().record.key;
+        let selected = selected_view(&review, Some(key), &cards).unwrap();
+        assert_eq!(selected.source_url, selected.evidence[0].url);
+        assert!(!selected.source_url.is_empty());
+        assert!(selected.source_unavailable_note.is_empty());
+
+        let handle = review.analysis.as_ref().unwrap().items[0]
+            .evidence
+            .message
+            .clone();
+        let source = review
+            .messages
+            .iter_mut()
+            .find(|message| message.input.handle == handle)
+            .unwrap();
+        source.web_link.clear();
+        source.input.team = true;
+        let selected = selected_view(&review, Some(key), &cards).unwrap();
+        assert!(selected.source_url.is_empty());
+        assert_eq!(
+            selected.source_unavailable_note,
+            "Email link not available for group posts"
+        );
+    }
+
     // Every test in this crate that needs a real `AppWindow` lives in this
     // one function. Slint's `backend-winit` platform is process-global (see
     // `i-slint-core`'s `GLOBAL_CONTEXT`/`with_event_loop_proxy`): once one
@@ -3393,6 +3443,14 @@ mod tests {
         assert_eq!(
             gated_outlook_url("https://outlook.office365.com/mail/item"),
             "https://outlook.office365.com/mail/item"
+        );
+        assert_eq!(
+            gated_outlook_url("https://outlook.live.com/mail/item"),
+            "https://outlook.live.com/mail/item"
+        );
+        assert_eq!(
+            gated_outlook_url("https://outlook.office365.us/mail/item"),
+            "https://outlook.office365.us/mail/item"
         );
         assert!(gated_outlook_url("https://example.invalid/outlook.office.com/").is_empty());
         assert!(gated_outlook_url("http://outlook.office.com/mail/item").is_empty());

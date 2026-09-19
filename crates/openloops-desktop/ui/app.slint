@@ -97,6 +97,8 @@ export component AppWindow inherits Window {
     in property <string> draft-scheduled-line;
     in property <bool> draft-valid;
     in property <ReminderStateView> reminder-state;
+    in property <string> source-url;
+    in property <string> source-unavailable-note;
     in property <[EvidenceCard]> evidence-cards;
     in property <CompletionCard> completion-card;
     in property <SuggestedUpdateCard> suggested-update;
@@ -179,7 +181,7 @@ export component AppWindow inherits Window {
                 action-status: root.review-action-status; action-status-succeeded: root.review-action-status-succeeded; selected-open: root.selected-open; selected-terminal: root.selected-terminal;
                 can-track: root.can-track; can-watch: root.can-watch; can-remind: root.can-remind;
                 draft-open: root.draft-open; draft-title <=> root.draft-title; draft-when <=> root.draft-when; draft-scheduled-line: root.draft-scheduled-line; draft-valid: root.draft-valid;
-                reminder-state: root.reminder-state; evidence-cards: root.evidence-cards; completion-card: root.completion-card; suggested-update: root.suggested-update; conversation-title: root.conversation-title; conversation-rows: root.conversation-rows;
+                reminder-state: root.reminder-state; source-url: root.source-url; source-unavailable-note: root.source-unavailable-note; evidence-cards: root.evidence-cards; completion-card: root.completion-card; suggested-update: root.suggested-update; conversation-title: root.conversation-title; conversation-rows: root.conversation-rows;
                 todo-url: root.todo-url; conversation-expanded-default: root.conversation-expanded-default;
                 scan-inboxes => { root.scan-inboxes(); } stop-scan => { root.stop-scan(); } rescan => { root.rescan(); } retry-failed => { root.retry-failed(); } sync-todo => { root.sync-todo(); } clear-results => { root.clear-results(); }
                 filter-selected(index) => { root.review-filter-selected(index); } show-handled-toggled(value) => { root.show-handled-toggled(value); } show-call-summaries-toggled(value) => { root.show-call-summaries-toggled(value); }
