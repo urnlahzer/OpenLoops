@@ -875,15 +875,21 @@ pub(crate) fn microsoft_status(result: Result<ConnectionReport, ConnectionError>
 }
 
 /// Whether `url` is an Outlook web link `OpenLoops` is willing to draw a
-/// hyperlink to: exactly the two accepted host prefixes, requiring the
+/// hyperlink to: exactly one of the accepted host prefixes, requiring the
 /// trailing slash (so a bare host with nothing after it does not match) and
 /// `https`. Guards against a host-spoofing attempt such as
 /// `https://example.invalid/outlook.office.com/`, where the accepted text
 /// appears but not as the scheme+host prefix.
 #[must_use]
 pub fn is_outlook_link(url: &str) -> bool {
-    url.starts_with("https://outlook.office.com/")
-        || url.starts_with("https://outlook.office365.com/")
+    [
+        "https://outlook.office.com/",
+        "https://outlook.office365.com/",
+        "https://outlook.live.com/",
+        "https://outlook.office365.us/",
+    ]
+    .iter()
+    .any(|prefix| url.starts_with(prefix))
 }
 
 /// How the Microsoft account is shown in the title bar.
@@ -1249,16 +1255,31 @@ mod tests {
     }
 
     #[test]
-    fn is_outlook_link_accepts_only_the_two_prefixes() {
+    fn is_outlook_link_accepts_only_allowlisted_https_hosts_with_paths() {
         assert!(is_outlook_link("https://outlook.office.com/mail/deeplink"));
         assert!(is_outlook_link(
             "https://outlook.office365.com/mail/deeplink"
         ));
+        assert!(is_outlook_link("https://outlook.live.com/mail/deeplink"));
+        assert!(is_outlook_link(
+            "https://outlook.office365.us/mail/deeplink"
+        ));
         assert!(!is_outlook_link("https://outlook.office.com"));
+        assert!(!is_outlook_link("https://outlook.live.com"));
         assert!(!is_outlook_link(
             "https://example.invalid/outlook.office.com/"
         ));
+        assert!(!is_outlook_link(
+            "https://outlook.office.com.evil.invalid/mail/deeplink"
+        ));
         assert!(!is_outlook_link("http://outlook.office.com/mail/deeplink"));
+        assert!(!is_outlook_link("http://outlook.live.com/mail/deeplink"));
+        assert!(!is_outlook_link(
+            "https://outlook.office.com:443/mail/deeplink"
+        ));
+        assert!(!is_outlook_link(
+            "https://user@outlook.office.com/mail/deeplink"
+        ));
     }
 
     #[test]

@@ -109,6 +109,8 @@ export component ReviewScreen {
     in property <bool> draft-valid;
     in property <ReminderStateView> reminder-state;
     in property <string> todo-url;
+    in property <string> source-url;
+    in property <string> source-unavailable-note;
     in property <[EvidenceCard]> evidence-cards;
     in property <CompletionCard> completion-card;
     in property <SuggestedUpdateCard> suggested-update;
@@ -384,6 +386,19 @@ export component ReviewScreen {
                                         }
                                     }
                                     VerticalLayout { width: 100%; spacing: Tokens.space-2; alignment: start;
+                                        HorizontalLayout { width: 100%; spacing: Tokens.space-2; alignment: start;
+                                            OutlineButton {
+                                                text: "Open email";
+                                                visible: !root.source-url.is-empty;
+                                                enabled: !root.busy && !root.source-url.is-empty;
+                                                clicked => { root.open-external(root.source-url); }
+                                            }
+                                        }
+                                        if root.source-url.is-empty && !root.source-unavailable-note.is-empty: WrappedText {
+                                            text: root.source-unavailable-note;
+                                            text-color: Tokens.text-3;
+                                            size: Tokens.font-11;
+                                        }
                                         // Decision callback codes are defined once in slint_review.rs.
                                         // Two rows, not one: an undecided Team-owned card shows Track
                                         // *and* Watch alongside all three terminal actions, five buttons
