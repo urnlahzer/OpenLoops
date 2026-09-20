@@ -134,24 +134,39 @@ impl Questions {
     /// # Errors
     /// Returns [`ProviderError::InvalidQuestion`] for an unknown id or invalid registry entry.
     pub fn from_registry(ids: &[&str]) -> Result<Self, ProviderError> {
+        let mapped: Vec<(&str, &str)> = ids.iter().map(|id| (*id, *id)).collect();
+        Self::from_registry_with_ids(&mapped)
+    }
+
+    /// Builds named questions from the pinned registry under request-local ids.
+    ///
+    /// The first member of each pair is the registry id and the second is the
+    /// id emitted in the request. This keeps tuned instructions in the
+    /// registry while allowing callers to identify repeated questions.
+    /// # Errors
+    /// Returns [`ProviderError::InvalidQuestion`] for an unknown id or invalid
+    /// registry entry or request-local id.
+    pub fn from_registry_with_ids(ids: &[(&str, &str)]) -> Result<Self, ProviderError> {
         let mut questions = Self::new();
-        for id in ids {
+        for (registry_id, request_id) in ids {
             let registered = registry::Registry::get()
-                .question(id)
+                .question(registry_id)
                 .ok_or(ProviderError::InvalidQuestion)?;
             questions = match registered.kind {
-                registry::QuestionKind::Noul => questions.noul(id, &registered.instructions)?,
+                registry::QuestionKind::Noul => {
+                    questions.noul(request_id, &registered.instructions)?
+                }
                 registry::QuestionKind::Choice => {
                     let options: Vec<_> = registered
                         .options
                         .iter()
                         .map(|(key, value)| (key.as_str(), value.as_str()))
                         .collect();
-                    questions.choice(id, &registered.instructions, &options)?
+                    questions.choice(request_id, &registered.instructions, &options)?
                 }
                 registry::QuestionKind::Score => {
                     let levels: Vec<_> = registered.levels.iter().map(String::as_str).collect();
-                    questions.score(id, &registered.instructions, &levels)?
+                    questions.score(request_id, &registered.instructions, &levels)?
                 }
             };
         }

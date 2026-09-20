@@ -3836,6 +3836,7 @@ dependencies = [
  "openloops-graph",
  "openloops-inference",
  "openloops-persistence",
+ "serde_json",
  "sha2 0.11.0",
  "slint",
  "slint-build",

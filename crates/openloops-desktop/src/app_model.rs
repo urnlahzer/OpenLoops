@@ -745,6 +745,7 @@ impl AppModel {
         let key = self.active_key().clone();
         let model = self.selected_model().to_owned();
         let provider = self.provider;
+        let use_decision_model = self.use_decision_model;
         let parallel = self.max_parallel();
         let progress = Arc::new(crate::review_model::ScanProgress::default());
         progress.total.store(messages.len(), Ordering::Relaxed);
@@ -762,7 +763,10 @@ impl AppModel {
             move || {
                 Outcome::Scan(
                     crate::review_model::scan(
-                        provider,
+                        crate::review_model::ScanOptions {
+                            provider,
+                            use_decision_model,
+                        },
                         key.to_string(),
                         &model,
                         parallel,
@@ -834,6 +838,7 @@ impl AppModel {
         let key = self.active_key().clone();
         let model = self.selected_model().to_owned();
         let provider = self.provider;
+        let use_decision_model = self.use_decision_model;
         let parallel = self.max_parallel();
         let progress = Arc::new(crate::review_model::ScanProgress::default());
         self.scan_progress = Some(progress.clone());
@@ -846,7 +851,10 @@ impl AppModel {
             },
             move || Outcome::RetryScan {
                 result: crate::review_model::scan(
-                    provider,
+                    crate::review_model::ScanOptions {
+                        provider,
+                        use_decision_model,
+                    },
                     key.to_string(),
                     &model,
                     parallel,

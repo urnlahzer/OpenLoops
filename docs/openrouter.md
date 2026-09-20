@@ -61,12 +61,16 @@ configured for ZDR, and OpenLoops never relaxes it for an individual request.
 Before any message text is sent, connecting re-checks that the selected model
 still appears in the ZDR listing.
 
-When the decision model is on, the same message paragraphs may also be sent to
+When the decision model is on, closure checks may also be sent to
 `POST /api/alpha/decisions` with request members `model`, `state`, `questions`,
 and `provider: {"zdr": true}` when the endpoint accepts it (which the check
-reports). The model is `typesafe/jev-1.13` and is validated against the ZDR
-listing before any content is sent. Its answers are probabilities, never text,
-and nothing from them is persisted.
+reports). Each request contains the obligation title, its resolved evidence
+paragraph, and one later body paragraph, plus whether that later message was
+sent by the user and the whole days between the messages. At most the first 8
+body paragraphs of a later message are checked. The model is
+`typesafe/jev-1.13` and is validated against the ZDR listing before any content
+is sent. Its answers are probabilities, never text, and nothing from them is
+persisted. Gray-band pairs go to the governed chat-model closure call.
 
 The governed conversation projection omits a quoted-history block only when
 Unicode-whitespace normalization makes it exactly duplicate an earlier message
