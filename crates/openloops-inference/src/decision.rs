@@ -449,7 +449,27 @@ pub mod registry {
     use crate::analysis::valid_handle;
     use crate::provider::ProviderError;
 
-    pub const REQUIRED_IDS: &[&str] = &["check.asks_recipient", "check.kind"];
+    pub const REQUIRED_IDS: &[&str] = &[
+        "check.asks_recipient",
+        "check.kind",
+        "closure.fulfilled",
+        "closure.withdrawn",
+        "closure.deadline_changed",
+        "closure.modified",
+        "triage.asks_recipient",
+        "triage.commits_sender",
+        "triage.asks_question",
+        "triage.names_time",
+        "triage.boilerplate",
+        "triage.automated_notification",
+        "rules.recap",
+        "rules.scoped_event",
+        "rules.event_match",
+        "rules.duplicate_action",
+        "rules.thread_merge",
+        "rules.deadline_kind",
+    ];
+    pub const CHECK_IDS: &[&str] = &["check.asks_recipient", "check.kind"];
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum QuestionKind {
@@ -500,7 +520,14 @@ pub mod registry {
             .map_err(|_| ProviderError::InvalidQuestion)?;
         let root = value.as_object().ok_or(ProviderError::InvalidQuestion)?;
         if root.keys().any(|key| {
-            !["schema_version", "model", "tuned_at", "questions"].contains(&key.as_str())
+            ![
+                "schema_version",
+                "model",
+                "tuned_at",
+                "questions",
+                "metrics",
+            ]
+            .contains(&key.as_str())
         }) || root.get("schema_version").and_then(Value::as_u64) != Some(1)
         {
             return Err(ProviderError::InvalidQuestion);
@@ -680,7 +707,7 @@ mod openrouter_adapter {
         pub(super) fn check_at(&mut self, url: &str) -> Result<DecisionCheckReport, ProviderError> {
             let started = Instant::now();
             let state = serde_json::json!({"text":"Please send the signed form by Friday."});
-            let questions = Questions::from_registry(registry::REQUIRED_IDS)?;
+            let questions = Questions::from_registry(registry::CHECK_IDS)?;
             let first = self.decide_at(url, &state, &questions, None, DECISION_DEADLINE);
             let answers = match first {
                 Err(ProviderError::RequestRejected(400 | 422)) if self.zdr_member => {
@@ -995,8 +1022,17 @@ mod tests {
             Questions::from_registry(registry::REQUIRED_IDS)
                 .unwrap()
                 .len(),
-            2
+            registry::REQUIRED_IDS.len()
         );
+    }
+
+    #[test]
+    fn registry_fixture_contains_all_p1_through_p3_ids() {
+        let source = include_str!("../../../contracts/model/decision-questions.json");
+        let fixture = registry::parse_for_test(source).unwrap();
+        for id in &registry::REQUIRED_IDS[2..] {
+            assert!(fixture.question(id).is_some(), "missing fixture id {id}");
+        }
     }
 
     #[test]

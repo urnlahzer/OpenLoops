@@ -4,6 +4,22 @@
   "tuned_at": null,
   "questions": {
     "check.asks_recipient": {"type":"noul","instructions":"The text asks the reader to do something.","accept":0.70,"escalate":0.30},
-    "check.kind": {"type":"choice","instructions":"What kind of statement is the text?","options":{"request":"The writer asks the reader to do something.","promise":"The writer commits to doing something.","none":"Neither."},"accept":0.70,"escalate":0.30}
+    "check.kind": {"type":"choice","instructions":"Classify the statement kind.","options":{"request":"The writer asks the reader to do something.","promise":"The writer commits to doing something.","none":"The text is neither a request nor a promise."},"accept":0.70,"escalate":0.30},
+    "closure.fulfilled": {"type":"noul","instructions":"The later text shows the obligation has been carried out.","accept":0.70,"escalate":0.30},
+    "closure.withdrawn": {"type":"noul","instructions":"The later text cancels or withdraws the obligation.","accept":0.70,"escalate":0.30},
+    "closure.deadline_changed": {"type":"noul","instructions":"The later text sets a different deadline for the obligation.","accept":0.70,"escalate":0.30},
+    "closure.modified": {"type":"noul","instructions":"The later text changes what the obligation requires.","accept":0.70,"escalate":0.30},
+    "triage.asks_recipient": {"type":"noul","instructions":"The paragraph asks its recipient to do something.","accept":0.70,"escalate":0.30},
+    "triage.commits_sender": {"type":"noul","instructions":"The paragraph commits its sender to doing something.","accept":0.70,"escalate":0.30},
+    "triage.asks_question": {"type":"noul","instructions":"The paragraph asks a genuine question that seeks an answer.","accept":0.70,"escalate":0.30},
+    "triage.names_time": {"type":"noul","instructions":"The paragraph names a time, date, deadline, or event-relative time.","accept":0.70,"escalate":0.30},
+    "triage.boilerplate": {"type":"noul","instructions":"The paragraph is a signature, legal footer, unsubscribe notice, or disclaimer.","accept":0.70,"escalate":0.30},
+    "triage.automated_notification": {"type":"noul","instructions":"The paragraph is an automatically generated notification.","accept":0.70,"escalate":0.30},
+    "rules.recap": {"type":"noul","instructions":"This email is an automatically generated meeting summary, recap, or transcript.","accept":0.70,"escalate":0.30},
+    "rules.scoped_event": {"type":"noul","instructions":"This request is about attending, preparing for, or bringing something to a meeting or event.","accept":0.70,"escalate":0.30},
+    "rules.event_match": {"type":"noul","instructions":"The phrase refers to the named event.","accept":0.70,"escalate":0.30},
+    "rules.duplicate_action": {"type":"noul","instructions":"These two sentences ask for the same thing.","accept":0.70,"escalate":0.30},
+    "rules.thread_merge": {"type":"noul","instructions":"These two messages belong to the same conversation topic.","accept":0.70,"escalate":0.30},
+    "rules.deadline_kind": {"type":"choice","instructions":"Classify how the phrase expresses a deadline.","options":{"event_tied":"The deadline is tied to a named event.","soft":"The timing is flexible or aspirational.","unknown":"The phrase has no supported deadline classification."},"accept":0.70,"escalate":0.30}
   }
 }

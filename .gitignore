@@ -171,6 +171,8 @@ __pycache__/
 .tox/
 .nox/
 .venv/
+tools/jev-optimize/data/enron/
+tools/jev-optimize/runs/
 venv/
 env/
 pip-wheel-metadata/
