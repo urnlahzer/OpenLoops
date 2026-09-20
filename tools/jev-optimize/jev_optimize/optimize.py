@@ -27,8 +27,15 @@ def _inputs(row: DatasetRow) -> dict[str, Any]:
 def metric_for(question_id: str, *, feedback_includes_text: bool = False):
     """Return GEPA's score-plus-feedback metric; owner exports keep feedback text-free."""
 
-    def metric(example: Any, prediction: Any, trace: Any = None) -> dspy.Prediction:
-        del trace
+    def metric(
+        example: Any,
+        prediction: Any,
+        trace: Any = None,
+        pred_name: Any = None,
+        pred_trace: Any = None,
+    ) -> dspy.Prediction:
+        # GEPA calls the metric with five positional arguments.
+        del trace, pred_name, pred_trace
         label = example.label[question_id]
         if isinstance(label, bool):
             probability = float(prediction.probability)
