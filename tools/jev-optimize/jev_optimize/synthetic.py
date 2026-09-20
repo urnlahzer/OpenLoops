@@ -336,13 +336,22 @@ def _chat_rows(
         json={"model": model,
               "messages": [{"role": "user", "content": _prompt(set_name, plans)}],
               "response_format": _response_format(set_name), "provider": {"zdr": True},
-              "temperature": 0.9},
+              "temperature": 0.9,
+              # Twelve rows of JSON run to several thousand tokens; a default
+              # output cap truncates the reply mid-string.
+              "max_tokens": 16384},
     )
     response.raise_for_status()
-    content = response.json()["choices"][0]["message"]["content"]
-    payload = json.loads(content)
+    choice = response.json()["choices"][0]
+    content = choice["message"]["content"]
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        # A truncated or malformed reply is a failed batch; the caller
+        # re-queues its plans rather than aborting the whole set.
+        return []
     if not isinstance(payload, dict) or not isinstance(payload.get("rows"), list):
-        raise ValueError("synthetic model response must be an object containing a rows array")
+        return []
     return payload["rows"]
 
 
