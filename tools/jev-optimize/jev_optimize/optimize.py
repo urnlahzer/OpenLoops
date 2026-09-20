@@ -202,11 +202,18 @@ def optimize_set(
             else tuple(SPECS[question_id].signature.input_fields)
         )
         proposer = JevProposer(reflection_lm, fields)
+        # GEPA checkpoints its state under log_dir and resumes from it, so an
+        # interrupted run keeps the candidates it already scored; delete the
+        # directory to start a question over.
+        log_dir = Path("runs") / "gepa" / set_name / question_id.replace(".", "-")
+        log_dir.mkdir(parents=True, exist_ok=True)
         optimizer = dspy.GEPA(
             metric=metric_for(question_id, feedback_includes_text=feedback_includes_text),
             auto=budget,
             reflection_lm=reflection_lm,
             instruction_proposer=proposer,
+            log_dir=str(log_dir),
+            track_stats=True,
         )
         optimized = optimizer.compile(
             program,
