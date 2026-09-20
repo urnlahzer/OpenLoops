@@ -35,6 +35,29 @@ HARD_NEGATIVES = (
 _EMAIL_RE = re.compile(r"\b[^\s@]+@[^\s@]+\b")
 _URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 _CAPITALIZED_BIGRAM_RE = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][A-Za-z]+)+)\b")
+# Capitalized words that start ordinary phrases in business mail. A run of
+# capitalized words is treated as a name only when none of its words is here,
+# so "Best Regards", "Monday Morning" and "Project Update" are not names while
+# "Unlisted Person" still is.
+_COMMON_CAPITALIZED_WORDS = frozenset(
+    """
+    Monday Tuesday Wednesday Thursday Friday Saturday Sunday
+    January February March April May June July August September October November December
+    Hi Hello Dear Thanks Thank Best Kind Warm Regards Cheers Sincerely Yours Please
+    Re Fw Fwd Subject Sent From To Cc Date Attached Attachment Draft Final Revised Updated
+    Project Client Team Board Committee Council Department Office Group Meeting Call Review
+    Quarter Q1 Q2 Q3 Q4 Week Month Year Morning Afternoon Evening Today Tomorrow Yesterday
+    Invoice Contract Agreement Brief Memo Report Proposal Plan Budget Summary Notes Minutes
+    Agenda Update Status Reminder Deadline Request Action Item Items Next Steps Follow Up
+    The This That These Those A An And Or But If When Where While After Before Since Until
+    Legal Sales Operations Academic Personal Admin Administration Finance Marketing Support
+    Engineering Research Program Programme Course Semester Term Class Lab Study Paper Thesis
+    Order Purchase Vendor Supplier Customer Account Case Matter File Filing Court Hearing Trial
+    Zoom Teams Meet Calendar Outlook Slack Email Phone Video Conference Room Suite Floor
+    North South East West New Old Main Central Grand Upper Lower Inner Outer
+    I We You They He She It My Our Your Their His Her Its
+    """.split()
+)
 _ROW_FIELDS = {
     "closure": {"obligation", "later", "label"},
     "triage": {"subject", "paragraph_text", "from_user", "label"},
@@ -136,11 +159,17 @@ def scrub_row(row: dict[str, Any]) -> list[str]:
     if _URL_RE.search(text):
         violations.append("URL")
     allowed_names = _allowed_name_phrases()
-    if any(
-        match.group(1) not in allowed_names
-        for match in _CAPITALIZED_BIGRAM_RE.finditer(text)
-    ):
+    for match in _CAPITALIZED_BIGRAM_RE.finditer(text):
+        phrase = match.group(1)
+        if phrase in allowed_names:
+            continue
+        words = phrase.split()
+        if any(word in _COMMON_CAPITALIZED_WORDS for word in words):
+            continue
+        # A name-shaped run that is not a pool name and contains no ordinary
+        # capitalized word.
         violations.append("capitalized name outside the synthetic pool")
+        break
     return violations
 
 
@@ -266,8 +295,10 @@ def _prompt(set_name: str, plans: list[dict[str, Any]]) -> str:
         "closure label, or none; they must not imply another closure outcome. When "
         "hard_negative is "
         "set, implement that negative pattern. Use only these invented people and organizations: "
-        f"{', '.join((*SYNTHETIC_PEOPLE, *SYNTHETIC_COMPANIES))}. Any email must end in "
-        "example.invalid. Do not emit URLs. Vary language, artifacts, relationships, and contexts. "
+        f"{', '.join((*SYNTHETIC_PEOPLE, *SYNTHETIC_COMPANIES))}. Never name any other person, "
+        "company, product, place or document title; write project, document and product names "
+        "in lowercase (for example: the licensing brief, the vendor contract). Any email must end "
+        "in example.invalid. Do not emit URLs. Vary language, artifacts, relationships, and contexts. "
         "Plans:\n" + json.dumps(plans, ensure_ascii=False, sort_keys=True)
     )
 
