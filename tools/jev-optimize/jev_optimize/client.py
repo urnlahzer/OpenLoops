@@ -145,13 +145,30 @@ class DecisionsClient:
         raise AssertionError("unreachable")
 
     def probe(self) -> bool:
-        """Run a content-free capability probe and remember provider-member support."""
-        response = self._post(request_bytes(self.model, {}, {}, zdr_member=True))
+        """Run a content-free capability probe and remember provider-member support.
+
+        The state is one synthetic sentence and the question set is one noul, so
+        the server's reason for a rejection may be shown: nothing in it is mail.
+        """
+        state = {"text": "Please send the signed form by Friday."}
+        questions = {
+            "asks_recipient": {
+                "type": "noul",
+                "instructions": "The text asks the reader to do something.",
+            }
+        }
+        response = self._post(request_bytes(self.model, state, questions, zdr_member=True))
         if response.status_code in {400, 422}:
             self.zdr_member = False
-            response = self._post(request_bytes(self.model, {}, {}, zdr_member=False))
-        response.raise_for_status()
-        parse_response(response.content, self.model, {})
+            response = self._post(
+                request_bytes(self.model, state, questions, zdr_member=False)
+            )
+        if response.status_code >= 400:
+            excerpt = response.text[:500]
+            raise RuntimeError(
+                f"probe rejected with HTTP {response.status_code}: {excerpt}"
+            )
+        parse_response(response.content, self.model, questions)
         return self.zdr_member
 
     def decide(

@@ -72,7 +72,13 @@ def test_probe_drops_rejected_provider_member(monkeypatch):
         calls.append(request.content)
         if len(calls) == 1:
             return httpx.Response(422)
-        return httpx.Response(200, json={"model": MODEL, "answers": {}})
+        return httpx.Response(
+            200,
+            json={
+                "model": MODEL,
+                "answers": {"asks_recipient": {"type": "noul", "noul": 0.9}},
+            },
+        )
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "synthetic-test-placeholder")
     client = DecisionsClient(transport=httpx.MockTransport(handler))
