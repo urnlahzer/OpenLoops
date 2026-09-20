@@ -27,7 +27,39 @@ def merge_registry(
     path: str | Path = DEFAULT_REGISTRY,
     *,
     tuned_at: str | None = None,
+    allow_baseline: bool = False,
 ) -> str:
+    print(
+        "question | validation baseline->tuned | test accuracy baseline->tuned | "
+        "accept/escalate"
+    )
+    blocked: list[str] = []
+    for result in results.values():
+        for question_id, update in result.get("questions", {}).items():
+            baseline_test = update.get("baseline_test_metrics", {})
+            tuned_test = update.get("tuned_test_metrics", {})
+            baseline_validation = update.get("baseline_validation_score", "-")
+            tuned_validation = update.get("tuned_validation_score", "-")
+            print(
+                f"{question_id} | "
+                f"{baseline_validation}->{tuned_validation} | "
+                f"{baseline_test.get('accuracy', '-')}->{tuned_test.get('accuracy', '-')} | "
+                f"{update.get('accept', '-')}/{update.get('escalate', '-')}"
+            )
+            reasons = []
+            if update.get("insufficient_data"):
+                reasons.append("insufficient_data")
+            if update.get("kept_baseline"):
+                reasons.append("kept_baseline")
+            if reasons:
+                blocked.append(f"{question_id} ({', '.join(reasons)})")
+    if blocked and not allow_baseline:
+        raise ValueError(
+            "refusing to write guarded question results: "
+            + ", ".join(blocked)
+            + "; pass --allow-baseline after review"
+        )
+
     destination = Path(path)
     registry = json.loads(destination.read_text(encoding="utf-8"))
     metrics = registry.setdefault("metrics", {})

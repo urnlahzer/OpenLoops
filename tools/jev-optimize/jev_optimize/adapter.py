@@ -27,6 +27,13 @@ class JevAdapter(dspy.Adapter):
         self.client = client
         self.question_id = question_id
 
+    def __deepcopy__(self, memo: dict[int, Any]) -> JevAdapter:
+        """Copy adapter metadata while deliberately sharing the transport client."""
+
+        copied = type(self)(self.client, self.question_id)
+        memo[id(self)] = copied
+        return copied
+
     def __call__(
         self,
         lm: Any,

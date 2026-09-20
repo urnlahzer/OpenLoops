@@ -31,7 +31,7 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     generate = commands.add_parser("generate-synthetic")
     generate.add_argument("--seed", type=int, default=20260919)
-    generate.add_argument("--count", type=int, default=360)
+    generate.add_argument("--count", type=int, default=600)
     commands.add_parser("fetch-enron")
     commands.add_parser("probe")
     evaluate = commands.add_parser("evaluate")
@@ -48,6 +48,7 @@ def _parser() -> argparse.ArgumentParser:
     write = commands.add_parser("write-registry")
     write.add_argument("results", nargs="+")
     write.add_argument("--registry")
+    write.add_argument("--allow-baseline", action="store_true")
     return parser
 
 
@@ -87,10 +88,13 @@ def main() -> None:
                 if set(result["questions"]) <= set(ids)
             )
             merged[set_name] = result
-        if args.registry:
-            merge_registry(merged, args.registry)
-        else:
-            merge_registry(merged)
+        try:
+            if args.registry:
+                merge_registry(merged, args.registry, allow_baseline=args.allow_baseline)
+            else:
+                merge_registry(merged, allow_baseline=args.allow_baseline)
+        except ValueError as error:
+            raise SystemExit(f"write-registry: {error}") from None
 
 
 if __name__ == "__main__":

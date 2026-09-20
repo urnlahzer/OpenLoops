@@ -1,0 +1,86 @@
+from types import SimpleNamespace
+
+import pytest
+
+from jev_optimize.metrics import threshold_sweep
+from jev_optimize.optimize import gated_question_update
+from jev_optimize.proposer import JevProposer, validate_statement
+
+
+def test_proposer_validator_accepts_literal_statement():
+    statement = "later.paragraph_text states that the obligation is complete."
+    assert validate_statement(statement) == []
+
+
+@pytest.mark.parametrize(
+    ("statement", "expected"),
+    [
+        ("word " * 46, "maximum"),
+        ("The state is clear.\n- Check the next item.", "newline or list"),
+        ("The state contains 10 entries.", "digits-only"),
+        ("Northstar is complete.", "capitalized example"),
+        ("Output the answer.", "banned phrase"),
+        ("You inspect later.paragraph_text.", "second-person"),
+        ("The text is not absent and not unclear.", "stacks negation"),
+        ("One is true. Two is true. Three is true.", "more than two"),
+        ("Is later.paragraph_text complete?", "not declarative"),
+    ],
+)
+def test_proposer_validator_rejects_each_violation(statement, expected):
+    violations = validate_statement(
+        statement,
+        current_statement="The current statement is literal.",
+        example_texts=("The Northstar example appears here.",),
+    )
+    assert any(expected in violation for violation in violations)
+
+
+def test_proposer_retries_once_then_falls_back():
+    responses = iter(("Output a probability.", "You are an assistant."))
+
+    def predictor(**_kwargs):
+        return SimpleNamespace(proposed_statement=next(responses))
+
+    proposer = JevProposer(None, ("later.paragraph_text",), predictor=predictor)
+    current = "later.paragraph_text states that the obligation is complete."
+    result = proposer(
+        {"predict": current},
+        {"predict": [{"Feedback": "label=true; predicted_probability=0.100."}]},
+        ["predict"],
+    )
+    assert result == {"predict": current}
+    assert proposer.rejection_count == 2
+
+
+def _metrics(accuracy):
+    labels = [True] * 20 + [False] * 20
+    probabilities = [0.9] * 20 + [0.1] * 20
+    return {"accuracy": accuracy, "sweep": threshold_sweep(labels, probabilities)}
+
+
+def test_result_gate_keeps_baseline_when_test_accuracy_regresses():
+    update = gated_question_update(
+        "closure.fulfilled",
+        baseline_validation=_metrics(0.8),
+        tuned_validation=_metrics(0.9),
+        baseline_test={"accuracy": 0.85},
+        tuned_test={"accuracy": 0.84},
+        tuned_instructions="later.paragraph_text states that the obligation is done.",
+    )
+    assert update["kept_baseline"] is True
+    assert update["instructions"] == "The later text shows the obligation has been carried out."
+    assert "test accuracy" in update["baseline_reason"]
+
+
+def test_result_gate_keeps_non_regressing_tuned_statement():
+    tuned = "later.paragraph_text states that the obligation is complete."
+    update = gated_question_update(
+        "closure.fulfilled",
+        baseline_validation=_metrics(0.8),
+        tuned_validation=_metrics(0.8),
+        baseline_test={"accuracy": 0.85},
+        tuned_test={"accuracy": 0.86},
+        tuned_instructions=tuned,
+    )
+    assert update["instructions"] == tuned
+    assert "kept_baseline" not in update

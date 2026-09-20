@@ -41,14 +41,17 @@ def threshold_sweep(labels: list[bool], probabilities: list[float]) -> list[dict
     truth = np.asarray(labels, dtype=bool)
     probs = np.asarray(probabilities, dtype=float)
     rows: list[dict[str, Any]] = []
+    positive_count = int(truth.sum())
+    negative_count = len(labels) - positive_count
     for step in range(21):
         threshold = step * 0.05
         selected = probs >= threshold
         count = int(selected.sum())
         wrong = int(np.logical_not(truth[selected]).sum()) if count else 0
-        rejected = probs <= threshold
+        rejected = probs < threshold
         rejected_count = int(rejected.sum())
         rejected_wrong = int(truth[rejected].sum()) if rejected_count else 0
+        selected_positives = int(truth[selected].sum()) if count else 0
         rows.append(
             {
                 "threshold": round(threshold, 2),
@@ -57,6 +60,14 @@ def threshold_sweep(labels: list[bool], probabilities: list[float]) -> list[dict
                 "selected": count,
                 "below_coverage": rejected_count / len(labels) if labels else 0.0,
                 "below_error": rejected_wrong / rejected_count if rejected_count else 0.0,
+                "positive_coverage": (
+                    selected_positives / positive_count if positive_count else 0.0
+                ),
+                "positive_below_fraction": (
+                    rejected_wrong / positive_count if positive_count else 0.0
+                ),
+                "positives": positive_count,
+                "negatives": negative_count,
             }
         )
     return rows
@@ -64,21 +75,34 @@ def threshold_sweep(labels: list[bool], probabilities: list[float]) -> list[dict
 
 def choose_thresholds(
     sweep: list[dict[str, Any]], max_selective_risk: float = 0.05
-) -> tuple[float, float]:
+) -> dict[str, float | bool]:
+    """Choose guarded accept/escalate thresholds from a validation sweep.
+
+    At least 20 positive and 20 negative examples are required; otherwise the registry
+    defaults (0.70, 0.30) are returned with ``insufficient_data``. The accept threshold is
+    the smallest threshold whose selective risk is within the limit and whose positive recall
+    is at least 0.5. Escalate is the largest lower threshold with at most 0.1 of all positives
+    below it. Fallbacks preserve ``escalate < accept``.
+    """
+
+    positives = int(sweep[0].get("positives", 0)) if sweep else 0
+    negatives = int(sweep[0].get("negatives", 0)) if sweep else 0
+    if positives < 20 or negatives < 20:
+        return {"accept": 0.7, "escalate": 0.3, "insufficient_data": True}
     acceptable = [
         row["threshold"]
         for row in sweep
-        if row.get("selected", 0) > 0 and row["selective_risk"] <= max_selective_risk
+        if row.get("selected", 0) > 0
+        and row["selective_risk"] <= max_selective_risk
+        and row.get("positive_coverage", 0.0) >= 0.5
     ]
-    accept = max(0.05, min(acceptable, default=1.0))
-    mostly_wrong = [
+    accept = float(min(acceptable, default=0.7))
+    low_positive_tail = [
         row["threshold"]
         for row in sweep
-        if row.get("below_coverage", 0) > 0
-        and row["threshold"] < accept
-        and row.get("below_error", 0.0) > 0.5
+        if row["threshold"] < accept and row.get("positive_below_fraction", 0.0) <= 0.1
     ]
-    escalate = max(mostly_wrong, default=0.0)
+    escalate = float(max(low_positive_tail, default=max(0.3, accept - 0.4)))
     if escalate >= accept:
         escalate = max(0.0, round(accept - 0.05, 2))
-    return float(accept), float(escalate)
+    return {"accept": accept, "escalate": escalate, "insufficient_data": False}

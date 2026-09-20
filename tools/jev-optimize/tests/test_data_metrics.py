@@ -35,7 +35,21 @@ def test_metrics_on_toy_set():
 
 
 def test_threshold_chooser_obeys_risk_and_orders_thresholds():
-    sweep = threshold_sweep([True, True, False, False], [0.95, 0.85, 0.65, 0.10])
-    accept, escalate = choose_thresholds(sweep, max_selective_risk=0.05)
-    assert accept == 0.7
-    assert 0.0 <= escalate < accept
+    labels = [True] * 20 + [False] * 20
+    probabilities = [0.9] * 20 + [0.1] * 20
+    result = choose_thresholds(threshold_sweep(labels, probabilities))
+    assert result == {"accept": 0.15, "escalate": 0.1, "insufficient_data": False}
+
+
+def test_threshold_chooser_uses_defaults_for_insufficient_support():
+    result = choose_thresholds(threshold_sweep([True] * 19 + [False] * 20, [0.5] * 39))
+    assert result == {"accept": 0.7, "escalate": 0.3, "insufficient_data": True}
+
+
+def test_threshold_chooser_enforces_positive_recall_floor():
+    labels = [True] * 20 + [False] * 20
+    probabilities = [0.9] * 9 + [0.4] * 11 + [0.45] * 20
+    result = choose_thresholds(threshold_sweep(labels, probabilities))
+    assert result["accept"] == 0.7
+    assert result["escalate"] == 0.4
+    assert result["insufficient_data"] is False

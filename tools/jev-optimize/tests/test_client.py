@@ -1,4 +1,6 @@
 import json
+import warnings
+from copy import deepcopy
 
 import httpx
 import pytest
@@ -122,3 +124,15 @@ def test_one_signature_becomes_one_exact_typed_question():
             }
         },
     )
+
+
+def test_jev_predict_deepcopy_shares_client_without_warning():
+    client = object()
+    program = JevPrograms(client).program("triage.asks_recipient")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        copied = deepcopy(program)
+    assert copied is not program
+    assert copied.adapter is not program.adapter
+    assert copied.adapter.client is client
+    assert not [warning for warning in caught if "Failed to deep copy" in str(warning.message)]

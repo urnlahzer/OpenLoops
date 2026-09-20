@@ -38,6 +38,23 @@ Run `optimize` separately for `closure`, `triage`, and `rules`; pass all result
 files to `write-registry` to merge them in one reviewed edit. Replay files are
 stable-hash keyed and allow evaluation without a network call.
 
+The committed synthetic corpus contains at least 600 rows per set. Every binary
+question is construction-balanced to a 40–60% positive rate, uses distinct
+positive row selections, and includes at least twelve positive phrasings. The
+threshold tuner requires at least 20 positives and 20 negatives in its sweep;
+smaller samples retain the registry defaults.
+
+GEPA uses a Jev-specific proposer. Proposed instructions are one or two literal,
+present-tense declarative sentences of at most 45 words, may name state fields,
+and contain no role framing, output directions, examples, lists, stacked
+negation, or proper nouns copied from examples. Invalid proposals are retried
+once and then discarded in favor of the current statement.
+
+Optimization results retain baseline and tuned validation/test measurements.
+`write-registry` prints a per-question comparison and refuses results marked
+`insufficient_data` or `kept_baseline`. After reviewing why a baseline was kept,
+an owner may explicitly override that guard with `--allow-baseline`.
+
 Enron rows are explicitly marked `source: "enron-unlabeled"`. Their simple
 rule-produced silver labels are for smoke, calibration, and coverage sweeps
 only, never accuracy claims. Real Enron labels require owner review. An owner

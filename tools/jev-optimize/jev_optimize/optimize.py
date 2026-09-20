@@ -17,7 +17,16 @@ from .metrics import (
     expected_calibration_error,
     threshold_sweep,
 )
+from .proposer import JevProposer
 from .questions import SETS, SPECS
+
+CLOSURE_FIELDS = (
+    "obligation.title",
+    "obligation.evidence_text",
+    "later.paragraph_text",
+    "later.from_user",
+    "later.days_later",
+)
 
 
 def _inputs(row: DatasetRow) -> dict[str, Any]:
@@ -109,6 +118,54 @@ def evaluate_question(program: Any, question_id: str, rows: list[DatasetRow]) ->
     return result
 
 
+def gated_question_update(
+    question_id: str,
+    *,
+    baseline_validation: dict[str, Any],
+    tuned_validation: dict[str, Any],
+    baseline_test: dict[str, Any],
+    tuned_test: dict[str, Any],
+    tuned_instructions: str,
+) -> dict[str, Any]:
+    """Keep tuned wording only when validation and held-out accuracy do not regress."""
+
+    baseline_validation_score = float(baseline_validation["accuracy"])
+    tuned_validation_score = float(tuned_validation["accuracy"])
+    baseline_test_accuracy = float(baseline_test["accuracy"])
+    tuned_test_accuracy = float(tuned_test["accuracy"])
+    keep_tuned = (
+        tuned_validation_score >= baseline_validation_score
+        and tuned_test_accuracy >= baseline_test_accuracy
+    )
+    selected_validation = tuned_validation if keep_tuned else baseline_validation
+    thresholds = choose_thresholds(selected_validation["sweep"])
+    update: dict[str, Any] = {
+        "instructions": (
+            tuned_instructions
+            if keep_tuned
+            else (SPECS[question_id].signature.instructions or "").strip()
+        ),
+        "accept": thresholds["accept"],
+        "escalate": thresholds["escalate"],
+        "insufficient_data": thresholds["insufficient_data"],
+        "baseline_validation_score": baseline_validation_score,
+        "tuned_validation_score": tuned_validation_score,
+        "baseline_test_metrics": baseline_test,
+        "tuned_test_metrics": tuned_test,
+    }
+    if not keep_tuned:
+        reasons = []
+        if tuned_validation_score < baseline_validation_score:
+            reasons.append("tuned validation score regressed")
+        if tuned_test_accuracy < baseline_test_accuracy:
+            reasons.append("tuned test accuracy regressed")
+        update["kept_baseline"] = True
+        update["baseline_reason"] = "; ".join(reasons)
+    if SPECS[question_id].options:
+        update["options"] = SPECS[question_id].options
+    return update
+
+
 def optimize_set(
     set_name: str,
     client: Any,
@@ -133,27 +190,43 @@ def optimize_set(
         "dataset_sizes": {name: len(values) for name, values in parts.items()},
         "questions": {},
         "test_metrics": {},
+        "proposer_rejection_count": 0,
     }
     for question_id in SETS[set_name]:
         program = adapter.program(question_id)
+        baseline_validation = evaluate_question(program, question_id, parts["validation"])
+        baseline_test = evaluate_question(program, question_id, parts["test"])
+        fields = (
+            CLOSURE_FIELDS
+            if set_name == "closure"
+            else tuple(SPECS[question_id].signature.input_fields)
+        )
+        proposer = JevProposer(reflection_lm, fields)
         optimizer = dspy.GEPA(
             metric=metric_for(question_id, feedback_includes_text=feedback_includes_text),
             auto=budget,
             reflection_lm=reflection_lm,
+            instruction_proposer=proposer,
         )
         optimized = optimizer.compile(
             program,
             trainset=_examples(parts["train"]),
             valset=_examples(parts["validation"]),
         )
-        output["test_metrics"][question_id] = evaluate_question(
-            optimized, question_id, parts["test"]
+        tuned_test = evaluate_question(optimized, question_id, parts["test"])
+        tuned_validation = evaluate_question(optimized, question_id, parts["validation"])
+        update = gated_question_update(
+            question_id,
+            baseline_validation=baseline_validation,
+            tuned_validation=tuned_validation,
+            baseline_test=baseline_test,
+            tuned_test=tuned_test,
+            tuned_instructions=optimized.predict.signature.instructions,
         )
-        validation = evaluate_question(optimized, question_id, parts["validation"])
-        update = {"instructions": optimized.predict.signature.instructions}
-        if "sweep" in validation:
-            update["accept"], update["escalate"] = choose_thresholds(validation["sweep"])
-        if SPECS[question_id].options:
-            update["options"] = SPECS[question_id].options
+        update["proposer_rejection_count"] = proposer.rejection_count
+        output["proposer_rejection_count"] += proposer.rejection_count
+        output["test_metrics"][question_id] = (
+            baseline_test if update.get("kept_baseline") else tuned_test
+        )
         output["questions"][question_id] = update
     return output
