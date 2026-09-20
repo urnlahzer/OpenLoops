@@ -42,6 +42,9 @@ unproven and is gated on measurement.
   extraction switch happens only when the numbers justify it.
 - Uncertain answers (probability or confidence in the gray band) are escalated
   to the LLM for that item, not shown as uncertain and not dropped.
+- Question wording is tuned with DSPy (GEPA) on a synthetic corpus, a public
+  corpus, and an opt-in export of the owner's mail; see "Question
+  optimization with DSPy".
 
 ## Transport and privacy
 
@@ -98,6 +101,75 @@ Thresholds are named constants in one table, `decision::thresholds`, and
 are tuned from the measuring mode, not from the docs' examples. Initial
 values: accept above 0.70, escalate 0.30-0.70, reject below 0.30, per the
 consistency cookbook's band.
+
+## Question registry
+
+The wording of every Jev question is data, not code.
+`contracts/model/decision-questions.json` holds one entry per question id:
+type, instructions, criteria, the accept and escalate thresholds, the Jev
+model version it was tuned against, and the metric numbers from the last
+optimization run. `decision.rs` loads it with `include_str!` and refuses to
+build if an id the code uses is missing or the type differs. A checker pins
+the file's hash like the other contracts, so a wording change is a reviewed
+contract edit. The optimizer (below) is the only thing that writes this
+file; hand edits are for bootstrapping P0 only.
+
+## Question optimization with DSPy
+
+Owner decision 2026-09-19: tune the questions with DSPy; train and score on a
+synthetic corpus, a public business-mail corpus, and an opt-in export of the
+owner's own mail.
+
+Harness: `tools/jev-optimize/`, a Python project (uv, pinned lock) outside
+the Rust build. It never runs in CI or at app runtime.
+
+- **Program.** One `dspy.Module` per question set (P1 closure, P2 triage,
+  each P3 rule, P4 extraction). Each Jev question is a `dspy.Predict` whose
+  signature docstring is the instructions and whose output-field
+  descriptions are the criteria, the mapping `dspy-typesafeify` uses. A
+  small adapter turns the signature into a `/api/alpha/decisions` request
+  and the answers back into typed outputs; no chat model is involved in
+  answering.
+- **Optimizer.** `dspy.GEPA`. It rewrites instructions and criteria from
+  textual feedback; Jev takes no few-shot demonstrations, so MIPROv2's demo
+  search has nothing to act on. The metric returns a score and a feedback
+  string per example ("predicted fulfilled 0.82, label none: the paragraph
+  thanks the sender and asks nothing"). The reflection model is the chat
+  model already configured in the app, called through OpenRouter with
+  `provider.zdr` so exported mail never leaves ZDR routes. Budget `auto=
+  "light"` first; Jev calls cost cents, the reflection model is the cost.
+- **Metrics.** Per question: accuracy against labels, Brier score and
+  expected calibration error, and a threshold sweep at 0.05 steps that
+  reports coverage and selective risk (the share of wrong answers among
+  those above threshold). The accept and escalate thresholds written to the
+  registry are chosen from the sweep to hold selective risk under 5% on the
+  validation split, not copied from the docs.
+- **Data.** Three sources, all paragraph-level JSONL with the same schema
+  (`text`, `context` fields the question needs, `label`, `source`):
+  1. Synthetic: a generated corpus of business email threads with known
+     obligations, closures, recaps and boilerplate, committed under
+     `tools/jev-optimize/data/synthetic/`. Used for bootstrapping and as the
+     regression set the harness's own tests run against.
+  2. Public: the Enron corpus, downloaded by a script into a git-ignored
+     folder, never committed. Volume and real phrasing.
+  3. Owner export: `--probe-saved-model --export-training <dir>` writes the
+     loaded mail's paragraphs, participant handles, the chat model's
+     accepted claims (silver labels for triage and extraction), and the
+     owner's Accept/Reject on suggested updates and Handled/Dismissed
+     decisions (gold labels for closure) to a folder the owner names. The
+     flag prints a one-line warning that mail text is being written to disk,
+     the folder is outside the repo, and the app's own state stays
+     text-free. This is a deliberate, owner-invoked exception to the
+     no-persistence rule and is documented as such.
+  Splits: train, validation and a held-out test set that the optimizer never
+  sees; the registry records test numbers only.
+- **Output.** The harness writes `decision-questions.json` with the tuned
+  wording, thresholds, `jev-1.13` pinned, dataset sizes and test metrics.
+  The owner reviews the diff in a contract PR. A Jev version bump re-runs
+  the harness before the registry is repinned.
+- **Order.** The harness lands as phase O after P0 and before P1, so P1
+  ships tuned wording. It is re-run after P4's compare mode produces owner
+  export data at volume.
 
 ## Where Jev is used
 
@@ -230,15 +302,16 @@ only if the owner asks.
 
 | Phase | Branch | Contents |
 |---|---|---|
-| P0 | `feat/jev-transport` | `decision.rs`, `OpenRouterDecisions`, settings toggle (off by default), Sources disclosure line, content-free "Check decision model" probe that sends a synthetic state, docs. Contract and checker edits in a sibling `chore/contract-decision-model` PR. |
+| P0 | `feat/jev-transport` | `decision.rs`, `OpenRouterDecisions`, the question registry with hand-written bootstrap wording, settings toggle (off by default), Sources disclosure line, content-free "Check decision model" probe that sends a synthetic state, docs. Contract and checker edits in a sibling `chore/contract-decision-model` PR. |
+| O | `feat/jev-optimize` | `tools/jev-optimize/` harness, synthetic corpus, Enron download script, the `--export-training` probe flag, first tuned registry in a contract PR. |
 | P1 | `feat/jev-closure-pass` | Replace `scan_closures` internals. |
 | P2 | `feat/jev-triage` | Triage request and projection trimming. |
 | P3 | `feat/jev-rule-residue` | The seven rule replacements, one commit each. |
 | P4 | `feat/jev-compare-probe` | Measuring mode. |
 | P5 | `feat/jev-extraction` | The switch, after P4 numbers. |
 
-P1 and P2 are independent after P0. P3 items are independent of each other.
-P5 waits on P4.
+O follows P0. P1 and P2 are independent after O. P3 items are independent of
+each other. P5 waits on P4 and on a re-run of O with owner export data.
 
 ## Open items the P0 probe must answer
 
