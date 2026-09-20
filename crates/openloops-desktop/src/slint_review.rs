@@ -2632,6 +2632,15 @@ mod tests {
     fn a_single_native_window_covers_busy_guards_projection_cache_and_sync_busy() {
         let window = AppWindow::new().expect("create AppWindow for test");
         let mut model = model();
+        model.provider = crate::settings::Provider::OpenRouter;
+        model.openrouter_key = zeroize::Zeroizing::new("synthetic-key".into());
+        crate::slint_ui::sync(&model, &window);
+        assert!(!window.get_use_decision_model());
+        assert!(!window.get_can_check_decision_model());
+        model.use_decision_model = true;
+        crate::slint_ui::sync(&model, &window);
+        assert!(window.get_use_decision_model());
+        assert!(window.get_can_check_decision_model());
         model.review = crate::review_model::layout_fixture();
         let key = model
             .review

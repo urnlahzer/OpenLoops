@@ -13,6 +13,7 @@ use openloops_graph::live::{
     ConnectionConfig, ConnectionError, ConnectionReport, clear_session,
     review::{LoadProgress, MailCache},
 };
+use openloops_inference::decision::DecisionCheckReport;
 use openloops_inference::ollama::suggested_model;
 use openloops_inference::openrouter::ModelChoice;
 use openloops_inference::provider::ProviderError;
@@ -23,6 +24,7 @@ pub(crate) enum Outcome {
     Models(Result<Vec<String>, ProviderError>),
     ZdrModels(Result<Vec<ModelChoice>, ProviderError>),
     Generation(Result<(), ProviderError>),
+    DecisionCheck(Result<DecisionCheckReport, ProviderError>),
     Mail(Result<Vec<openloops_graph::live::review::SourceReview>, ConnectionError>),
     Scan(
         Result<crate::review_model::ScanResult, ProviderError>,
@@ -67,6 +69,12 @@ pub(crate) struct Status {
     pub(crate) succeeded: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsPresence {
+    Missing,
+    Present,
+}
+
 /// Toolkit-free setup/connection/review model used by the native UI adapter.
 pub struct AppModel {
     pub client_id: String,
@@ -81,8 +89,10 @@ pub struct AppModel {
     pub zdr_models: Vec<ModelChoice>,
     pub openrouter_selected: String,
     pub openrouter_parallel: u16,
+    pub use_decision_model: bool,
     pub(crate) microsoft: Status,
     pub(crate) model_status: Status,
+    pub(crate) decision_status: Status,
     pub(crate) pending: Option<Receiver<Outcome>>,
     pub(crate) pending_service: Service,
     pub progress: &'static str,
@@ -103,7 +113,7 @@ pub struct AppModel {
     /// record. The native adapter reads this immediately after each such call,
     /// together with [`AppModel::ready_for_review`], to reproduce today's
     /// initial-tab decision without the model owning any UI-nav state.
-    pub settings_existed: bool,
+    pub(crate) settings_presence: SettingsPresence,
 }
 
 impl AppModel {
@@ -127,8 +137,10 @@ impl AppModel {
             zdr_models: vec![],
             openrouter_selected: String::new(),
             openrouter_parallel: crate::settings::DEFAULT_OPENROUTER_PARALLEL,
+            use_decision_model: false,
             microsoft: Status::default(),
             model_status: Status::default(),
+            decision_status: Status::default(),
             pending: None,
             pending_service: Service::Microsoft,
             progress: "",
@@ -142,12 +154,16 @@ impl AppModel {
             load_progress: None,
             scan_progress: None,
             mail_cache: Arc::new(MailCache::default()),
-            settings_existed: false,
+            settings_presence: SettingsPresence::Missing,
         };
         match store {
             Ok(store) => {
                 app.store = store;
-                app.settings_existed = app.reload_settings();
+                app.settings_presence = if app.reload_settings() {
+                    SettingsPresence::Present
+                } else {
+                    SettingsPresence::Missing
+                };
             }
             Err(error) => {
                 app.automatic_save = false;
@@ -179,6 +195,7 @@ impl AppModel {
         self.provider = settings.provider;
         self.ollama_plan = settings.ollama_plan;
         self.openrouter_parallel = settings.openrouter_parallel;
+        self.use_decision_model = settings.use_decision_model;
         self.openrouter_key = settings.openrouter_key;
         self.openrouter_selected = settings.openrouter_selected;
         self.zdr_models = if self.openrouter_selected.is_empty() {
@@ -192,6 +209,7 @@ impl AppModel {
         self.trim_keys();
         self.microsoft = Status::default();
         self.model_status = Status::default();
+        self.decision_status = Status::default();
         self.pending_save = false;
         self.review = ReviewState::default();
         self.review_status = Status::default();
@@ -200,7 +218,7 @@ impl AppModel {
     /// Reloads settings from the store, if any, applying them the same way
     /// as today. Returns whether a saved record existed (`false` when there
     /// is no store, the load failed, or no record had been saved yet) --
-    /// see [`AppModel::settings_existed`] for how the adapter uses this
+    /// see [`AppModel::settings_presence`] for how the adapter uses this
     /// alongside [`AppModel::ready_for_review`] to decide the initial/
     /// post-reload tab.
     pub fn reload_settings(&mut self) -> bool {
@@ -250,6 +268,7 @@ impl AppModel {
             openrouter_selected: self.openrouter_selected.clone(),
             ollama_plan: self.ollama_plan,
             openrouter_parallel: self.openrouter_parallel,
+            use_decision_model: self.use_decision_model,
         };
         match store.save(&settings) {
             Ok(()) => {
@@ -381,6 +400,26 @@ impl AppModel {
                 self.model_status = Status {
                     lines: vec![error.to_string()],
                     succeeded: false,
+                };
+            }
+            Outcome::DecisionCheck(Err(error)) => {
+                self.decision_status = Status {
+                    lines: vec![error.to_string()],
+                    succeeded: false,
+                };
+            }
+            Outcome::DecisionCheck(Ok(report)) => {
+                self.decision_status = Status {
+                    lines: vec![
+                        format!("Decision model check passed in {} ms.", report.latency_ms),
+                        if report.zdr_member_supported {
+                            "provider.zdr accepted on the decisions endpoint."
+                        } else {
+                            "provider.zdr not accepted on the decisions endpoint; the model is verified against the zero-data-retention listing before every connection instead."
+                        }
+                        .into(),
+                    ],
+                    succeeded: true,
                 };
             }
             Outcome::Generation(Ok(())) => {
@@ -676,8 +715,18 @@ impl AppModel {
     pub fn provider_disclosure(&self) -> &'static str {
         match self.provider {
             Provider::OllamaCloud => "Ollama Cloud",
+            Provider::OpenRouter if self.use_decision_model => {
+                "OpenRouter, restricted to zero-data-retention endpoints, including the Jev decision model"
+            }
             Provider::OpenRouter => "OpenRouter, restricted to zero-data-retention endpoints",
         }
+    }
+
+    #[must_use]
+    pub fn can_check_decision_model(&self) -> bool {
+        self.provider == Provider::OpenRouter
+            && !self.openrouter_key.is_empty()
+            && self.use_decision_model
     }
 
     /// Whether the client ID, active key, and selected model are all
@@ -962,6 +1011,7 @@ impl AccountDisplay {
 mod tests {
     use super::*;
     use openloops_graph::live::SharedScope;
+    use openloops_inference::decision::DecisionCheckReport;
     use std::{
         cell::{Cell, RefCell},
         rc::Rc,
@@ -1057,6 +1107,57 @@ mod tests {
         app.poll(|| {});
         assert!(app.model_status.succeeded);
         assert!(app.model_status.lines[0].contains("other-model"));
+    }
+
+    #[test]
+    fn decision_check_ok_and_err_set_decision_status() {
+        let mut app = AppModel::with_store(Ok(None));
+        let (sender, receiver) = mpsc::channel();
+        app.pending = Some(receiver);
+        sender
+            .send(Outcome::DecisionCheck(Ok(DecisionCheckReport {
+                zdr_member_supported: false,
+                latency_ms: 17,
+            })))
+            .unwrap();
+        app.poll(|| {});
+        assert!(app.decision_status.succeeded);
+        assert_eq!(app.decision_status.lines.len(), 2);
+        assert!(app.decision_status.lines[0].contains("17 ms"));
+        assert!(app.decision_status.lines[1].contains("not accepted"));
+
+        let (sender, receiver) = mpsc::channel();
+        app.pending = Some(receiver);
+        sender
+            .send(Outcome::DecisionCheck(Err(ProviderError::InvalidResponse)))
+            .unwrap();
+        app.poll(|| {});
+        assert!(!app.decision_status.succeeded);
+        assert_eq!(
+            app.decision_status.lines,
+            [ProviderError::InvalidResponse.to_string()]
+        );
+    }
+
+    #[test]
+    fn provider_disclosure_names_the_decision_model_only_when_enabled() {
+        let mut app = AppModel::with_store(Ok(None));
+        app.provider = Provider::OpenRouter;
+        assert!(!app.provider_disclosure().contains("Jev"));
+        app.use_decision_model = true;
+        assert!(app.provider_disclosure().contains("Jev decision model"));
+        app.provider = Provider::OllamaCloud;
+        assert!(!app.provider_disclosure().contains("Jev"));
+    }
+
+    #[test]
+    fn apply_settings_round_trips_use_decision_model() {
+        let memory = MemoryStore::default();
+        let mut app = AppModel::with_store(Ok(Some(Box::new(memory.clone()))));
+        app.use_decision_model = true;
+        app.save_settings();
+        let reopened = AppModel::with_store(Ok(Some(Box::new(memory))));
+        assert!(reopened.use_decision_model);
     }
 
     #[test]

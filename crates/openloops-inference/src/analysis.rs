@@ -464,7 +464,7 @@ When none of these fits, set temporal null and include "deadline" in ambiguity_c
 AMBIGUITY CODES. Include each that applies: quote_scope (the cited block contains more than this claim), identity (unclear who is asking or who owes), delegation (unclear whether the user handed this off), deadline (a time is implied but could not be expressed), relation (unclear which open loop this closes or changes), cross_message (evidence from more than one message), insufficient_context (the conversation does not show enough to be sure), semantic_conflict (messages disagree). confidence_micros is your confidence from 0 to 1000000; it never changes routing.
 OUTPUT. {"schema_version":1,"claims":[...]} with at most 64 claims. Return {"schema_version":1,"claims":[]} when there is nothing actionable. Schema:"#;
 
-fn valid_handle(handle: &str) -> bool {
+pub(crate) fn valid_handle(handle: &str) -> bool {
     !handle.is_empty()
         && handle.len() <= 128
         && handle

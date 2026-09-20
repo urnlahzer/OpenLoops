@@ -68,6 +68,9 @@ export component SourcesScreen {
     in-out property <bool> parallel-field-focused;
     in property <string> model-status;
     in property <bool> model-succeeded;
+    in-out property <bool> use-decision-model;
+    in property <string> decision-status;
+    in property <bool> decision-succeeded;
     // Same rationale as `microsoft-busy-line`: the model card's own busy
     // line, always `Tokens.text-2`, never riding on `model-succeeded`.
     in property <string> model-busy-line;
@@ -77,6 +80,7 @@ export component SourcesScreen {
     in property <bool> can-check-microsoft;
     in property <bool> can-load-models;
     in property <bool> can-test-model;
+    in property <bool> can-check-decision-model;
 
     callback save-settings;
     callback reload-settings;
@@ -94,6 +98,8 @@ export component SourcesScreen {
     callback plan-selected(int);
     callback parallel-committed(string);
     callback test-model;
+    callback decision-model-toggled(bool);
+    callback check-decision-model;
 
     VerticalLayout { spacing: Tokens.space-1;
         Rectangle { preferred-height: bar-layout.preferred-height; min-height: Tokens.command-bar-height; background: Tokens.bg-bar;
@@ -179,6 +185,15 @@ export component SourcesScreen {
                                 SecondaryButton { text: root.load-models-label; enabled: root.controls-enabled && root.can-load-models; clicked => { root.load-models(); } }
                             }
                             if root.provider-index == 1: HelperText { text: "Only models with a zero-data-retention endpoint are listed, and every request asks OpenRouter to route to those endpoints only. OpenRouter's own retention policy still applies."; width: 100%; }
+                            if root.provider-index == 1: VerticalLayout { width: 100%; spacing: Tokens.space-1;
+                                Checkbox { text: "Use the Jev decision model for closure checks and triage"; checked <=> root.use-decision-model; enabled: root.controls-enabled; toggled(value) => { root.decision-model-toggled(value); } }
+                                HelperText { text: "Same OpenRouter key and zero-data-retention endpoints. Off by default; nothing changes in the scan until later releases use it."; width: 100%; }
+                                HorizontalLayout { width: 100%; spacing: Tokens.space-3;
+                                    SecondaryButton { text: "Check decision model"; enabled: root.controls-enabled && root.can-check-decision-model; clicked => { root.check-decision-model(); } }
+                                    HelperText { text: "Content-free decision check, up to 20 s."; horizontal-stretch: 1; }
+                                }
+                                WrappedText { text: root.decision-status; text-color: root.decision-succeeded ? Tokens.success : Tokens.warning; horizontal-stretch: 1; }
+                            }
                             HorizontalLayout { width: 100%; spacing: Tokens.space-3;
                                 PrimaryButton { text: "Test selected model"; enabled: root.controls-enabled && root.can-test-model; clicked => { root.test-model(); } }
                                 HelperText { text: "Content-free generation check, up to 150 s."; horizontal-stretch: 1; }

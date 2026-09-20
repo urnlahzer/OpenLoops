@@ -17,7 +17,7 @@ use crate::provider::{
 };
 use crate::validation::{AnalysisResult, SuppliedContext};
 
-const AUTHORITY: &str = "https://openrouter.ai";
+pub(crate) const AUTHORITY: &str = "https://openrouter.ai";
 const CHAT: &str = "https://openrouter.ai/api/v1/chat/completions";
 const ZDR_ENDPOINTS: &str = "https://openrouter.ai/api/v1/endpoints/zdr";
 /// The catalog listing is content-free and much larger than a completion:
@@ -192,7 +192,7 @@ pub fn available_zdr_models() -> Result<Vec<ModelChoice>, ProviderError> {
     fetch_zdr(&https_client()?, ZDR_ENDPOINTS)
 }
 
-fn fetch_zdr(client: &Client, url: &str) -> Result<Vec<ModelChoice>, ProviderError> {
+pub(crate) fn fetch_zdr(client: &Client, url: &str) -> Result<Vec<ModelChoice>, ProviderError> {
     // Only the adapter-fixed ZDR_ENDPOINTS constant reaches here in a real
     // build; the loopback tests substitute their own origin.
     debug_assert!(cfg!(test) || url.starts_with(AUTHORITY));
@@ -284,7 +284,7 @@ fn healthy_choice(endpoint: &Value) -> Option<ModelChoice> {
     })
 }
 
-fn read_response(
+pub(crate) fn read_response(
     response: Response,
     control: &RequestControl<'_>,
 ) -> Result<Zeroizing<Vec<u8>>, ProviderError> {
@@ -336,7 +336,7 @@ fn request(model: &str, system: &str, user: &str) -> Result<Vec<u8>, ProviderErr
 /// variant suffix such as `:free`. A different model whose id merely starts
 /// with the same characters, such as `vendor/model-10` for `vendor/model-1`,
 /// never matches.
-fn model_matches(reported: &str, selected: &str) -> bool {
+pub(crate) fn model_matches(reported: &str, selected: &str) -> bool {
     reported
         .strip_prefix(selected)
         .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(':'))

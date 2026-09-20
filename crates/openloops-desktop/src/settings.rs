@@ -113,6 +113,7 @@ pub struct Settings {
     /// How many `OpenRouter` requests a scan may keep in flight, within
     /// [`MIN_OPENROUTER_PARALLEL`]..=[`MAX_OPENROUTER_PARALLEL`].
     pub openrouter_parallel: u16,
+    pub use_decision_model: bool,
 }
 
 impl Default for Settings {
@@ -128,6 +129,7 @@ impl Default for Settings {
             openrouter_selected: String::new(),
             ollama_plan: OllamaPlan::default(),
             openrouter_parallel: DEFAULT_OPENROUTER_PARALLEL,
+            use_decision_model: false,
         }
     }
 }
@@ -191,6 +193,7 @@ impl Settings {
 
     fn encode(&self) -> Result<Zeroizing<Vec<u8>>, SettingsError> {
         let parallel = self.openrouter_parallel.to_string();
+        let decision = self.use_decision_model.to_string();
         let fields = [
             self.client_id.as_str(),
             self.groups.as_str(),
@@ -202,6 +205,7 @@ impl Settings {
             self.openrouter_selected.as_str(),
             self.ollama_plan.tag(),
             parallel.as_str(),
+            decision.as_str(),
         ];
         let size = fields
             .iter()
@@ -225,7 +229,8 @@ impl Settings {
     /// Records written before the concurrency settings existed end after
     /// the eighth; they load with the Free Ollama plan (one concurrent
     /// request, so those scans stay sequential exactly as they were) and
-    /// the default `OpenRouter` parallel ceiling.
+    /// the default `OpenRouter` parallel ceiling. Records written before the
+    /// decision setting existed end after the tenth field and load with it off.
     fn decode(bytes: &[u8]) -> Result<Self, SettingsError> {
         if bytes.len() > MAX_BYTES {
             return Err(SettingsError::Invalid);
@@ -249,9 +254,20 @@ impl Settings {
             settings.openrouter_parallel = parse_parallel(&next(&mut remaining)?)?;
         }
         if !remaining.is_empty() {
+            settings.use_decision_model = parse_bool(&next(&mut remaining)?)?;
+        }
+        if !remaining.is_empty() {
             return Err(SettingsError::Invalid);
         }
         Ok(settings)
+    }
+}
+
+fn parse_bool(field: &str) -> Result<bool, SettingsError> {
+    match field {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(SettingsError::Invalid),
     }
 }
 
@@ -358,6 +374,7 @@ mod tests {
             openrouter_selected: "vendor/model-1".into(),
             ollama_plan: OllamaPlan::Max,
             openrouter_parallel: 64,
+            use_decision_model: true,
         }
     }
 
@@ -407,6 +424,19 @@ mod tests {
             ]
             .concat(),
         );
+        let concurrency_end = boundary(
+            &[
+                legacy.as_slice(),
+                &[
+                    settings.provider.tag(),
+                    settings.openrouter_key.as_str(),
+                    settings.openrouter_selected.as_str(),
+                    settings.ollama_plan.tag(),
+                    &settings.openrouter_parallel.to_string(),
+                ],
+            ]
+            .concat(),
+        );
         for length in 0..encoded.len() {
             if length == legacy_end {
                 // A record truncated exactly at the pre-provider boundary is
@@ -425,6 +455,11 @@ mod tests {
                 assert_eq!(truncated.openrouter_parallel, DEFAULT_OPENROUTER_PARALLEL);
                 continue;
             }
+            if length == concurrency_end {
+                let truncated = Settings::decode(&encoded[..length]).unwrap();
+                assert!(!truncated.use_decision_model);
+                continue;
+            }
             assert!(Settings::decode(&encoded[..length]).is_err());
         }
         let mut bad = encoded.to_vec();
@@ -441,6 +476,24 @@ mod tests {
         assert_eq!(decoded.openrouter_selected, "vendor/model-1");
         assert_eq!(decoded.ollama_plan, OllamaPlan::Max);
         assert_eq!(decoded.openrouter_parallel, 64);
+        assert!(decoded.use_decision_model);
+    }
+
+    #[test]
+    fn records_written_before_the_decision_setting_default_it_off() {
+        let settings = synthetic();
+        let encoded = settings.encode().unwrap();
+        let old_end = encoded.len() - (4 + "true".len());
+        let decoded = Settings::decode(&encoded[..old_end]).unwrap();
+        assert!(!decoded.use_decision_model);
+
+        let mut invalid = encoded[..old_end].to_vec();
+        invalid.extend_from_slice(&u32::try_from("maybe".len()).unwrap().to_le_bytes());
+        invalid.extend_from_slice(b"maybe");
+        assert_eq!(
+            Settings::decode(&invalid).err(),
+            Some(SettingsError::Invalid)
+        );
     }
 
     #[test]

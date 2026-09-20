@@ -2,12 +2,13 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use crate::{
-    app_model::{AccountDisplay, AppModel, Outcome, Service, Status},
+    app_model::{AccountDisplay, AppModel, Outcome, Service, SettingsPresence, Status},
     review_model::{ReviewState, ScanStrip, load_strip, open_badge_count, scan_strip},
     settings::{MAX_OPENROUTER_PARALLEL, MIN_OPENROUTER_PARALLEL, OllamaPlan, Provider},
 };
 use openloops_graph::live::{ConnectionConfig, check_connection, clear_session};
 use openloops_inference::{
+    decision::{OpenRouterDecisions, registry::Registry},
     ollama::{OllamaCloud, available_models},
     openrouter::{OpenRouter, available_zdr_models},
 };
@@ -193,7 +194,7 @@ thread_local! {
 }
 
 #[allow(clippy::too_many_lines)]
-fn sync(model: &AppModel, window: &AppWindow) {
+pub(crate) fn sync(model: &AppModel, window: &AppWindow) {
     // Graph does not expose the signed-in display name through the current
     // connection report yet, so the title bar shows only a connection
     // summary (owner feedback item 3): once the Microsoft connection has
@@ -325,6 +326,9 @@ fn sync(model: &AppModel, window: &AppWindow) {
     }
     window.set_model_status(joined_status(&model.model_status).into());
     window.set_model_succeeded(model.model_status.succeeded);
+    window.set_use_decision_model(model.use_decision_model);
+    window.set_decision_status(joined_status(&model.decision_status).into());
+    window.set_decision_succeeded(model.decision_status.succeeded);
     window.set_model_busy_line(
         if model.pending_service == Service::Model {
             busy_text.as_deref().unwrap_or_default()
@@ -348,6 +352,7 @@ fn sync(model: &AppModel, window: &AppWindow) {
         Provider::OpenRouter => true,
     });
     window.set_can_test_model(!model.selected_model().is_empty() && !model.active_key().is_empty());
+    window.set_can_check_decision_model(model.can_check_decision_model());
     crate::slint_review::sync_review(model, window, &cards, busy, review_scanning, strip_model);
 }
 
@@ -544,7 +549,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
         if preview_review {
             0
         } else {
-            i32::from(!(model.settings_existed && model.ready_for_review()))
+            i32::from(
+                !(model.settings_presence == SettingsPresence::Present && model.ready_for_review()),
+            )
         }
     };
     window.set_active_screen(initial_screen);
@@ -748,6 +755,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
             }
             model_ref.provider = provider;
             model_ref.model_status = Status::default();
+            model_ref.decision_status = Status::default();
             finish_edit(&mut model_ref);
             drop(model_ref);
             // The OpenRouter parallel-requests field only exists while
@@ -789,6 +797,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 model_ref.selected.clear();
             }
             model_ref.model_status = Status::default();
+            model_ref.decision_status = Status::default();
             finish_edit(&mut model_ref);
             drop(model_ref);
             refresh(&model, &weak);
@@ -909,6 +918,21 @@ pub fn run() -> Result<(), slint::PlatformError> {
     {
         let model = Rc::clone(&model);
         let weak = window.as_weak();
+        window.on_decision_model_toggled(move |value| {
+            let mut model_ref = model.borrow_mut();
+            if model_ref.use_decision_model == value {
+                return;
+            }
+            model_ref.use_decision_model = value;
+            model_ref.decision_status = Status::default();
+            finish_edit(&mut model_ref);
+            drop(model_ref);
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
         let timer = Rc::clone(&timer);
         window.on_test_model(move || {
             let mut model_ref = model.borrow_mut();
@@ -926,6 +950,31 @@ pub fn run() -> Result<(), slint::PlatformError> {
                         Provider::OpenRouter => OpenRouter::connect(key.to_string(), &selected)
                             .and_then(|provider| provider.check_generation()),
                     })
+                },
+                || {},
+            );
+            drop(model_ref);
+            start_timer(&timer);
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        let timer = Rc::clone(&timer);
+        window.on_check_decision_model(move || {
+            let mut model_ref = model.borrow_mut();
+            let key = model_ref.openrouter_key.clone();
+            let selected = Registry::get().model.clone();
+            model_ref.decision_status = Status::default();
+            model_ref.start(
+                Service::Model,
+                "Checking the decision model (up to 20 seconds)",
+                move || {
+                    Outcome::DecisionCheck(
+                        OpenRouterDecisions::connect(key.to_string(), &selected)
+                            .and_then(|mut client| client.check()),
+                    )
                 },
                 || {},
             );

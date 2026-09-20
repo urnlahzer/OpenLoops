@@ -182,6 +182,7 @@ pub enum ProviderError {
     RequestRejected(u16),
     ServerError(u16),
     ModelUnavailable,
+    InvalidQuestion,
     InvalidResponse,
     /// The provider reported `finish_reason: "length"`: the model hit the
     /// request's output ceiling before finishing its answer, so what came
@@ -213,6 +214,7 @@ impl std::fmt::Display for ProviderError {
             Self::RequestRejected(status) => return write!(f, "The provider rejected the request (HTTP {status}). An unsupported request parameter or model capability is the usual cause; try another model."),
             Self::ServerError(status) => return write!(f, "The provider returned a server error (HTTP {status}). Try again later or choose another model."),
             Self::ModelUnavailable => "The selected model is not in the provider's selectable model list.",
+            Self::InvalidQuestion => "The decision request was malformed.",
             Self::InvalidResponse => "The provider returned an incomplete or unsupported response.",
             Self::OutputTruncated => "The model ran out of output room before finishing its answer (a reasoning model's thinking counts against the same limit). Try a model that thinks less, or a faster one.",
             Self::InputTooLarge => "The selected message projection exceeds the analysis limits.",
@@ -977,6 +979,7 @@ mod tests {
             ProviderError::Unauthorized,
             ProviderError::Network,
             ProviderError::ModelUnavailable,
+            ProviderError::InvalidQuestion,
             ProviderError::InvalidResponse,
         ] {
             let text = error.to_string();

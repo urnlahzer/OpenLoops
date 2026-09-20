@@ -27,7 +27,8 @@ unattended background service remain on the implementation roadmap.
    - OpenRouter: paste an OpenRouter API key, then click **Load ZDR models**.
      That listing is public, so it is fetched without sending the key. Only
      models with a zero-data-retention endpoint appear, and every request pins
-     ZDR-only routing. See [OpenRouter](openrouter.md).
+     ZDR-only routing. The optional Jev decision-model toggle is off by default
+     and has its own content-free check. See [OpenRouter](openrouter.md).
 4. To switch, select another model and test it. No automatic fallback occurs.
    A failed test distinguishes authentication, rate limiting, account balance,
    HTTP server/request errors, timeouts, and invalid analysis output. Upstream
