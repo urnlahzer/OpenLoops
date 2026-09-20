@@ -39,25 +39,24 @@ _CAPITALIZED_BIGRAM_RE = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][A-Za-z]+)+)\b")
 # capitalized words is treated as a name only when none of its words is here,
 # so "Best Regards", "Monday Morning" and "Project Update" are not names while
 # "Unlisted Person" still is.
-_COMMON_CAPITALIZED_WORDS = frozenset(
-    """
-    Monday Tuesday Wednesday Thursday Friday Saturday Sunday
-    January February March April May June July August September October November December
-    Hi Hello Dear Thanks Thank Best Kind Warm Regards Cheers Sincerely Yours Please
-    Re Fw Fwd Subject Sent From To Cc Date Attached Attachment Draft Final Revised Updated
-    Project Client Team Board Committee Council Department Office Group Meeting Call Review
-    Quarter Q1 Q2 Q3 Q4 Week Month Year Morning Afternoon Evening Today Tomorrow Yesterday
-    Invoice Contract Agreement Brief Memo Report Proposal Plan Budget Summary Notes Minutes
-    Agenda Update Status Reminder Deadline Request Action Item Items Next Steps Follow Up
-    The This That These Those A An And Or But If When Where While After Before Since Until
-    Legal Sales Operations Academic Personal Admin Administration Finance Marketing Support
-    Engineering Research Program Programme Course Semester Term Class Lab Study Paper Thesis
-    Order Purchase Vendor Supplier Customer Account Case Matter File Filing Court Hearing Trial
-    Zoom Teams Meet Calendar Outlook Slack Email Phone Video Conference Room Suite Floor
-    North South East West New Old Main Central Grand Upper Lower Inner Outer
-    I We You They He She It My Our Your Their His Her Its
-    """.split()
+_COMMON_CAPITALIZED_TEXT = (
+        "Monday Tuesday Wednesday Thursday Friday Saturday Sunday January February March "
+        "April May June July August September October November December Hi Hello Dear "
+        "Thanks Thank Best Kind Warm Regards Cheers Sincerely Yours Please Re Fw Fwd Subject "
+        "Sent From To Cc Date Attached Attachment Draft Final Revised Updated Project Client "
+        "Team Board Committee Council Department Office Group Meeting Call Review Quarter Q1 "
+        "Q2 Q3 Q4 Week Month Year Morning Afternoon Evening Today Tomorrow Yesterday Invoice "
+        "Contract Agreement Brief Memo Report Proposal Plan Budget Summary Notes Minutes "
+        "Agenda Update Status Reminder Deadline Request Action Item Items Next Steps Follow "
+        "Up The This That These Those A An And Or But If When Where While After Before Since "
+        "Until Legal Sales Operations Academic Personal Admin Administration Finance "
+        "Marketing Support Engineering Research Program Programme Course Semester Term Class "
+        "Lab Study Paper Thesis Order Purchase Vendor Supplier Customer Account Case Matter "
+        "File Filing Court Hearing Trial Zoom Teams Meet Calendar Outlook Slack Email Phone "
+        "Video Conference Room Suite Floor North South East West New Old Main Central Grand "
+        "Upper Lower Inner Outer I We You They He She It My Our Your Their His Her Its"
 )
+_COMMON_CAPITALIZED_WORDS = frozenset(_COMMON_CAPITALIZED_TEXT.split())
 _ROW_FIELDS = {
     "closure": {"obligation", "later", "label"},
     "triage": {"subject", "paragraph_text", "from_user", "label"},
@@ -298,8 +297,8 @@ def _prompt(set_name: str, plans: list[dict[str, Any]]) -> str:
         f"{', '.join((*SYNTHETIC_PEOPLE, *SYNTHETIC_COMPANIES))}. Never name any other person, "
         "company, product, place or document title; write project, document and product names "
         "in lowercase (for example: the licensing brief, the vendor contract). Any email must end "
-        "in example.invalid. Do not emit URLs. Vary language, artifacts, relationships, and contexts. "
-        "Plans:\n" + json.dumps(plans, ensure_ascii=False, sort_keys=True)
+        "in example.invalid. Do not emit URLs. Vary language, artifacts, relationships, and "
+        "contexts. Plans:\n" + json.dumps(plans, ensure_ascii=False, sort_keys=True)
     )
 
 
@@ -450,16 +449,21 @@ def _validate_generated_row(
 def generate_llm(
     output: str | Path = DEFAULT_ROOT, *, selected_set: str = "all", rows: int = 600,
     seed: int = 20260919, client: httpx.Client | None = None, parallel: int = 8,
+    smoke: bool = False,
 ) -> list[Path]:
     """Generate corpora through OpenRouter; callers own the live-network decision.
 
     Batches of 12 plans go to the model ``parallel`` at a time (the calls are
     independent); acceptance and de-duplication stay serial so the result
-    does not depend on completion order.
+    does not depend on completion order. ``smoke`` allows a small row count
+    and relaxed corpus checks for a cheap live trial; its output must never
+    replace the committed corpus.
     """
 
-    if rows < 600:
+    if rows < 600 and not smoke:
         raise ValueError("LLM generation requires at least 600 rows per set")
+    if smoke and rows < 128:
+        raise ValueError("a smoke run needs at least 128 rows to balance every label")
     parallel = max(1, parallel)
     api_key = os.environ.get("OPENROUTER_API_KEY")
     model = os.environ.get("OPENROUTER_SYNTH_MODEL")
@@ -524,12 +528,24 @@ def generate_llm(
             path = root / f"{set_name}.jsonl"
             temporary = path.with_suffix(".jsonl.tmp")
             write_jsonl(temporary, generated)
+            thresholds = (
+                CorpusThresholds(min_rows=rows, min_paragraphs=rows // 2, min_obligations=4)
+                if smoke
+                else CorpusThresholds()
+            )
             try:
-                check_corpus(temporary)
+                check_corpus(temporary, thresholds)
                 temporary.replace(path)
             except Exception:
                 temporary.unlink(missing_ok=True)
                 raise
+            summary = ", ".join(
+                f"{reason}: {count}" for reason, count in sorted(rejections.items())
+            ) or "none"
+            print(
+                f"{set_name}: accepted {rows} rows from {attempts} plans; "
+                f"rejections: {summary}"
+            )
             paths.append(path)
     finally:
         if owned_client:

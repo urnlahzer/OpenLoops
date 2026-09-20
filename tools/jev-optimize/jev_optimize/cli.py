@@ -40,6 +40,11 @@ def _parser() -> argparse.ArgumentParser:
     generate.add_argument(
         "--parallel", type=int, default=8, help="concurrent model calls for --llm"
     )
+    generate.add_argument(
+        "--smoke",
+        action="store_true",
+        help="cheap live trial: 128 rows into runs/smoke with relaxed checks",
+    )
     check = commands.add_parser("check-corpus")
     check.add_argument("file", type=Path)
     commands.add_parser("fetch-enron")
@@ -69,12 +74,19 @@ def main() -> None:
         if args.stub:
             paths = generate_stub(args.output, selected_set=args.set, rows=rows, seed=args.seed)
         else:
+            output = args.output
+            if args.smoke:
+                # 128 rows so every label bit of the plan is balanced.
+                rows = args.rows or 128
+                if output == DEFAULT_ROOT:
+                    output = Path("runs") / "smoke"
             paths = generate_llm(
-                args.output,
+                output,
                 selected_set=args.set,
                 rows=rows,
                 seed=args.seed,
                 parallel=args.parallel,
+                smoke=args.smoke,
             )
         for path in paths:
             print(path)
