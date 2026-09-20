@@ -76,7 +76,7 @@ def main() -> None:
         else:
             output = args.output
             if args.smoke:
-                # 128 rows so every label bit of the plan is balanced.
+                # Keep smoke runs large enough for useful per-question samples.
                 rows = args.rows or 128
                 if output == DEFAULT_ROOT:
                     output = Path("runs") / "smoke"
@@ -100,14 +100,14 @@ def main() -> None:
     elif args.command == "probe":
         print(f"zdr_member={str(DecisionsClient().probe()).lower()}")
     elif args.command == "evaluate":
-        rows = split_rows(load_jsonl(args.data))["test"]
+        rows = load_jsonl(args.data)
         adapter = JevPrograms(_client(args.replay))
         registry = json.loads(DEFAULT_REGISTRY.read_text(encoding="utf-8"))
         result = {
             question_id: evaluate_question(
                 adapter.program(question_id),
                 question_id,
-                rows,
+                split_rows(rows, question_id=question_id)["test"],
                 registry_thresholds={
                     name: registry["questions"][question_id][name]
                     for name in ("accept", "escalate")

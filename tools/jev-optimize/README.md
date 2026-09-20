@@ -48,10 +48,13 @@ files to `write-registry` to merge them in one reviewed edit. Replay files are
 stable-hash keyed and allow evaluation without a network call.
 
 The committed synthetic corpus must contain at least 600 rows per set and pass
-`check-corpus` before a PR. Every non-closure binary question is construction-
-balanced to a 40–60% positive rate. Closure rows are mutually exclusive (or
-all-negative), so each of its four questions is 15–30% positive; requiring all
-four exclusive labels to be 40–60% positive would be mathematically impossible.
+`check-corpus` before a PR. Closure rows carry all four closure labels; those
+labels are mutually exclusive (or all-negative), so each question is 15–30%
+positive. Triage and rules use a per-question layout: each row carries exactly
+one label and only the input fields used by that question. At 600 rows, each of
+their six questions receives 100 examples. Binary questions are exactly half
+positive and half negative; `rules.deadline_kind` is divided as evenly as
+possible among `event_tied`, `soft`, and `unknown` (34/33/33 at 100 rows).
 For every applicable binary label, `from_user` differs by at most 0.1 between
 positive and negative rows and the `days_later` means differ by at most 2 days.
 Each corpus has at least 300 distinct paragraph texts, and closure has at least
@@ -60,7 +63,8 @@ and 20 negatives in its sweep;
 smaller samples retain the registry defaults.
 
 LLM generation uses a fixed matrix of at least 30 scenario seeds per question,
-assigns labels and nuisance fields before each request, requests
+sends a separate prompt and strict schema for each question batch, assigns
+labels and nuisance fields before each request, requests
 `provider.zdr=true`, deduplicates normalized text, and gives rows stable text
 hash IDs. The post-generation scrub rejects URLs, addresses outside
 `example.invalid`, and capitalized names outside the documented invented pool.

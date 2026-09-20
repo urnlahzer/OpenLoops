@@ -15,7 +15,7 @@ from typing import Any
 import httpx
 
 from .data import DatasetRow, load_jsonl, write_jsonl
-from .questions import SETS
+from .questions import SETS, SPECS
 
 DEFAULT_ROOT = Path(__file__).parents[1] / "data" / "synthetic"
 DOMAINS = ("legal", "sales", "operations", "academic", "personal administration")
@@ -27,6 +27,11 @@ SYNTHETIC_PEOPLE = (
 )
 SYNTHETIC_COMPANIES = (
     "Halcyon Ridge LLC", "Juniper Vale Ltd", "Copper Lantern Inc", "Blue Heron Labs",
+)
+SYNTHETIC_SERVICES = (
+    "notes@meetingnotes.example.invalid",
+    "recap@calltranscripts.example.invalid",
+    "noreply@notetaker.example.invalid",
 )
 HARD_NEGATIVES = (
     "thanks-only acknowledgement", "quoted history without a current update",
@@ -57,14 +62,46 @@ _COMMON_CAPITALIZED_TEXT = (
         "Upper Lower Inner Outer I We You They He She It My Our Your Their His Her Its"
 )
 _COMMON_CAPITALIZED_WORDS = frozenset(_COMMON_CAPITALIZED_TEXT.split())
-_ROW_FIELDS = {
-    "closure": {"obligation", "later", "label"},
-    "triage": {"subject", "paragraph_text", "from_user", "label"},
-    "rules": {
-        "sender", "subject", "first_paragraph", "request_text", "phrase", "event_name",
-        "action_a", "action_b", "subject_a", "subject_b", "first_paragraph_a",
-        "first_paragraph_b", "label",
-    },
+_QUESTION_FIELDS = {
+    **{question_id: ("subject", "paragraph_text") for question_id in SETS["triage"]},
+    "rules.recap": ("sender", "subject", "first_paragraph"),
+    "rules.scoped_event": ("request_text",),
+    "rules.event_match": ("phrase", "event_name"),
+    "rules.duplicate_action": ("action_a", "action_b"),
+    "rules.thread_merge": (
+        "subject_a", "subject_b", "first_paragraph_a", "first_paragraph_b",
+    ),
+    "rules.deadline_kind": ("phrase",),
+}
+_MAIN_TEXT_FIELD = {
+    **{question_id: "paragraph_text" for question_id in SETS["triage"]},
+    "rules.recap": "first_paragraph",
+    "rules.scoped_event": "request_text",
+    "rules.event_match": "phrase",
+    "rules.duplicate_action": "action_a",
+    "rules.thread_merge": "first_paragraph_a",
+    "rules.deadline_kind": "phrase",
+}
+_HARD_NEGATIVE_GUIDANCE = {
+    "triage.asks_recipient": "a quoted request, suggestion, or statement that asks nobody to act",
+    "triage.commits_sender": "a hope, plan under discussion, or another person's commitment",
+    "triage.asks_question": "a rhetorical or quoted question that seeks no answer",
+    "triage.names_time": (
+        "a number or sequence that is not a time, date, deadline, or event-relative time"
+    ),
+    "triage.boilerplate": (
+        "ordinary prose mentioning a signature, disclaimer, or unsubscribe request"
+    ),
+    "triage.automated_notification": "a human-written note discussing an alert or notification",
+    "rules.recap": (
+        "a person writing about a meeting, including ordinary mail mentioning recap or notes"
+    ),
+    "rules.scoped_event": (
+        "work unrelated to attendance, including meeting notes, minutes, or a recording"
+    ),
+    "rules.event_match": "a different event with overlapping words",
+    "rules.duplicate_action": "different actions on the same topic that share most of their words",
+    "rules.thread_merge": "different matters with deceptively similar subjects",
 }
 
 
@@ -150,9 +187,13 @@ def scrub_row(row: dict[str, Any]) -> list[str]:
 
     violations: list[str] = []
     text = "\n".join(_text_values(row))
-    if any(
-        not address.rstrip(".,;:)").casefold().endswith("@example.invalid")
+    email_domains = {
+        address.rstrip(".,;:)>").rsplit("@", 1)[-1].casefold()
         for address in _EMAIL_RE.findall(text)
+    }
+    if any(
+        domain != "example.invalid" and not domain.endswith(".example.invalid")
+        for domain in email_domains
     ):
         violations.append("non-example.invalid email address")
     if _URL_RE.search(text):
@@ -172,7 +213,21 @@ def scrub_row(row: dict[str, Any]) -> list[str]:
     return violations
 
 
-def _control_plan(set_name: str, index: int) -> dict[str, Any]:
+def _question_assignment(set_name: str, index: int, rows: int) -> tuple[str, int]:
+    """Return a question and its zero-based local row number."""
+
+    question_ids = SETS[set_name]
+    quotient, remainder = divmod(rows, len(question_ids))
+    offset = 0
+    for ordinal, question_id in enumerate(question_ids):
+        count = quotient + (ordinal < remainder)
+        if index < offset + count:
+            return question_id, index - offset
+        offset += count
+    raise IndexError(index)
+
+
+def _control_plan(set_name: str, index: int, rows: int = 600) -> dict[str, Any]:
     question_ids = SETS[set_name]
     if set_name == "closure":
         target = (*question_ids, None)[index % (len(question_ids) + 1)]
@@ -186,22 +241,31 @@ def _control_plan(set_name: str, index: int) -> dict[str, Any]:
             ),
             "focus_question": target or question_ids[index % len(question_ids)],
         }
-    bool_ids = tuple(q for q in question_ids if q != "rules.deadline_kind")
-    labels: dict[str, bool | str] = {
-        question_id: bool((index // 2 >> offset) & 1)
-        for offset, question_id in enumerate(bool_ids)
-    }
-    if set_name == "rules":
-        labels["rules.deadline_kind"] = ("event_tied", "soft", "unknown")[index % 3]
+    question_id, local_index = _question_assignment(set_name, index, rows)
+    value: bool | str
+    if question_id == "rules.deadline_kind":
+        value = ("event_tied", "soft", "unknown")[local_index % 3]
+    else:
+        value = bool(local_index % 2)
     return {
-        "label": labels,
-        "from_user": bool(index % 2),
-        "focus_question": question_ids[index % len(question_ids)],
+        "row_index": index,
+        "label": {question_id: value},
+        # Within each boolean label, this alternates after the label itself,
+        # producing equal from_user rates for positives and negatives.
+        **({"from_user": bool((local_index // 2) % 2)} if set_name == "triage" else {}),
+        "focus_question": question_id,
+        "hard_negative": value is False,
     }
 
 
-def _stub_row(set_name: str, index: int) -> dict[str, Any]:
-    plan = _control_plan(set_name, index)
+def _person_sender(index: int) -> str:
+    person = SYNTHETIC_PEOPLE[index % len(SYNTHETIC_PEOPLE)]
+    mailbox = person.casefold().replace(" ", ".")
+    return f"{person} <{mailbox}@example.invalid>"
+
+
+def _stub_row(set_name: str, index: int, rows: int = 600) -> dict[str, Any]:
+    plan = _control_plan(set_name, index, rows)
     person = SYNTHETIC_PEOPLE[index % len(SYNTHETIC_PEOPLE)]
     company = SYNTHETIC_COMPANIES[(index // len(SYNTHETIC_PEOPLE)) % len(SYNTHETIC_COMPANIES)]
     marker = f"case {index:03d}"
@@ -227,31 +291,80 @@ def _stub_row(set_name: str, index: int) -> dict[str, Any]:
             "label": plan["label"],
         }
     elif set_name == "triage":
-        active = [q.rsplit(".", 1)[1] for q, value in plan["label"].items() if value]
+        question_id, value = next(iter(plan["label"].items()))
         row = {
             "set": set_name, "subject": f"Synthetic coordination {marker}",
             "paragraph_text": (
-                f"{person} writes to {company} about {marker}; signals: {', '.join(active)}."
+                f"{person} writes to {company} about {marker}; "
+                f"the {question_id.rsplit('.', 1)[1]} example is {str(value).lower()}."
             ),
             "from_user": plan["from_user"], "label": plan["label"],
         }
     else:
-        positive = [q.rsplit(".", 1)[1] for q, value in plan["label"].items() if value is True]
-        row = {
-            "set": set_name, "sender": "notices@example.invalid",
-            "subject": f"Synthetic rule case {index:03d}",
-            "first_paragraph": f"Rule fixture {marker} for {company}: {', '.join(positive)}.",
-            "request_text": f"Prepare synthetic item {index:03d} for the review meeting.",
-            "phrase": f"before review event {index:03d}",
-            "event_name": f"review event {index:03d}",
-            "action_a": f"Prepare synthetic item {index:03d}.",
-            "action_b": f"Complete synthetic action {index:03d}.",
-            "subject_a": f"Synthetic topic {index:03d}",
-            "subject_b": f"Synthetic follow-up {index:03d}",
-            "first_paragraph_a": f"A discussion for {marker}.",
-            "first_paragraph_b": f"Another discussion for {marker}.",
-            "label": plan["label"],
-        }
+        question_id, value = next(iter(plan["label"].items()))
+        fields: dict[str, str]
+        if question_id == "rules.recap":
+            fields = {
+                "sender": (
+                    SYNTHETIC_SERVICES[index % len(SYNTHETIC_SERVICES)]
+                    if value else _person_sender(index)
+                ),
+                "subject": (
+                    f"Meeting recap: review {marker}"
+                    if value else f"Notes question for {marker}"
+                ),
+                "first_paragraph": (
+                    f"Summary for {company}: decisions are recorded. "
+                    f"Action items: prepare {marker}."
+                    if value
+                    else f"{person} asks whether the meeting notes include {marker} for {company}."
+                ),
+            }
+        elif question_id == "rules.scoped_event":
+            fields = {"request_text": (
+                f"Please bring the agenda for {marker} to the review meeting."
+                if value else f"Please archive the meeting recording for {marker}."
+            )}
+        elif question_id == "rules.event_match":
+            fields = {
+                "phrase": (
+                    f"the planning offsite for {marker}"
+                    if value else f"the sales review for {marker}"
+                ),
+                "event_name": (
+                    f"q3 planning offsite for {marker}"
+                    if value else f"q3 planning review for {marker}"
+                ),
+            }
+        elif question_id == "rules.duplicate_action":
+            fields = {
+                "action_a": f"Prepare the vendor brief for {marker}.",
+                "action_b": (
+                    f"Draft the briefing document for the vendor matter {marker}."
+                    if value else f"Approve the vendor brief for {marker}."
+                ),
+            }
+        elif question_id == "rules.thread_merge":
+            fields = {
+                "subject_a": f"Vendor review {marker}",
+                "subject_b": (
+                    f"Re: vendor review {marker}"
+                    if value else f"Vendor review invoice {marker}"
+                ),
+                "first_paragraph_a": f"Please review the vendor terms for {marker}.",
+                "first_paragraph_b": (
+                    f"Following up on those vendor terms for {marker}."
+                    if value else f"Please review the vendor invoice for {marker}."
+                ),
+            }
+        else:
+            phrases = {
+                "event_tied": f"before the board meeting for {marker}",
+                "soft": f"whenever you get a chance on {marker}",
+                "unknown": f"after maybe around the {marker} point",
+            }
+            fields = {"phrase": phrases[str(value)]}
+        row = {"set": set_name, **fields, "label": plan["label"]}
     row["source"] = "synthetic-stub"
     row["id"] = _stable_id(set_name, row)
     return row
@@ -268,7 +381,7 @@ def generate_stub(
     root = Path(output)
     paths: list[Path] = []
     for offset, set_name in enumerate(names):
-        generated = [_stub_row(set_name, index) for index in range(rows)]
+        generated = [_stub_row(set_name, index, rows) for index in range(rows)]
         random.Random(seed + offset).shuffle(generated)
         path = root / f"{set_name}.jsonl"
         write_jsonl(path, generated)
@@ -276,33 +389,88 @@ def generate_stub(
     return paths
 
 
-def _prompt(set_name: str, plans: list[dict[str, Any]]) -> str:
-    fields = {
-        "closure": "obligation {title,evidence_text}; later {paragraph_text,from_user,days_later}",
-        "triage": "subject; paragraph_text; from_user",
-        "rules": (
-            "sender; subject; first_paragraph; request_text; phrase; event_name; action_a; "
-            "action_b; subject_a; subject_b; first_paragraph_a; first_paragraph_b"
+def _prompt(
+    set_name: str, plans: list[dict[str, Any]], question_id: str | None = None
+) -> str:
+    if set_name == "closure":
+        return (
+            "Create realistic but fully invented evaluation rows. Return strict JSON as an object "
+            "with one member named rows whose value is an array in exactly the requested order. "
+            "Each row has these fields: obligation {title,evidence_text}; later "
+            "{paragraph_text,from_user,days_later}; label. Copy every supplied label and assigned "
+            "from_user/days_later value exactly. Write each text as one coherent situation. "
+            "Closure rows may express exactly the one true closure label, or none; they must not "
+            "imply another closure outcome. When hard_negative is set, implement that negative "
+            "pattern. Use only these invented people and organizations: "
+            f"{', '.join((*SYNTHETIC_PEOPLE, *SYNTHETIC_COMPANIES))}. Never name any other person, "
+            "company, product, place or document title; write project, document and product names "
+            "in lowercase. Any email must end in example.invalid. Do not emit URLs. Plans:\n"
+            + json.dumps(plans, ensure_ascii=False, sort_keys=True)
+        )
+    if question_id is None:
+        question_id = str(plans[0]["focus_question"])
+    output_fields = [*_QUESTION_FIELDS[question_id], "label"]
+    if set_name == "triage":
+        output_fields.insert(-1, "from_user")
+    fields = "; ".join(output_fields)
+    definition = SPECS[question_id].intent
+    true_pattern = {
+        "rules.recap": (
+            "Use a sender exactly from the synthetic service list, a subject such as "
+            "'Meeting recap: ...', 'Your call summary', or 'Transcript: ...', and a first "
+            "paragraph structured as a summary with decisions or action items."
         ),
-    }[set_name]
+        "rules.scoped_event": (
+            "Make the request about attending, preparing for, or bringing something to an event."
+        ),
+        "rules.event_match": (
+            "Make the phrase identify the named event by paraphrase, abbreviation, or shorthand."
+        ),
+        "rules.duplicate_action": (
+            "Express the same action in substantially different wording; never copy either "
+            "sentence."
+        ),
+        "rules.thread_merge": (
+            "Show one thread despite a reply prefix, typo, or reasonable retitle."
+        ),
+    }.get(question_id, f"Make the text clearly satisfy this definition: {definition}")
+    if question_id == "rules.deadline_kind":
+        label_guidance = (
+            "The label is a choice: event_tied uses an event-relative deadline such as 'before "
+            "the board meeting'; soft uses flexible timing such as 'whenever you get a chance'; "
+            "unknown is garbled or ambiguous. Every phrase must be a deadline expression that a "
+            "simple deadline parser cannot parse."
+        )
+    else:
+        label_guidance = (
+            f"For label true: {true_pattern} For label false: make it genuinely false. "
+            f"False hard negatives must use this pattern: {_HARD_NEGATIVE_GUIDANCE[question_id]}."
+        )
+    people_and_companies = ", ".join((*SYNTHETIC_PEOPLE, *SYNTHETIC_COMPANIES))
+    service_guidance = (
+        f" Synthetic service senders (only for true recap rows): {', '.join(SYNTHETIC_SERVICES)}."
+        if question_id == "rules.recap" else ""
+    )
     return (
         "Create realistic but fully invented evaluation rows. Return strict JSON as an object "
         "with one member named rows whose value is an array in exactly the requested order. "
-        f"Each row has these fields: {fields}; label. Copy every supplied label and assigned "
-        "from_user/days_later value exactly. Write each text as one coherent situation, never by "
-        "concatenating independent label sentences. Closure rows may express exactly the one true "
-        "closure label, or none; they must not imply another closure outcome. When "
-        "hard_negative is "
-        "set, implement that negative pattern. Use only these invented people and organizations: "
-        f"{', '.join((*SYNTHETIC_PEOPLE, *SYNTHETIC_COMPANIES))}. Never name any other person, "
+        f"This batch is only for question {question_id}. Definition: {definition} "
+        f"Write exactly these fields and no others: {fields}. Copy the supplied label and any "
+        "from_user value exactly; validation stamps them from the plan. "
+        + label_guidance + service_guidance + " "
+        "Write each row as one coherent situation. Use only these invented people and "
+        "organizations: "
+        f"{people_and_companies}. Never name any other person, "
         "company, product, place or document title; write project, document and product names "
-        "in lowercase (for example: the licensing brief, the vendor contract). Any email must end "
-        "in example.invalid. Do not emit URLs. Vary language, artifacts, relationships, and "
-        "contexts. Plans:\n" + json.dumps(plans, ensure_ascii=False, sort_keys=True)
+        "in lowercase (for example: the licensing brief, the vendor contract). Human senders must "
+        "include a pool person's full name and may use only an example.invalid address. Do not "
+        "emit "
+        "URLs. Vary language, artifacts, relationships, and contexts. Plans:\n"
+        + json.dumps(plans, ensure_ascii=False, sort_keys=True)
     )
 
 
-def _response_format(set_name: str) -> dict[str, Any]:
+def _response_format(set_name: str, question_id: str | None = None) -> dict[str, Any]:
     label_properties = {
         question_id: (
             {"type": "string", "enum": ["event_tied", "soft", "unknown"]}
@@ -333,12 +501,21 @@ def _response_format(set_name: str) -> dict[str, Any]:
             },
             "label": label,
         }
+    elif question_id is None:
+        raise ValueError("question_id is required for per-question synthetic rows")
     else:
         properties = {
-            field: ({"type": "boolean"} if field == "from_user" else {"type": "string"})
-            for field in _ROW_FIELDS[set_name] - {"label"}
+            field: {"type": "string"}
+            for field in _QUESTION_FIELDS[question_id]
         }
-        properties["label"] = label
+        if set_name == "triage":
+            properties["from_user"] = {"type": "boolean"}
+        properties["label"] = {
+            "type": "object",
+            "properties": {question_id: label_properties[question_id]},
+            "required": [question_id],
+            "additionalProperties": False,
+        }
     row_schema = {
         "type": "object", "properties": properties,
         "required": list(properties), "additionalProperties": False,
@@ -346,7 +523,8 @@ def _response_format(set_name: str) -> dict[str, Any]:
     return {
         "type": "json_schema",
         "json_schema": {
-            "name": f"synthetic_{set_name}_rows", "strict": True,
+            "name": f"synthetic_{set_name}_{(question_id or 'all').replace('.', '_')}_rows",
+            "strict": True,
             "schema": {
                 "type": "object", "properties": {
                     "rows": {"type": "array", "items": row_schema}
@@ -358,14 +536,16 @@ def _response_format(set_name: str) -> dict[str, Any]:
 
 
 def _chat_rows(
-    client: httpx.Client, model: str, api_key: str, set_name: str, plans: list[dict[str, Any]]
+    client: httpx.Client, model: str, api_key: str, set_name: str, plans: list[dict[str, Any]],
+    question_id: str | None = None,
 ) -> list[dict[str, Any]]:
     response = client.post(
         "https://openrouter.ai/api/v1/chat/completions",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json={"model": model,
-              "messages": [{"role": "user", "content": _prompt(set_name, plans)}],
-              "response_format": _response_format(set_name), "provider": {"zdr": True},
+              "messages": [{"role": "user", "content": _prompt(set_name, plans, question_id)}],
+              "response_format": _response_format(set_name, question_id),
+              "provider": {"zdr": True},
               "temperature": 0.9,
               # Twelve rows of JSON run to several thousand tokens; a default
               # output cap truncates the reply mid-string.
@@ -389,6 +569,23 @@ def _nonempty_strings(mapping: Any, keys: tuple[str, ...]) -> bool:
     return isinstance(mapping, dict) and all(
         isinstance(mapping.get(key), str) and mapping[key].strip() for key in keys
     )
+
+
+def _action_tokens(value: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", value.casefold()))
+
+
+def _duplicate_action_too_similar(action_a: str, action_b: str) -> bool:
+    if _normalize(action_a) == _normalize(action_b):
+        return True
+    left, right = _action_tokens(action_a), _action_tokens(action_b)
+    union = left | right
+    return bool(union) and len(left & right) / len(union) >= 0.9
+
+
+def _is_pool_person_sender(sender: str) -> bool:
+    normalized = sender.casefold()
+    return any(person.casefold() in normalized for person in SYNTHETIC_PEOPLE)
 
 
 def _validate_generated_row(
@@ -420,7 +617,11 @@ def _validate_generated_row(
             },
         }
     elif set_name == "triage":
-        if not _nonempty_strings(row, ("subject", "paragraph_text")):
+        question_id = str(plan["focus_question"])
+        fields = _QUESTION_FIELDS[question_id]
+        if set(row) != {*fields, "from_user", "label"} or not _nonempty_strings(
+            row, fields
+        ):
             return None, "triage texts missing"
         built = {
             "subject": row["subject"],
@@ -428,10 +629,26 @@ def _validate_generated_row(
             "from_user": plan["from_user"],
         }
     else:
-        text_keys = tuple(sorted(_ROW_FIELDS["rules"] - {"label"}))
-        if not _nonempty_strings(row, text_keys):
+        question_id = str(plan["focus_question"])
+        text_keys = _QUESTION_FIELDS[question_id]
+        if set(row) != {*text_keys, "label"} or not _nonempty_strings(row, text_keys):
             return None, "rules texts missing"
         built = {key: row[key] for key in text_keys}
+        value = plan["label"][question_id]
+        if (
+            question_id == "rules.duplicate_action"
+            and value is True
+            and _duplicate_action_too_similar(built["action_a"], built["action_b"])
+        ):
+            return None, "duplicate actions use identical or near-identical text"
+        if question_id == "rules.recap":
+            sender = built["sender"]
+            if value is True and sender.casefold() not in {
+                service.casefold() for service in SYNTHETIC_SERVICES
+            }:
+                return None, "positive recap sender is not a synthetic service"
+            if value is False and not _is_pool_person_sender(sender):
+                return None, "negative recap sender is not a pool person"
     built["label"] = dict(plan["label"])
     built["set"] = set_name
     built["source"] = "synthetic-llm"
@@ -479,17 +696,34 @@ def generate_llm(
             accepted: dict[int, dict[str, Any]] = {}
             seen_ids: set[str] = set()
             seen_texts: set[str] = set()
-            pending = [(index, _control_plan(set_name, index)) for index in range(rows)]
+            pending = [(index, _control_plan(set_name, index, rows)) for index in range(rows)]
             for index, plan in pending:
                 seeds = scenario_seeds(plan["focus_question"])
-                plan["scenario"] = seeds[(index // len(SETS[set_name])) % len(seeds)]
+                plan["scenario" if set_name == "closure" else "scenario_seed"] = seeds[
+                    index % len(seeds)
+                ]
             attempts = 0
             rejections: dict[str, int] = {}
             while len(accepted) < rows and attempts < rows * 8:
-                round_items = pending[: 12 * parallel]
-                batches = [round_items[i : i + 12] for i in range(0, len(round_items), 12)]
+                batches: list[list[tuple[int, dict[str, Any]]]] = []
+                round_items: list[tuple[int, dict[str, Any]]] = []
+                while pending and len(batches) < parallel:
+                    focus = pending[0][1]["focus_question"]
+                    take = 0
+                    while (
+                        take < min(12, len(pending))
+                        and (set_name == "closure" or pending[take][1]["focus_question"] == focus)
+                    ):
+                        take += 1
+                    batch, pending = pending[:take], pending[take:]
+                    batches.append(batch)
+                    round_items.extend(batch)
+
                 def request_batch(batch: list[tuple[int, dict[str, Any]]], name: str = set_name):
-                    return _chat_rows(http, model, api_key, name, [plan for _i, plan in batch])
+                    question_id = None if name == "closure" else batch[0][1]["focus_question"]
+                    return _chat_rows(
+                        http, model, api_key, name, [plan for _i, plan in batch], question_id
+                    )
 
                 with ThreadPoolExecutor(max_workers=parallel) as pool:
                     results = list(pool.map(request_batch, batches))
@@ -513,7 +747,7 @@ def generate_llm(
                         seen_texts.add(normalized_text)
                         completed.add(index)
                 failed = [item for item in round_items if item[0] not in completed]
-                pending = pending[len(round_items):] + failed
+                pending.extend(failed)
                 attempts += len(round_items)
             if len(accepted) < rows:
                 summary = ", ".join(
@@ -558,8 +792,8 @@ def _paragraph_text(row: DatasetRow) -> str:
         return str(row.later["paragraph_text"])
     if row.set == "triage":
         return str(row.paragraph_text)
-    values = row.model_dump(exclude={"id", "set", "label", "source"})
-    return " ".join(_text_values(values))
+    question_id = next(iter(row.label))
+    return str(getattr(row, _MAIN_TEXT_FIELD[question_id]))
 
 
 def check_corpus(
@@ -578,14 +812,30 @@ def check_corpus(
     errors: list[str] = []
     if len(rows) < thresholds.min_rows:
         errors.append(f"rows {len(rows)} < {thresholds.min_rows}")
+    if set_name != "closure":
+        if any(len(row.label) != 1 for row in rows):
+            errors.append("non-closure rows must carry exactly one question label")
+        malformed = 0
+        for row in rows:
+            if len(row.label) != 1:
+                continue
+            question_id = next(iter(row.label))
+            if question_id not in _QUESTION_FIELDS:
+                malformed += 1
+                continue
+            expected = {"id", "set", "label", "source", *_QUESTION_FIELDS[question_id]}
+            if set_name == "triage":
+                expected.add("from_user")
+            if set(row.model_dump()) != expected:
+                malformed += 1
+        if malformed:
+            errors.append(f"{malformed} rows do not match their question field set")
     if any(row.id != _stable_id(row.set, row.model_dump()) for row in rows):
         errors.append("one or more row ids are not stable text hashes")
     scrubbed = sum(bool(scrub_row(row.model_dump())) for row in rows)
     if scrubbed:
         errors.append(f"privacy scrub rejected {scrubbed} rows")
     paragraphs = {_normalize(_paragraph_text(row)) for row in rows}
-    if len(paragraphs) != len(rows):
-        errors.append("normalized paragraph text is not unique")
     if len(paragraphs) < thresholds.min_paragraphs:
         errors.append(f"distinct paragraph texts {len(paragraphs)} < {thresholds.min_paragraphs}")
     obligations: set[str] = set()
@@ -599,12 +849,34 @@ def check_corpus(
             errors.append("a closure row is positive for more than one closure question")
     question_stats: dict[str, Any] = {}
     for question_id in SETS[set_name]:
-        values = [row.label[question_id] for row in rows]
+        question_rows = [row for row in rows if question_id in row.label]
+        minimum_question_rows = min(
+            80, thresholds.min_rows // len(SETS[set_name])
+        )
+        if len(question_rows) < minimum_question_rows:
+            errors.append(
+                f"{question_id} rows {len(question_rows)} < {minimum_question_rows}"
+            )
+        values = [row.label[question_id] for row in question_rows]
         if not all(isinstance(value, bool) for value in values):
+            counts = {
+                option: values.count(option)
+                for option in ("event_tied", "soft", "unknown")
+            }
+            if set(values) != set(counts) or max(counts.values()) - min(counts.values()) > 1:
+                errors.append(f"{question_id} choice labels are not evenly balanced")
+            question_stats[question_id] = {
+                "rows": len(question_rows),
+                "label_counts": counts,
+            }
             continue
-        positives = [row for row, value in zip(rows, values, strict=True) if value]
-        negatives = [row for row, value in zip(rows, values, strict=True) if not value]
-        rate = len(positives) / len(rows)
+        positives = [
+            row for row, value in zip(question_rows, values, strict=True) if value
+        ]
+        negatives = [
+            row for row, value in zip(question_rows, values, strict=True) if not value
+        ]
+        rate = len(positives) / len(question_rows) if question_rows else 0.0
         low, high = (
             (thresholds.closure_positive_rate_min, thresholds.closure_positive_rate_max)
             if set_name == "closure"
@@ -612,7 +884,7 @@ def check_corpus(
         )
         if not low <= rate <= high:
             errors.append(f"{question_id} positive rate {rate:.3f} outside [{low}, {high}]")
-        stats: dict[str, Any] = {"positive_rate": rate}
+        stats: dict[str, Any] = {"rows": len(question_rows), "positive_rate": rate}
         if positives and negatives and set_name == "triage":
             pos_rate = sum(bool(row.from_user) for row in positives) / len(positives)
             neg_rate = sum(bool(row.from_user) for row in negatives) / len(negatives)
@@ -634,6 +906,11 @@ def check_corpus(
                 f"{question_id} from_user gap {stats['from_user_gap']:.3f} > "
                 f"{thresholds.max_from_user_gap}"
             )
+        if question_id == "rules.duplicate_action" and any(
+            _normalize(str(row.action_a)) == _normalize(str(row.action_b))
+            for row in positives
+        ):
+            errors.append("rules.duplicate_action has an identical true action pair")
         question_stats[question_id] = stats
     report = {
         "set": set_name, "rows": len(rows), "distinct_paragraph_texts": len(paragraphs),

@@ -25,6 +25,15 @@ def test_split_is_deterministic_and_complete():
     assert sum(map(len, first.values())) == 1000
 
 
+def test_split_filters_rows_for_one_question():
+    rows = [
+        DatasetRow(id="one", set="triage", label={"q.one": True}, source="synthetic"),
+        DatasetRow(id="two", set="triage", label={"q.two": False}, source="synthetic"),
+    ]
+    parts = split_rows(rows, question_id="q.one")
+    assert [row.id for values in parts.values() for row in values] == ["one"]
+
+
 def test_metrics_on_toy_set():
     labels = [True, True, False, False]
     probabilities = [0.9, 0.8, 0.2, 0.1]
@@ -86,3 +95,25 @@ def test_evaluate_reports_confusion_at_registry_thresholds():
         "accept": {"threshold": 0.7, "tp": 1, "fp": 0, "tn": 2, "fn": 1},
         "escalate": {"threshold": 0.3, "tp": 2, "fp": 1, "tn": 1, "fn": 0},
     }
+
+
+def test_evaluate_skips_rows_without_the_question_label():
+    rows = [
+        DatasetRow(
+            id="other", set="triage", subject="Other", paragraph_text="Other text.",
+            from_user=False, label={"triage.names_time": True}, source="synthetic-stub",
+        ),
+        DatasetRow(
+            id="target", set="triage", subject="Target", paragraph_text="Target text.",
+            from_user=True, label={"triage.asks_recipient": True}, source="synthetic-stub",
+        ),
+    ]
+    calls = []
+
+    def program(**inputs):
+        calls.append(inputs)
+        return SimpleNamespace(probability=0.9)
+
+    result = evaluate_question(program, "triage.asks_recipient", rows)
+    assert result["accuracy"] == 1.0
+    assert len(calls) == 1

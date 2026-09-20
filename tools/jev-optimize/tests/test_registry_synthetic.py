@@ -7,6 +7,7 @@ from jev_optimize.data import load_jsonl
 from jev_optimize.questions import SETS
 from jev_optimize.registry import merge_registry
 from jev_optimize.synthetic import (
+    SYNTHETIC_SERVICES,
     CorpusThresholds,
     _chat_rows,
     check_corpus,
@@ -24,23 +25,23 @@ def relaxed_thresholds():
 def test_synthetic_generation_is_deterministic_and_sane(tmp_path, relaxed_thresholds):
     one = tmp_path / "one"
     two = tmp_path / "two"
-    # 128 rows: the stub plan encodes the boolean labels in the bits of
-    # index // 2, and the triage set has six of them.
-    generate_stub(one, seed=42, rows=128)
-    generate_stub(two, seed=42, rows=128)
+    generate_stub(one, seed=42, rows=120)
+    generate_stub(two, seed=42, rows=120)
     for set_name, question_ids in SETS.items():
         assert (one / f"{set_name}.jsonl").read_bytes() == (
             two / f"{set_name}.jsonl"
         ).read_bytes()
         rows = load_jsonl(one / f"{set_name}.jsonl")
-        assert len(rows) == 128
-        assert all(
-            row.source == "synthetic-stub" and set(row.label) == set(question_ids)
-            for row in rows
-        )
+        assert len(rows) == 120
+        assert all(row.source == "synthetic-stub" for row in rows)
+        if set_name == "closure":
+            assert all(set(row.label) == set(question_ids) for row in rows)
+        else:
+            assert all(len(row.label) == 1 for row in rows)
         positive_sets = []
         for question_id in question_ids:
-            values = [row.label[question_id] for row in rows]
+            question_rows = [row for row in rows if question_id in row.label]
+            values = [row.label[question_id] for row in question_rows]
             if all(isinstance(value, bool) for value in values):
                 rate = sum(values) / len(values)
                 if set_name == "closure":
@@ -48,9 +49,14 @@ def test_synthetic_generation_is_deterministic_and_sane(tmp_path, relaxed_thresh
                 else:
                     assert 0.4 <= rate <= 0.6
                 positive_sets.append(
-                    {row.id for row, value in zip(rows, values, strict=True) if value}
+                    {
+                        row.id
+                        for row, value in zip(question_rows, values, strict=True)
+                        if value
+                    }
                 )
-        assert len({frozenset(values) for values in positive_sets}) == len(positive_sets)
+        if set_name == "closure":
+            assert len({frozenset(values) for values in positive_sets}) == len(positive_sets)
         report = check_corpus(one / f"{set_name}.jsonl", relaxed_thresholds)
         assert report["errors"] == []
 
@@ -70,6 +76,7 @@ def test_scrub_rejects_external_addresses_urls_and_unknown_names():
         "capitalized name outside the synthetic pool"
     ]
     assert scrub_row({"text": "Priya Venkataraman used priya@example.invalid."}) == []
+    assert scrub_row({"text": f"Sent by {SYNTHETIC_SERVICES[0]}."}) == []
 
 
 def test_llm_request_uses_zdr_and_strict_json_without_live_network():
@@ -84,11 +91,22 @@ def test_llm_request_uses_zdr_and_strict_json_without_live_network():
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         assert _chat_rows(
-            client, "synthetic/model", "synthetic-test-placeholder", "triage", []
+            client,
+            "synthetic/model",
+            "synthetic-test-placeholder",
+            "triage",
+            [],
+            "triage.asks_recipient",
         ) == []
     assert seen["provider"] == {"zdr": True}
     assert seen["response_format"]["type"] == "json_schema"
     assert seen["response_format"]["json_schema"]["strict"] is True
+    row_schema = seen["response_format"]["json_schema"]["schema"]["properties"][
+        "rows"
+    ]["items"]
+    assert set(row_schema["properties"]) == {
+        "subject", "paragraph_text", "from_user", "label",
+    }
 
 
 def test_registry_merge_writes_loader_compatible_shape(tmp_path):

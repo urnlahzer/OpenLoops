@@ -37,6 +37,8 @@ def metric_for(question_id: str, *, feedback_includes_text: bool = False):
     ) -> dspy.Prediction:
         # GEPA calls the metric with five positional arguments.
         del trace, pred_name, pred_trace
+        if question_id not in example.label:
+            raise ValueError(f"example does not carry label for {question_id}")
         label = example.label[question_id]
         if isinstance(label, bool):
             probability = float(prediction.probability)
@@ -53,9 +55,11 @@ def metric_for(question_id: str, *, feedback_includes_text: bool = False):
     return metric
 
 
-def _examples(rows: list[DatasetRow]) -> list[dspy.Example]:
+def _examples(rows: list[DatasetRow], question_id: str) -> list[dspy.Example]:
     examples = []
     for row in rows:
+        if question_id not in row.label:
+            continue
         values = _inputs(row) | {"label": row.label, "source": row.source}
         examples.append(dspy.Example(**values).with_inputs(*_inputs(row)))
     return examples
@@ -72,6 +76,8 @@ def evaluate_question(
     probabilities: list[float] = []
     multiclass_brier: list[float] = []
     for row in rows:
+        if question_id not in row.label:
+            continue
         prediction = program(**_inputs(row))
         label = row.label[question_id]
         if isinstance(label, bool):
@@ -197,7 +203,6 @@ def optimize_set(
     feedback_includes_text: bool = False,
 ) -> dict[str, Any]:
     rows = load_jsonl(data_path)
-    parts = split_rows(rows)
     reflection_model = os.environ.get("OPENROUTER_REFLECTION_MODEL")
     if not reflection_model:
         raise RuntimeError("OPENROUTER_REFLECTION_MODEL is not set")
@@ -209,12 +214,16 @@ def optimize_set(
     adapter = JevPrograms(client)
     output: dict[str, Any] = {
         "model": getattr(client, "model", "typesafe/jev-1.13"),
-        "dataset_sizes": {name: len(values) for name, values in parts.items()},
+        "dataset_sizes": {},
         "questions": {},
         "test_metrics": {},
         "proposer_rejection_count": 0,
     }
     for question_id in SETS[set_name]:
+        parts = split_rows(rows, question_id=question_id)
+        output["dataset_sizes"][question_id] = {
+            name: len(values) for name, values in parts.items()
+        }
         program = adapter.program(question_id)
         baseline_validation = evaluate_question(program, question_id, parts["validation"])
         baseline_test = evaluate_question(program, question_id, parts["test"])
@@ -240,8 +249,8 @@ def optimize_set(
         )
         optimized = optimizer.compile(
             program,
-            trainset=_examples(parts["train"]),
-            valset=_examples(parts["validation"]),
+            trainset=_examples(parts["train"], question_id),
+            valset=_examples(parts["validation"], question_id),
         )
         tuned_test = evaluate_question(optimized, question_id, parts["test"])
         tuned_validation = evaluate_question(optimized, question_id, parts["validation"])

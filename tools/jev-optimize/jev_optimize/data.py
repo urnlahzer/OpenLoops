@@ -61,10 +61,12 @@ def split_name(row_id: str, seed: int = 0) -> str:
 
 
 def split_rows(
-    rows: Iterable[DatasetRow], seed: int = 0
+    rows: Iterable[DatasetRow], seed: int = 0, question_id: str | None = None
 ) -> dict[str, list[DatasetRow]]:
     result: dict[str, list[DatasetRow]] = {"train": [], "validation": [], "test": []}
     for row in rows:
+        if question_id is not None and question_id not in row.label:
+            continue
         result[split_name(row.id, seed)].append(row)
     return result
 
