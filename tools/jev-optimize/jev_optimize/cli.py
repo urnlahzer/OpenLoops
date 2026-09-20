@@ -37,6 +37,9 @@ def _parser() -> argparse.ArgumentParser:
     generate.add_argument("--rows", type=int)
     generate.add_argument("--output", type=Path, default=DEFAULT_ROOT)
     generate.add_argument("--seed", type=int, default=20260919)
+    generate.add_argument(
+        "--parallel", type=int, default=8, help="concurrent model calls for --llm"
+    )
     check = commands.add_parser("check-corpus")
     check.add_argument("file", type=Path)
     commands.add_parser("fetch-enron")
@@ -63,10 +66,17 @@ def main() -> None:
     args = _parser().parse_args()
     if args.command == "generate-synthetic":
         rows = args.rows or (60 if args.stub else 600)
-        generator = generate_stub if args.stub else generate_llm
-        for path in generator(
-            args.output, selected_set=args.set, rows=rows, seed=args.seed
-        ):
+        if args.stub:
+            paths = generate_stub(args.output, selected_set=args.set, rows=rows, seed=args.seed)
+        else:
+            paths = generate_llm(
+                args.output,
+                selected_set=args.set,
+                rows=rows,
+                seed=args.seed,
+                parallel=args.parallel,
+            )
+        for path in paths:
             print(path)
     elif args.command == "check-corpus":
         try:

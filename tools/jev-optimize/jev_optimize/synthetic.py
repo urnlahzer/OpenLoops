@@ -7,6 +7,7 @@ import json
 import os
 import random
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -385,12 +386,18 @@ def _validate_generated_row(
 
 def generate_llm(
     output: str | Path = DEFAULT_ROOT, *, selected_set: str = "all", rows: int = 600,
-    seed: int = 20260919, client: httpx.Client | None = None,
+    seed: int = 20260919, client: httpx.Client | None = None, parallel: int = 8,
 ) -> list[Path]:
-    """Generate corpora through OpenRouter; callers own the live-network decision."""
+    """Generate corpora through OpenRouter; callers own the live-network decision.
+
+    Batches of 12 plans go to the model ``parallel`` at a time (the calls are
+    independent); acceptance and de-duplication stay serial so the result
+    does not depend on completion order.
+    """
 
     if rows < 600:
         raise ValueError("LLM generation requires at least 600 rows per set")
+    parallel = max(1, parallel)
     api_key = os.environ.get("OPENROUTER_API_KEY")
     model = os.environ.get("OPENROUTER_SYNTH_MODEL")
     if not api_key or not model:
@@ -411,27 +418,36 @@ def generate_llm(
                 plan["scenario"] = seeds[(index // len(SETS[set_name])) % len(seeds)]
             attempts = 0
             while len(accepted) < rows and attempts < rows * 5:
-                batch = pending[:12]
-                plans = [plan for _index, plan in batch]
-                candidates = _chat_rows(http, model, api_key, set_name, plans)
-                completed: set[int] = set()
-                for candidate, (index, plan) in zip(candidates, batch, strict=False):
-                    validated = _validate_generated_row(set_name, candidate, plan)
-                    normalized_text = (
-                        _dedupe_text(set_name, validated) if validated is not None else ""
+                round_items = pending[: 12 * parallel]
+                batches = [round_items[i : i + 12] for i in range(0, len(round_items), 12)]
+                with ThreadPoolExecutor(max_workers=parallel) as pool:
+                    results = list(
+                        pool.map(
+                            lambda batch: _chat_rows(
+                                http, model, api_key, set_name, [plan for _i, plan in batch]
+                            ),
+                            batches,
+                        )
                     )
-                    if (
-                        validated is not None
-                        and validated["id"] not in seen_ids
-                        and normalized_text not in seen_texts
-                    ):
-                        accepted[index] = validated
-                        seen_ids.add(validated["id"])
-                        seen_texts.add(normalized_text)
-                        completed.add(index)
-                failed = [item for item in batch if item[0] not in completed]
-                pending = pending[len(batch):] + failed
-                attempts += len(batch)
+                completed: set[int] = set()
+                for batch, candidates in zip(batches, results, strict=True):
+                    for candidate, (index, plan) in zip(candidates, batch, strict=False):
+                        validated = _validate_generated_row(set_name, candidate, plan)
+                        normalized_text = (
+                            _dedupe_text(set_name, validated) if validated is not None else ""
+                        )
+                        if (
+                            validated is not None
+                            and validated["id"] not in seen_ids
+                            and normalized_text not in seen_texts
+                        ):
+                            accepted[index] = validated
+                            seen_ids.add(validated["id"])
+                            seen_texts.add(normalized_text)
+                            completed.add(index)
+                failed = [item for item in round_items if item[0] not in completed]
+                pending = pending[len(round_items):] + failed
+                attempts += len(round_items)
             if len(accepted) < rows:
                 raise RuntimeError(
                     "synthetic generation produced only "
