@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from jev_optimize.data import DatasetRow, split_name, split_rows
 from jev_optimize.metrics import (
     accuracy,
@@ -6,6 +8,7 @@ from jev_optimize.metrics import (
     expected_calibration_error,
     threshold_sweep,
 )
+from jev_optimize.optimize import evaluate_question
 
 
 def test_split_is_deterministic_and_complete():
@@ -53,3 +56,33 @@ def test_threshold_chooser_enforces_positive_recall_floor():
     assert result["accept"] == 0.7
     assert result["escalate"] == 0.4
     assert result["insufficient_data"] is False
+
+
+def test_evaluate_reports_confusion_at_registry_thresholds():
+    probabilities = iter((0.9, 0.6, 0.4, 0.1))
+
+    def program(**_inputs):
+        return SimpleNamespace(probability=next(probabilities))
+
+    rows = [
+        DatasetRow(
+            id=f"row-{index}",
+            set="triage",
+            subject="Synthetic subject",
+            paragraph_text=f"Synthetic paragraph {index}.",
+            from_user=bool(index % 2),
+            label={"triage.asks_recipient": label},
+            source="synthetic-stub",
+        )
+        for index, label in enumerate((True, True, False, False))
+    ]
+    result = evaluate_question(
+        program,
+        "triage.asks_recipient",
+        rows,
+        registry_thresholds={"accept": 0.7, "escalate": 0.3},
+    )
+    assert result["confusion"] == {
+        "accept": {"threshold": 0.7, "tp": 1, "fp": 0, "tn": 2, "fn": 1},
+        "escalate": {"threshold": 0.3, "tp": 2, "fp": 1, "tn": 1, "fn": 0},
+    }

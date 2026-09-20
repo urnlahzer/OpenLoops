@@ -13,20 +13,24 @@ Install Python 3.11 or newer and uv, then run:
 ```powershell
 cd tools/jev-optimize
 uv sync --locked
-uv run jev-optimize generate-synthetic
 uv run pytest -q
 uv run ruff check .
 ```
 
 The live commands read `OPENROUTER_API_KEY` only at request time; the harness
 does not print, log, or store it. `OPENROUTER_REFLECTION_MODEL` selects the chat
-model used by GEPA for prompt reflection. The Decisions endpoint receives
+model used by GEPA for prompt reflection, and `OPENROUTER_SYNTH_MODEL` selects
+the model that authors synthetic rows. The Decisions endpoint receives
 `provider: {"zdr": true}` unless a content-free probe shows that the alpha
 endpoint rejects that member. The reflection endpoint always requests ZDR.
 
 ## Commands
 
 ```powershell
+$env:OPENROUTER_API_KEY = "<injected-secret>"
+$env:OPENROUTER_SYNTH_MODEL = "<openrouter-model-id>"
+uv run jev-optimize generate-synthetic --llm --set closure --rows 600
+uv run jev-optimize check-corpus data/synthetic/closure.jsonl
 uv run jev-optimize probe
 uv run jev-optimize fetch-enron
 uv run jev-optimize evaluate --set closure --data data/synthetic/closure.jsonl --replay runs/closure.json
@@ -34,21 +38,47 @@ uv run jev-optimize optimize --set closure --budget light
 uv run jev-optimize write-registry runs/closure-result.json
 ```
 
+Use `--set triage`, `--set rules`, or `--set all` for the other corpora. The
+stdlib-only `generate-synthetic --stub` mode writes tiny deterministic fixtures
+for tests; tests always direct those files to a temporary directory. It is not a
+replacement for the committed LLM-authored corpus.
+
 Run `optimize` separately for `closure`, `triage`, and `rules`; pass all result
 files to `write-registry` to merge them in one reviewed edit. Replay files are
 stable-hash keyed and allow evaluation without a network call.
 
-The committed synthetic corpus contains at least 600 rows per set. Every binary
-question is construction-balanced to a 40–60% positive rate, uses distinct
-positive row selections, and includes at least twelve positive phrasings. The
-threshold tuner requires at least 20 positives and 20 negatives in its sweep;
+The committed synthetic corpus must contain at least 600 rows per set and pass
+`check-corpus` before a PR. Every non-closure binary question is construction-
+balanced to a 40–60% positive rate. Closure rows are mutually exclusive (or
+all-negative), so each of its four questions is 15–30% positive; requiring all
+four exclusive labels to be 40–60% positive would be mathematically impossible.
+For every applicable binary label, `from_user` differs by at most 0.1 between
+positive and negative rows and the `days_later` means differ by at most 2 days.
+Each corpus has at least 300 distinct paragraph texts, and closure has at least
+40 distinct obligation texts. The threshold tuner requires at least 20 positives
+and 20 negatives in its sweep;
 smaller samples retain the registry defaults.
 
-GEPA uses a Jev-specific proposer. Proposed instructions are one or two literal,
+LLM generation uses a fixed matrix of at least 30 scenario seeds per question,
+assigns labels and nuisance fields before each request, requests
+`provider.zdr=true`, deduplicates normalized text, and gives rows stable text
+hash IDs. The post-generation scrub rejects URLs, addresses outside
+`example.invalid`, and capitalized names outside the documented invented pool.
+Rejected or duplicate rows are regenerated. Generation and tests never make a
+live request unless the owner explicitly chooses `--llm`.
+
+GEPA uses a Jev-specific proposer. Every question supplies a fixed semantic
+intent plus allowed and primary fields. Proposed instructions are one or two
+literal,
 present-tense declarative sentences of at most 45 words, may name state fields,
 and contain no role framing, output directions, examples, lists, stacked
-negation, or proper nouns copied from examples. Invalid proposals are retried
+negation, or proper nouns copied from examples. They must mention a primary
+field, may mention no field outside the allowed list, and must preserve the
+intent while changing only wording or precision. Invalid proposals are retried
 once and then discarded in favor of the current statement.
+
+`evaluate` includes TP/FP/TN/FN counts at both the checked-in accept and
+escalate thresholds for each question.
 
 Optimization results retain baseline and tuned validation/test measurements.
 `write-registry` prints a per-question comparison and refuses results marked

@@ -12,8 +12,8 @@ from .client import DecisionsClient, ReplayClient
 from .data import fetch_enron, load_jsonl, split_rows
 from .optimize import evaluate_question, optimize_set
 from .questions import SETS
-from .registry import merge_registry
-from .synthetic import generate_synthetic
+from .registry import DEFAULT_REGISTRY, merge_registry
+from .synthetic import DEFAULT_ROOT, check_corpus, generate_llm, generate_stub
 
 ROOT = Path(__file__).parents[1]
 
@@ -30,8 +30,15 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="jev-optimize")
     commands = parser.add_subparsers(dest="command", required=True)
     generate = commands.add_parser("generate-synthetic")
+    mode = generate.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--llm", action="store_true")
+    mode.add_argument("--stub", action="store_true")
+    generate.add_argument("--set", choices=(*SETS, "all"), default="all")
+    generate.add_argument("--rows", type=int)
+    generate.add_argument("--output", type=Path, default=DEFAULT_ROOT)
     generate.add_argument("--seed", type=int, default=20260919)
-    generate.add_argument("--count", type=int, default=600)
+    check = commands.add_parser("check-corpus")
+    check.add_argument("file", type=Path)
     commands.add_parser("fetch-enron")
     commands.add_parser("probe")
     evaluate = commands.add_parser("evaluate")
@@ -55,8 +62,17 @@ def _parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = _parser().parse_args()
     if args.command == "generate-synthetic":
-        for path in generate_synthetic(seed=args.seed, count=args.count):
+        rows = args.rows or (60 if args.stub else 600)
+        generator = generate_stub if args.stub else generate_llm
+        for path in generator(
+            args.output, selected_set=args.set, rows=rows, seed=args.seed
+        ):
             print(path)
+    elif args.command == "check-corpus":
+        try:
+            print(json.dumps(check_corpus(args.file), indent=2, sort_keys=True))
+        except ValueError as error:
+            raise SystemExit(f"check-corpus: {error}") from None
     elif args.command == "fetch-enron":
         print(fetch_enron())
     elif args.command == "probe":
@@ -64,8 +80,17 @@ def main() -> None:
     elif args.command == "evaluate":
         rows = split_rows(load_jsonl(args.data))["test"]
         adapter = JevPrograms(_client(args.replay))
+        registry = json.loads(DEFAULT_REGISTRY.read_text(encoding="utf-8"))
         result = {
-            question_id: evaluate_question(adapter.program(question_id), question_id, rows)
+            question_id: evaluate_question(
+                adapter.program(question_id),
+                question_id,
+                rows,
+                registry_thresholds={
+                    name: registry["questions"][question_id][name]
+                    for name in ("accept", "escalate")
+                },
+            )
             for question_id in SETS[args.set]
         }
         print(json.dumps(result, indent=2, sort_keys=True))

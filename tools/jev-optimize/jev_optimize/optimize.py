@@ -20,14 +20,6 @@ from .metrics import (
 from .proposer import JevProposer
 from .questions import SETS, SPECS
 
-CLOSURE_FIELDS = (
-    "obligation.title",
-    "obligation.evidence_text",
-    "later.paragraph_text",
-    "later.from_user",
-    "later.days_later",
-)
-
 
 def _inputs(row: DatasetRow) -> dict[str, Any]:
     return row.model_dump(exclude={"id", "set", "label", "source"})
@@ -69,7 +61,13 @@ def _examples(rows: list[DatasetRow]) -> list[dspy.Example]:
     return examples
 
 
-def evaluate_question(program: Any, question_id: str, rows: list[DatasetRow]) -> dict[str, Any]:
+def evaluate_question(
+    program: Any,
+    question_id: str,
+    rows: list[DatasetRow],
+    *,
+    registry_thresholds: dict[str, float] | None = None,
+) -> dict[str, Any]:
     labels: list[bool] = []
     probabilities: list[float] = []
     multiclass_brier: list[float] = []
@@ -115,6 +113,30 @@ def evaluate_question(program: Any, question_id: str, rows: list[DatasetRow]) ->
     }
     if multiclass_brier:
         result["brier"] = sum(multiclass_brier) / len(multiclass_brier)
+    if registry_thresholds:
+        result["confusion"] = {}
+        for name in ("accept", "escalate"):
+            threshold = float(registry_thresholds[name])
+            predictions = [probability >= threshold for probability in probabilities]
+            result["confusion"][name] = {
+                "threshold": threshold,
+                "tp": sum(
+                    actual and predicted
+                    for actual, predicted in zip(labels, predictions, strict=True)
+                ),
+                "fp": sum(
+                    not actual and predicted
+                    for actual, predicted in zip(labels, predictions, strict=True)
+                ),
+                "tn": sum(
+                    not actual and not predicted
+                    for actual, predicted in zip(labels, predictions, strict=True)
+                ),
+                "fn": sum(
+                    actual and not predicted
+                    for actual, predicted in zip(labels, predictions, strict=True)
+                ),
+            }
     return result
 
 
@@ -196,12 +218,13 @@ def optimize_set(
         program = adapter.program(question_id)
         baseline_validation = evaluate_question(program, question_id, parts["validation"])
         baseline_test = evaluate_question(program, question_id, parts["test"])
-        fields = (
-            CLOSURE_FIELDS
-            if set_name == "closure"
-            else tuple(SPECS[question_id].signature.input_fields)
+        spec = SPECS[question_id]
+        proposer = JevProposer(
+            reflection_lm,
+            spec.allowed_fields,
+            intent=spec.intent,
+            primary_fields=spec.primary_fields,
         )
-        proposer = JevProposer(reflection_lm, fields)
         # GEPA checkpoints its state under log_dir and resumes from it, so an
         # interrupted run keeps the candidates it already scored; delete the
         # directory to start a question over.

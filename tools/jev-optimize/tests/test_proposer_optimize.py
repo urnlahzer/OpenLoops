@@ -5,11 +5,22 @@ import pytest
 from jev_optimize.metrics import threshold_sweep
 from jev_optimize.optimize import gated_question_update
 from jev_optimize.proposer import JevProposer, validate_statement
+from jev_optimize.questions import SPECS
 
 
 def test_proposer_validator_accepts_literal_statement():
     statement = "later.paragraph_text states that the obligation is complete."
-    assert validate_statement(statement) == []
+    assert validate_statement(
+        statement,
+        allowed_fields=("later.paragraph_text",),
+        primary_fields=("later.paragraph_text",),
+    ) == []
+
+
+def test_every_question_declares_intent_and_field_contract():
+    assert all(spec.intent for spec in SPECS.values())
+    assert all(spec.primary_fields for spec in SPECS.values())
+    assert all(set(spec.primary_fields) <= set(spec.allowed_fields) for spec in SPECS.values())
 
 
 @pytest.mark.parametrize(
@@ -41,7 +52,13 @@ def test_proposer_retries_once_then_falls_back():
     def predictor(**_kwargs):
         return SimpleNamespace(proposed_statement=next(responses))
 
-    proposer = JevProposer(None, ("later.paragraph_text",), predictor=predictor)
+    proposer = JevProposer(
+        None,
+        ("later.paragraph_text",),
+        intent="The later paragraph shows the obligation was carried out.",
+        primary_fields=("later.paragraph_text",),
+        predictor=predictor,
+    )
     current = "later.paragraph_text states that the obligation is complete."
     result = proposer(
         {"predict": current},
@@ -50,6 +67,46 @@ def test_proposer_retries_once_then_falls_back():
     )
     assert result == {"predict": current}
     assert proposer.rejection_count == 2
+
+
+def test_proposer_passes_fixed_intent_and_field_contract():
+    calls = []
+
+    def predictor(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            proposed_statement="later.paragraph_text shows the obligation was carried out."
+        )
+
+    proposer = JevProposer(
+        None,
+        ("obligation.evidence_text", "later.paragraph_text"),
+        intent="The later paragraph shows the obligation was carried out.",
+        primary_fields=("later.paragraph_text",),
+        predictor=predictor,
+    )
+    result = proposer(
+        {"predict": "later.paragraph_text shows completion."}, {}, ["predict"]
+    )
+    assert result["predict"].startswith("later.paragraph_text")
+    assert calls[0]["intent"] == proposer.intent
+    assert calls[0]["primary_fields"] == "later.paragraph_text"
+
+
+@pytest.mark.parametrize(
+    ("statement", "expected"),
+    [
+        ("obligation.evidence_text shows completion.", "required primary"),
+        ("later.paragraph_text and sender show completion.", "disallowed fields"),
+    ],
+)
+def test_proposer_validator_enforces_field_contract(statement, expected):
+    violations = validate_statement(
+        statement,
+        allowed_fields=("obligation.evidence_text", "later.paragraph_text"),
+        primary_fields=("later.paragraph_text",),
+    )
+    assert any(expected in violation for violation in violations)
 
 
 def _metrics(accuracy):

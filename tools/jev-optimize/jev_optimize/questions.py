@@ -12,6 +12,9 @@ import dspy
 class QuestionSpec:
     set_name: str
     signature: type[dspy.Signature]
+    intent: str
+    primary_fields: tuple[str, ...]
+    allowed_fields: tuple[str, ...]
     kind: str = "noul"
     options: dict[str, str] | None = None
 
@@ -134,25 +137,99 @@ class RulesDeadlineKind(dspy.Signature):
     confidence: float = dspy.OutputField(desc="Confidence in the selected deadline kind.")
 
 
+_CLOSURE_FIELDS = (
+    "obligation.title",
+    "obligation.evidence_text",
+    "later.paragraph_text",
+    "later.from_user",
+    "later.days_later",
+)
+_TRIAGE_FIELDS = ("subject", "paragraph_text", "from_user")
+
+
 SPECS: dict[str, QuestionSpec] = {
-    "closure.fulfilled": QuestionSpec("closure", ClosureFulfilled),
-    "closure.withdrawn": QuestionSpec("closure", ClosureWithdrawn),
-    "closure.deadline_changed": QuestionSpec("closure", ClosureDeadlineChanged),
-    "closure.modified": QuestionSpec("closure", ClosureModified),
-    "triage.asks_recipient": QuestionSpec("triage", TriageAsksRecipient),
-    "triage.commits_sender": QuestionSpec("triage", TriageCommitsSender),
-    "triage.asks_question": QuestionSpec("triage", TriageAsksQuestion),
-    "triage.names_time": QuestionSpec("triage", TriageNamesTime),
-    "triage.boilerplate": QuestionSpec("triage", TriageBoilerplate),
-    "triage.automated_notification": QuestionSpec("triage", TriageAutomatedNotification),
-    "rules.recap": QuestionSpec("rules", RulesRecap),
-    "rules.scoped_event": QuestionSpec("rules", RulesScopedEvent),
-    "rules.event_match": QuestionSpec("rules", RulesEventMatch),
-    "rules.duplicate_action": QuestionSpec("rules", RulesDuplicateAction),
-    "rules.thread_merge": QuestionSpec("rules", RulesThreadMerge),
+    "closure.fulfilled": QuestionSpec(
+        "closure", ClosureFulfilled,
+        "The later paragraph shows the obligation was carried out.",
+        ("later.paragraph_text",), _CLOSURE_FIELDS,
+    ),
+    "closure.withdrawn": QuestionSpec(
+        "closure", ClosureWithdrawn,
+        "The later paragraph cancels or withdraws the obligation.",
+        ("later.paragraph_text",), _CLOSURE_FIELDS,
+    ),
+    "closure.deadline_changed": QuestionSpec(
+        "closure", ClosureDeadlineChanged,
+        "The later paragraph sets a different deadline for the obligation.",
+        ("later.paragraph_text",), _CLOSURE_FIELDS,
+    ),
+    "closure.modified": QuestionSpec(
+        "closure", ClosureModified,
+        "The later paragraph changes what the obligation requires.",
+        ("later.paragraph_text",), _CLOSURE_FIELDS,
+    ),
+    "triage.asks_recipient": QuestionSpec(
+        "triage", TriageAsksRecipient,
+        "The paragraph asks its recipient to do something.",
+        ("paragraph_text",), _TRIAGE_FIELDS,
+    ),
+    "triage.commits_sender": QuestionSpec(
+        "triage", TriageCommitsSender,
+        "The paragraph commits its sender to doing something.",
+        ("paragraph_text",), _TRIAGE_FIELDS,
+    ),
+    "triage.asks_question": QuestionSpec(
+        "triage", TriageAsksQuestion,
+        "The paragraph asks a genuine question that seeks an answer.",
+        ("paragraph_text",), _TRIAGE_FIELDS,
+    ),
+    "triage.names_time": QuestionSpec(
+        "triage", TriageNamesTime,
+        "The paragraph names a time, date, deadline, or event-relative time.",
+        ("paragraph_text",), _TRIAGE_FIELDS,
+    ),
+    "triage.boilerplate": QuestionSpec(
+        "triage", TriageBoilerplate,
+        "The paragraph is a signature, legal footer, unsubscribe notice, or disclaimer.",
+        ("paragraph_text",), _TRIAGE_FIELDS,
+    ),
+    "triage.automated_notification": QuestionSpec(
+        "triage", TriageAutomatedNotification,
+        "The paragraph is an automatically generated notification.",
+        ("paragraph_text",), _TRIAGE_FIELDS,
+    ),
+    "rules.recap": QuestionSpec(
+        "rules", RulesRecap,
+        "The email is an automatically generated meeting summary, recap, or transcript.",
+        ("first_paragraph",), ("sender", "subject", "first_paragraph"),
+    ),
+    "rules.scoped_event": QuestionSpec(
+        "rules", RulesScopedEvent,
+        "The request concerns attending, preparing for, or bringing something to an event.",
+        ("request_text",), ("request_text",),
+    ),
+    "rules.event_match": QuestionSpec(
+        "rules", RulesEventMatch,
+        "The phrase refers to the named event.",
+        ("phrase", "event_name"), ("phrase", "event_name"),
+    ),
+    "rules.duplicate_action": QuestionSpec(
+        "rules", RulesDuplicateAction,
+        "The two action sentences ask for the same thing.",
+        ("action_a", "action_b"), ("action_a", "action_b"),
+    ),
+    "rules.thread_merge": QuestionSpec(
+        "rules", RulesThreadMerge,
+        "The two messages belong to the same conversation topic.",
+        ("first_paragraph_a", "first_paragraph_b"),
+        ("subject_a", "subject_b", "first_paragraph_a", "first_paragraph_b"),
+    ),
     "rules.deadline_kind": QuestionSpec(
         "rules",
         RulesDeadlineKind,
+        "The phrase is classified by whether its timing is event-tied, soft, or unknown.",
+        ("phrase",),
+        ("phrase",),
         "choice",
         {
             "event_tied": "The deadline is tied to a named event.",

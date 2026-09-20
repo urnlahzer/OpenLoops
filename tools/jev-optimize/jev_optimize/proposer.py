@@ -28,6 +28,14 @@ BANNED_PHRASES = (
 _WORD_RE = re.compile(r"\b[\w.-]+\b")
 _CAPITALIZED_RE = re.compile(r"\b[A-Z][A-Za-z'-]*\b")
 _BULLET_RE = re.compile(r"(?:^|\s)(?:[-*\u2022]|\d+[.)])\s")
+_FIELD_TOKEN_RE = re.compile(
+    r"\b[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+\b"
+)
+_KNOWN_SIMPLE_FIELDS = {
+    "action_a", "action_b", "event_name", "first_paragraph", "first_paragraph_a",
+    "first_paragraph_b", "from_user", "paragraph_text", "phrase", "request_text",
+    "sender", "subject", "subject_a", "subject_b",
+}
 _NEGATION_RE = re.compile(
     r"\b(?:not|no|never|neither|nor|without)\b(?:\W+\w+){0,3}\W+"
     r"\b(?:not|no|never|neither|nor|without)\b",
@@ -52,15 +60,23 @@ class JevInstructionProposal(dspy.Signature):
     """Write one Jev decision statement that returns the probability the statement is true.
 
     The statement has at most two plain declarative sentences and at most 45 words. It is
-    present tense and literal. It may refer to the supplied state fields by name. It contains
+    present tense and literal. It must preserve the supplied intent, changing only wording or
+    precision, and explicitly name at least one supplied primary field. It may refer only to the
+    supplied allowed state fields. It contains
     no role framing, second-person language, output instructions, lists, examples, copied names
     of people, companies, projects, or documents, and no stacked negation.
     """
 
     current_statement: str = dspy.InputField(desc="The current literal decision statement.")
+    intent: str = dspy.InputField(
+        desc="The fixed meaning that the replacement must preserve exactly."
+    )
     feedback: str = dspy.InputField(desc="Feedback lines from passing and failing examples.")
     state_fields: str = dspy.InputField(
-        desc="Comma-separated state field names available to Jev."
+        desc="Comma-separated allowed state field names; no other field may be named."
+    )
+    primary_fields: str = dspy.InputField(
+        desc="Comma-separated fields; the statement must explicitly name at least one."
     )
     violations: str = dspy.InputField(
         desc="Validation violations from the previous attempt, or 'none'."
@@ -100,7 +116,12 @@ def _feedback_lines(value: Any) -> list[str]:
 
 
 def validate_statement(
-    statement: str, *, current_statement: str = "", example_texts: Iterable[str] = ()
+    statement: str,
+    *,
+    current_statement: str = "",
+    example_texts: Iterable[str] = (),
+    allowed_fields: Iterable[str] = (),
+    primary_fields: Iterable[str] = (),
 ) -> list[str]:
     """Return every Jev prompt constraint violated by ``statement``."""
 
@@ -129,6 +150,23 @@ def validate_statement(
     if _NEGATION_RE.search(stripped):
         violations.append("statement stacks negation")
 
+    allowed = tuple(allowed_fields)
+    primary = tuple(primary_fields)
+    mentions_primary = any(
+        re.search(rf"(?<![\w.]){re.escape(field)}(?![\w.])", stripped)
+        for field in primary
+    )
+    if primary and not mentions_primary:
+        violations.append("statement mentions none of the required primary fields")
+    named_fields = set(_FIELD_TOKEN_RE.findall(stripped)) | {
+        field
+        for field in _KNOWN_SIMPLE_FIELDS
+        if re.search(rf"(?<![\w.]){re.escape(field)}(?![\w.])", stripped)
+    }
+    disallowed = sorted(named_fields - set(allowed))
+    if disallowed:
+        violations.append("statement mentions disallowed fields: " + ", ".join(disallowed))
+
     current_caps = set(_CAPITALIZED_RE.findall(current_statement))
     example_caps = {
         token
@@ -151,10 +189,14 @@ class JevProposer:
         reflection_lm: Any,
         fields: Iterable[str],
         *,
+        intent: str = "",
+        primary_fields: Iterable[str] = (),
         predictor: Any | None = None,
     ) -> None:
         self.reflection_lm = reflection_lm
         self.fields = tuple(fields)
+        self.intent = intent
+        self.primary_fields = tuple(primary_fields)
         self.predictor = predictor or dspy.ChainOfThought(JevInstructionProposal)
         self.rejection_count = 0
 
@@ -163,8 +205,10 @@ class JevProposer:
     ) -> str:
         kwargs = {
             "current_statement": current,
+            "intent": self.intent,
             "feedback": feedback or "No feedback was supplied.",
             "state_fields": ", ".join(self.fields),
+            "primary_fields": ", ".join(self.primary_fields),
             "violations": "; ".join(violations) if violations else "none",
         }
         if self.reflection_lm is None:
@@ -187,13 +231,21 @@ class JevProposer:
             current = candidate[component]
             proposal = self._propose(current, feedback, [])
             violations = validate_statement(
-                proposal, current_statement=current, example_texts=example_texts
+                proposal,
+                current_statement=current,
+                example_texts=example_texts,
+                allowed_fields=self.fields,
+                primary_fields=self.primary_fields,
             )
             if violations:
                 self.rejection_count += 1
                 proposal = self._propose(current, feedback, violations)
                 violations = validate_statement(
-                    proposal, current_statement=current, example_texts=example_texts
+                    proposal,
+                    current_statement=current,
+                    example_texts=example_texts,
+                    allowed_fields=self.fields,
+                    primary_fields=self.primary_fields,
                 )
             if violations:
                 self.rejection_count += 1
