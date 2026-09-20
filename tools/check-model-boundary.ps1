@@ -2,6 +2,7 @@
 param(
     [string]$ManifestPath = 'contracts/model/provider-boundary.json',
     [string]$SchemaPath = 'contracts/model/analysis-output.schema.json',
+    [string]$DecisionQuestionsPath = 'contracts/model/decision-questions.json',
     [string]$AdrPath = 'docs/adr/ADR-007-model-boundary.md',
     [string]$ThreatPath = 'docs/threat-model/model-provider-boundary.md',
     [string]$TraceabilityPath = 'docs/prd-traceability.md',
@@ -60,8 +61,16 @@ function Has([string]$Text, [string[]]$Phrases, [string]$Id) {
     }
 }
 
+function Sha256-Hex([string]$Text) {
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text)))).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $sha256.Dispose() }
+}
+
 function Read-Json([string]$Path, [string]$Id) {
-    try { return Get-Content -Raw -LiteralPath (Resolve-Input $Path) | ConvertFrom-Json -Depth 100 }
+    try { return Get-Content -Raw -LiteralPath (Resolve-Input $Path) | ConvertFrom-Json }
     catch { Fail $Id; return $null }
 }
 
@@ -82,6 +91,7 @@ $checks = @(
     'P0-MODEL-AUTHORITY-001',
     'P0-MODEL-PRIVACY-001',
     'P0-MODEL-SOURCES-001',
+    'P0-MODEL-DECISIONS-001',
     'P0-MODEL-CROSS-CONTRACT-001',
     'P0-MODEL-CLAIMS-001',
     'P0-MODEL-FRESH-CHECKER-001'
@@ -94,8 +104,8 @@ if ($null -eq $m) {
 }
 
 $canonical = $m | ConvertTo-Json -Depth 100 -Compress
-$hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($canonical))).ToLowerInvariant()
-if ($hash -ne 'b78f7229f95f9da8ed6c636e8f429368780b0e104826a9844d9bf613d52b7132') { Fail 'P0-MODEL-INVENTORY-001' }
+$hash = Sha256-Hex $canonical
+if ($hash -ne 'f9c49111de5549591f9feca542f15640e4330b6ba1dda34a694196fb45463aa2') { Fail 'P0-MODEL-INVENTORY-001' }
 
 $requirements = @('OL-SYNC-012','OL-SYNC-013','OL-TEST-003','OL-MODEL-001','OL-MODEL-002','OL-MODEL-003','OL-MODEL-004','OL-MODEL-005','OL-MODEL-006','OL-MODEL-007','OL-MODEL-008','OL-MODEL-009','OL-MODEL-010','OL-MODEL-011','OL-MODEL-012','OL-MODEL-013','OL-MODEL-014','OL-MODEL-015','OL-NFR-005','OL-NFR-007','OL-NFR-011')
 if ($m.schema_version -ne 1 -or $m.work_item -ne 'P0-WI-10' -or $m.adr -ne 'ADR-007' -or $m.decision_status -ne 'accepted_contract_wired_review_only_gates_pending' -or $m.snapshot_date -ne '2026-07-20') { Fail 'P0-MODEL-INVENTORY-001' }
@@ -142,21 +152,21 @@ if ($null -eq $adapterProperty) {
 }
 else {
     $adapter = $adapterProperty.Value
-    if ($adapter.id -ne 'openrouter' -or $adapter.authority -ne 'https://openrouter.ai' -or $adapter.chat_path -ne '/api/v1/chat/completions' -or $adapter.listing_path -ne '/api/v1/endpoints/zdr' -or $adapter.request_fields_in_order -ne 'model, messages, stream, provider, max_tokens' -or $adapter.substitution -ne 'cannot replace the required tested ollama_cloud path') { Fail 'P0-MODEL-PROFILES-001' }
-    Has (($adapter | ConvertTo-Json -Compress)) @('one bounded write-only OS-protected key','Authorization Bearer only to the exact authority after final authority validation','provider.zdr=true','ORs with the account setting','revalidates the selected model against the ZDR listing before any content is sent','content-free public GET /api/v1/endpoints/zdr with no credential and no mailbox projection','ignore unknown members','never persist the raw response','response_format and structured_outputs are not sent','application validation is authoritative','exactly one assistant choice from the exact selected model label') 'P0-MODEL-PROFILES-001'
+    if ($adapter.id -ne 'openrouter' -or $adapter.authority -ne 'https://openrouter.ai' -or $adapter.chat_path -ne '/api/v1/chat/completions' -or $adapter.listing_path -ne '/api/v1/endpoints/zdr' -or $adapter.decision_path -ne '/api/alpha/decisions' -or $adapter.decision_model -ne 'typesafe/jev-1.13' -or $adapter.request_fields_in_order -ne 'model, messages, stream, provider, max_tokens' -or $adapter.decision_request_fields_in_order -ne 'model, state, questions, provider' -or $adapter.decision_deadline_seconds -ne 20 -or $adapter.substitution -ne 'cannot replace the required tested ollama_cloud path') { Fail 'P0-MODEL-PROFILES-001' }
+    Has (($adapter | ConvertTo-Json -Compress)) @('one bounded write-only OS-protected key','Authorization Bearer only to the exact authority after final authority validation','provider.zdr=true','ORs with the account setting','revalidates the selected model against the ZDR listing before any content is sent','the model is validated against the public ZDR listing before any content is sent; provider.zdr is sent when the endpoint accepts it','content-free public GET /api/v1/endpoints/zdr with no credential and no mailbox projection','ignore unknown members','never persist the raw response','response_format and structured_outputs are not sent','application validation is authoritative','exactly one assistant choice from the exact selected model label','typed probabilities only; every requested question id present with its requested type; unknown members reject; no text') 'P0-MODEL-PROFILES-001'
 }
 $preflight = $m.provider_preflight
 if ($preflight.mailbox_content -ne 'prohibited') { Fail 'P0-MODEL-PROFILES-001' }
 Has (($preflight | ConvertTo-Json -Compress)) @('GET the fixed /api/tags path only after authority validation','bound and strictly parse name model digest and details','ignore unknown members','never persist the raw response','exact provider profile plus exact model label plus provider-reported digest when available plus adapter schema and policy versions','starts Ollama with OLLAMA_NO_CLOUD=1','confirms the content-free cloud-disabled status','confirms a locally resident selected digest','rejects every cloud model and any cloud-capable fallback','proves zero non-loopback connection','ordinary loopback reachability alone never passes','content-free bounded GET /api/tags with the write-only key','only after exact https://ollama.com authority validation','Ollama API is not strictly versioned','response shape capability model digest or documented behavior drift disables the profile pending review','provider remains disabled','no mailbox projection is sent','no alternate origin model provider or proxy is attempted') 'P0-MODEL-PROFILES-001'
 
 $request = $m.request_contract
-if ($request.method -ne 'POST' -or $request.content_type -ne 'application/json' -or $request.stream -ne $false -or $request.maximum_context_messages -ne 4 -or $request.maximum_blocks_per_message -ne 64 -or $request.maximum_scalars_per_block -ne 8192 -or $request.maximum_participants_per_message -ne 500 -or $request.maximum_attachment_names_per_message -ne 256 -or $request.maximum_link_labels_per_message -ne 256 -or $request.maximum_request_bytes -ne 524288) { Fail 'P0-MODEL-REQUEST-001' }
+if ($request.method -ne 'POST' -or $request.content_type -ne 'application/json' -or $request.stream -ne $false -or $request.maximum_context_messages -ne 40 -or $request.maximum_blocks_per_message -ne 64 -or $request.maximum_scalars_per_block -ne 8192 -or $request.maximum_participants_per_message -ne 500 -or $request.maximum_attachment_names_per_message -ne 256 -or $request.maximum_link_labels_per_message -ne 256 -or $request.maximum_request_bytes -ne 524288) { Fail 'P0-MODEL-REQUEST-001' }
 ExactOrdered @($request.ollama_top_level_fields_in_order) @('model','messages','stream') 'P0-MODEL-REQUEST-001'
 ExactOrdered @($request.ollama_message_fields_in_order) @('role','content') 'P0-MODEL-REQUEST-001'
 ExactOrdered @($request.ollama_roles_in_order) @('system','user') 'P0-MODEL-REQUEST-001'
 ExactOrdered @($request.allowed_components) @('subject','body_block','quote_block','sender','to','cc','attachment_name','link_label') 'P0-MODEL-REQUEST-001'
 ExactOrdered @($request.prohibited) @('whole mailbox','whole thread by default','attachment bytes','linked content','URLs or href values','credentials','unrelated recipients','Graph locators','provider key') 'P0-MODEL-REQUEST-001'
-Has (($request | ConvertTo-Json -Compress)) @('no provider-side format or tools field is sent in the MVP contract','strict application validation of analysis-output-v1 is authoritative','tool_calls','prohibited','tools functions images attachments linked-document contents and remote retrieval fields are absent','one changed message projection plus at most four relevance-selected context projections supplied by deterministic code','length-framed untrusted data','cannot alter policy prompt schema scopes tools endpoint or model') 'P0-MODEL-REQUEST-001'
+Has (($request | ConvertTo-Json -Compress)) @('no provider-side format or tools field is sent in the MVP contract','strict application validation of analysis-output-v1 is authoritative','tool_calls','prohibited','tools functions images attachments linked-document contents and remote retrieval fields are absent','one changed message projection plus at most forty relevance-selected context projections supplied by deterministic code','length-framed untrusted data','cannot alter policy prompt schema scopes tools endpoint or model') 'P0-MODEL-REQUEST-001'
 
 $response = $m.response_contract
 if ($response.maximum_response_bytes -ne 262144 -or $response.maximum_wall_time_seconds -ne 150 -or $response.maximum_idle_read_seconds -ne 60 -or $response.maximum_connect_time_seconds -ne 5 -or $response.schema_id -ne 'openloops-analysis-v1' -or $response.schema_path -ne 'contracts/model/analysis-output.schema.json' -or $response.schema_dialect -ne 'https://json-schema.org/draft/2020-12/schema' -or $response.unknown_fields -ne 'reject' -or $response.duplicate_json_members -ne 'reject before schema validation' -or $response.maximum_claims -ne 64) { Fail 'P0-MODEL-RESPONSE-001' }
@@ -166,7 +176,7 @@ Has (($response | ConvertTo-Json -Compress)) @('analysis_unavailable or needs_re
 $schema = Read-Json $SchemaPath 'P0-MODEL-RESPONSE-001'
 if ($null -ne $schema) {
     $schemaCanonical = $schema | ConvertTo-Json -Depth 100 -Compress
-    $schemaHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($schemaCanonical))).ToLowerInvariant()
+    $schemaHash = Sha256-Hex $schemaCanonical
     if ($schemaHash -ne '7af8982ef3c9cc8b19cd4adeea668da55528d84ea9ce0e43a68a135229ea3337' -or $schema.'$schema' -ne 'https://json-schema.org/draft/2020-12/schema' -or $schema.'$id' -ne 'https://openloops.invalid/contracts/model/analysis-output-v1' -or $schema.title -ne 'OpenLoops transient model hypotheses v1' -or $schema.type -ne 'object' -or $schema.additionalProperties -ne $false) { Fail 'P0-MODEL-RESPONSE-001' }
     ExactOrdered @($schema.required) @('schema_version','claims') 'P0-MODEL-RESPONSE-001'
     Exact @($schema.properties.PSObject.Properties.Name) @('schema_version','claims') 'P0-MODEL-RESPONSE-001'
@@ -213,11 +223,12 @@ else {
     $settings = $settingsProperty.Value
     if ($settings.policy_version -ne 'model-sensitivity-v1' -or $settings.ui_visibility -ne 'show provider profile exact endpoint model label external-data disclosure and every confidence or detection sensitivity before provider use and whenever settings are reviewed' -or $settings.global_change_behavior -ne 'a sensitivity or threshold change never starts replay automatically; existing loops remain intact') { Fail 'P0-MODEL-CONSENT-001' }
     $sensitivities = @($settings.sensitivities)
-    ExactOrdered @($sensitivities.id) @('request_sensitivity','deadline_inference_sensitivity','closure_sensitivity') 'P0-MODEL-CONSENT-001'
+    ExactOrdered @($sensitivities.id) @('request_sensitivity','deadline_inference_sensitivity','closure_sensitivity','decision_model') 'P0-MODEL-CONSENT-001'
     $requestSensitivity = @($sensitivities | Where-Object id -eq 'request_sensitivity')
     $deadlineSensitivity = @($sensitivities | Where-Object id -eq 'deadline_inference_sensitivity')
     $closureSensitivity = @($sensitivities | Where-Object id -eq 'closure_sensitivity')
-    if ($requestSensitivity.Count -ne 1 -or $deadlineSensitivity.Count -ne 1 -or $closureSensitivity.Count -ne 1) { Fail 'P0-MODEL-CONSENT-001' }
+    $decisionModel = @($sensitivities | Where-Object id -eq 'decision_model')
+    if ($requestSensitivity.Count -ne 1 -or $deadlineSensitivity.Count -ne 1 -or $closureSensitivity.Count -ne 1 -or $decisionModel.Count -ne 1) { Fail 'P0-MODEL-CONSENT-001' }
     if ($requestSensitivity.Count -eq 1) {
         ExactOrdered @($requestSensitivity[0].allowed_values) @('low','standard','high') 'P0-MODEL-CONSENT-001'
         if ($requestSensitivity[0].default -ne 'standard' -or $requestSensitivity[0].default_semantics -ne 'high-recall standard' -or $requestSensitivity[0].prerequisite -ne 'provider configured for inferred cases' -or $requestSensitivity[0].change_behavior -ne 'offers bounded replay with review-only results') { Fail 'P0-MODEL-CONSENT-001' }
@@ -229,6 +240,10 @@ else {
     if ($closureSensitivity.Count -eq 1) {
         ExactOrdered @($closureSensitivity[0].allowed_values) @('conservative','standard','high') 'P0-MODEL-CONSENT-001'
         if ($closureSensitivity[0].default -ne 'conservative' -or $closureSensitivity[0].prerequisite -ne 'provider configured for semantic association' -or $closureSensitivity[0].change_behavior -ne 'offers bounded replay and every result remains possible closure') { Fail 'P0-MODEL-CONSENT-001' }
+    }
+    if ($decisionModel.Count -eq 1) {
+        ExactOrdered @($decisionModel[0].allowed_values) @('off','on') 'P0-MODEL-CONSENT-001'
+        if ($decisionModel[0].default -ne 'off' -or $decisionModel[0].prerequisite -ne 'openrouter profile with a validated key' -or $decisionModel[0].change_behavior -ne 'turning it on changes the transmitted fields and invalidates prior consent; the Sources disclosure line names the decision model') { Fail 'P0-MODEL-CONSENT-001' }
     }
     $reviewThresholds = $settings.review_thresholds
     ExactOrdered @($reviewThresholds.claim_types) @('request','promise','attribution','question','deadline_change','possible_closure','delegation','modification') 'P0-MODEL-CONSENT-001'
@@ -244,13 +259,13 @@ $privacy = $m.privacy_boundary
 ExactOrdered @($privacy.diagnostics) @('provider_disabled','analysis_unavailable','timeout','transport_policy_rejected','response_too_large','invalid_utf8','invalid_json','invalid_schema','invalid_evidence','semantic_rejected') 'P0-MODEL-PRIVACY-001'
 Has (($privacy | ConvertTo-Json -Compress)) @('persistent_prompt_request_response_output_rationale_transcript_embedding','prohibited','fixed codes and bounded non-content counters only','no endpoint path host key header body prompt response model text or source identifier','disabled and source-sanitized before application exceptions','zero in every application-controlled durable temporary diagnostic crash browser package CI and repository artifact','exact enabled provider request is the only test-time exception') 'P0-MODEL-PRIVACY-001'
 
-ExactOrdered @($m.sources.id) @('SRC-SPEC-OWN-08','SRC-SPEC-MODEL','SRC-OLLAMA-API','SRC-OLLAMA-AUTH','SRC-OLLAMA-CLOUD','SRC-OLLAMA-FAQ','SRC-OLLAMA-STRUCTURED','SRC-OLLAMA-TAGS','SRC-OPENROUTER-ZDR','SRC-OPENROUTER-API') 'P0-MODEL-SOURCES-001'
-ExactOrdered @($m.sources.location) @('docs/product-spec.md#31-approved-owner-decisions','docs/product-spec.md#611-model-and-policy-contract','https://docs.ollama.com/api/introduction','https://docs.ollama.com/api/authentication','https://docs.ollama.com/cloud','https://docs.ollama.com/faq','https://docs.ollama.com/capabilities/structured-outputs','https://docs.ollama.com/api/tags','https://openrouter.ai/docs/features/zdr','https://openrouter.ai/docs/api-reference/overview') 'P0-MODEL-SOURCES-001'
+ExactOrdered @($m.sources.id) @('SRC-SPEC-OWN-08','SRC-SPEC-MODEL','SRC-OLLAMA-API','SRC-OLLAMA-AUTH','SRC-OLLAMA-CLOUD','SRC-OLLAMA-FAQ','SRC-OLLAMA-STRUCTURED','SRC-OLLAMA-TAGS','SRC-OPENROUTER-ZDR','SRC-OPENROUTER-API','SRC-TYPESAFE-API','SRC-OPENROUTER-DECISIONS') 'P0-MODEL-SOURCES-001'
+ExactOrdered @($m.sources.location) @('docs/product-spec.md#31-approved-owner-decisions','docs/product-spec.md#611-model-and-policy-contract','https://docs.ollama.com/api/introduction','https://docs.ollama.com/api/authentication','https://docs.ollama.com/cloud','https://docs.ollama.com/faq','https://docs.ollama.com/capabilities/structured-outputs','https://docs.ollama.com/api/tags','https://openrouter.ai/docs/features/zdr','https://openrouter.ai/docs/api-reference/overview','https://docs.typesafe.ai','https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-questions-and-answers-request') 'P0-MODEL-SOURCES-001'
 $remoteSources = @($m.sources | Where-Object { $_.location -like 'https://*' })
 $ollamaSources = @($remoteSources | Where-Object { $_.id -like 'SRC-OLLAMA-*' })
 $openrouterSources = @($remoteSources | Where-Object { $_.id -like 'SRC-OPENROUTER-*' })
-if ($remoteSources.Count -ne 8 -or $ollamaSources.Count -ne 6 -or @($ollamaSources | Where-Object { $_.verified -ne '2026-07-20' }).Count -ne 0 -or $openrouterSources.Count -ne 2 -or @($openrouterSources | Where-Object { $_.verified -ne '2026-09-07' }).Count -ne 0) { Fail 'P0-MODEL-SOURCES-001' }
-ExactOrdered @($m.source_claims.source) @('SRC-OLLAMA-API','SRC-OLLAMA-AUTH','SRC-OLLAMA-CLOUD','SRC-OLLAMA-FAQ','SRC-OLLAMA-STRUCTURED','SRC-OLLAMA-TAGS','SRC-OPENROUTER-ZDR','SRC-OPENROUTER-API') 'P0-MODEL-SOURCES-001'
+if ($remoteSources.Count -ne 10 -or $ollamaSources.Count -ne 6 -or @($ollamaSources | Where-Object { $_.verified -ne '2026-07-20' }).Count -ne 0 -or $openrouterSources.Count -ne 3 -or @($openrouterSources | Where-Object { $_.id -ne 'SRC-OPENROUTER-DECISIONS' -and $_.verified -ne '2026-09-07' }).Count -ne 0 -or @($remoteSources | Where-Object { $_.id -in @('SRC-TYPESAFE-API','SRC-OPENROUTER-DECISIONS') -and $_.verified -ne '2026-09-19' }).Count -ne 0) { Fail 'P0-MODEL-SOURCES-001' }
+ExactOrdered @($m.source_claims.source) @('SRC-OLLAMA-API','SRC-OLLAMA-AUTH','SRC-OLLAMA-CLOUD','SRC-OLLAMA-FAQ','SRC-OLLAMA-STRUCTURED','SRC-OLLAMA-TAGS','SRC-OPENROUTER-ZDR','SRC-OPENROUTER-API','SRC-TYPESAFE-API','SRC-OPENROUTER-DECISIONS') 'P0-MODEL-SOURCES-001'
 ExactOrdered @($m.source_claims.claim) @(
     'documented local base is http://localhost:11434/api, cloud base is https://ollama.com/api, and the API is not strictly versioned',
     'local localhost API requires no authentication; direct ollama.com API uses an API-key Bearer authorization header',
@@ -259,8 +274,42 @@ ExactOrdered @($m.source_claims.claim) @(
     'Ollama Cloud currently does not support structured outputs; application validation is authoritative',
     'GET /api/tags returns a model list including name model and digest fields; raw responses remain transient',
     'OpenRouter publishes its zero-data-retention endpoints at /api/v1/endpoints/zdr and honors provider.zdr=true on a request by routing only to zero-data-retention endpoints; the request-level flag ORs with the account setting',
-    'the OpenRouter chat completion endpoint is POST https://openrouter.ai/api/v1/chat/completions with an Authorization Bearer key and an OpenAI-compatible answer whose text is choices[0].message.content'
+    'the OpenRouter chat completion endpoint is POST https://openrouter.ai/api/v1/chat/completions with an Authorization Bearer key and an OpenAI-compatible answer whose text is choices[0].message.content',
+    'Jev accepts state and typed noul choice or score questions and returns typed probabilities rather than generated text',
+    'the OpenRouter decisions endpoint is POST https://openrouter.ai/api/alpha/decisions with model state and questions; typesafe/jev-1.13 returns typed answers and token usage'
 ) 'P0-MODEL-SOURCES-001'
+
+$decisionQuestions = Read-Json $DecisionQuestionsPath 'P0-MODEL-DECISIONS-001'
+if ($null -ne $decisionQuestions) {
+    $decisionCanonical = $decisionQuestions | ConvertTo-Json -Depth 100 -Compress
+    $decisionHash = Sha256-Hex $decisionCanonical
+    if ($decisionHash -ne 'c880e048d4cfa81380dfe99e70001aa4af0a165640f14d0e35d7e12d2a0026dd' -or $decisionQuestions.schema_version -ne 1 -or $decisionQuestions.model -ne 'typesafe/jev-1.13') { Fail 'P0-MODEL-DECISIONS-001' }
+    $questionsProperty = $decisionQuestions.PSObject.Properties['questions']
+    if ($null -eq $questionsProperty -or @($questionsProperty.Value.PSObject.Properties).Count -eq 0) {
+        Fail 'P0-MODEL-DECISIONS-001'
+    }
+    else {
+        foreach ($questionProperty in $questionsProperty.Value.PSObject.Properties) {
+            $question = $questionProperty.Value
+            $typeProperty = $question.PSObject.Properties['type']
+            $acceptProperty = $question.PSObject.Properties['accept']
+            $escalateProperty = $question.PSObject.Properties['escalate']
+            if ($null -eq $typeProperty -or $null -eq $acceptProperty -or $null -eq $escalateProperty) {
+                Fail 'P0-MODEL-DECISIONS-001'
+                continue
+            }
+            $accept = $acceptProperty.Value
+            $escalate = $escalateProperty.Value
+            $acceptIsNumber = $accept -is [byte] -or $accept -is [int16] -or $accept -is [int32] -or $accept -is [int64] -or $accept -is [single] -or $accept -is [double] -or $accept -is [decimal]
+            $escalateIsNumber = $escalate -is [byte] -or $escalate -is [int16] -or $escalate -is [int32] -or $escalate -is [int64] -or $escalate -is [single] -or $escalate -is [double] -or $escalate -is [decimal]
+            if ($typeProperty.Value -notin @('noul','choice','score') -or -not $acceptIsNumber -or -not $escalateIsNumber -or $accept -lt 0 -or $accept -gt 1 -or $escalate -lt 0 -or $escalate -gt 1 -or $escalate -ge $accept) { Fail 'P0-MODEL-DECISIONS-001' }
+            if ($typeProperty.Value -eq 'choice') {
+                $optionsProperty = $question.PSObject.Properties['options']
+                if ($null -eq $optionsProperty -or @($optionsProperty.Value.PSObject.Properties).Count -lt 1 -or @($optionsProperty.Value.PSObject.Properties).Count -gt 255) { Fail 'P0-MODEL-DECISIONS-001' }
+            }
+        }
+    }
+}
 
 $runtime = $m.runtime_boundary
 if ($runtime.provider_transport -ne $true -or $runtime.credentials_accepted -ne $true) { Fail 'P0-MODEL-CLAIMS-001' }
@@ -319,7 +368,7 @@ $adrText = Read-Text $AdrPath 'P0-MODEL-CROSS-CONTRACT-001'
 $threatText = Read-Text $ThreatPath 'P0-MODEL-CROSS-CONTRACT-001'
 $traceText = Read-Text $TraceabilityPath 'P0-MODEL-INVENTORY-001'
 $adrCanonical = (($adrText -replace "`r`n", "`n").TrimEnd() + "`n")
-$adrHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($adrCanonical))).ToLowerInvariant()
+$adrHash = Sha256-Hex $adrCanonical
 if ($adrHash -ne '12be5a6e8081ec3938d8c0ceb59f7c10b874b37d52a628f3011e899ecba9eb15') { Fail 'P0-MODEL-CROSS-CONTRACT-001' }
 Has $adrText @('ADR-007','OWN-08','Accepted','implements no adapter, transport, credential store','G-MODEL','G-PRIV','ollama_local','ollama_cloud','approved_https','openrouter','provider.zdr=true','zero-data-retention','model-sensitivity-v1','Request sensitivity','Deadline inference sensitivity','Closure sensitivity','review_required','No settings change starts replay automatically','No tool surface exists','Prompts, requests, responses, outputs, rationales, transcripts','are never persisted') 'P0-MODEL-CROSS-CONTRACT-001'
 Has $threatText @('Model-provider boundary threat model','No provider adapter, origin, credential, request','redirect','proxy','DNS','consent','canary','untrusted','zero mutation','zero-data-retention','provider.zdr=true') 'P0-MODEL-CROSS-CONTRACT-001'
