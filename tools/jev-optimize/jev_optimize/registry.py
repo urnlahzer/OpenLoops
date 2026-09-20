@@ -73,10 +73,19 @@ def merge_registry(
             for key in ("instructions", "options", "accept", "escalate"):
                 if key in update:
                     entry[key] = update[key]
+        # Only the summary numbers go into the contract; sweeps and confusion
+        # tables stay in the result files under runs/.
         metrics[set_name] = {
             "model": result.get("model", registry["model"]),
             "dataset_sizes": result.get("dataset_sizes", {}),
-            "test": result.get("test_metrics", {}),
+            "test": {
+                question_id: {
+                    key: value
+                    for key, value in test.items()
+                    if key in {"accuracy", "brier", "ece_10"}
+                }
+                for question_id, test in result.get("test_metrics", {}).items()
+            },
         }
     registry["tuned_at"] = tuned_at or datetime.now(UTC).isoformat()
     stable = json.loads(json.dumps(registry, ensure_ascii=False, sort_keys=True))

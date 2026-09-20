@@ -1,25 +1,308 @@
 {
-  "schema_version": 1,
+  "metrics": {
+    "closure": {
+      "dataset_sizes": {
+        "closure.deadline_changed": {
+          "test": 115,
+          "train": 382,
+          "validation": 103
+        },
+        "closure.fulfilled": {
+          "test": 115,
+          "train": 382,
+          "validation": 103
+        },
+        "closure.modified": {
+          "test": 115,
+          "train": 382,
+          "validation": 103
+        },
+        "closure.withdrawn": {
+          "test": 115,
+          "train": 382,
+          "validation": 103
+        }
+      },
+      "model": "typesafe/jev-1.13",
+      "test": {
+        "closure.deadline_changed": {
+          "accuracy": 0.9565217391304348,
+          "brier": 0.04520347826086957,
+          "ece_10": 0.08695652173913043
+        },
+        "closure.fulfilled": {
+          "accuracy": 0.8695652173913043,
+          "brier": 0.1078886956521739,
+          "ece_10": 0.15686956521739134
+        },
+        "closure.modified": {
+          "accuracy": 0.4782608695652174,
+          "brier": 0.33723652173913055,
+          "ece_10": 0.35113043478260875
+        },
+        "closure.withdrawn": {
+          "accuracy": 1.0,
+          "brier": 0.01063304347826087,
+          "ece_10": 0.08069565217391303
+        }
+      }
+    },
+    "rules": {
+      "dataset_sizes": {
+        "rules.deadline_kind": {
+          "test": 83,
+          "train": 248,
+          "validation": 69
+        },
+        "rules.duplicate_action": {
+          "test": 81,
+          "train": 250,
+          "validation": 69
+        },
+        "rules.event_match": {
+          "test": 85,
+          "train": 224,
+          "validation": 91
+        },
+        "rules.recap": {
+          "test": 81,
+          "train": 229,
+          "validation": 90
+        },
+        "rules.scoped_event": {
+          "test": 84,
+          "train": 232,
+          "validation": 84
+        },
+        "rules.thread_merge": {
+          "test": 74,
+          "train": 241,
+          "validation": 85
+        }
+      },
+      "model": "typesafe/jev-1.13",
+      "test": {
+        "rules.deadline_kind": {
+          "accuracy": 0.7349397590361446,
+          "brier": 0.42919518072289153,
+          "ece_10": 0.19192771084337357
+        },
+        "rules.duplicate_action": {
+          "accuracy": 0.9012345679012346,
+          "brier": 0.08698271604938271,
+          "ece_10": 0.11061728395061728
+        },
+        "rules.event_match": {
+          "accuracy": 0.8235294117647058,
+          "brier": 0.13567176470588233,
+          "ece_10": 0.11494117647058823
+        },
+        "rules.recap": {
+          "accuracy": 1.0,
+          "brier": 0.014240740740740738,
+          "ece_10": 0.09320987654320988
+        },
+        "rules.scoped_event": {
+          "accuracy": 0.8928571428571429,
+          "brier": 0.08740357142857143,
+          "ece_10": 0.11821428571428574
+        },
+        "rules.thread_merge": {
+          "accuracy": 0.9054054054054054,
+          "brier": 0.08270810810810811,
+          "ece_10": 0.10864864864864865
+        }
+      }
+    },
+    "triage": {
+      "dataset_sizes": {
+        "triage.asks_question": {
+          "test": 77,
+          "train": 241,
+          "validation": 82
+        },
+        "triage.asks_recipient": {
+          "test": 78,
+          "train": 253,
+          "validation": 69
+        },
+        "triage.automated_notification": {
+          "test": 89,
+          "train": 235,
+          "validation": 76
+        },
+        "triage.boilerplate": {
+          "test": 74,
+          "train": 238,
+          "validation": 88
+        },
+        "triage.commits_sender": {
+          "test": 80,
+          "train": 239,
+          "validation": 81
+        },
+        "triage.names_time": {
+          "test": 72,
+          "train": 240,
+          "validation": 88
+        }
+      },
+      "model": "typesafe/jev-1.13",
+      "test": {
+        "triage.asks_question": {
+          "accuracy": 0.8051948051948052,
+          "brier": 0.1256051948051948,
+          "ece_10": 0.17636363636363633
+        },
+        "triage.asks_recipient": {
+          "accuracy": 0.9102564102564102,
+          "brier": 0.05079358974358975,
+          "ece_10": 0.10653846153846154
+        },
+        "triage.automated_notification": {
+          "accuracy": 0.9887640449438202,
+          "brier": 0.016422471910112358,
+          "ece_10": 0.04786516853932592
+        },
+        "triage.boilerplate": {
+          "accuracy": 0.9864864864864865,
+          "brier": 0.006682432432432433,
+          "ece_10": 0.05337837837837836
+        },
+        "triage.commits_sender": {
+          "accuracy": 0.8625,
+          "brier": 0.09970500000000002,
+          "ece_10": 0.15899999999999995
+        },
+        "triage.names_time": {
+          "accuracy": 0.8472222222222222,
+          "brier": 0.12589166666666665,
+          "ece_10": 0.18000000000000002
+        }
+      }
+    }
+  },
   "model": "typesafe/jev-1.13",
-  "tuned_at": null,
   "questions": {
-    "check.asks_recipient": {"type":"noul","instructions":"The text asks the reader to do something.","accept":0.70,"escalate":0.30},
-    "check.kind": {"type":"choice","instructions":"Classify the statement kind.","options":{"request":"The writer asks the reader to do something.","promise":"The writer commits to doing something.","none":"The text is neither a request nor a promise."},"accept":0.70,"escalate":0.30},
-    "closure.fulfilled": {"type":"noul","instructions":"The later text shows the obligation has been carried out.","accept":0.70,"escalate":0.30},
-    "closure.withdrawn": {"type":"noul","instructions":"The later text cancels or withdraws the obligation.","accept":0.70,"escalate":0.30},
-    "closure.deadline_changed": {"type":"noul","instructions":"The later text sets a different deadline for the obligation.","accept":0.70,"escalate":0.30},
-    "closure.modified": {"type":"noul","instructions":"The later text changes what the obligation requires.","accept":0.70,"escalate":0.30},
-    "triage.asks_recipient": {"type":"noul","instructions":"The paragraph asks its recipient to do something.","accept":0.70,"escalate":0.30},
-    "triage.commits_sender": {"type":"noul","instructions":"The paragraph commits its sender to doing something.","accept":0.70,"escalate":0.30},
-    "triage.asks_question": {"type":"noul","instructions":"The paragraph asks a genuine question that seeks an answer.","accept":0.70,"escalate":0.30},
-    "triage.names_time": {"type":"noul","instructions":"The paragraph names a time, date, deadline, or event-relative time.","accept":0.70,"escalate":0.30},
-    "triage.boilerplate": {"type":"noul","instructions":"The paragraph is a signature, legal footer, unsubscribe notice, or disclaimer.","accept":0.70,"escalate":0.30},
-    "triage.automated_notification": {"type":"noul","instructions":"The paragraph is an automatically generated notification.","accept":0.70,"escalate":0.30},
-    "rules.recap": {"type":"noul","instructions":"This email is an automatically generated meeting summary, recap, or transcript.","accept":0.70,"escalate":0.30},
-    "rules.scoped_event": {"type":"noul","instructions":"This request is about attending, preparing for, or bringing something to a meeting or event.","accept":0.70,"escalate":0.30},
-    "rules.event_match": {"type":"noul","instructions":"The phrase refers to the named event.","accept":0.70,"escalate":0.30},
-    "rules.duplicate_action": {"type":"noul","instructions":"These two sentences ask for the same thing.","accept":0.70,"escalate":0.30},
-    "rules.thread_merge": {"type":"noul","instructions":"These two messages belong to the same conversation topic.","accept":0.70,"escalate":0.30},
-    "rules.deadline_kind": {"type":"choice","instructions":"Classify how the phrase expresses a deadline.","options":{"event_tied":"The deadline is tied to a named event.","soft":"The timing is flexible or aspirational.","unknown":"The phrase has no supported deadline classification."},"accept":0.70,"escalate":0.30}
-  }
+    "check.asks_recipient": {
+      "accept": 0.7,
+      "escalate": 0.3,
+      "instructions": "The text asks the reader to do something.",
+      "type": "noul"
+    },
+    "check.kind": {
+      "accept": 0.7,
+      "escalate": 0.3,
+      "instructions": "Classify the statement kind.",
+      "options": {
+        "none": "The text is neither a request nor a promise.",
+        "promise": "The writer commits to doing something.",
+        "request": "The writer asks the reader to do something."
+      },
+      "type": "choice"
+    },
+    "closure.deadline_changed": {
+      "accept": 0.7,
+      "escalate": 0.65,
+      "instructions": "The later text sets a different deadline for the obligation.",
+      "type": "noul"
+    },
+    "closure.fulfilled": {
+      "accept": 0.7,
+      "escalate": 0.65,
+      "instructions": "The later text shows the obligation has been carried out.",
+      "type": "noul"
+    },
+    "closure.modified": {
+      "accept": 0.7,
+      "escalate": 0.2,
+      "instructions": "The later text changes what the obligation requires.",
+      "type": "noul"
+    },
+    "closure.withdrawn": {
+      "accept": 0.5,
+      "escalate": 0.45,
+      "instructions": "The later text cancels or withdraws the obligation.",
+      "type": "noul"
+    },
+    "rules.deadline_kind": {
+      "accept": 0.7,
+      "escalate": 0.65,
+      "instructions": "Classify how the phrase expresses a deadline.",
+      "options": {
+        "event_tied": "The deadline is tied to a named event.",
+        "soft": "The timing is flexible or aspirational.",
+        "unknown": "The phrase has no supported deadline classification."
+      },
+      "type": "choice"
+    },
+    "rules.duplicate_action": {
+      "accept": 0.7,
+      "escalate": 0.65,
+      "instructions": "The action sentence `action_a` asks for the same thing as the action sentence `action_b`.",
+      "type": "noul"
+    },
+    "rules.event_match": {
+      "accept": 0.7,
+      "escalate": 0.6,
+      "instructions": "The phrase refers to the event name.",
+      "type": "noul"
+    },
+    "rules.recap": {
+      "accept": 0.5,
+      "escalate": 0.45,
+      "instructions": "This email is an automatically generated meeting summary, recap, or transcript.",
+      "type": "noul"
+    },
+    "rules.scoped_event": {
+      "accept": 0.85,
+      "escalate": 0.75,
+      "instructions": "This request is about attending, preparing for, or bringing something to a meeting or event.",
+      "type": "noul"
+    },
+    "rules.thread_merge": {
+      "accept": 0.85,
+      "escalate": 0.8,
+      "instructions": "The topic of first_paragraph_a is the topic of first_paragraph_b.",
+      "type": "noul"
+    },
+    "triage.asks_question": {
+      "accept": 0.95,
+      "escalate": 0.9,
+      "instructions": "The paragraph_text asks a genuine question that seeks an answer.",
+      "type": "noul"
+    },
+    "triage.asks_recipient": {
+      "accept": 0.5,
+      "escalate": 0.45,
+      "instructions": "The paragraph_text explicitly instructs its recipient to perform an action.",
+      "type": "noul"
+    },
+    "triage.automated_notification": {
+      "accept": 0.5,
+      "escalate": 0.45,
+      "instructions": "The paragraph is an automatically generated notification.",
+      "type": "noul"
+    },
+    "triage.boilerplate": {
+      "accept": 0.5,
+      "escalate": 0.45,
+      "instructions": "The paragraph is a signature, legal footer, unsubscribe notice, or disclaimer.",
+      "type": "noul"
+    },
+    "triage.commits_sender": {
+      "accept": 0.9,
+      "escalate": 0.85,
+      "instructions": "The paragraph commits its sender to doing something.",
+      "type": "noul"
+    },
+    "triage.names_time": {
+      "accept": 0.7,
+      "escalate": 0.65,
+      "instructions": "The paragraph names a time, date, deadline, or event-relative time.",
+      "type": "noul"
+    }
+  },
+  "schema_version": 1,
+  "tuned_at": "2026-09-20T21:50:51.564400+00:00"
 }
