@@ -24,14 +24,16 @@ def relaxed_thresholds():
 def test_synthetic_generation_is_deterministic_and_sane(tmp_path, relaxed_thresholds):
     one = tmp_path / "one"
     two = tmp_path / "two"
-    generate_stub(one, seed=42, rows=60)
-    generate_stub(two, seed=42, rows=60)
+    # 128 rows: the stub plan encodes the boolean labels in the bits of
+    # index // 2, and the triage set has six of them.
+    generate_stub(one, seed=42, rows=128)
+    generate_stub(two, seed=42, rows=128)
     for set_name, question_ids in SETS.items():
         assert (one / f"{set_name}.jsonl").read_bytes() == (
             two / f"{set_name}.jsonl"
         ).read_bytes()
         rows = load_jsonl(one / f"{set_name}.jsonl")
-        assert len(rows) == 60
+        assert len(rows) == 128
         assert all(
             row.source == "synthetic-stub" and set(row.label) == set(question_ids)
             for row in rows
