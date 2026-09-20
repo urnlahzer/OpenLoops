@@ -48,10 +48,16 @@ def write_jsonl(path: str | Path, rows: Iterable[dict[str, Any]]) -> None:
 
 
 def split_name(row_id: str, seed: int = 0) -> str:
+    """Train 78%, validation 7%, test 15%, by a stable hash of the row id.
+
+    GEPA scores every candidate on the whole validation set, so a small
+    validation set (about 40 rows at 600) leaves the budget for exploring
+    candidates; the held-out test set keeps its size for the final metrics.
+    """
     bucket = int.from_bytes(
         hashlib.sha256(f"{seed}:{row_id}".encode()).digest()[:8], "big"
     ) % 100
-    return "train" if bucket < 70 else "validation" if bucket < 85 else "test"
+    return "train" if bucket < 78 else "validation" if bucket < 85 else "test"
 
 
 def split_rows(
