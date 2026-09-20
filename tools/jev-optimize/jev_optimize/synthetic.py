@@ -62,6 +62,20 @@ _COMMON_CAPITALIZED_TEXT = (
         "Upper Lower Inner Outer I We You They He She It My Our Your Their His Her Its"
 )
 _COMMON_CAPITALIZED_WORDS = frozenset(_COMMON_CAPITALIZED_TEXT.split())
+# A named gathering for rules.event_match: the event name must contain one of
+# these nouns, so a task such as "review the draft agenda" is rejected.
+_EVENT_NOUN_RE = re.compile(
+    r"\b(meeting|call|offsite|off-site|onsite|conference|hearing|workshop|kickoff|kick-off|"
+    r"review session|review|sync|standup|stand-up|summit|deposition|trial|retreat|demo|"
+    r"town hall|all-hands|webinar|session|briefing|presentation|interview|training|"
+    r"orientation|ceremony|dinner|lunch|reception|event)\b",
+    re.IGNORECASE,
+)
+# A deadline phrase for rules.deadline_kind is a fragment, not a sentence: no
+# greeting with a comma, no sentence-final punctuation followed by more text.
+_SENTENCE_SHAPE_RE = re.compile(r"^\s*[A-Z][a-z]+,|[.!?]\s+\S")
+# A scoped_event request is the request itself, not a whole email.
+_EMAIL_SHAPE_RE = re.compile(r"^\s*subject\s*:|^\s*(hi|hello|dear)\b", re.IGNORECASE)
 _QUESTION_FIELDS = {
     **{question_id: ("subject", "paragraph_text") for question_id in SETS["triage"]},
     "rules.recap": ("sender", "subject", "first_paragraph"),
@@ -421,10 +435,15 @@ def _prompt(
             "paragraph structured as a summary with decisions or action items."
         ),
         "rules.scoped_event": (
-            "Make the request about attending, preparing for, or bringing something to an event."
+            "Make the request about attending, preparing for, or bringing something to an "
+            "event. request_text is the request itself: one or two sentences, no subject line, "
+            "greeting or signature."
         ),
         "rules.event_match": (
-            "Make the phrase identify the named event by paraphrase, abbreviation, or shorthand."
+            "event_name is the name of a gathering (a meeting, call, offsite, hearing, "
+            "conference, workshop, kickoff, review session), for example 'Q3 planning offsite' "
+            "or 'Copper Lantern contract review call', never a task. Make the phrase refer to "
+            "that gathering by paraphrase, abbreviation, or shorthand."
         ),
         "rules.duplicate_action": (
             "Express the same action in substantially different wording; never copy either "
@@ -439,7 +458,9 @@ def _prompt(
             "The label is a choice: event_tied uses an event-relative deadline such as 'before "
             "the board meeting'; soft uses flexible timing such as 'whenever you get a chance'; "
             "unknown is garbled or ambiguous. Every phrase must be a deadline expression that a "
-            "simple deadline parser cannot parse."
+            "simple deadline parser cannot parse. phrase is only the deadline expression as it "
+            "would appear inside a sentence, at most eight words (for example 'before the "
+            "board meeting', 'whenever you get a chance'): no greeting, name, or full sentence."
         )
     else:
         label_guidance = (
@@ -649,6 +670,18 @@ def _validate_generated_row(
                 return None, "positive recap sender is not a synthetic service"
             if value is False and not _is_pool_person_sender(sender):
                 return None, "negative recap sender is not a pool person"
+        if question_id == "rules.event_match" and not _EVENT_NOUN_RE.search(
+            built["event_name"]
+        ):
+            return None, "event_name is not a named gathering"
+        if question_id == "rules.deadline_kind" and (
+            len(built["phrase"].split()) > 12 or _SENTENCE_SHAPE_RE.search(built["phrase"])
+        ):
+            return None, "deadline phrase is a sentence, not a phrase"
+        if question_id == "rules.scoped_event" and _EMAIL_SHAPE_RE.search(
+            built["request_text"]
+        ):
+            return None, "request_text is a whole email, not a request"
     built["label"] = dict(plan["label"])
     built["set"] = set_name
     built["source"] = "synthetic-llm"
