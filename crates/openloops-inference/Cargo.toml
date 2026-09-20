@@ -11,13 +11,14 @@ openloops-application = { path = "../openloops-application" }
 openloops-contracts = { path = "../openloops-contracts" }
 openloops-domain = { path = "../openloops-domain" }
 reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "rustls-tls-native-roots"], optional = true }
-serde_json = { version = "=1.0.150", optional = true }
+serde = { version = "=1.0.229", optional = true }
+serde_json = { version = "=1.0.150", features = ["preserve_order"], optional = true }
 zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"], optional = true }
 
 [features]
 default = []
-ollama-cloud = ["dep:reqwest", "dep:serde_json", "dep:zeroize"]
-openrouter = ["dep:reqwest", "dep:serde_json", "dep:zeroize"]
+ollama-cloud = ["dep:reqwest", "dep:serde", "dep:serde_json", "dep:zeroize"]
+openrouter = ["dep:reqwest", "dep:serde", "dep:serde_json", "dep:zeroize"]
 
 [lints]
 workspace = true

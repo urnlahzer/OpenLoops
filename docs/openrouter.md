@@ -23,6 +23,10 @@ In the [native setup window](native-setup.md), on the Connections tab:
    [Concurrency and rate limits](#concurrency-and-rate-limits).
 5. Click **Test selected model** for a content-free generation check against
    the selected model. It sends no email and creates no task.
+6. Optionally turn on **Use the Jev decision model for closure checks and
+   triage**. It is off by default, and P0 does not change scan behavior.
+7. Click **Check decision model** to run the content-free endpoint check and
+   report whether that endpoint accepts the `provider.zdr` member.
 
 Create a key at <https://openrouter.ai/settings/keys>.
 
@@ -56,6 +60,13 @@ setting on your account, so it holds whether or not your account is
 configured for ZDR, and OpenLoops never relaxes it for an individual request.
 Before any message text is sent, connecting re-checks that the selected model
 still appears in the ZDR listing.
+
+When the decision model is on, the same message paragraphs may also be sent to
+`POST /api/alpha/decisions` with request members `model`, `state`, `questions`,
+and `provider: {"zdr": true}` when the endpoint accepts it (which the check
+reports). The model is `typesafe/jev-1.13` and is validated against the ZDR
+listing before any content is sent. Its answers are probabilities, never text,
+and nothing from them is persisted.
 
 The governed conversation projection omits a quoted-history block only when
 Unicode-whitespace normalization makes it exactly duplicate an earlier message
@@ -107,6 +118,9 @@ reported in the scan's failure list as
 
 and the scan continues with the remaining conversations. HTTP 429 narrows the
 scan; it does not stop it.
+
+Decision requests share this never-resent rule and count toward OpenRouter's
+rate limits.
 
 OpenRouter uses HTTP 402 for two different conditions, and OpenLoops tells
 them apart by the reason OpenRouter states in the response body, which the
@@ -181,13 +195,16 @@ background thread's one blocking `send()`/`read()` call, and the socket
 underneath it, can still linger for up to the 300-second transport timeout,
 since that one call cannot be interrupted from outside.
 
+Decision requests have their own 20-second wall deadline.
+
 ## Validation
 
 `cargo test -p openloops-inference --features ollama-cloud,openrouter --locked`.
 
 The unit tests answer from a loopback socket and never contact OpenRouter. They
-cover ZDR menu parsing, model revalidation, request shape, terminal HTTP 402,
-and concurrency narrowing after HTTP 429. Live
+cover ZDR menu parsing, model revalidation, request shape, strict decision
+request and answer validation, terminal HTTP 402, and concurrency narrowing
+after HTTP 429. Live
 authentication and generation require your own key, entered locally.
 
 `openloops-ui.exe --probe-saved-model` runs the ADR-007 governed semantic smoke

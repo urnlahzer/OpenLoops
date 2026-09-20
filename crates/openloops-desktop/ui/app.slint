@@ -53,6 +53,9 @@ export component AppWindow inherits Window {
     in-out property <bool> parallel-field-focused;
     in property <string> model-status;
     in property <bool> model-succeeded;
+    in-out property <bool> use-decision-model;
+    in property <string> decision-status;
+    in property <bool> decision-succeeded;
     in property <string> model-busy-line;
     in property <string> provider-disclosure;
     in property <string> key-placeholder;
@@ -60,6 +63,7 @@ export component AppWindow inherits Window {
     in property <bool> can-check-microsoft;
     in property <bool> can-load-models;
     in property <bool> can-test-model;
+    in property <bool> can-check-decision-model;
     in property <bool> review-scanning;
     in property <bool> can-scan;
     in property <bool> can-rescan;
@@ -125,6 +129,8 @@ export component AppWindow inherits Window {
     callback plan-selected(int);
     callback parallel-committed(string);
     callback test-model;
+    callback decision-model-toggled(bool);
+    callback check-decision-model;
     callback scan-inboxes;
     callback stop-scan;
     callback rescan;
@@ -163,14 +169,16 @@ export component AppWindow inherits Window {
                 provider-index <=> root.provider-index; api-key <=> root.api-key; show-key <=> root.show-key; models: root.models; model-index <=> root.model-index; model-value <=> root.model-value;
                 ollama-plan-index <=> root.ollama-plan-index; ollama-plan-options: root.ollama-plan-options; openrouter-parallel <=> root.openrouter-parallel;
                 parallel-field-focused <=> root.parallel-field-focused; model-status: root.model-status; model-succeeded: root.model-succeeded; model-busy-line: root.model-busy-line;
+                use-decision-model <=> root.use-decision-model; decision-status: root.decision-status; decision-succeeded: root.decision-succeeded;
                 provider-disclosure: root.provider-disclosure; key-placeholder: root.key-placeholder; load-models-label: root.load-models-label;
-                can-check-microsoft: root.can-check-microsoft; can-load-models: root.can-load-models; can-test-model: root.can-test-model;
+                can-check-microsoft: root.can-check-microsoft; can-load-models: root.can-load-models; can-test-model: root.can-test-model; can-check-decision-model: root.can-check-decision-model;
                 save-settings => { root.save-settings(); } reload-settings => { root.reload-settings(); } forget-settings => { root.forget-settings(); }
                 client-id-edited(value) => { root.client-id-edited(value); } groups-edited(value) => { root.groups-edited(value); } shared-edited(value) => { root.shared-edited(value); }
                 check-microsoft => { root.check-microsoft(); } provider-selected(index) => { root.provider-selected(index); } key-edited(value) => { root.key-edited(value); }
                 open-entra => { root.open-entra(); } open-key-page => { root.open-key-page(); }
                 load-models => { root.load-models(); } model-selected(value) => { root.model-selected(value); } plan-selected(index) => { root.plan-selected(index); }
                 parallel-committed(value) => { root.parallel-committed(value); } test-model => { root.test-model(); }
+                decision-model-toggled(value) => { root.decision-model-toggled(value); } check-decision-model => { root.check-decision-model(); }
             }
             if root.active-screen == 0: ReviewScreen {
                 busy: root.busy; review-scanning: root.review-scanning; can-scan: root.can-scan; can-rescan: root.can-rescan; can-sync-todo: root.can-sync-todo;

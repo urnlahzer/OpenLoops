@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "model": "typesafe/jev-1.13",
+  "tuned_at": null,
+  "questions": {
+    "check.asks_recipient": {"type":"noul","instructions":"The text asks the reader to do something.","accept":0.70,"escalate":0.30},
+    "check.kind": {"type":"choice","instructions":"What kind of statement is the text?","options":{"request":"The writer asks the reader to do something.","promise":"The writer commits to doing something.","none":"Neither."},"accept":0.70,"escalate":0.30}
+  }
+}

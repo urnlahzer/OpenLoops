@@ -29,6 +29,9 @@ pub mod provider;
 #[cfg(any(feature = "ollama-cloud", feature = "openrouter"))]
 pub mod analysis;
 
+#[cfg(any(feature = "ollama-cloud", feature = "openrouter"))]
+pub mod decision;
+
 #[cfg(feature = "ollama-cloud")]
 pub mod ollama;
 
