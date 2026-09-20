@@ -1,0 +1,30 @@
+[project]
+name = "jev-optimize"
+version = "0.1.0"
+description = "Offline-first DSPy harness for OpenLoops Jev question optimization"
+requires-python = ">=3.11"
+dependencies = [
+  "dspy==3.3.1",
+  "httpx",
+  "numpy",
+  "pydantic",
+  "pytest",
+  "ruff",
+]
+
+[project.scripts]
+jev-optimize = "jev_optimize.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

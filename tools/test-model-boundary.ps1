@@ -12,9 +12,11 @@ function Resolve-Repo([string]$Path) {
 }
 
 $checker = Resolve-Repo $CheckerPath
+$powerShell = (Get-Process -Id $PID).Path
 $inputs = @(
     'contracts/model/provider-boundary.json',
     'contracts/model/analysis-output.schema.json',
+    'contracts/model/decision-questions.json',
     'docs/adr/ADR-007-model-boundary.md',
     'docs/threat-model/model-provider-boundary.md',
     'docs/prd-traceability.md',
@@ -38,11 +40,16 @@ function New-SyntheticRoot {
     return $root
 }
 
+function Write-Utf8NoBom([string]$Path, [string]$Value) {
+    [IO.File]::WriteAllText($Path, $Value, [Text.UTF8Encoding]::new($false))
+}
+
 function Invoke-SyntheticChecker([string]$Root) {
     $arguments = @(
         '-NoProfile','-File',$checker,
         '-ManifestPath',(Join-Path $Root 'contracts/model/provider-boundary.json'),
         '-SchemaPath',(Join-Path $Root 'contracts/model/analysis-output.schema.json'),
+        '-DecisionQuestionsPath',(Join-Path $Root 'contracts/model/decision-questions.json'),
         '-AdrPath',(Join-Path $Root 'docs/adr/ADR-007-model-boundary.md'),
         '-ThreatPath',(Join-Path $Root 'docs/threat-model/model-provider-boundary.md'),
         '-TraceabilityPath',(Join-Path $Root 'docs/prd-traceability.md'),
@@ -53,7 +60,10 @@ function Invoke-SyntheticChecker([string]$Root) {
         '-ProtectedStatePath',(Join-Path $Root 'contracts/persistence/protected-state-boundary.json'),
         '-Quiet'
     )
-    $output = @(& pwsh @arguments 2>&1 | ForEach-Object { [string]$_ })
+    $savedErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $output = @(& $powerShell @arguments 2>&1 | ForEach-Object { [string]$_ }) }
+    finally { $ErrorActionPreference = $savedErrorActionPreference }
     return [pscustomobject]@{ Code = $LASTEXITCODE; Output = ($output -join "`n") }
 }
 
@@ -62,9 +72,9 @@ function JsonCase([string]$Name, [string]$ExpectedId, [string]$RelativePath, [sc
     $root = New-SyntheticRoot
     try {
         $path = Join-Path $root $RelativePath
-        $value = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json -Depth 100
+        $value = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
         & $Mutate $value
-        $value | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $path -Encoding utf8NoBOM
+        Write-Utf8NoBom $path ($value | ConvertTo-Json -Depth 100)
         $result = Invoke-SyntheticChecker $root
         if ($result.Code -eq 0 -or $result.Output -notmatch [regex]::Escape($ExpectedId)) {
             $script:failures.Add("$Name (expected $ExpectedId; exit $($result.Code))")
@@ -80,7 +90,7 @@ function TextCase([string]$Name, [string]$ExpectedId, [string]$RelativePath, [sc
         $path = Join-Path $root $RelativePath
         $text = Get-Content -Raw -LiteralPath $path
         $changed = & $Mutate $text
-        Set-Content -LiteralPath $path -Value $changed -Encoding utf8NoBOM
+        Write-Utf8NoBom $path $changed
         $result = Invoke-SyntheticChecker $root
         if ($result.Code -eq 0 -or $result.Output -notmatch [regex]::Escape($ExpectedId)) {
             $script:failures.Add("$Name (expected $ExpectedId; exit $($result.Code))")
@@ -89,7 +99,7 @@ function TextCase([string]$Name, [string]$ExpectedId, [string]$RelativePath, [sc
     finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
-$baseline = & pwsh -NoProfile -File $checker 2>&1
+$baseline = & $powerShell -NoProfile -File $checker 2>&1
 if ($LASTEXITCODE -ne 0) { throw ('Baseline model-boundary checker failed: ' + (@($baseline) -join "`n")) }
 
 JsonCase 'work item drift' 'P0-MODEL-INVENTORY-001' 'contracts/model/provider-boundary.json' { param($c) $c.work_item = 'P0-WI-SYNTHETIC' }
@@ -112,6 +122,7 @@ JsonCase 'approved HTTPS substitutes hosted' 'P0-MODEL-PROFILES-001' 'contracts/
 JsonCase 'approved HTTPS adapter omitted' 'P0-MODEL-PROFILES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.profiles | Where-Object id -eq 'approved_https').PSObject.Properties.Remove('adapter') }
 JsonCase 'adapter authority widened' 'P0-MODEL-PROFILES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.profiles | Where-Object id -eq 'approved_https').adapter.authority = 'https://synthetic.invalid' }
 JsonCase 'adapter chat path edited' 'P0-MODEL-PROFILES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.profiles | Where-Object id -eq 'approved_https').adapter.chat_path = '/v1/anything' }
+JsonCase 'adapter decision path edited' 'P0-MODEL-PROFILES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.profiles | Where-Object id -eq 'approved_https').adapter.decision_path = '/api/v1/decisions' }
 JsonCase 'adapter ZDR routing relaxed' 'P0-MODEL-PROFILES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.profiles | Where-Object id -eq 'approved_https').adapter.zdr_enforcement = 'zdr routing is optional per request' }
 JsonCase 'adapter model listing retained' 'P0-MODEL-PROFILES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.profiles | Where-Object id -eq 'approved_https').adapter.model_menu = 'cache the raw response for reuse' }
 JsonCase 'adapter trusts provider schema enforcement' 'P0-MODEL-PROFILES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.profiles | Where-Object id -eq 'approved_https').adapter.structured_output = 'provider enforcement is authoritative' }
@@ -128,7 +139,7 @@ JsonCase 'request message field added' 'P0-MODEL-REQUEST-001' 'contracts/model/p
 JsonCase 'assistant role added' 'P0-MODEL-REQUEST-001' 'contracts/model/provider-boundary.json' { param($c) $c.request_contract.ollama_roles_in_order += 'assistant' }
 JsonCase 'provider format enabled' 'P0-MODEL-REQUEST-001' 'contracts/model/provider-boundary.json' { param($c) $c.request_contract.provider_schema_request = 'send format field' }
 JsonCase 'tool calls enabled' 'P0-MODEL-REQUEST-001' 'contracts/model/provider-boundary.json' { param($c) $c.request_contract.tool_calls = 'allowed' }
-JsonCase 'context bound widened' 'P0-MODEL-REQUEST-001' 'contracts/model/provider-boundary.json' { param($c) $c.request_contract.maximum_context_messages = 5 }
+JsonCase 'context bound widened' 'P0-MODEL-REQUEST-001' 'contracts/model/provider-boundary.json' { param($c) $c.request_contract.maximum_context_messages = 41 }
 JsonCase 'request byte bound widened' 'P0-MODEL-REQUEST-001' 'contracts/model/provider-boundary.json' { param($c) $c.request_contract.maximum_request_bytes = 524289 }
 JsonCase 'URL component allowed' 'P0-MODEL-REQUEST-001' 'contracts/model/provider-boundary.json' { param($c) $c.request_contract.allowed_components += 'url' }
 JsonCase 'attachment bytes no longer prohibited' 'P0-MODEL-REQUEST-001' 'contracts/model/provider-boundary.json' { param($c) $c.request_contract.prohibited = @($c.request_contract.prohibited | Where-Object { $_ -ne 'attachment bytes' }) }
@@ -166,6 +177,7 @@ JsonCase 'replacement skips validation' 'P0-MODEL-CONSENT-001' 'contracts/model/
 JsonCase 'deletion triggers replay' 'P0-MODEL-CONSENT-001' 'contracts/model/provider-boundary.json' { param($c) $c.consent_contract.key_validation = 'deletion triggers replay' }
 JsonCase 'sensitivity inventory removed' 'P0-MODEL-CONSENT-001' 'contracts/model/provider-boundary.json' { param($c) $c.PSObject.Properties.Remove('settings_disclosure') }
 JsonCase 'request sensitivity default drift' 'P0-MODEL-CONSENT-001' 'contracts/model/provider-boundary.json' { param($c) ($c.settings_disclosure.sensitivities | Where-Object id -eq 'request_sensitivity').default = 'high' }
+JsonCase 'decision model default enabled' 'P0-MODEL-CONSENT-001' 'contracts/model/provider-boundary.json' { param($c) ($c.settings_disclosure.sensitivities | Where-Object id -eq 'decision_model').default = 'on' }
 JsonCase 'review threshold default broadened' 'P0-MODEL-CONSENT-001' 'contracts/model/provider-boundary.json' { param($c) $c.settings_disclosure.review_thresholds.safe_default = 'automatic' }
 JsonCase 'settings change starts replay' 'P0-MODEL-CONSENT-001' 'contracts/model/provider-boundary.json' { param($c) $c.settings_disclosure.global_change_behavior = 'replay immediately' }
 
@@ -187,6 +199,10 @@ JsonCase 'source verification date drift' 'P0-MODEL-SOURCES-001' 'contracts/mode
 JsonCase 'source claim reordered' 'P0-MODEL-SOURCES-001' 'contracts/model/provider-boundary.json' { param($c) [array]::Reverse($c.source_claims) }
 JsonCase 'cloud limitation claim weakened' 'P0-MODEL-SOURCES-001' 'contracts/model/provider-boundary.json' { param($c) ($c.source_claims | Where-Object source -eq 'SRC-OLLAMA-STRUCTURED').claim = 'cloud enforces structured outputs' }
 JsonCase 'cloud disable claim removed' 'P0-MODEL-SOURCES-001' 'contracts/model/provider-boundary.json' { param($c) $c.source_claims = @($c.source_claims | Where-Object source -ne 'SRC-OLLAMA-FAQ') }
+
+JsonCase 'decision threshold ordering invalid' 'P0-MODEL-DECISIONS-001' 'contracts/model/decision-questions.json' { param($c) $c.questions.'check.asks_recipient'.escalate = $c.questions.'check.asks_recipient'.accept }
+JsonCase 'decision question type unknown' 'P0-MODEL-DECISIONS-001' 'contracts/model/decision-questions.json' { param($c) $c.questions.'check.kind'.type = 'synthetic' }
+JsonCase 'decision registry hash drift' 'P0-MODEL-DECISIONS-001' 'contracts/model/decision-questions.json' { param($c) $c.questions.'check.kind'.instructions = 'Synthetic decision question.' }
 
 JsonCase 'provider transport disabled' 'P0-MODEL-CLAIMS-001' 'contracts/model/provider-boundary.json' { param($c) $c.runtime_boundary.provider_transport = $false }
 JsonCase 'profiles emptied' 'P0-MODEL-CLAIMS-001' 'contracts/model/provider-boundary.json' { param($c) $c.runtime_boundary.configured_profiles = @() }

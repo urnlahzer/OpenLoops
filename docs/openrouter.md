@@ -199,6 +199,12 @@ Decision requests have their own 20-second wall deadline.
 
 ## Validation
 
+The owner-run [Jev optimization harness](../tools/jev-optimize/README.md) tunes
+the decision questions using synthetic or public text, and owner-exported text
+only when the owner explicitly runs that path. It sends those inputs to the
+same ZDR Decisions and reflection endpoints described above; downloaded data,
+recordings, and owner exports are not committed.
+
 `cargo test -p openloops-inference --features ollama-cloud,openrouter --locked`.
 
 The unit tests answer from a loopback socket and never contact OpenRouter. They
