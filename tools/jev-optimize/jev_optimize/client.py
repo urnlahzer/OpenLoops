@@ -40,6 +40,22 @@ def request_bytes(
     return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
 
 
+def model_matches(reported: str, selected: str) -> bool:
+    """The exact selected label, or that label with a dated or variant suffix.
+
+    OpenRouter reports the build actually served, e.g. ``typesafe/jev-1.13``
+    as ``typesafe/jev-1.13-20260917``; a different model or family never
+    matches.
+    """
+    if reported == selected:
+        return True
+    for separator in (":", "-"):
+        prefix = f"{selected}{separator}"
+        if reported.startswith(prefix) and len(reported) > len(prefix):
+            return all(ch.isalnum() or ch in ".-_" for ch in reported[len(prefix) :])
+    return False
+
+
 def _probability(value: Any) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise DecisionResponseError("invalid probability")
@@ -65,17 +81,17 @@ def parse_response(raw: bytes, model: str, questions: Mapping[str, Any]) -> dict
     if not isinstance(value, dict) or set(value) - _ENVELOPE_KEYS:
         raise DecisionResponseError("invalid response envelope")
     reported = value.get("model")
-    if not isinstance(reported, str) or not (
-        reported == model or reported.startswith(f"{model}:")
-    ):
-        raise DecisionResponseError("model mismatch")
+    if not isinstance(reported, str) or not model_matches(reported, model):
+        # The reported label is provider metadata, never mail content.
+        raise DecisionResponseError(f"model mismatch: reported {reported!r}")
     supplied = value.get("answers")
     if not isinstance(supplied, dict) or set(supplied) != set(questions):
         raise DecisionResponseError("answer ids mismatch")
+    # `usage` is provider accounting metadata: OpenRouter adds members such as
+    # `cost` beside TypeSafe's token counts. Only `input_tokens` is read.
     usage = value.get("usage")
     if usage is not None and (
         not isinstance(usage, dict)
-        or set(usage) - {"input_tokens", "output_tokens"}
         or isinstance(usage.get("input_tokens"), bool)
         or not isinstance(usage.get("input_tokens"), int)
         or usage["input_tokens"] < 0

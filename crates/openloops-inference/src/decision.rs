@@ -424,19 +424,33 @@ pub fn parse_answers(
     })
 }
 
+/// `usage` is provider accounting metadata: `OpenRouter` adds members such as
+/// `cost` beside `TypeSafe`'s token counts, so only `input_tokens` is read and
+/// the rest of the object is ignored. It must still be an object with a
+/// non-negative integer `input_tokens`.
 fn parse_usage(value: Option<&Value>) -> Result<u64, ProviderError> {
     let Some(value) = value else { return Ok(0) };
-    let usage = object_with_members(value, &["input_tokens", "output_tokens"])?;
-    usage
-        .get("input_tokens")
+    value
+        .as_object()
+        .and_then(|usage| usage.get("input_tokens"))
         .and_then(Value::as_u64)
         .ok_or(ProviderError::InvalidResponse)
 }
 
+/// The exact selected label, or that label followed by `:` or `-` and a
+/// variant or dated build such as `typesafe/jev-1.13-20260917`, which is what
+/// the decisions endpoint reports for the build it served. Any other label
+/// rejects.
 fn selected_model_matches(reported: &str, selected: &str) -> bool {
-    reported
-        .strip_prefix(selected)
-        .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(':'))
+    reported.strip_prefix(selected).is_some_and(|suffix| {
+        suffix.is_empty()
+            || suffix.strip_prefix([':', '-']).is_some_and(|rest| {
+                !rest.is_empty()
+                    && rest
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            })
+    })
 }
 
 pub mod registry {
@@ -951,6 +965,19 @@ mod tests {
     fn parse_answers_rejects_model_mismatch() {
         let mut value = documented_response();
         value["model"] = json!("typesafe/other");
+        assert_eq!(parse(&value), Err(ProviderError::InvalidResponse));
+    }
+
+    #[test]
+    fn parse_answers_accepts_a_dated_build_of_the_selected_model() {
+        let mut value = documented_response();
+        value["model"] = json!("typesafe/jev-1.13-20260917");
+        assert!(parse(&value).is_ok());
+        value["model"] = json!("typesafe/jev-1.13:beta");
+        assert!(parse(&value).is_ok());
+        value["model"] = json!("typesafe/jev-1.130");
+        assert_eq!(parse(&value), Err(ProviderError::InvalidResponse));
+        value["model"] = json!("typesafe/jev-1.13-");
         assert_eq!(parse(&value), Err(ProviderError::InvalidResponse));
     }
 
