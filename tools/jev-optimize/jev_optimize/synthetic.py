@@ -420,15 +420,11 @@ def generate_llm(
             while len(accepted) < rows and attempts < rows * 5:
                 round_items = pending[: 12 * parallel]
                 batches = [round_items[i : i + 12] for i in range(0, len(round_items), 12)]
+                def request_batch(batch: list[tuple[int, dict[str, Any]]], name: str = set_name):
+                    return _chat_rows(http, model, api_key, name, [plan for _i, plan in batch])
+
                 with ThreadPoolExecutor(max_workers=parallel) as pool:
-                    results = list(
-                        pool.map(
-                            lambda batch: _chat_rows(
-                                http, model, api_key, set_name, [plan for _i, plan in batch]
-                            ),
-                            batches,
-                        )
-                    )
+                    results = list(pool.map(request_batch, batches))
                 completed: set[int] = set()
                 for batch, candidates in zip(batches, results, strict=True):
                     for candidate, (index, plan) in zip(candidates, batch, strict=False):
