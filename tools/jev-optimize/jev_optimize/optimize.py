@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -75,10 +76,12 @@ def evaluate_question(
     labels: list[bool] = []
     probabilities: list[float] = []
     multiclass_brier: list[float] = []
-    for row in rows:
-        if question_id not in row.label:
-            continue
-        prediction = program(**_inputs(row))
+    selected = [row for row in rows if question_id in row.label]
+    # The decisions are independent, so they are requested concurrently;
+    # results come back in row order.
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        predictions = list(pool.map(lambda row: program(**_inputs(row)), selected))
+    for row, prediction in zip(selected, predictions, strict=True):
         label = row.label[question_id]
         if isinstance(label, bool):
             labels.append(label)
@@ -154,8 +157,16 @@ def gated_question_update(
     baseline_test: dict[str, Any],
     tuned_test: dict[str, Any],
     tuned_instructions: str,
+    calibration: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Keep tuned wording only when validation and held-out accuracy do not regress."""
+    """Keep tuned wording only when validation and held-out accuracy do not regress.
+
+    Thresholds come from ``calibration`` when supplied: the selected wording
+    evaluated on train plus validation, which holds enough of each class for
+    the chooser where a validation split alone does not (closure outcomes are
+    20% positive). Without it the selected validation sweep is used. The
+    held-out test split never feeds threshold choice.
+    """
 
     baseline_validation_score = float(baseline_validation["accuracy"])
     tuned_validation_score = float(tuned_validation["accuracy"])
@@ -166,7 +177,7 @@ def gated_question_update(
         and tuned_test_accuracy >= baseline_test_accuracy
     )
     selected_validation = tuned_validation if keep_tuned else baseline_validation
-    thresholds = choose_thresholds(selected_validation["sweep"])
+    thresholds = choose_thresholds((calibration or selected_validation)["sweep"])
     update: dict[str, Any] = {
         "instructions": (
             tuned_instructions
@@ -254,6 +265,17 @@ def optimize_set(
         )
         tuned_test = evaluate_question(optimized, question_id, parts["test"])
         tuned_validation = evaluate_question(optimized, question_id, parts["validation"])
+        keep_tuned = (
+            tuned_validation["accuracy"] >= baseline_validation["accuracy"]
+            and tuned_test["accuracy"] >= baseline_test["accuracy"]
+        )
+        # Thresholds are chosen on train + validation for the wording that
+        # will ship, so the sweep holds enough of each class; test stays out.
+        calibration = evaluate_question(
+            optimized if keep_tuned else program,
+            question_id,
+            [*parts["train"], *parts["validation"]],
+        )
         update = gated_question_update(
             question_id,
             baseline_validation=baseline_validation,
@@ -261,7 +283,9 @@ def optimize_set(
             baseline_test=baseline_test,
             tuned_test=tuned_test,
             tuned_instructions=optimized.predict.signature.instructions,
+            calibration=calibration,
         )
+        update["calibration_rows"] = len(parts["train"]) + len(parts["validation"])
         update["proposer_rejection_count"] = proposer.rejection_count
         output["proposer_rejection_count"] += proposer.rejection_count
         output["test_metrics"][question_id] = (

@@ -141,3 +141,36 @@ def test_result_gate_keeps_non_regressing_tuned_statement():
     )
     assert update["instructions"] == tuned
     assert "kept_baseline" not in update
+
+
+def test_result_gate_takes_thresholds_from_the_calibration_sweep_when_given():
+    # Validation alone has too few positives (10) for the chooser; the
+    # calibration sweep (train + validation) has enough and is used instead.
+    thin = {
+        "accuracy": 0.9,
+        "sweep": threshold_sweep([True] * 10 + [False] * 30, [0.9] * 10 + [0.1] * 30),
+    }
+    calibration = {
+        "accuracy": 0.9,
+        "sweep": threshold_sweep([True] * 60 + [False] * 60, [0.9] * 60 + [0.1] * 60),
+    }
+    without = gated_question_update(
+        "closure.fulfilled",
+        baseline_validation=thin,
+        tuned_validation=thin,
+        baseline_test={"accuracy": 0.85},
+        tuned_test={"accuracy": 0.85},
+        tuned_instructions="later.paragraph_text states that the obligation is complete.",
+    )
+    assert without["insufficient_data"] is True
+    with_calibration = gated_question_update(
+        "closure.fulfilled",
+        baseline_validation=thin,
+        tuned_validation=thin,
+        baseline_test={"accuracy": 0.85},
+        tuned_test={"accuracy": 0.85},
+        tuned_instructions="later.paragraph_text states that the obligation is complete.",
+        calibration=calibration,
+    )
+    assert with_calibration["insufficient_data"] is False
+    assert with_calibration["accept"] >= 0.5 > with_calibration["escalate"]
