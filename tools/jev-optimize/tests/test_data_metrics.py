@@ -46,11 +46,15 @@ def test_metrics_on_toy_set():
     assert sweep[10]["selective_risk"] == 0.0
 
 
-def test_threshold_chooser_obeys_risk_and_orders_thresholds():
+def test_threshold_chooser_obeys_risk_and_never_accepts_below_half():
+    # Perfectly separated data would let a naive chooser accept at 0.15; a
+    # noul below 0.5 leans false, so accept is floored at 0.5 and the
+    # escalation band sits just below it.
     labels = [True] * 20 + [False] * 20
     probabilities = [0.9] * 20 + [0.1] * 20
     result = choose_thresholds(threshold_sweep(labels, probabilities))
-    assert result == {"accept": 0.15, "escalate": 0.1, "insufficient_data": False}
+    assert result == {"accept": 0.5, "escalate": 0.45, "insufficient_data": False}
+    assert result["accept"] >= 0.5 > result["escalate"] >= 0.2
 
 
 def test_threshold_chooser_uses_defaults_for_insufficient_support():

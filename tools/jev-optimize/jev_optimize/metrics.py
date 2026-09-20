@@ -73,6 +73,12 @@ def threshold_sweep(labels: list[bool], probabilities: list[float]) -> list[dict
     return rows
 
 
+# A noul below 0.5 leans false; accepting it as true would be wrong whatever
+# the sweep says. Escalation covers the band between the floors.
+ACCEPT_FLOOR = 0.5
+ESCALATE_FLOOR = 0.2
+
+
 def choose_thresholds(
     sweep: list[dict[str, Any]], max_selective_risk: float = 0.05
 ) -> dict[str, float | bool]:
@@ -80,9 +86,11 @@ def choose_thresholds(
 
     At least 20 positive and 20 negative examples are required; otherwise the registry
     defaults (0.70, 0.30) are returned with ``insufficient_data``. The accept threshold is
-    the smallest threshold whose selective risk is within the limit and whose positive recall
-    is at least 0.5. Escalate is the largest lower threshold with at most 0.1 of all positives
-    below it. Fallbacks preserve ``escalate < accept``.
+    the smallest threshold of at least ``ACCEPT_FLOOR`` whose selective risk is within the
+    limit and whose positive recall is at least 0.5: a probability below 0.5 means the
+    model leans false, so it can never count as acceptance however clean a validation
+    sweep looks. Escalate is the largest lower threshold of at least ``ESCALATE_FLOOR``
+    with at most 0.1 of all positives below it. Fallbacks preserve ``escalate < accept``.
     """
 
     positives = int(sweep[0].get("positives", 0)) if sweep else 0
@@ -92,7 +100,8 @@ def choose_thresholds(
     acceptable = [
         row["threshold"]
         for row in sweep
-        if row.get("selected", 0) > 0
+        if row["threshold"] >= ACCEPT_FLOOR
+        and row.get("selected", 0) > 0
         and row["selective_risk"] <= max_selective_risk
         and row.get("positive_coverage", 0.0) >= 0.5
     ]
@@ -100,9 +109,10 @@ def choose_thresholds(
     low_positive_tail = [
         row["threshold"]
         for row in sweep
-        if row["threshold"] < accept and row.get("positive_below_fraction", 0.0) <= 0.1
+        if ESCALATE_FLOOR <= row["threshold"] < accept
+        and row.get("positive_below_fraction", 0.0) <= 0.1
     ]
-    escalate = float(max(low_positive_tail, default=max(0.3, accept - 0.4)))
+    escalate = float(max(low_positive_tail, default=max(ESCALATE_FLOOR, accept - 0.4)))
     if escalate >= accept:
-        escalate = max(0.0, round(accept - 0.05, 2))
+        escalate = max(ESCALATE_FLOOR, round(accept - 0.1, 2))
     return {"accept": accept, "escalate": escalate, "insufficient_data": False}

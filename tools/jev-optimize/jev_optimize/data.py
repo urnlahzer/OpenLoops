@@ -47,27 +47,36 @@ def write_jsonl(path: str | Path, rows: Iterable[dict[str, Any]]) -> None:
             stream.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
 
-def split_name(row_id: str, seed: int = 0) -> str:
-    """Train 78%, validation 7%, test 15%, by a stable hash of the row id.
+def split_name(row_id: str, seed: int = 0, *, small: bool = False) -> str:
+    """Assign a row to train, validation or test by a stable hash of its id.
 
-    GEPA scores every candidate on the whole validation set, so a small
-    validation set (about 40 rows at 600) leaves the budget for exploring
-    candidates; the held-out test set keeps its size for the final metrics.
+    Large populations split 78/7/15: GEPA scores every candidate on the whole
+    validation set, so a small validation set leaves the budget for exploring
+    candidates while the held-out test set keeps its size. Populations under
+    ``SMALL_POPULATION`` rows (one question of a per-question corpus) split
+    60/20/20: the threshold chooser needs at least 20 examples of each class
+    in the validation sweep, which 400 rows per question meets at 20%.
     """
     bucket = int.from_bytes(
         hashlib.sha256(f"{seed}:{row_id}".encode()).digest()[:8], "big"
     ) % 100
-    return "train" if bucket < 78 else "validation" if bucket < 85 else "test"
+    train_end, validation_end = (60, 80) if small else (78, 85)
+    return "train" if bucket < train_end else "validation" if bucket < validation_end else "test"
+
+
+SMALL_POPULATION = 1000
 
 
 def split_rows(
     rows: Iterable[DatasetRow], seed: int = 0, question_id: str | None = None
 ) -> dict[str, list[DatasetRow]]:
+    population = [
+        row for row in rows if question_id is None or question_id in row.label
+    ]
+    small = len(population) < SMALL_POPULATION
     result: dict[str, list[DatasetRow]] = {"train": [], "validation": [], "test": []}
-    for row in rows:
-        if question_id is not None and question_id not in row.label:
-            continue
-        result[split_name(row.id, seed)].append(row)
+    for row in population:
+        result[split_name(row.id, seed, small=small)].append(row)
     return result
 
 
