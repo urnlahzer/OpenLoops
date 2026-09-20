@@ -355,42 +355,65 @@ def _chat_rows(
     return payload["rows"]
 
 
+def _nonempty_strings(mapping: Any, keys: tuple[str, ...]) -> bool:
+    return isinstance(mapping, dict) and all(
+        isinstance(mapping.get(key), str) and mapping[key].strip() for key in keys
+    )
+
+
 def _validate_generated_row(
     set_name: str, row: Any, plan: dict[str, Any]
-) -> dict[str, Any] | None:
-    if (
-        not isinstance(row, dict)
-        or set(row) != _ROW_FIELDS[set_name]
-        or row.get("label") != plan["label"]
-    ):
-        return None
-    if set_name == "closure" and (
-        not isinstance(row.get("obligation"), dict)
-        or set(row["obligation"]) != {"title", "evidence_text"}
-        or not isinstance(row.get("later"), dict)
-        or set(row["later"]) != {"paragraph_text", "from_user", "days_later"}
-    ):
-        return None
-    if set_name in {"closure", "triage"}:
-        location = row.get("later", row)
-        if not isinstance(location, dict) or location.get("from_user") is not plan["from_user"]:
-            return None
+) -> tuple[dict[str, Any] | None, str]:
+    """Return the accepted row and ``"ok"``, or ``None`` and the rejection reason.
+
+    The model writes only the texts. The label, ``from_user`` and
+    ``days_later`` are stamped from the plan, so a row is never rejected for
+    failing to echo a value the plan already fixed.
+    """
+
+    if not isinstance(row, dict):
+        return None, "not an object"
     if set_name == "closure":
-        if row.get("later", {}).get("days_later") != plan["days_later"]:
-            return None
-        if sum(value is True for value in row["label"].values()) > 1:
-            return None
-    row = dict(row)
-    row["set"] = set_name
-    row["source"] = "synthetic-llm"
-    if scrub_row(row):
-        return None
-    row["id"] = _stable_id(set_name, row)
+        if not _nonempty_strings(row.get("obligation"), ("title", "evidence_text")):
+            return None, "obligation texts missing"
+        if not _nonempty_strings(row.get("later"), ("paragraph_text",)):
+            return None, "later paragraph missing"
+        built: dict[str, Any] = {
+            "obligation": {
+                "title": row["obligation"]["title"],
+                "evidence_text": row["obligation"]["evidence_text"],
+            },
+            "later": {
+                "paragraph_text": row["later"]["paragraph_text"],
+                "from_user": plan["from_user"],
+                "days_later": plan["days_later"],
+            },
+        }
+    elif set_name == "triage":
+        if not _nonempty_strings(row, ("subject", "paragraph_text")):
+            return None, "triage texts missing"
+        built = {
+            "subject": row["subject"],
+            "paragraph_text": row["paragraph_text"],
+            "from_user": plan["from_user"],
+        }
+    else:
+        text_keys = tuple(sorted(_ROW_FIELDS["rules"] - {"label"}))
+        if not _nonempty_strings(row, text_keys):
+            return None, "rules texts missing"
+        built = {key: row[key] for key in text_keys}
+    built["label"] = dict(plan["label"])
+    built["set"] = set_name
+    built["source"] = "synthetic-llm"
+    scrub = scrub_row(built)
+    if scrub:
+        return None, "scrub: " + scrub[0]
+    built["id"] = _stable_id(set_name, built)
     try:
-        DatasetRow.model_validate(row)
+        DatasetRow.model_validate(built)
     except ValueError:
-        return None
-    return row
+        return None, "row failed validation"
+    return built, "ok"
 
 
 def generate_llm(
@@ -426,7 +449,8 @@ def generate_llm(
                 seeds = scenario_seeds(plan["focus_question"])
                 plan["scenario"] = seeds[(index // len(SETS[set_name])) % len(seeds)]
             attempts = 0
-            while len(accepted) < rows and attempts < rows * 5:
+            rejections: dict[str, int] = {}
+            while len(accepted) < rows and attempts < rows * 8:
                 round_items = pending[: 12 * parallel]
                 batches = [round_items[i : i + 12] for i in range(0, len(round_items), 12)]
                 def request_batch(batch: list[tuple[int, dict[str, Any]]], name: str = set_name):
@@ -436,27 +460,33 @@ def generate_llm(
                     results = list(pool.map(request_batch, batches))
                 completed: set[int] = set()
                 for batch, candidates in zip(batches, results, strict=True):
-                    for candidate, (index, plan) in zip(candidates, batch, strict=False):
-                        validated = _validate_generated_row(set_name, candidate, plan)
-                        normalized_text = (
-                            _dedupe_text(set_name, validated) if validated is not None else ""
+                    if len(candidates) < len(batch):
+                        rejections["short batch"] = (
+                            rejections.get("short batch", 0) + len(batch) - len(candidates)
                         )
-                        if (
-                            validated is not None
-                            and validated["id"] not in seen_ids
-                            and normalized_text not in seen_texts
-                        ):
-                            accepted[index] = validated
-                            seen_ids.add(validated["id"])
-                            seen_texts.add(normalized_text)
-                            completed.add(index)
+                    for candidate, (index, plan) in zip(candidates, batch, strict=False):
+                        validated, reason = _validate_generated_row(set_name, candidate, plan)
+                        if validated is None:
+                            rejections[reason] = rejections.get(reason, 0) + 1
+                            continue
+                        normalized_text = _dedupe_text(set_name, validated)
+                        if validated["id"] in seen_ids or normalized_text in seen_texts:
+                            rejections["duplicate"] = rejections.get("duplicate", 0) + 1
+                            continue
+                        accepted[index] = validated
+                        seen_ids.add(validated["id"])
+                        seen_texts.add(normalized_text)
+                        completed.add(index)
                 failed = [item for item in round_items if item[0] not in completed]
                 pending = pending[len(round_items):] + failed
                 attempts += len(round_items)
             if len(accepted) < rows:
+                summary = ", ".join(
+                    f"{reason}: {count}" for reason, count in sorted(rejections.items())
+                )
                 raise RuntimeError(
                     "synthetic generation produced only "
-                    f"{len(accepted)} valid distinct {set_name} rows"
+                    f"{len(accepted)} valid distinct {set_name} rows; rejections: {summary}"
                 )
             generated = [accepted[index] for index in range(rows)]
             random.Random(seed).shuffle(generated)
