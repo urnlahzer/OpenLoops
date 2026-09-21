@@ -27,6 +27,12 @@ In the [native setup window](native-setup.md), on the Connections tab:
    triage**. It is off by default, and P0 does not change scan behavior.
 7. Click **Check decision model** to run the content-free endpoint check and
    report whether that endpoint accepts the `provider.zdr` member.
+8. Optionally, with a scan result loaded, type an absolute folder path
+   outside the repository into **Training export folder** and click
+   **Export training data** twice (the first click only arms a warning) to
+   write the current scan's mail text as training data for the `Jev`
+   question-optimization harness. See [Inbox review](inbox-review.md) and
+   `tools/jev-optimize/README.md`.
 
 Create a key at <https://openrouter.ai/settings/keys>.
 

@@ -75,6 +75,16 @@ pub(crate) enum SettingsPresence {
     Present,
 }
 
+/// The training-export button's two-press confirm state -- an enum rather
+/// than a plain `bool` field so it does not count against `AppModel`'s
+/// `clippy::struct_excessive_bools` budget.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ExportArmed {
+    #[default]
+    No,
+    Yes,
+}
+
 /// Toolkit-free setup/connection/review model used by the native UI adapter.
 pub struct AppModel {
     pub client_id: String,
@@ -90,6 +100,15 @@ pub struct AppModel {
     pub openrouter_selected: String,
     pub openrouter_parallel: u16,
     pub use_decision_model: bool,
+    /// The owner-typed destination for a training-data export -- in-memory
+    /// only, never part of [`Settings`]/[`AppModel::save_settings`]. See
+    /// [`crate::training_export`].
+    pub training_export_folder: String,
+    pub(crate) training_export_status: Status,
+    /// The export button's two-press confirm: `No` until the first click,
+    /// which arms it and shows a warning instead of writing; disarmed by
+    /// any further folder edit or by the write attempt itself.
+    pub(crate) training_export_armed: ExportArmed,
     pub(crate) microsoft: Status,
     pub(crate) model_status: Status,
     pub(crate) decision_status: Status,
@@ -138,6 +157,9 @@ impl AppModel {
             openrouter_selected: String::new(),
             openrouter_parallel: crate::settings::DEFAULT_OPENROUTER_PARALLEL,
             use_decision_model: false,
+            training_export_folder: String::new(),
+            training_export_status: Status::default(),
+            training_export_armed: ExportArmed::No,
             microsoft: Status::default(),
             model_status: Status::default(),
             decision_status: Status::default(),
@@ -727,6 +749,13 @@ impl AppModel {
         self.provider == Provider::OpenRouter
             && !self.openrouter_key.is_empty()
             && self.use_decision_model
+    }
+
+    /// Whether "Export training data" may be pressed: a scan result is
+    /// loaded and the owner has typed a destination folder.
+    #[must_use]
+    pub fn can_export_training(&self) -> bool {
+        self.review.analysis.is_some() && !self.training_export_folder.trim().is_empty()
     }
 
     /// Whether the client ID, active key, and selected model are all

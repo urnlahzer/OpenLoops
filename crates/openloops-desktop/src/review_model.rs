@@ -1,7 +1,7 @@
 //! Toolkit-free review state and pure decision/urgency/status logic.
 use crate::claim_view::{
-    Anchor, EventPassed, LoopItem, LoopItems, Owner, ResolutionKind, SuggestedUpdate,
-    SuggestedUpdateKind,
+    Anchor, EventPassed, LoopItem, LoopItems, Owner, ResolutionKind, ResolvedUpdate,
+    SuggestedUpdate, SuggestedUpdateKind,
 };
 use crate::deadline_view::{DeadlineView, classify};
 use crate::loop_state::{Decision, Decisions, Record, Reminder, now};
@@ -15,7 +15,7 @@ use std::sync::atomic::Ordering;
 mod scanning;
 pub(crate) use scanning::{
     ConversationFailure, FailureReason, ReviewMessage, ScanOptions, ScanProgress, ScanResult,
-    probe, scan,
+    closure_candidates, probe, same_thread_closure_candidates, scan,
 };
 
 pub(crate) const SHOW_HANDLED_LABEL: &str = "Show resolved, handled, and dismissed";
@@ -123,6 +123,12 @@ pub struct ReviewState {
     pub failed_sources: BTreeSet<String>,
     pub failed_conversations_detail: Vec<ConversationFailure>,
     pub decisions: Decisions,
+    /// Owner accept/reject outcomes on suggested updates, kept after
+    /// [`LoopItem::suggested_update`] is cleared so a later training-data
+    /// export ([`crate::training_export`]) can still recover the gold
+    /// label. Session-only, cleared on the next [`ReviewState::set_scan`]
+    /// (a rescan invalidates every message handle it might reference).
+    pub(crate) resolved_updates: Vec<ResolvedUpdate>,
     pub action_status: String,
     pub action_status_succeeded: bool,
     pub pending_reminder: Option<([u8; 32], ReminderRequest)>,
@@ -366,6 +372,7 @@ impl ReviewState {
         }
         self.analysis = Some(result.analysis);
         self.analysis_model = model;
+        self.resolved_updates.clear();
         // A rescan rebuilds `analysis`/`messages` from scratch; an open
         // draft refers to a card from the previous scan and would otherwise
         // be orphaned -- neither closeable (its card may no longer exist)
@@ -641,6 +648,16 @@ impl ReviewState {
         let Some(update) = item.suggested_update.take() else {
             return SuggestionOutcome::Ignored;
         };
+        self.resolved_updates.push(ResolvedUpdate {
+            obligation_message: item.evidence.message.clone(),
+            obligation_block: item.evidence.block,
+            obligation_action_phrase: item.action_phrase.clone(),
+            obligation_evidence_text: item.evidence.quote.clone(),
+            kind: update.kind,
+            source_message: update.source_message.clone(),
+            source_block: update.source_block,
+            accepted: accept,
+        });
         if !accept {
             return SuggestionOutcome::Cleared;
         }
@@ -1535,6 +1552,72 @@ mod tests {
         let mut state = ReviewState::loaded(vec![source.clone()]);
         state.append_sources(vec![source]);
         assert_eq!(state.messages.len(), 1);
+    }
+
+    #[test]
+    fn resolve_suggested_update_records_accept_and_reject_outcomes() {
+        let mut state = layout_fixture();
+        state.analysis.as_mut().unwrap().items[0].suggested_update = Some(SuggestedUpdate {
+            kind: SuggestedUpdateKind::Closure,
+            evidence_text: "Synthetic follow-up confirming completion.".into(),
+            source_message: "m1".into(),
+            source_block: 0,
+            temporal_value: None,
+            confidence_micros: 900_000,
+        });
+        let obligation_message = state.analysis.as_ref().unwrap().items[0]
+            .evidence
+            .message
+            .clone();
+        let obligation_block = state.analysis.as_ref().unwrap().items[0].evidence.block;
+        let outcome = state.resolve_suggested_update(0, true);
+        assert_eq!(outcome, SuggestionOutcome::MarkHandled);
+        assert_eq!(state.resolved_updates.len(), 1);
+        let recorded = &state.resolved_updates[0];
+        assert_eq!(recorded.kind, SuggestedUpdateKind::Closure);
+        assert!(recorded.accepted);
+        assert_eq!(recorded.obligation_message, obligation_message);
+        assert_eq!(recorded.obligation_block, obligation_block);
+        assert_eq!(recorded.source_message, "m1");
+        assert_eq!(recorded.source_block, 0);
+
+        state.analysis.as_mut().unwrap().items[1].suggested_update = Some(SuggestedUpdate {
+            kind: SuggestedUpdateKind::DeadlineChange,
+            evidence_text: "Synthetic deadline change.".into(),
+            source_message: "m2".into(),
+            source_block: 0,
+            temporal_value: Some("next Friday".into()),
+            confidence_micros: 800_000,
+        });
+        let outcome = state.resolve_suggested_update(1, false);
+        assert_eq!(outcome, SuggestionOutcome::Cleared);
+        assert_eq!(state.resolved_updates.len(), 2);
+        assert!(!state.resolved_updates[1].accepted);
+    }
+
+    #[test]
+    fn resolve_suggested_update_ignores_accepting_a_modification_and_records_nothing() {
+        let mut state = layout_fixture();
+        state.analysis.as_mut().unwrap().items[0].suggested_update = Some(SuggestedUpdate {
+            kind: SuggestedUpdateKind::Modification,
+            evidence_text: "Synthetic modification.".into(),
+            source_message: "m1".into(),
+            source_block: 0,
+            temporal_value: None,
+            confidence_micros: 700_000,
+        });
+        let outcome = state.resolve_suggested_update(0, true);
+        assert_eq!(outcome, SuggestionOutcome::Ignored);
+        assert!(state.resolved_updates.is_empty());
+        // A rejected `Modification` still records, unlike an accepted one.
+        let outcome = state.resolve_suggested_update(0, false);
+        assert_eq!(outcome, SuggestionOutcome::Cleared);
+        assert_eq!(state.resolved_updates.len(), 1);
+        assert!(!state.resolved_updates[0].accepted);
+        assert_eq!(
+            state.resolved_updates[0].kind,
+            SuggestedUpdateKind::Modification
+        );
     }
 
     #[test]

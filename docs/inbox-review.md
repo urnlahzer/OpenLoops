@@ -213,6 +213,22 @@ API references: [messages](https://learn.microsoft.com/en-us/graph/api/user-list
 [To Do creation](https://learn.microsoft.com/en-us/graph/api/todotasklist-post-tasks?view=graph-rest-1.0),
 [Ollama structured-output limits](https://docs.ollama.com/capabilities/structured-outputs).
 
+### Training data export (deliberate exception)
+
+The Sources screen's OpenRouter card has an owner-invoked **Export training
+data** control: with a scan result loaded and a folder path typed into
+**Training export folder**, it writes `triage.jsonl` and `closure.jsonl` --
+real mail text (subjects, paragraphs, participants) from the currently
+loaded scan, plus the owner's own accept/reject decisions on suggested
+updates -- for the `Jev` question-optimization harness in
+`tools/jev-optimize/` (see that tool's README). This is the one deliberate
+exception to the no-persistence rule described above: it writes real content
+to disk only when the owner explicitly asks, only to a folder the owner
+names outside this repository, and the button requires two presses (the
+first only arms a warning). The folder path itself lives in memory only for
+the running session and is never saved to Windows Credential Manager or any
+other settings record; nothing about the export is logged.
+
 # Retry failed conversations and sources
 
 After a Review scan, **Retry failed (N)** reloads only sources whose listing failed and re-analyzes only conversations that timed out, hit a transport or retryable provider failure, panicked, or were not started; newly loaded conversations from those sources are included automatically. It never resends rate-limited or quota-blocked conversations, and decisions on untouched conversations—as well as decisions whose retried item keeps the same fingerprint—are preserved.

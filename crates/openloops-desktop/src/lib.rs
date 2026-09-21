@@ -16,6 +16,8 @@ pub(crate) mod settings;
 pub(crate) mod slint_review;
 #[cfg(feature = "native-ui")]
 pub mod slint_ui;
+#[cfg(feature = "native-ui")]
+pub(crate) mod training_export;
 #[cfg(all(test, feature = "native-ui"))]
 mod winres;
 

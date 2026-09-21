@@ -95,6 +95,19 @@ only, never accuracy claims. Real Enron labels require owner review. An owner
 export is similarly opt-in and outside this repository; use
 `feedback_includes_text=False` for it so GEPA feedback remains content-free.
 
+The desktop app's own **Export training data** control (Sources screen,
+OpenRouter card) writes this owner export directly in the harness's JSONL
+schema: `triage.jsonl` and `closure.jsonl`, one JSON object per line,
+`sort_keys`-equivalent (sorted member order), `source: "owner-export"`.
+Closure rows also carry `label_source: "gold"` where the label reflects the
+owner's own Accept/Reject on a suggested update, or `"silver"` where it is
+the chat model's own guess (pending, or no signal at all) -- treat gold rows
+as ground truth and silver rows the same as any other silver source. Point
+`evaluate --data`/`optimize --data` (or `check-corpus`) at either file
+directly; run `--set triage`/`--set closure` to match. Both files are
+already outside this repository by construction (the exporter refuses to
+write inside it), so no extra step is needed to keep them out of `git`.
+
 The registry hash printed by `write-registry` is SHA-256 over
 `json.dumps(obj, separators=(",", ":"), ensure_ascii=False)`. The registry is
 written with sorted keys, so PowerShell's `ConvertTo-Json -Depth 100 -Compress`

@@ -2,9 +2,12 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use crate::{
-    app_model::{AccountDisplay, AppModel, Outcome, Service, SettingsPresence, Status},
+    app_model::{
+        AccountDisplay, AppModel, ExportArmed, Outcome, Service, SettingsPresence, Status,
+    },
     review_model::{ReviewState, ScanStrip, load_strip, open_badge_count, scan_strip},
     settings::{MAX_OPENROUTER_PARALLEL, MIN_OPENROUTER_PARALLEL, OllamaPlan, Provider},
+    training_export,
 };
 use openloops_graph::live::{ConnectionConfig, check_connection, clear_session};
 use openloops_inference::{
@@ -329,6 +332,9 @@ pub(crate) fn sync(model: &AppModel, window: &AppWindow) {
     window.set_use_decision_model(model.use_decision_model);
     window.set_decision_status(joined_status(&model.decision_status).into());
     window.set_decision_succeeded(model.decision_status.succeeded);
+    window.set_training_export_folder(model.training_export_folder.clone().into());
+    window.set_training_export_status(joined_status(&model.training_export_status).into());
+    window.set_training_export_succeeded(model.training_export_status.succeeded);
     window.set_model_busy_line(
         if model.pending_service == Service::Model {
             busy_text.as_deref().unwrap_or_default()
@@ -353,6 +359,7 @@ pub(crate) fn sync(model: &AppModel, window: &AppWindow) {
     });
     window.set_can_test_model(!model.selected_model().is_empty() && !model.active_key().is_empty());
     window.set_can_check_decision_model(model.can_check_decision_model());
+    window.set_can_export_training(model.can_export_training());
     crate::slint_review::sync_review(model, window, &cards, busy, review_scanning, strip_model);
 }
 
@@ -434,6 +441,79 @@ pub(crate) fn refresh(model: &Rc<RefCell<AppModel>>, weak: &slint::Weak<AppWindo
 
 pub(crate) fn start_timer(timer: &Rc<Timer>) {
     timer.restart();
+}
+
+/// Wires the Sources-screen training-data export controls. Local disk I/O
+/// only (never a network call), so both callbacks run synchronously rather
+/// than through the `start`/`Outcome`/timer worker pattern the model/
+/// decision checks use. Split out of `run` so a test can register these two
+/// callbacks against a window without driving the whole event loop -- see
+/// `slint_review.rs`'s one native-window test.
+pub(crate) fn register_training_export_callbacks(
+    window: &AppWindow,
+    model: &Rc<RefCell<AppModel>>,
+) {
+    {
+        let model = Rc::clone(model);
+        let weak = window.as_weak();
+        // Deliberately bypasses `finish_edit`/`persist_changes`: this field
+        // is in-memory only and must never round-trip through the settings
+        // store (see `AppModel::training_export_folder`).
+        window.on_training_export_folder_edited(move |value| {
+            let value: String = value.chars().take(512).collect();
+            let mut model_ref = model.borrow_mut();
+            model_ref.training_export_folder = value;
+            model_ref.training_export_armed = ExportArmed::No;
+            drop(model_ref);
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(model);
+        let weak = window.as_weak();
+        window.on_export_training_data(move || {
+            let mut model_ref = model.borrow_mut();
+            if model_ref.training_export_armed == ExportArmed::Yes {
+                let folder = model_ref.training_export_folder.trim().to_owned();
+                model_ref.training_export_status =
+                    match training_export::export(&model_ref.review, std::path::Path::new(&folder))
+                    {
+                        Ok(summary) => Status {
+                            lines: vec![format!(
+                                "Wrote {} triage rows and {} closure rows.",
+                                summary.triage_rows, summary.closure_rows
+                            )],
+                            succeeded: true,
+                        },
+                        Err(training_export::ExportError::RelativePath) => Status {
+                            lines: vec!["Enter an absolute folder path.".into()],
+                            succeeded: false,
+                        },
+                        Err(training_export::ExportError::PathInRepo) => Status {
+                            lines: vec!["Choose a folder outside the repository.".into()],
+                            succeeded: false,
+                        },
+                        Err(training_export::ExportError::Io(error)) => Status {
+                            lines: vec![format!("Could not write to {folder} ({}).", error.kind())],
+                            succeeded: false,
+                        },
+                    };
+                model_ref.training_export_armed = ExportArmed::No;
+            } else {
+                model_ref.training_export_armed = ExportArmed::Yes;
+                model_ref.training_export_status = Status {
+                    lines: vec![
+                        "Mail text (subjects, paragraphs, participants) from the loaded scan \
+                         will be written to this folder. Press Export training data again to write."
+                            .into(),
+                    ],
+                    succeeded: false,
+                };
+            }
+            drop(model_ref);
+            refresh(&model, &weak);
+        });
+    }
 }
 
 /// Probes the model selected in the saved desktop settings.
@@ -983,6 +1063,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
             refresh(&model, &weak);
         });
     }
+    register_training_export_callbacks(&window, &model);
 
     crate::slint_review::register_callbacks(&window, &model, &timer);
 
