@@ -485,6 +485,8 @@ pub mod registry {
         "closure.withdrawn",
         "closure.deadline_changed",
         "closure.modified",
+        "closure.outcome",
+        "extract.claim_type",
         "triage.asks_recipient",
         "triage.commits_sender",
         "triage.asks_question",

@@ -43,6 +43,35 @@ stdlib-only `generate-synthetic --stub` mode writes tiny deterministic fixtures
 for tests; tests always direct those files to a temporary directory. It is not a
 replacement for the committed LLM-authored corpus.
 
+## Derived questions: `closure.outcome` and `extract.claim_type`
+
+Two questions have no corpus of their own; their labels are derived on load
+(`data.py`'s `load_jsonl`) from an existing set's rows, so `--set extract`
+generation is refused (`extract` rows come from `triage`) and `--set closure`
+already carries `closure.outcome`.
+
+- `closure.outcome` (choice: `fulfilled` / `withdrawn` / `deadline_changed` /
+  `modified` / `none`) is derived from a closure row's four noul labels: the
+  one true noul, or `none` when all four are false. A row positive for more
+  than one noul is a data-quality issue and is left without a derived
+  `closure.outcome` label (`check-corpus`'s own exclusivity check catches it
+  separately). `optimize --set closure` and `check-corpus` on a closure file
+  tune and report `closure.outcome` alongside the four nouls without any
+  separate `closure.outcome` corpus file.
+- `extract.claim_type` (choice: `request` / `promise` / `question` /
+  `attribution` / `delegation` / `none`) is derived from a triage row's own
+  labels: `question` when `triage.asks_question` is true, else `request` when
+  `triage.asks_recipient` is true, else `promise` when
+  `triage.commits_sender` is true, else `none`. `attribution` and
+  `delegation` have no triage signal to derive from and never appear in the
+  derived corpus; they are registered so the desktop app's compare probe and
+  a future owner-labeled corpus can use them. `optimize --set extract` and
+  `evaluate --set extract` default their `--data` to the `triage` corpus
+  (`triage.jsonl`); point `--data` at a `triage`-shaped file explicitly to use
+  another one. `check-corpus` run on a `triage` file reports both the
+  triage question's own balance and `extract.claim_type`'s label
+  distribution.
+
 Run `optimize` separately for `closure`, `triage`, and `rules`; pass all result
 files to `write-registry` to merge them in one reviewed edit. Replay files are
 stable-hash keyed and allow evaluation without a network call.

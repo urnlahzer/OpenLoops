@@ -42,9 +42,11 @@ use openloops_inference::{
     walker::canonicalize_html,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::BufRead;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct ReviewMessage {
@@ -4998,15 +5000,17 @@ fn decision_paragraph_jobs(pairs: &[DecisionPair<'_>]) -> Vec<DecisionParagraphJ
 }
 
 fn closure_questions(ordinal: usize) -> Result<Questions, ProviderError> {
-    let request_ids: Vec<String> = DecisionOutcome::ALL
+    let mut request_ids: Vec<String> = DecisionOutcome::ALL
         .iter()
         .map(|outcome| format!("p{ordinal}.{}", outcome.suffix()))
         .collect();
-    let mapped: Vec<(&str, &str)> = DecisionOutcome::ALL
+    request_ids.push(format!("p{ordinal}.outcome"));
+    let mut mapped: Vec<(&str, &str)> = DecisionOutcome::ALL
         .iter()
         .zip(&request_ids)
         .map(|(outcome, request)| (outcome.registry_id(), request.as_str()))
         .collect();
+    mapped.push(("closure.outcome", request_ids[4].as_str()));
     Questions::from_registry_with_ids(&mapped)
 }
 
@@ -5027,6 +5031,13 @@ fn closure_state(item: &LoopItem, pair: &DecisionPair<'_>, paragraph: &str) -> s
 
 struct DecisionProbabilities {
     values: [(DecisionOutcome, f64); 4],
+    choice: DecisionChoice,
+}
+
+struct DecisionChoice {
+    outcome: Option<DecisionOutcome>,
+    probability: f64,
+    confidence: f64,
 }
 
 enum DecisionJobResult {
@@ -5052,7 +5063,33 @@ fn decide_paragraph(
         };
         values[slot] = (outcome, *probability);
     }
-    Ok(DecisionProbabilities { values })
+    let id = format!("p{}.outcome", job.ordinal);
+    let Some(Answer::Choice {
+        choice,
+        probabilities,
+        confidence,
+    }) = answers.get(&id)
+    else {
+        return Err(ProviderError::InvalidResponse);
+    };
+    let outcome = DecisionOutcome::ALL
+        .iter()
+        .copied()
+        .find(|candidate| candidate.suffix() == choice);
+    if outcome.is_none() && choice != "none" {
+        return Err(ProviderError::InvalidResponse);
+    }
+    let probability = *probabilities
+        .get(choice)
+        .ok_or(ProviderError::InvalidResponse)?;
+    Ok(DecisionProbabilities {
+        values,
+        choice: DecisionChoice {
+            outcome,
+            probability,
+            confidence: *confidence,
+        },
+    })
 }
 
 fn normalized_deadline(pair: &DecisionPair<'_>, text: &str) -> Result<Option<String>, ()> {
@@ -5125,6 +5162,35 @@ fn accepted_update(
     }))
 }
 
+fn choice_update(
+    pair: &DecisionPair<'_>,
+    job: &DecisionParagraphJob,
+    choice: &DecisionChoice,
+) -> Result<Option<SuggestedUpdate>, ()> {
+    let Some(outcome) = choice.outcome else {
+        return Ok(None);
+    };
+    let temporal_value = if outcome == DecisionOutcome::DeadlineChanged {
+        let Some(value) = normalized_deadline(pair, &job.text)? else {
+            return Ok(None);
+        };
+        Some(value)
+    } else {
+        None
+    };
+    let confidence_micros = format!("{:.0}", choice.probability * 1_000_000.0)
+        .parse()
+        .expect("validated probability rounds into u32");
+    Ok(Some(SuggestedUpdate {
+        kind: outcome.kind(),
+        evidence_text: job.text.clone(),
+        source_message: pair.later.input.handle.clone(),
+        source_block: job.ordinal,
+        temporal_value,
+        confidence_micros,
+    }))
+}
+
 fn pair_has_escalation(
     pair: &DecisionPair<'_>,
     jobs: &[DecisionParagraphJob],
@@ -5157,6 +5223,8 @@ fn recombine_decisions(
     bool,
 ) {
     let mut maxima = vec![BTreeMap::new(); pairs.len()];
+    let mut choices: Vec<Option<(DecisionChoice, usize)>> =
+        (0..pairs.len()).map(|_| None).collect();
     let mut skipped = BTreeSet::new();
     let mut cancelled = false;
     for (slot, outcome) in outcomes {
@@ -5168,6 +5236,12 @@ fn recombine_decisions(
                     if probability > entry.0 {
                         *entry = (probability, slot);
                     }
+                }
+                let replace = choices[pair_index]
+                    .as_ref()
+                    .is_none_or(|(current, _)| answer.choice.confidence > current.confidence);
+                if replace {
+                    choices[pair_index] = Some((answer.choice, slot));
                 }
             }
             JobOutcome::Completed(Err(ProviderError::Cancelled)) => cancelled = true,
@@ -5184,7 +5258,20 @@ fn recombine_decisions(
         if skipped.contains(&pair_index) || maxima[pair_index].is_empty() {
             continue;
         }
-        match accepted_update(pair, jobs, &maxima[pair_index]) {
+        let choice_question = Registry::get()
+            .question("closure.outcome")
+            .expect("closure outcome registry question");
+        let Some((choice, choice_job)) = &choices[pair_index] else {
+            continue;
+        };
+        let choice_result = if choice.confidence >= choice_question.accept {
+            choice_update(pair, &jobs[*choice_job], choice)
+        } else if choice.confidence >= choice_question.escalate {
+            accepted_update(pair, jobs, &maxima[pair_index])
+        } else {
+            Ok(None)
+        };
+        match choice_result {
             Err(()) => {
                 escalated.insert(pair_index);
             }
@@ -5197,7 +5284,11 @@ fn recombine_decisions(
                     best.insert(item, update);
                 }
             }
-            Ok(None) if pair_has_escalation(pair, jobs, &maxima[pair_index]) => {
+            Ok(None)
+                if choice.confidence >= choice_question.escalate
+                    && choice.confidence < choice_question.accept
+                    && pair_has_escalation(pair, jobs, &maxima[pair_index]) =>
+            {
                 escalated.insert(pair_index);
             }
             Ok(None) => {}
@@ -6134,6 +6225,319 @@ fn merge_threads_with_rules(
 }
 
 // Live semantic smoke suite: counts only, no returned content is logged or saved.
+const COMPARE_IDS: &[&str] = &[
+    "triage.asks_recipient",
+    "triage.commits_sender",
+    "triage.asks_question",
+    "triage.names_time",
+    "triage.boilerplate",
+    "triage.automated_notification",
+    "extract.claim_type",
+];
+
+#[derive(Clone)]
+struct CompareRow {
+    subject: String,
+    paragraph_text: String,
+    from_user: bool,
+    labels: BTreeMap<String, CompareValue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CompareValue {
+    Bool(bool),
+    Choice(String),
+}
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+struct CompareCount {
+    n: usize,
+    agreement: usize,
+    gray: usize,
+}
+
+fn claim_type_from_labels(labels: &serde_json::Map<String, serde_json::Value>) -> &'static str {
+    if labels
+        .get("triage.asks_question")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        "question"
+    } else if labels
+        .get("triage.asks_recipient")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        "request"
+    } else if labels
+        .get("triage.commits_sender")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        "promise"
+    } else {
+        "none"
+    }
+}
+
+fn exported_compare_rows(folder: &Path) -> Result<Vec<CompareRow>, String> {
+    let file = std::fs::File::open(folder.join("triage.jsonl"))
+        .map_err(|_| "Comparison data could not be opened".to_string())?;
+    let mut rows = Vec::new();
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line.map_err(|_| "Comparison data could not be read".to_string())?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value = openloops_contracts::parse_strict_json(line.as_bytes())
+            .map_err(|_| "Comparison data is invalid".to_string())?;
+        let labels = value
+            .get("label")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| "Comparison data is invalid".to_string())?;
+        let mut derived = BTreeMap::new();
+        for id in &COMPARE_IDS[..6] {
+            let label = labels
+                .get(*id)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            derived.insert((*id).to_string(), CompareValue::Bool(label));
+        }
+        derived.insert(
+            "extract.claim_type".into(),
+            CompareValue::Choice(claim_type_from_labels(labels).into()),
+        );
+        rows.push(CompareRow {
+            subject: value
+                .get("subject")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "Comparison data is invalid".to_string())?
+                .to_string(),
+            paragraph_text: value
+                .get("paragraph_text")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "Comparison data is invalid".to_string())?
+                .to_string(),
+            from_user: value
+                .get("from_user")
+                .and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| "Comparison data is invalid".to_string())?,
+            labels: derived,
+        });
+    }
+    Ok(rows)
+}
+
+fn chat_compare_labels(items: &LoopItems) -> BTreeMap<String, CompareValue> {
+    let mut asks_recipient = false;
+    let mut commits_sender = false;
+    let mut asks_question = false;
+    let mut names_time = false;
+    let mut claim_type = "none";
+    for item in &items.items {
+        names_time |= item.deadline.is_some();
+        match item.kind.as_str() {
+            "question" => {
+                asks_question = true;
+                asks_recipient = true;
+                claim_type = "question";
+            }
+            "request" if claim_type != "question" => {
+                asks_recipient = true;
+                claim_type = "request";
+            }
+            "promise" if !matches!(claim_type, "question" | "request") => {
+                commits_sender = true;
+                claim_type = "promise";
+            }
+            "attribution" if claim_type == "none" => claim_type = "attribution",
+            "delegation" if claim_type == "none" => claim_type = "delegation",
+            _ => {}
+        }
+    }
+    BTreeMap::from([
+        (
+            "triage.asks_recipient".into(),
+            CompareValue::Bool(asks_recipient),
+        ),
+        (
+            "triage.commits_sender".into(),
+            CompareValue::Bool(commits_sender),
+        ),
+        (
+            "triage.asks_question".into(),
+            CompareValue::Bool(asks_question),
+        ),
+        ("triage.names_time".into(), CompareValue::Bool(names_time)),
+        ("triage.boilerplate".into(), CompareValue::Bool(false)),
+        (
+            "triage.automated_notification".into(),
+            CompareValue::Bool(false),
+        ),
+        (
+            "extract.claim_type".into(),
+            CompareValue::Choice(claim_type.into()),
+        ),
+    ])
+}
+
+fn built_in_compare_rows(client: &dyn ModelClient) -> Result<Vec<CompareRow>, ProviderError> {
+    let mut rows = Vec::new();
+    for (body, from_user, to_user, team, _) in SEMANTIC_CASES {
+        let item = synthetic(body, 0, "compare");
+        let mut message = prepare(&item, "Synthetic", 0)
+            .map_err(|_| ProviderError::InvalidAnalysis)?
+            .input;
+        message.from_user = from_user;
+        message.recipient = if to_user {
+            crate::claim_view::UserRecipient::To
+        } else {
+            crate::claim_view::UserRecipient::NotAddressed
+        };
+        message.team = team;
+        if from_user {
+            set_outgoing(&mut message);
+        }
+        let labels = chat_compare_labels(&governed_pass(
+            client,
+            std::slice::from_ref(&message),
+            None,
+        )?);
+        rows.push(CompareRow {
+            subject: message.message.subject.as_string(),
+            paragraph_text: message.message.body_blocks[0].as_string(),
+            from_user,
+            labels,
+        });
+    }
+    Ok(rows)
+}
+
+fn compare_prediction(id: &str, answer: &Answer) -> Result<(CompareValue, bool), ProviderError> {
+    let registered = Registry::get()
+        .question(id)
+        .ok_or(ProviderError::InvalidQuestion)?;
+    match answer {
+        Answer::Noul { probability } => Ok((
+            CompareValue::Bool(*probability >= 0.5),
+            *probability >= registered.escalate && *probability < registered.accept,
+        )),
+        Answer::Choice {
+            choice, confidence, ..
+        } => Ok((
+            CompareValue::Choice(choice.clone()),
+            *confidence >= registered.escalate && *confidence < registered.accept,
+        )),
+        Answer::Score { .. } => Err(ProviderError::InvalidResponse),
+    }
+}
+
+fn aggregate_comparison(
+    counts: &mut BTreeMap<String, CompareCount>,
+    labels: &BTreeMap<String, CompareValue>,
+    predictions: &BTreeMap<String, (CompareValue, bool)>,
+) {
+    for id in COMPARE_IDS {
+        let Some(label) = labels.get(*id) else {
+            continue;
+        };
+        let Some((prediction, gray)) = predictions.get(*id) else {
+            continue;
+        };
+        let count = counts.entry((*id).into()).or_default();
+        count.n += 1;
+        count.agreement += usize::from(label == prediction);
+        count.gray += usize::from(*gray);
+    }
+}
+
+/// Converts a paragraph count to `f64` without precision loss for any count
+/// this comparison could realistically see (a probe corpus, never a count
+/// near `u32::MAX`); a count that did overflow `u32` saturates rather than
+/// panicking, since this is a diagnostic ratio, not a persisted value.
+fn count_as_f64(count: usize) -> f64 {
+    f64::from(u32::try_from(count).unwrap_or(u32::MAX))
+}
+
+fn format_comparison(
+    counts: &BTreeMap<String, CompareCount>,
+    chat_wall: Duration,
+    chat_tokens: u64,
+    jev_wall: Duration,
+    jev_tokens: u64,
+) -> Vec<String> {
+    COMPARE_IDS
+        .iter()
+        .map(|id| {
+            let count = counts.get(*id).copied().unwrap_or_default();
+            let agreement = if count.n == 0 {
+                0.0
+            } else {
+                count_as_f64(count.agreement) / count_as_f64(count.n)
+            };
+            let gray = if count.n == 0 {
+                0.0
+            } else {
+                count_as_f64(count.gray) / count_as_f64(count.n)
+            };
+            format!(
+                "{id}: n={} agreement={agreement:.3} gray_band={gray:.3} chat_wall_ms={} chat_input_tokens={chat_tokens} jev_wall_ms={} jev_input_tokens={jev_tokens}",
+                count.n,
+                chat_wall.as_millis(),
+                jev_wall.as_millis(),
+            )
+        })
+        .collect()
+}
+
+/// Compares paragraph-level chat labels with Jev triage and claim-type answers.
+/// `extract.waiting_party` is intentionally not attempted in this phase.
+pub fn compare_decisions(
+    chat: &OpenRouter,
+    decisions: &OpenRouterDecisions,
+    data: Option<&Path>,
+) -> Result<Vec<String>, String> {
+    let chat_started = Instant::now();
+    let rows = if let Some(folder) = data {
+        exported_compare_rows(folder)?
+    } else {
+        built_in_compare_rows(chat).map_err(|error| error.to_string())?
+    };
+    let chat_wall = chat_started.elapsed();
+    let chat_tokens = chat.input_tokens();
+    let questions = Questions::from_registry(COMPARE_IDS).map_err(|error| error.to_string())?;
+    let jev_started = Instant::now();
+    let mut jev_tokens = 0;
+    let mut counts = BTreeMap::new();
+    for row in rows {
+        let state = serde_json::json!({
+            "subject": row.subject,
+            "paragraph_text": row.paragraph_text,
+            "from_user": row.from_user,
+        });
+        let answers = decisions
+            .decide(&state, &questions, None, DECISION_DEADLINE)
+            .map_err(|error| error.to_string())?;
+        jev_tokens += answers.input_tokens;
+        let predictions = COMPARE_IDS
+            .iter()
+            .map(|id| {
+                let answer = answers.get(id).ok_or(ProviderError::InvalidResponse)?;
+                Ok(((*id).to_string(), compare_prediction(id, answer)?))
+            })
+            .collect::<Result<BTreeMap<_, _>, ProviderError>>()
+            .map_err(|error| error.to_string())?;
+        aggregate_comparison(&mut counts, &row.labels, &predictions);
+    }
+    Ok(format_comparison(
+        &counts,
+        chat_wall,
+        chat_tokens,
+        jev_started.elapsed(),
+        jev_tokens,
+    ))
+}
+
 const SEMANTIC_CASES: [(&str, bool, bool, bool, usize); 7] = [
     (
         "Please send the draft budget by Friday.",
@@ -10546,8 +10950,15 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         }
     }
 
-    type FixedDecisionAnswer<'a> =
-        dyn Fn(usize, &serde_json::Value) -> Result<Vec<f64>, ProviderError> + Send + Sync + 'a;
+    struct FixedDecisionValues {
+        probabilities: Vec<f64>,
+        choice: Option<(String, f64, f64)>,
+    }
+
+    type FixedDecisionAnswer<'a> = dyn Fn(usize, &serde_json::Value) -> Result<FixedDecisionValues, ProviderError>
+        + Send
+        + Sync
+        + 'a;
 
     struct FixedDecisionClient<'a> {
         answer: Box<FixedDecisionAnswer<'a>>,
@@ -10565,7 +10976,10 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         ) -> Self {
             Self {
                 answer: Box::new(move |index, state| {
-                    answer(index, state).map(|values| values.to_vec())
+                    answer(index, state).map(|values| FixedDecisionValues {
+                        probabilities: values.to_vec(),
+                        choice: Some(("none".into(), 0.5, 0.5)),
+                    })
                 }),
                 calls: AtomicUsize::new(0),
                 states: Mutex::new(Vec::new()),
@@ -10589,7 +11003,36 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         ) -> Self {
             Self {
                 answer: Box::new(move |index, state| {
-                    answer(index, state).map(|values| values.to_vec())
+                    answer(index, state).map(|values| FixedDecisionValues {
+                        probabilities: values.to_vec(),
+                        choice: None,
+                    })
+                }),
+                calls: AtomicUsize::new(0),
+                states: Mutex::new(Vec::new()),
+                parallel: 1,
+            }
+        }
+
+        fn closure_choice(
+            answer: impl Fn(
+                usize,
+                &serde_json::Value,
+            ) -> Result<([f64; 4], &'static str, f64, f64), ProviderError>
+            + Send
+            + Sync
+            + 'a,
+        ) -> Self {
+            Self {
+                answer: Box::new(move |index, state| {
+                    answer(index, state).map(
+                        |(probabilities, choice, choice_probability, confidence)| {
+                            FixedDecisionValues {
+                                probabilities: probabilities.to_vec(),
+                                choice: Some((choice.into(), choice_probability, confidence)),
+                            }
+                        },
+                    )
                 }),
                 calls: AtomicUsize::new(0),
                 states: Mutex::new(Vec::new()),
@@ -10620,7 +11063,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(state.clone());
-            let probabilities = (self.answer)(call, state)?;
+            let values = (self.answer)(call, state)?;
             let request =
                 openloops_inference::decision::request_body(self.model(), state, questions, false)?;
             let request: serde_json::Value =
@@ -10631,16 +11074,49 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 .keys();
             let mut answers = serde_json::Map::new();
             for id in ids {
-                let probability = if probabilities.len() == DecisionOutcome::ALL.len() {
+                if id.ends_with(".outcome") {
+                    let (choice, probability, confidence) = values
+                        .choice
+                        .as_ref()
+                        .ok_or(ProviderError::InvalidQuestion)?;
+                    let mut choice_probabilities = serde_json::Map::new();
+                    for option in [
+                        "fulfilled",
+                        "withdrawn",
+                        "deadline_changed",
+                        "modified",
+                        "none",
+                    ] {
+                        choice_probabilities.insert(
+                            option.into(),
+                            serde_json::Value::from(if option == choice {
+                                *probability
+                            } else {
+                                0.0
+                            }),
+                        );
+                    }
+                    answers.insert(
+                        id.clone(),
+                        serde_json::json!({
+                            "type": "choice",
+                            "choice": choice,
+                            "probabilities": choice_probabilities,
+                            "confidence": confidence
+                        }),
+                    );
+                    continue;
+                }
+                let probability = if values.probabilities.len() == DecisionOutcome::ALL.len() {
                     DecisionOutcome::ALL
                         .iter()
                         .position(|outcome| id.ends_with(outcome.suffix()))
-                        .map(|index| probabilities[index])
+                        .map(|index| values.probabilities[index])
                 } else {
                     TRIAGE_IDS
                         .iter()
                         .position(|candidate| id == candidate)
-                        .map(|index| probabilities[index])
+                        .map(|index| values.probabilities[index])
                 }
                 .ok_or(ProviderError::InvalidQuestion)?;
                 answers.insert(
@@ -11429,6 +11905,206 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         assert_eq!(update.source_message, "m1");
         assert_eq!(update.source_block, 0);
         assert_eq!(update.confidence_micros, 810_000);
+    }
+
+    #[test]
+    fn accepted_outcome_choice_precedes_the_nouls_and_uses_option_probability() {
+        let (all, item) = cross_thread_fixture();
+        let decision = FixedDecisionClient::closure_choice(|_, _| {
+            Ok(([0.1, 0.99, 0.1, 0.1], "fulfilled", 0.42, 0.9))
+        });
+        let result = run_decision_closures(
+            &all,
+            vec![item],
+            &decision,
+            &empty_chat(),
+            &ScanProgress::default(),
+        );
+
+        let update = result.analysis.items[0].suggested_update.as_ref().unwrap();
+        assert_eq!(update.kind, SuggestedUpdateKind::Closure);
+        assert_eq!(update.confidence_micros, 420_000);
+    }
+
+    #[test]
+    fn accepted_none_choice_rejects_the_pair_regardless_of_nouls() {
+        let (all, item) = cross_thread_fixture();
+        let decision = FixedDecisionClient::closure_choice(|_, _| {
+            Ok(([0.99, 0.1, 0.1, 0.1], "none", 0.8, 0.9))
+        });
+        let chat = empty_chat();
+        let result =
+            run_decision_closures(&all, vec![item], &decision, &chat, &ScanProgress::default());
+
+        assert!(result.analysis.items[0].suggested_update.is_none());
+        assert_eq!(chat.calls(), 0);
+    }
+
+    #[test]
+    fn gray_outcome_choice_falls_back_to_noul_recombination() {
+        let (all, item) = cross_thread_fixture();
+        let decision = FixedDecisionClient::closure_choice(|_, _| {
+            Ok(([0.81, 0.1, 0.1, 0.1], "none", 0.5, 0.5))
+        });
+        let result = run_decision_closures(
+            &all,
+            vec![item],
+            &decision,
+            &empty_chat(),
+            &ScanProgress::default(),
+        );
+
+        let update = result.analysis.items[0].suggested_update.as_ref().unwrap();
+        assert_eq!(update.kind, SuggestedUpdateKind::Closure);
+        assert_eq!(update.confidence_micros, 810_000);
+    }
+
+    #[test]
+    fn claim_type_from_labels_prioritizes_question_then_request_then_promise() {
+        let labels = |asks_question: bool, asks_recipient: bool, commits_sender: bool| {
+            serde_json::json!({
+                "triage.asks_question": asks_question,
+                "triage.asks_recipient": asks_recipient,
+                "triage.commits_sender": commits_sender,
+            })
+            .as_object()
+            .unwrap()
+            .clone()
+        };
+        assert_eq!(
+            claim_type_from_labels(&labels(true, true, true)),
+            "question"
+        );
+        assert_eq!(
+            claim_type_from_labels(&labels(false, true, true)),
+            "request"
+        );
+        assert_eq!(
+            claim_type_from_labels(&labels(false, false, true)),
+            "promise"
+        );
+        assert_eq!(claim_type_from_labels(&labels(false, false, false)), "none");
+    }
+
+    #[test]
+    fn aggregate_comparison_counts_agreement_and_gray_band_per_id() {
+        let mut counts = BTreeMap::new();
+        let mut labels = BTreeMap::new();
+        labels.insert(
+            "triage.asks_recipient".to_string(),
+            CompareValue::Bool(true),
+        );
+        labels.insert(
+            "extract.claim_type".to_string(),
+            CompareValue::Choice("request".into()),
+        );
+        let mut agree = BTreeMap::new();
+        agree.insert(
+            "triage.asks_recipient".to_string(),
+            (CompareValue::Bool(true), false),
+        );
+        agree.insert(
+            "extract.claim_type".to_string(),
+            (CompareValue::Choice("request".into()), true),
+        );
+        aggregate_comparison(&mut counts, &labels, &agree);
+
+        let mut disagree = BTreeMap::new();
+        disagree.insert(
+            "triage.asks_recipient".to_string(),
+            (CompareValue::Bool(false), false),
+        );
+        disagree.insert(
+            "extract.claim_type".to_string(),
+            (CompareValue::Choice("promise".into()), false),
+        );
+        aggregate_comparison(&mut counts, &labels, &disagree);
+
+        let recipient = counts["triage.asks_recipient"];
+        assert_eq!(recipient.n, 2);
+        assert_eq!(recipient.agreement, 1);
+        assert_eq!(recipient.gray, 0);
+
+        let claim_type = counts["extract.claim_type"];
+        assert_eq!(claim_type.n, 2);
+        assert_eq!(claim_type.agreement, 1);
+        assert_eq!(claim_type.gray, 1);
+
+        // Ids absent from either map are skipped rather than defaulted in.
+        assert!(!counts.contains_key("triage.boilerplate"));
+    }
+
+    #[test]
+    fn format_comparison_is_content_free_and_reports_exact_ratios() {
+        let mut counts = BTreeMap::new();
+        counts.insert(
+            "triage.asks_recipient".to_string(),
+            CompareCount {
+                n: 4,
+                agreement: 3,
+                gray: 1,
+            },
+        );
+        let lines = format_comparison(
+            &counts,
+            Duration::from_millis(120),
+            1_000,
+            Duration::from_millis(80),
+            250,
+        );
+        let line = lines
+            .iter()
+            .find(|line| line.starts_with("triage.asks_recipient:"))
+            .expect("triage.asks_recipient line present");
+        assert_eq!(
+            line,
+            "triage.asks_recipient: n=4 agreement=0.750 gray_band=0.250 chat_wall_ms=120 \
+             chat_input_tokens=1000 jev_wall_ms=80 jev_input_tokens=250"
+        );
+        // Every configured comparison id gets a line, even with zero support.
+        assert_eq!(lines.len(), COMPARE_IDS.len());
+        let empty = lines
+            .iter()
+            .find(|line| line.starts_with("extract.claim_type:"))
+            .expect("extract.claim_type line present");
+        assert!(empty.contains("n=0 agreement=0.000 gray_band=0.000"));
+        for line in &lines {
+            for name in ["Synthetic", "@", "fulfilled", "withdrawn"] {
+                assert!(!line.contains(name), "line leaked content: {line}");
+            }
+        }
+    }
+
+    #[test]
+    fn compare_prediction_flags_the_registry_gray_band_for_nouls_and_choices() {
+        let noul_gray = Answer::Noul { probability: 0.47 };
+        let (value, gray) = compare_prediction("triage.asks_recipient", &noul_gray).unwrap();
+        assert_eq!(value, CompareValue::Bool(false));
+        assert!(
+            gray,
+            "0.47 sits inside triage.asks_recipient's 0.45..0.5 band"
+        );
+
+        let noul_accept = Answer::Noul { probability: 0.9 };
+        let (_, gray) = compare_prediction("triage.asks_recipient", &noul_accept).unwrap();
+        assert!(!gray);
+
+        let choice_gray = Answer::Choice {
+            choice: "request".into(),
+            probabilities: BTreeMap::from([("request".to_string(), 0.5)]),
+            confidence: 0.5,
+        };
+        let (value, gray) = compare_prediction("extract.claim_type", &choice_gray).unwrap();
+        assert_eq!(value, CompareValue::Choice("request".into()));
+        assert!(gray, "0.5 sits inside extract.claim_type's 0.3..0.7 band");
+
+        let choice_accept = Answer::Choice {
+            choice: "none".into(),
+            probabilities: BTreeMap::from([("none".to_string(), 0.95)]),
+            confidence: 0.95,
+        };
+        let (_, gray) = compare_prediction("extract.claim_type", &choice_accept).unwrap();
+        assert!(!gray);
     }
 
     #[test]

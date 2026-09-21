@@ -15,7 +15,7 @@ use std::sync::atomic::Ordering;
 mod scanning;
 pub(crate) use scanning::{
     ConversationFailure, FailureReason, ReviewMessage, ScanOptions, ScanProgress, ScanResult,
-    closure_candidates, probe, same_thread_closure_candidates, scan,
+    closure_candidates, compare_decisions, probe, same_thread_closure_candidates, scan,
 };
 
 pub(crate) const SHOW_HANDLED_LABEL: &str = "Show resolved, handled, and dismissed";

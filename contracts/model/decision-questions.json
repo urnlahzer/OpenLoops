@@ -219,11 +219,38 @@
       "instructions": "The later text changes what the obligation requires.",
       "type": "noul"
     },
+    "closure.outcome": {
+      "accept": 0.7,
+      "escalate": 0.3,
+      "instructions": "Which single outcome, if any, does the later paragraph express for the obligation?",
+      "options": {
+        "fulfilled": "The later paragraph says the obligation was carried out.",
+        "withdrawn": "The later paragraph cancels or withdraws the obligation.",
+        "deadline_changed": "The later paragraph sets a different deadline for the obligation.",
+        "modified": "The later paragraph changes what the obligation requires.",
+        "none": "The later paragraph expresses none of the listed outcomes for the obligation."
+      },
+      "type": "choice"
+    },
     "closure.withdrawn": {
       "accept": 0.5,
       "escalate": 0.45,
       "instructions": "The later text cancels or withdraws the obligation.",
       "type": "noul"
+    },
+    "extract.claim_type": {
+      "accept": 0.7,
+      "escalate": 0.3,
+      "instructions": "Which single claim type, if any, does the paragraph express?",
+      "options": {
+        "request": "The paragraph asks its recipient to do something.",
+        "promise": "The paragraph commits its sender to doing something.",
+        "question": "The paragraph asks a genuine question that seeks an answer.",
+        "attribution": "The paragraph attributes an obligation or commitment to another party.",
+        "delegation": "The paragraph delegates an obligation from one party to another.",
+        "none": "The paragraph expresses none of the listed claim types."
+      },
+      "type": "choice"
     },
     "rules.deadline_kind": {
       "accept": 0.7,
