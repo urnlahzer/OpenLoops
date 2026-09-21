@@ -117,7 +117,8 @@ def main() -> None:
         }
         print(json.dumps(result, indent=2, sort_keys=True))
     elif args.command == "optimize":
-        data = args.data or ROOT / "data" / "synthetic" / f"{args.set}.jsonl"
+        data_set = "triage" if args.set == "extract" else args.set
+        data = args.data or ROOT / "data" / "synthetic" / f"{data_set}.jsonl"
         result = optimize_set(args.set, _client(args.replay), data, budget=args.budget)
         output = ROOT / "runs" / f"{args.set}-result.json"
         output.parent.mkdir(exist_ok=True)

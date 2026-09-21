@@ -173,7 +173,7 @@ def _question_from_prompt(content: str) -> str | None:
     return content.split(marker, 1)[1].split(". Definition:", 1)[0]
 
 
-@pytest.mark.parametrize("set_name", list(SETS))
+@pytest.mark.parametrize("set_name", [name for name in SETS if name != "extract"])
 def test_generate_llm_reaches_the_row_count_offline(tmp_path: Path, monkeypatch, set_name):
     monkeypatch.setenv("OPENROUTER_API_KEY", "synthetic-test-placeholder")
     monkeypatch.setenv("OPENROUTER_SYNTH_MODEL", "synthetic/model")
@@ -189,7 +189,10 @@ def test_generate_llm_reaches_the_row_count_offline(tmp_path: Path, monkeypatch,
     assert all(row.source == "synthetic-llm" for row in rows)
     assert len({row.id for row in rows}) == requested
     if set_name != "closure":
-        assert all(len(row.label) == 1 for row in rows)
+        # Triage rows also carry the extract.claim_type label derived on
+        # load; every other non-closure set carries exactly its own label.
+        expected_label_count = 2 if set_name == "triage" else 1
+        assert all(len(row.label) == expected_label_count for row in rows)
         for question_id in SETS[set_name]:
             question_rows = [row for row in rows if question_id in row.label]
             assert len(question_rows) == 100
@@ -205,6 +208,20 @@ def test_generate_llm_reaches_the_row_count_offline(tmp_path: Path, monkeypatch,
     )
     assert report["errors"] == []
     assert fake.calls <= 70
+
+
+def test_generate_llm_refuses_the_derived_extract_set(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "synthetic-test-placeholder")
+    monkeypatch.setenv("OPENROUTER_SYNTH_MODEL", "synthetic/model")
+    fake = FakeOpenRouter()
+    with (
+        httpx.Client(transport=httpx.MockTransport(fake.handler)) as client,
+        pytest.raises(ValueError, match="extract rows are derived"),
+    ):
+        generate_llm(
+            tmp_path, selected_set="extract", rows=128, client=client, parallel=3, smoke=True
+        )
+    assert fake.calls == 0
 
 
 def test_duplicate_action_validator_rejects_true_near_duplicates():

@@ -51,6 +51,18 @@ class ClosureModified(dspy.Signature):
     probability: float = dspy.OutputField(desc="Probability that the obligation was modified.")
 
 
+class ClosureOutcome(dspy.Signature):
+    """Which single outcome, if any, does the later paragraph express for the obligation?"""
+
+    obligation: dict[str, str] = dspy.InputField()
+    later: dict[str, Any] = dspy.InputField()
+    choice: str = dspy.OutputField(desc="The single expressed obligation outcome, or none.")
+    probabilities: dict[str, float] = dspy.OutputField(
+        desc="Probability for each issued obligation-outcome option."
+    )
+    confidence: float = dspy.OutputField(desc="Confidence in the selected obligation outcome.")
+
+
 class TriageBase(dspy.Signature):
     subject: str = dspy.InputField()
     paragraph_text: str = dspy.InputField()
@@ -91,6 +103,16 @@ class TriageAutomatedNotification(TriageBase):
     """The paragraph is an automatically generated notification."""
 
     probability: float = dspy.OutputField(desc="Probability of an automated notification.")
+
+
+class ExtractClaimType(TriageBase):
+    """Which single claim type, if any, does the paragraph express?"""
+
+    choice: str = dspy.OutputField(desc="The single expressed claim type, or none.")
+    probabilities: dict[str, float] = dspy.OutputField(
+        desc="Probability for each issued claim-type option."
+    )
+    confidence: float = dspy.OutputField(desc="Confidence in the selected claim type.")
 
 
 def _rule_signature(name: str, instructions: str, fields: tuple[str, ...]) -> type[dspy.Signature]:
@@ -168,6 +190,21 @@ SPECS: dict[str, QuestionSpec] = {
         "The later paragraph changes what the obligation requires.",
         ("later.paragraph_text",), _CLOSURE_FIELDS,
     ),
+    "closure.outcome": QuestionSpec(
+        "closure",
+        ClosureOutcome,
+        "Which single outcome, if any, does the later paragraph express for the obligation",
+        ("later.paragraph_text",),
+        _CLOSURE_FIELDS,
+        "choice",
+        {
+            "fulfilled": "The later paragraph says the obligation was carried out.",
+            "withdrawn": "The later paragraph cancels or withdraws the obligation.",
+            "deadline_changed": "The later paragraph sets a different deadline for the obligation.",
+            "modified": "The later paragraph changes what the obligation requires.",
+            "none": "The later paragraph expresses none of the listed outcomes for the obligation.",
+        },
+    ),
     "triage.asks_recipient": QuestionSpec(
         "triage", TriageAsksRecipient,
         "The paragraph asks its recipient to do something.",
@@ -197,6 +234,22 @@ SPECS: dict[str, QuestionSpec] = {
         "triage", TriageAutomatedNotification,
         "The paragraph is an automatically generated notification.",
         ("paragraph_text",), _TRIAGE_FIELDS,
+    ),
+    "extract.claim_type": QuestionSpec(
+        "extract",
+        ExtractClaimType,
+        "Which single claim type, if any, does the paragraph express",
+        ("paragraph_text",),
+        _TRIAGE_FIELDS,
+        "choice",
+        {
+            "request": "The paragraph asks its recipient to do something.",
+            "promise": "The paragraph commits its sender to doing something.",
+            "question": "The paragraph asks a genuine question that seeks an answer.",
+            "attribution": "The paragraph attributes an obligation or commitment to another party.",
+            "delegation": "The paragraph delegates an obligation from one party to another.",
+            "none": "The paragraph expresses none of the listed claim types.",
+        },
     ),
     "rules.recap": QuestionSpec(
         "rules", RulesRecap,
@@ -242,7 +295,7 @@ SPECS: dict[str, QuestionSpec] = {
 
 SETS = {
     name: tuple(key for key, spec in SPECS.items() if spec.set_name == name)
-    for name in ("closure", "triage", "rules")
+    for name in ("closure", "triage", "rules", "extract")
 }
 
 

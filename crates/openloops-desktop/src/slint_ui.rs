@@ -538,6 +538,42 @@ pub fn probe_saved_model() -> Result<usize, String> {
     .map_err(|error| error.to_string())
 }
 
+/// Runs the P4 `--compare-decisions` probe against the saved settings: the
+/// chat extractor and the Jev-native extractor both run over a corpus (the
+/// built-in synthetic probe cases, or the training export at `data` when
+/// given) and the returned lines are content-free per-question agreement
+/// counts.
+///
+/// # Errors
+///
+/// Returns the same user-facing settings and inference errors as
+/// [`probe_saved_model`], plus a message when the saved provider is not
+/// `OpenRouter` with the decision model enabled, or when the comparison data
+/// cannot be read.
+pub fn probe_compare_decisions(data: Option<&std::path::Path>) -> Result<Vec<String>, String> {
+    let store = crate::settings::production_store()
+        .map_err(|_| "Saved settings unavailable".to_string())?
+        .ok_or("Saved settings disabled".to_string())?;
+    let settings = store
+        .load()
+        .map_err(|_| "Saved settings could not be loaded".to_string())?
+        .ok_or("No saved settings".to_string())?;
+    if settings.provider != Provider::OpenRouter || !settings.use_decision_model {
+        return Err(
+            "Enable OpenRouter and the decision model on the Sources screen first.".to_string(),
+        );
+    }
+    let chat = OpenRouter::connect(
+        settings.openrouter_key.to_string(),
+        &settings.openrouter_selected,
+    )
+    .map_err(|error| error.to_string())?;
+    let decisions =
+        OpenRouterDecisions::connect(settings.openrouter_key.to_string(), &Registry::get().model)
+            .map_err(|error| error.to_string())?;
+    crate::review_model::compare_decisions(&chat, &decisions, data)
+}
+
 /// Builds and runs the native Slint window.
 ///
 /// # Errors

@@ -2,7 +2,7 @@
 //! Credentials and payloads are session-only, the model menu is built from
 //! the public ZDR endpoint listing, and every completion asks `OpenRouter`
 //! to route to ZDR endpoints only.
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::{Client, Response};
@@ -54,6 +54,7 @@ pub struct OpenRouter {
     /// Caller-chosen dispatch ceiling; see
     /// [`OpenRouter::with_max_parallel`].
     parallel: usize,
+    input_tokens: AtomicU64,
 }
 
 impl OpenRouter {
@@ -81,6 +82,7 @@ impl OpenRouter {
             key,
             model: model.to_owned(),
             parallel: 1,
+            input_tokens: AtomicU64::new(0),
         })
     }
 
@@ -94,6 +96,12 @@ impl OpenRouter {
     pub fn with_max_parallel(mut self, parallel: usize) -> Self {
         self.parallel = parallel.clamp(1, MAX_PARALLEL_REQUESTS);
         self
+    }
+
+    /// Returns the input-token total observed in chat responses so far.
+    #[must_use]
+    pub fn input_tokens(&self) -> u64 {
+        self.input_tokens.load(Ordering::Relaxed)
     }
 
     /// Sends only the supplied canonical projections and validates returned
@@ -160,7 +168,10 @@ impl OpenRouter {
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body);
         let response = send_with_control(request, &control)?;
-        parse_chat(&read_response(response, &control)?, &self.model)
+        let (content, input_tokens) =
+            parse_chat_with_usage(&read_response(response, &control)?, &self.model)?;
+        self.input_tokens.fetch_add(input_tokens, Ordering::Relaxed);
+        Ok(content)
     }
 }
 
@@ -343,7 +354,10 @@ pub(crate) fn model_matches(reported: &str, selected: &str) -> bool {
 }
 
 /// Accepts exactly one completed assistant choice from the selected model.
-fn parse_chat(bytes: &[u8], selected: &str) -> Result<Zeroizing<String>, ProviderError> {
+fn parse_chat_with_usage(
+    bytes: &[u8],
+    selected: &str,
+) -> Result<(Zeroizing<String>, u64), ProviderError> {
     let value = openloops_contracts::parse_strict_json(bytes)
         .map_err(|_| ProviderError::InvalidResponse)?;
     if value.get("error").is_some()
@@ -393,7 +407,17 @@ fn parse_chat(bytes: &[u8], selected: &str) -> Result<Zeroizing<String>, Provide
         .and_then(Value::as_str)
         .filter(|content| !content.is_empty())
         .ok_or(ProviderError::InvalidResponse)?;
-    Ok(Zeroizing::new(content.to_owned()))
+    let input_tokens = value
+        .get("usage")
+        .and_then(|usage| usage.get("prompt_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    Ok((Zeroizing::new(content.to_owned()), input_tokens))
+}
+
+#[cfg(test)]
+fn parse_chat(bytes: &[u8], selected: &str) -> Result<Zeroizing<String>, ProviderError> {
+    parse_chat_with_usage(bytes, selected).map(|(content, _)| content)
 }
 
 #[cfg(test)]
@@ -488,6 +512,7 @@ mod tests {
             key: Zeroizing::new("synthetic-key".into()),
             model: MODEL.to_owned(),
             parallel: 1,
+            input_tokens: AtomicU64::new(0),
         }
     }
 

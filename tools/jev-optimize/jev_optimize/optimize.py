@@ -100,7 +100,7 @@ def evaluate_question(
                     for option in (SPECS[question_id].options or {})
                 )
             )
-    is_choice = question_id == "rules.deadline_kind"
+    is_choice = SPECS[question_id].kind == "choice"
     sweep = threshold_sweep(labels, probabilities)
     if is_choice:
         for row in sweep:

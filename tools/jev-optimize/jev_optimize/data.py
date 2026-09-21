@@ -33,10 +33,46 @@ def load_jsonl(path: str | Path) -> list[DatasetRow]:
         for line_number, line in enumerate(stream, 1):
             if line.strip():
                 try:
-                    rows.append(DatasetRow.model_validate_json(line))
+                    value = json.loads(line)
+                    _derive_labels(value)
+                    rows.append(DatasetRow.model_validate(value))
                 except ValueError as error:
                     raise ValueError(f"invalid row {line_number}") from error
     return rows
+
+
+_CLOSURE_OUTCOMES = (
+    "fulfilled",
+    "withdrawn",
+    "deadline_changed",
+    "modified",
+)
+
+
+def _derive_labels(value: dict[str, Any]) -> None:
+    """Add choice labels implied by existing exported/synthetic labels."""
+
+    label = value.get("label")
+    if not isinstance(label, dict):
+        return
+    if value.get("set") == "closure" and all(
+        f"closure.{outcome}" in label for outcome in _CLOSURE_OUTCOMES
+    ):
+        selected = [
+            outcome for outcome in _CLOSURE_OUTCOMES if label[f"closure.{outcome}"] is True
+        ]
+        if len(selected) <= 1:
+            label["closure.outcome"] = selected[0] if selected else "none"
+    if value.get("set") == "triage":
+        if label.get("triage.asks_question") is True:
+            claim_type = "question"
+        elif label.get("triage.asks_recipient") is True:
+            claim_type = "request"
+        elif label.get("triage.commits_sender") is True:
+            claim_type = "promise"
+        else:
+            claim_type = "none"
+        label["extract.claim_type"] = claim_type
 
 
 def write_jsonl(path: str | Path, rows: Iterable[dict[str, Any]]) -> None:

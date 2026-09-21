@@ -210,9 +210,14 @@ exactly as the closure pass does today, restricted to those loops and grouped by
 conversation. Every suggestion still needs review; `validation::route` is
 unchanged.
 
-Follow-up: `closure.modified` remains at chance on synthetic data. The next
-tuning round plans to replace the four nouls with one `closure.outcome` choice
-question.
+Follow-up: `closure.modified` remained at chance on synthetic data. Implemented
+on `feat/jev-outcome-and-compare`: `closure.outcome`, a choice question over
+the same five options (the four nouls plus `none`), is now asked in the same
+request alongside the four nouls. In recombination, an accept-band
+`closure.outcome` answer takes precedence over the noul path -- a non-`none`
+choice supplies the pair's candidate at the chosen option's own probability,
+and a `none` choice rejects the pair regardless of what the nouls say; a
+gray-band choice falls back to the existing noul recombination unchanged.
 
 Result: decision requests have no handle or 40-call cap, while escalated chat
 work retains the 40-conversation cap; the same-thread and cross-thread routes
@@ -261,20 +266,42 @@ memory for the scan.
 
 ### P4. Measuring mode (probe) for Jev-native extraction
 
-`--probe-saved-model` gains a `--compare-decisions` flag. On loaded mail it
-runs both extractors and prints content-free counts: conversations,
-paragraphs, claims per type from each side, per-block agreement on
-(has claim, claim type, waiting-party handle, temporal candidate), gray-band
-rate, wall time and token usage per side. Nothing is written to disk.
+Status: implemented on `feat/jev-outcome-and-compare`.
 
-The Jev-native extractor, per message: state is `{subject, paragraphs[],
-participants[]}` with handles the code issued; per paragraph, `claim_type`
-choice over the eight types plus `none`; `waiting_party` choice over the
-participant handles plus `none`; `temporal` choice over candidates the
-existing prose parsers found in that paragraph, already normalized into the
-grammar `deadline_parse::reparse` accepts, plus `none`; one noul per
-ambiguity code. Code assembles a `Claim` with the paragraph as whole-block
-evidence and runs it through `validation::validate` unchanged.
+```
+openloops-ui.exe --probe-saved-model --compare-decisions [--data <dir>]
+```
+
+With the saved settings (`OpenRouter` key, chat model, decision model on),
+this runs both extractors over a corpus and prints content-free agreement,
+one line per question: `n`, agreement rate, gray-band rate, and wall time and
+input tokens per side. Nothing is written to disk. Without `--data`, the
+corpus is the built-in synthetic probe cases (`SEMANTIC_CASES`); with
+`--data <dir>`, the corpus is the paragraph rows in `<dir>/triage.jsonl`
+written by **Export training data** (the chat model's accepted claims are
+the silver labels there).
+
+The comparison covers the registry triage questions
+(`triage.asks_recipient`, `triage.commits_sender`, `triage.asks_question`,
+`triage.names_time`, `triage.boilerplate`, `triage.automated_notification`)
+plus the new `extract.claim_type` choice question (options `request`,
+`promise`, `question`, `attribution`, `delegation`, `none`; registered with
+bootstrap wording alongside `closure.outcome`). `extract.waiting_party` is
+deliberately not attempted in this phase -- there is no chat-side silver
+label to compare it against yet. This is a narrower measuring mode than the
+full per-block extractor comparison (claim type, waiting-party handle,
+temporal candidate) originally scoped below for P5; that fuller comparison,
+and the `waiting_party`/`temporal` questions it needs, waits on P5.
+
+The Jev-native extractor eventually planned for P5, per message: state is
+`{subject, paragraphs[], participants[]}` with handles the code issued; per
+paragraph, `claim_type` choice over the eight types plus `none`;
+`waiting_party` choice over the participant handles plus `none`; `temporal`
+choice over candidates the existing prose parsers found in that paragraph,
+already normalized into the grammar `deadline_parse::reparse` accepts, plus
+`none`; one noul per ambiguity code. Code assembles a `Claim` with the
+paragraph as whole-block evidence and runs it through `validation::validate`
+unchanged.
 
 ### P5. Extraction switch, gated
 

@@ -27,7 +27,12 @@ def test_synthetic_generation_is_deterministic_and_sane(tmp_path, relaxed_thresh
     two = tmp_path / "two"
     generate_stub(one, seed=42, rows=120)
     generate_stub(two, seed=42, rows=120)
+    # "extract" has no corpus of its own: its labels are derived on load from
+    # "triage" rows (see test_extract_claim_type_is_derived_from_triage_labels
+    # below), so generate_stub never writes extract.jsonl.
     for set_name, question_ids in SETS.items():
+        if set_name == "extract":
+            continue
         assert (one / f"{set_name}.jsonl").read_bytes() == (
             two / f"{set_name}.jsonl"
         ).read_bytes()
@@ -36,6 +41,11 @@ def test_synthetic_generation_is_deterministic_and_sane(tmp_path, relaxed_thresh
         assert all(row.source == "synthetic-stub" for row in rows)
         if set_name == "closure":
             assert all(set(row.label) == set(question_ids) for row in rows)
+        elif set_name == "triage":
+            # Each row's own label plus the extract.claim_type label derived
+            # from it on load.
+            assert all(len(row.label) == 2 for row in rows)
+            assert all("extract.claim_type" in row.label for row in rows)
         else:
             assert all(len(row.label) == 1 for row in rows)
         positive_sets = []

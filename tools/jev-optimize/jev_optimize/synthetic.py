@@ -230,7 +230,9 @@ def scrub_row(row: dict[str, Any]) -> list[str]:
 def _question_assignment(set_name: str, index: int, rows: int) -> tuple[str, int]:
     """Return a question and its zero-based local row number."""
 
-    question_ids = SETS[set_name]
+    question_ids = tuple(
+        question_id for question_id in SETS[set_name] if question_id != "closure.outcome"
+    )
     quotient, remainder = divmod(rows, len(question_ids))
     offset = 0
     for ordinal, question_id in enumerate(question_ids):
@@ -242,7 +244,9 @@ def _question_assignment(set_name: str, index: int, rows: int) -> tuple[str, int
 
 
 def _control_plan(set_name: str, index: int, rows: int = 600) -> dict[str, Any]:
-    question_ids = SETS[set_name]
+    question_ids = tuple(
+        question_id for question_id in SETS[set_name] if question_id != "closure.outcome"
+    )
     if set_name == "closure":
         target = (*question_ids, None)[index % (len(question_ids) + 1)]
         labels = {question_id: question_id == target for question_id in question_ids}
@@ -391,7 +395,11 @@ def generate_stub(
 
     if rows < 10:
         raise ValueError("stub generation requires at least 10 rows")
-    names = tuple(SETS) if selected_set == "all" else (selected_set,)
+    names = tuple(name for name in SETS if name != "extract") if selected_set == "all" else (
+        selected_set,
+    )
+    if "extract" in names:
+        raise ValueError("extract rows are derived from the triage corpus")
     root = Path(output)
     paths: list[Path] = []
     for offset, set_name in enumerate(names):
@@ -719,7 +727,11 @@ def generate_llm(
     model = os.environ.get("OPENROUTER_SYNTH_MODEL")
     if not api_key or not model:
         raise RuntimeError("OPENROUTER_API_KEY and OPENROUTER_SYNTH_MODEL must be set")
-    names = tuple(SETS) if selected_set == "all" else (selected_set,)
+    names = tuple(name for name in SETS if name != "extract") if selected_set == "all" else (
+        selected_set,
+    )
+    if "extract" in names:
+        raise ValueError("extract rows are derived from the triage corpus")
     root = Path(output)
     owned_client = client is None
     http = client or httpx.Client(timeout=120.0)
@@ -846,13 +858,15 @@ def check_corpus(
     if len(rows) < thresholds.min_rows:
         errors.append(f"rows {len(rows)} < {thresholds.min_rows}")
     if set_name != "closure":
-        if any(len(row.label) != 1 for row in rows):
+        expected_label_count = 2 if set_name == "triage" else 1
+        if any(len(row.label) != expected_label_count for row in rows):
             errors.append("non-closure rows must carry exactly one question label")
         malformed = 0
         for row in rows:
-            if len(row.label) != 1:
+            own_labels = [question_id for question_id in SETS[set_name] if question_id in row.label]
+            if len(row.label) != expected_label_count or len(own_labels) != 1:
                 continue
-            question_id = next(iter(row.label))
+            question_id = own_labels[0]
             if question_id not in _QUESTION_FIELDS:
                 malformed += 1
                 continue
@@ -892,11 +906,16 @@ def check_corpus(
             )
         values = [row.label[question_id] for row in question_rows]
         if not all(isinstance(value, bool) for value in values):
+            options = tuple((SPECS[question_id].options or {}).keys())
             counts = {
                 option: values.count(option)
-                for option in ("event_tied", "soft", "unknown")
+                for option in options
             }
-            if set(values) != set(counts) or max(counts.values()) - min(counts.values()) > 1:
+            if set(values) != set(counts):
+                errors.append(f"{question_id} has an unknown or missing choice label")
+            if question_id != "closure.outcome" and (
+                not counts or max(counts.values()) - min(counts.values()) > 1
+            ):
                 errors.append(f"{question_id} choice labels are not evenly balanced")
             question_stats[question_id] = {
                 "rows": len(question_rows),

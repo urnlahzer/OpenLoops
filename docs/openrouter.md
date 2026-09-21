@@ -252,5 +252,16 @@ suite against whichever provider is saved, including OpenRouter. Its synthetic
 update cases use only opaque loop handles and report content-free counts and
 fixed validation reasons.
 
+`openloops-ui.exe --probe-saved-model --compare-decisions [--data <dir>]` is
+the P4 measuring-mode probe: it requires the saved provider to be OpenRouter
+with the decision model on, then runs the chat extractor and the Jev-native
+triage/`extract.claim_type` questions over a corpus and prints one
+content-free line per question (`n`, agreement rate, gray-band rate, wall
+time and input tokens per side). Without `--data` the corpus is the built-in
+synthetic probe cases; with `--data <dir>` it is `<dir>/triage.jsonl`, as
+written by **Export training data** (see [Setup](#setup) above and
+`tools/jev-optimize/README.md`). Nothing is written to disk and no row
+content appears in the output.
+
 References: [zero data retention](https://openrouter.ai/docs/features/zdr),
 [API overview](https://openrouter.ai/docs/api-reference/overview).
