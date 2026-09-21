@@ -105,7 +105,7 @@ if ($null -eq $m) {
 
 $canonical = $m | ConvertTo-Json -Depth 100 -Compress
 $hash = Sha256-Hex $canonical
-if ($hash -ne 'f9c49111de5549591f9feca542f15640e4330b6ba1dda34a694196fb45463aa2') { Fail 'P0-MODEL-INVENTORY-001' }
+if ($hash -ne 'b0c40407927e69b7a1351c6f1ec8ab8bb5074d5cfdb2a0ad83c6737df556329e') { Fail 'P0-MODEL-INVENTORY-001' }
 
 $requirements = @('OL-SYNC-012','OL-SYNC-013','OL-TEST-003','OL-MODEL-001','OL-MODEL-002','OL-MODEL-003','OL-MODEL-004','OL-MODEL-005','OL-MODEL-006','OL-MODEL-007','OL-MODEL-008','OL-MODEL-009','OL-MODEL-010','OL-MODEL-011','OL-MODEL-012','OL-MODEL-013','OL-MODEL-014','OL-MODEL-015','OL-NFR-005','OL-NFR-007','OL-NFR-011')
 if ($m.schema_version -ne 1 -or $m.work_item -ne 'P0-WI-10' -or $m.adr -ne 'ADR-007' -or $m.decision_status -ne 'accepted_contract_wired_review_only_gates_pending' -or $m.snapshot_date -ne '2026-07-20') { Fail 'P0-MODEL-INVENTORY-001' }
@@ -164,6 +164,10 @@ if ($request.method -ne 'POST' -or $request.content_type -ne 'application/json' 
 ExactOrdered @($request.ollama_top_level_fields_in_order) @('model','messages','stream') 'P0-MODEL-REQUEST-001'
 ExactOrdered @($request.ollama_message_fields_in_order) @('role','content') 'P0-MODEL-REQUEST-001'
 ExactOrdered @($request.ollama_roles_in_order) @('system','user') 'P0-MODEL-REQUEST-001'
+ExactOrdered @($request.projection_top_level_fields_in_order) @('user','messages','participant_handles','related_loop_handles') 'P0-MODEL-REQUEST-001'
+ExactOrdered @($request.user_identity_fields_in_order) @('handle','display_name','given_name') 'P0-MODEL-REQUEST-001'
+ExactOrdered @($request.message_projection_fields_in_order) @('source_handle','from_user','to_user','cc_user','blocks') 'P0-MODEL-REQUEST-001'
+ExactOrdered @($request.participant_projection_fields_in_order) @('handle','source_handle','component','block_ordinal','is_user') 'P0-MODEL-REQUEST-001'
 ExactOrdered @($request.allowed_components) @('subject','body_block','quote_block','sender','to','cc','attachment_name','link_label') 'P0-MODEL-REQUEST-001'
 ExactOrdered @($request.prohibited) @('whole mailbox','whole thread by default','attachment bytes','linked content','URLs or href values','credentials','unrelated recipients','Graph locators','provider key') 'P0-MODEL-REQUEST-001'
 Has (($request | ConvertTo-Json -Compress)) @('no provider-side format or tools field is sent in the MVP contract','strict application validation of analysis-output-v1 is authoritative','tool_calls','prohibited','tools functions images attachments linked-document contents and remote retrieval fields are absent','one changed message projection plus at most forty relevance-selected context projections supplied by deterministic code','length-framed untrusted data','cannot alter policy prompt schema scopes tools endpoint or model') 'P0-MODEL-REQUEST-001'
@@ -221,7 +225,7 @@ if ($null -eq $settingsProperty) {
 }
 else {
     $settings = $settingsProperty.Value
-    if ($settings.policy_version -ne 'model-sensitivity-v1' -or $settings.ui_visibility -ne 'show provider profile exact endpoint model label external-data disclosure and every confidence or detection sensitivity before provider use and whenever settings are reviewed' -or $settings.global_change_behavior -ne 'a sensitivity or threshold change never starts replay automatically; existing loops remain intact') { Fail 'P0-MODEL-CONSENT-001' }
+    if ($settings.policy_version -ne 'model-sensitivity-v1' -or $settings.ui_visibility -ne 'show provider profile exact endpoint model label external-data disclosure and every confidence or detection sensitivity before provider use and whenever settings are reviewed' -or (-not $settings.PSObject.Properties['transmitted_identity']) -or $settings.transmitted_identity -ne "the signed-in user's display and given name plus per-message sender, to-recipient, and cc-recipient ownership facts are transmitted for attribution" -or $settings.global_change_behavior -ne 'a sensitivity or threshold change never starts replay automatically; existing loops remain intact') { Fail 'P0-MODEL-CONSENT-001' }
     $sensitivities = @($settings.sensitivities)
     ExactOrdered @($sensitivities.id) @('request_sensitivity','deadline_inference_sensitivity','closure_sensitivity','decision_model') 'P0-MODEL-CONSENT-001'
     $requestSensitivity = @($sensitivities | Where-Object id -eq 'request_sensitivity')

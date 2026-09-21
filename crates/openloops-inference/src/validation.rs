@@ -53,6 +53,10 @@ pub struct MessageContext<'a> {
     pub handle: &'a str,
     pub message: &'a CanonicalMessage,
     pub temporal_context: ParseContext,
+    /// Whether the signed-in user occupies the sender, `to`, or `cc` slot.
+    pub from_user: bool,
+    pub to_user: bool,
+    pub cc_user: bool,
 }
 
 /// One participant slot's opaque handle, as issued by the application for
@@ -61,6 +65,16 @@ pub struct ParticipantHandle<'a> {
     pub handle: &'a str,
     pub message_handle: &'a str,
     pub slot: ParticipantSlot,
+    /// Whether this exact participant slot is one of the user's addresses.
+    pub is_user: bool,
+}
+
+/// The signed-in user identity supplied to the model for attribution only.
+#[derive(Clone, Copy)]
+pub struct UserIdentity<'a> {
+    pub handle: &'a str,
+    pub display_name: Option<&'a str>,
+    pub given_name: Option<&'a str>,
 }
 
 /// Which participant slot a [`ParticipantHandle`] names.
@@ -76,7 +90,9 @@ pub enum ParticipantSlot {
 /// for them, and the existing-loop candidate handles offered as
 /// `related_loop_handles` targets. [`validate`] never trusts a claim's own
 /// handle text beyond membership/structural checks against this context.
+#[derive(Clone, Copy)]
 pub struct SuppliedContext<'a> {
+    pub user: UserIdentity<'a>,
     pub messages: &'a [MessageContext<'a>],
     pub participants: &'a [ParticipantHandle<'a>],
     pub loop_candidate_handles: &'a [&'a str],
@@ -616,8 +632,8 @@ mod tests {
     use super::{
         AnalysisResult, ClaimDisposition, ClaimRejectionReason, ConsistencyFailure,
         EvidenceBoundsFailure, HandleMembershipFailure, MessageContext, ParticipantHandle,
-        ParticipantSlot, ParticipantSlotFailure, SuppliedContext, TemporalReparseFailure, route,
-        validate,
+        ParticipantSlot, ParticipantSlotFailure, SuppliedContext, TemporalReparseFailure,
+        UserIdentity, route, validate,
     };
     use openloops_contracts::ClaimType;
     use openloops_domain::deadline::UnixSeconds;
@@ -626,6 +642,14 @@ mod tests {
     };
 
     use crate::message::{RawMessageInput, RawRecipient, canonicalize_message};
+
+    fn synthetic_user() -> UserIdentity<'static> {
+        UserIdentity {
+            handle: "user",
+            display_name: Some("Synthetic User"),
+            given_name: Some("Synthetic"),
+        }
+    }
 
     fn tz() -> TimezoneContext {
         TimezoneContext {
@@ -675,6 +699,7 @@ mod tests {
     #[test]
     fn malformed_document_yields_analysis_unavailable() {
         let context = SuppliedContext {
+            user: synthetic_user(),
             messages: &[],
             participants: &[],
             loop_candidate_handles: &[],
@@ -691,9 +716,13 @@ mod tests {
         let messages = [MessageContext {
             handle: "msg-1",
             message: &message,
+            from_user: false,
+            to_user: false,
+            cc_user: false,
             temporal_context: parse_context(0),
         }];
         let context = SuppliedContext {
+            user: synthetic_user(),
             messages: &messages,
             participants: &[],
             loop_candidate_handles: &[],
@@ -715,6 +744,7 @@ mod tests {
         // The hostile-model case: a claim cites a message handle the
         // application never issued for this request.
         let context = SuppliedContext {
+            user: synthetic_user(),
             messages: &[],
             participants: &[],
             loop_candidate_handles: &[],
@@ -737,9 +767,13 @@ mod tests {
         let messages = [MessageContext {
             handle: "msg-1",
             message: &message,
+            from_user: false,
+            to_user: false,
+            cc_user: false,
             temporal_context: parse_context(0),
         }];
         let context = SuppliedContext {
+            user: synthetic_user(),
             messages: &messages,
             participants: &[],
             loop_candidate_handles: &[],
@@ -770,9 +804,13 @@ mod tests {
         let messages = [MessageContext {
             handle: "msg-1",
             message: &message,
+            from_user: false,
+            to_user: false,
+            cc_user: false,
             temporal_context: parse_context(0),
         }];
         let context = SuppliedContext {
+            user: synthetic_user(),
             messages: &messages,
             participants: &[],
             loop_candidate_handles: &[],
@@ -796,9 +834,13 @@ mod tests {
         let messages = [MessageContext {
             handle: "msg-1",
             message: &message,
+            from_user: false,
+            to_user: false,
+            cc_user: false,
             temporal_context: parse_context(0),
         }];
         let context = SuppliedContext {
+            user: synthetic_user(),
             messages: &messages,
             participants: &[],
             loop_candidate_handles: &[],
@@ -824,6 +866,9 @@ mod tests {
         let messages = [MessageContext {
             handle: "msg-1",
             message: &message,
+            from_user: false,
+            to_user: false,
+            cc_user: false,
             temporal_context: parse_context(0),
         }];
         // The application issued a handle naming `To(0)`, but this message
@@ -833,8 +878,10 @@ mod tests {
             handle: "participant-1",
             message_handle: "msg-1",
             slot: ParticipantSlot::To(0),
+            is_user: false,
         }];
         let context = SuppliedContext {
+            user: synthetic_user(),
             messages: &messages,
             participants: &participants,
             loop_candidate_handles: &[],
@@ -858,9 +905,13 @@ mod tests {
         let messages = [MessageContext {
             handle: "msg-1",
             message: &message,
+            from_user: false,
+            to_user: false,
+            cc_user: false,
             temporal_context: parse_context(0),
         }];
         let context = SuppliedContext {
+            user: synthetic_user(),
             messages: &messages,
             participants: &[],
             loop_candidate_handles: &[],
@@ -888,9 +939,13 @@ mod tests {
         let messages = [MessageContext {
             handle: "msg-1",
             message: &message,
+            from_user: false,
+            to_user: false,
+            cc_user: false,
             temporal_context: parse_context(0),
         }];
         let context = SuppliedContext {
+            user: synthetic_user(),
             messages: &messages,
             participants: &[],
             loop_candidate_handles: &[],
@@ -921,15 +976,22 @@ mod tests {
             MessageContext {
                 handle: "msg-1",
                 message: &first_message,
+                from_user: false,
+                to_user: false,
+                cc_user: false,
                 temporal_context: parse_context(0),
             },
             MessageContext {
                 handle: "msg-2",
                 message: &second_message,
+                from_user: false,
+                to_user: false,
+                cc_user: false,
                 temporal_context: parse_context(0),
             },
         ];
         let context = SuppliedContext {
+            user: synthetic_user(),
             messages: &messages,
             participants: &[],
             loop_candidate_handles: &[],
@@ -968,9 +1030,13 @@ mod tests {
         let messages = [MessageContext {
             handle: "msg-1",
             message: &message,
+            from_user: false,
+            to_user: false,
+            cc_user: false,
             temporal_context: parse_context(0),
         }];
         let context = SuppliedContext {
+            user: synthetic_user(),
             messages: &messages,
             participants: &[],
             loop_candidate_handles: &["loop-1"],
@@ -1007,9 +1073,13 @@ mod tests {
         let messages = [MessageContext {
             handle: "msg-1",
             message: &message,
+            from_user: false,
+            to_user: false,
+            cc_user: false,
             temporal_context: parse_context(0),
         }];
         let context = SuppliedContext {
+            user: synthetic_user(),
             messages: &messages,
             participants: &[],
             loop_candidate_handles: &[],

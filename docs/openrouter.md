@@ -61,6 +61,11 @@ configured for ZDR, and OpenLoops never relaxes it for an individual request.
 Before any message text is sent, connecting re-checks that the selected model
 still appears in the ZDR listing.
 
+The governed projection also sends the signed-in user's display and given name,
+plus authoritative per-message facts for whether the user is the sender, a
+direct recipient, or a cc recipient. Participant slots carry a user marker so
+requests addressed to someone else are not attributed to the signed-in user.
+
 When the decision model is on, closure checks may also be sent to
 `POST /api/alpha/decisions` with request members `model`, `state`, `questions`,
 and `provider: {"zdr": true}` when the endpoint accepts it (which the check

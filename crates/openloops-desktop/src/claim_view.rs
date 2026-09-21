@@ -3,6 +3,18 @@
 use openloops_contracts::{AmbiguityCode, ClaimType, Nullable};
 use openloops_inference::{blocks::CanonicalBlock, message::CanonicalMessage};
 
+/// How the signed-in user appears among a message's recipients.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum UserRecipient {
+    /// The user is neither a to nor a cc recipient.
+    #[default]
+    NotAddressed,
+    /// The user is a to recipient (possibly also cc).
+    To,
+    /// The user is only a cc recipient.
+    Cc,
+}
+
 /// One chronologically ordered message supplied to governed analysis.
 #[derive(Clone)]
 pub struct ConversationMessage {
@@ -10,8 +22,26 @@ pub struct ConversationMessage {
     pub message: CanonicalMessage,
     pub timestamp: i64,
     pub from_user: bool,
-    pub to_user: bool,
+    pub recipient: UserRecipient,
+    /// Signed-in identity kept in memory only for governed attribution.
+    pub own_addresses: Vec<String>,
+    pub user_display_name: Option<String>,
+    pub user_given_name: Option<String>,
     pub team: bool,
+}
+
+impl ConversationMessage {
+    /// The user is a to recipient of this message.
+    #[must_use]
+    pub fn to_user(&self) -> bool {
+        self.recipient == UserRecipient::To
+    }
+
+    /// The user is only a cc recipient of this message.
+    #[must_use]
+    pub fn cc_user(&self) -> bool {
+        self.recipient == UserRecipient::Cc
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -154,7 +184,7 @@ pub fn action_phrase(evidence_text: &str) -> String {
 /// Downgrades ownership that the evidence message does not support.
 #[must_use]
 pub fn resolve_owner(owner: Owner, source: &ConversationMessage) -> Owner {
-    if owner == Owner::You && !source.from_user && !source.to_user {
+    if owner == Owner::You && !source.from_user && !source.to_user() {
         return if source.team {
             Owner::Team
         } else {

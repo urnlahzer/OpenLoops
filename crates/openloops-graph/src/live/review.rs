@@ -25,6 +25,9 @@ pub struct MailItem {
     pub conversation: String,
     pub account: String,
     pub own_addresses: Vec<String>,
+    /// Signed-in identity kept in memory only; deliberately never logged.
+    pub own_display_name: Option<String>,
+    pub own_given_name: Option<String>,
     pub sender_address: String,
     pub to: Vec<String>,
     pub cc: Vec<String>,
@@ -32,6 +35,14 @@ pub struct MailItem {
     pub team: bool,
     pub web_link: String,
     pub event: Option<MailEvent>,
+}
+
+/// Process-local signed-in identity. Deliberately no `Debug` implementation.
+pub(super) struct UserIdentity {
+    pub account: String,
+    pub addresses: Vec<String>,
+    pub display_name: Option<String>,
+    pub given_name: Option<String>,
 }
 
 #[derive(Clone)]
@@ -125,20 +136,16 @@ pub fn load_sources_with(
             Ordering::Relaxed,
         );
         ensure_loading(progress)?;
-        let (account, addresses) = identity(http, token)?;
+        let identity = identity(http, token)?;
         ensure_loading(progress)?;
         let mut sources = Vec::new();
         if selected("Personal mailbox / Inbox") {
-            sources.push(load_mailbox(
-                http, token, None, &account, &addresses, cache, progress,
-            )?);
+            sources.push(load_mailbox(http, token, None, &identity, cache, progress)?);
             progress.sources_done.fetch_add(1, Ordering::Relaxed);
         }
         ensure_loading(progress)?;
         if selected("Personal mailbox / Sent Items") {
-            sources.push(load_sent(
-                http, token, None, &account, &addresses, cache, progress,
-            )?);
+            sources.push(load_sent(http, token, None, &identity, cache, progress)?);
             progress.sources_done.fetch_add(1, Ordering::Relaxed);
         }
         for address in &config.group_inboxes {
@@ -147,7 +154,7 @@ pub fn load_sources_with(
                 continue;
             }
             let mut source = load_group(http, token, address);
-            stamp_group_messages(&mut source, &account, &addresses);
+            stamp_group_messages(&mut source, &identity);
             progress
                 .listed
                 .fetch_add(source.messages.len(), Ordering::Relaxed);
@@ -178,8 +185,7 @@ pub fn load_sources_with(
                         http,
                         token,
                         Some(address),
-                        &account,
-                        &addresses,
+                        &identity,
                         cache,
                         progress,
                     )?);
@@ -191,8 +197,7 @@ pub fn load_sources_with(
                         http,
                         token,
                         Some(address),
-                        &account,
-                        &addresses,
+                        &identity,
                         cache,
                         progress,
                     )?);
@@ -258,10 +263,12 @@ fn ensure_loading(progress: &LoadProgress) -> Result<(), ConnectionError> {
     }
 }
 
-fn stamp_group_messages(source: &mut SourceReview, account: &str, addresses: &[String]) {
+fn stamp_group_messages(source: &mut SourceReview, identity: &UserIdentity) {
     for message in &mut source.messages {
-        account.clone_into(&mut message.account);
-        message.own_addresses = addresses.to_vec();
+        identity.account.clone_into(&mut message.account);
+        message.own_addresses.clone_from(&identity.addresses);
+        message.own_display_name.clone_from(&identity.display_name);
+        message.own_given_name.clone_from(&identity.given_name);
     }
 }
 
@@ -366,10 +373,7 @@ fn page(bytes: &[u8]) -> Result<(Vec<Value>, bool), ConnectionError> {
     Ok((std::mem::take(rows), partial))
 }
 
-pub(super) fn identity(
-    http: &Client,
-    token: &str,
-) -> Result<(String, Vec<String>), ConnectionError> {
+pub(super) fn identity(http: &Client, token: &str) -> Result<UserIdentity, ConnectionError> {
     identity_from_origin(http, token, GRAPH_ORIGIN)
 }
 
@@ -377,23 +381,43 @@ pub(super) fn identity_from_origin(
     http: &Client,
     token: &str,
     origin: &str,
-) -> Result<(String, Vec<String>), ConnectionError> {
+) -> Result<UserIdentity, ConnectionError> {
     let url = Url::parse(origin)
-        .and_then(|url| url.join("v1.0/me?$select=id,mail,userPrincipalName"))
+        .and_then(|url| url.join("v1.0/me?$select=id,mail,userPrincipalName,displayName,givenName"))
         .map_err(|_| ConnectionError::InvalidConfiguration)?;
     let value: Value = serde_json::from_slice(&fetch_from_origin(http, token, &url, origin)?)
         .map_err(|_| ConnectionError::ResourceUnavailable)?;
-    let id = text(&value, "id", 512)?;
+    parse_identity(&value)
+}
+
+fn parse_identity(value: &Value) -> Result<UserIdentity, ConnectionError> {
+    let id = text(value, "id", 512)?;
     let addresses: Vec<_> = ["mail", "userPrincipalName"]
         .iter()
-        .filter_map(|field| text(&value, field, 512).ok())
+        .filter_map(|field| text(value, field, 512).ok())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_lowercase())
         .collect();
     if id.is_empty() || addresses.is_empty() {
         return Err(ConnectionError::ResourceUnavailable);
     }
-    Ok((id, addresses))
+    Ok(UserIdentity {
+        account: id,
+        addresses,
+        display_name: optional_text(value, "displayName", 4096)?,
+        given_name: optional_text(value, "givenName", 4096)?,
+    })
+}
+
+fn optional_text(
+    value: &Value,
+    field: &str,
+    max: usize,
+) -> Result<Option<String>, ConnectionError> {
+    match value.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => text(value, field, max).map(|text| (!text.is_empty()).then_some(text)),
+    }
 }
 
 fn cutoff() -> String {
@@ -747,42 +771,22 @@ fn load_mailbox(
     http: &Client,
     token: &str,
     address: Option<&str>,
-    account: &str,
-    own_addresses: &[String],
+    identity: &UserIdentity,
     cache: &MailCache,
     progress: &LoadProgress,
 ) -> Result<SourceReview, ConnectionError> {
-    load_folder(
-        http,
-        token,
-        address,
-        false,
-        account,
-        own_addresses,
-        cache,
-        progress,
-    )
+    load_folder(http, token, address, false, identity, cache, progress)
 }
 
 fn load_sent(
     http: &Client,
     token: &str,
     address: Option<&str>,
-    account: &str,
-    own_addresses: &[String],
+    identity: &UserIdentity,
     cache: &MailCache,
     progress: &LoadProgress,
 ) -> Result<SourceReview, ConnectionError> {
-    load_folder(
-        http,
-        token,
-        address,
-        true,
-        account,
-        own_addresses,
-        cache,
-        progress,
-    )
+    load_folder(http, token, address, true, identity, cache, progress)
 }
 
 // Walks the newest-first listing page by page, stopping as soon as a row older
@@ -881,8 +885,7 @@ fn load_folder(
     token: &str,
     address: Option<&str>,
     sent: bool,
-    account: &str,
-    own_addresses: &[String],
+    identity: &UserIdentity,
     cache: &MailCache,
     progress: &LoadProgress,
 ) -> Result<SourceReview, ConnectionError> {
@@ -927,8 +930,7 @@ fn load_folder(
         &collected,
         sent,
         address.is_some(),
-        account,
-        own_addresses,
+        identity,
         cache,
         progress,
         |row| hydrate(http, token, address, row),
@@ -942,8 +944,7 @@ fn add_hydrated(
     collected: &[Value],
     sent: bool,
     team: bool,
-    account: &str,
-    own_addresses: &[String],
+    identity: &UserIdentity,
     cache: &MailCache,
     progress: &LoadProgress,
     hydrate_row: impl Fn(Value) -> Result<MailItem, ConnectionError> + Sync,
@@ -973,7 +974,7 @@ fn add_hydrated(
                     let sent_time = sent.then(|| text(&row, "sentDateTime", 64).ok()).flatten();
                     let cached = text(&row, "id", 2048).ok().and_then(|id| {
                         cache
-                            .get(&(account.to_owned(), id))
+                            .get(&(identity.account.clone(), id))
                             .cloned()
                             .map(|message| (message, true))
                     });
@@ -996,8 +997,10 @@ fn add_hydrated(
         match result {
             Ok((mut message, cached)) => {
                 if !cached {
-                    account.clone_into(&mut message.account);
-                    message.own_addresses = own_addresses.to_vec();
+                    identity.account.clone_into(&mut message.account);
+                    message.own_addresses.clone_from(&identity.addresses);
+                    message.own_display_name.clone_from(&identity.display_name);
+                    message.own_given_name.clone_from(&identity.given_name);
                     message.sent = sent;
                     message.team = team;
                     if let Some(sent_time) = sent_time {
@@ -1105,6 +1108,41 @@ fn source_listing_failed(usable: usize, errors: &[ConnectionError]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn synthetic_identity(addresses: &[&str]) -> UserIdentity {
+        UserIdentity {
+            account: "synthetic-account".into(),
+            addresses: addresses.iter().map(|address| (*address).into()).collect(),
+            display_name: Some("Synthetic User".into()),
+            given_name: Some("Synthetic".into()),
+        }
+    }
+
+    #[test]
+    fn identity_parses_names_when_present() {
+        let identity = parse_identity(&serde_json::json!({
+            "id": "synthetic-account",
+            "mail": "user@example.invalid",
+            "userPrincipalName": "alias@example.invalid",
+            "displayName": "Synthetic User",
+            "givenName": "Synthetic"
+        }))
+        .unwrap();
+        assert_eq!(identity.display_name.as_deref(), Some("Synthetic User"));
+        assert_eq!(identity.given_name.as_deref(), Some("Synthetic"));
+    }
+
+    #[test]
+    fn identity_accepts_absent_names() {
+        let identity = parse_identity(&serde_json::json!({
+            "id": "synthetic-account",
+            "mail": "user@example.invalid"
+        }))
+        .unwrap();
+        assert_eq!(identity.display_name, None);
+        assert_eq!(identity.given_name, None);
+    }
+
     #[test]
     fn content_paths_are_read_only_bounded_and_encode_identifiers() {
         let url = mailbox_url(Some("synthetic@example.invalid"), false).unwrap();
@@ -1545,8 +1583,7 @@ mod tests {
             &rows,
             false,
             false,
-            "synthetic-account",
-            &[],
+            &synthetic_identity(&[]),
             &MailCache::default(),
             &LoadProgress::default(),
             |row| {
@@ -1629,8 +1666,7 @@ mod tests {
                 &rows,
                 false,
                 false,
-                "synthetic-account",
-                &[],
+                &synthetic_identity(&[]),
                 &MailCache::default(),
                 &LoadProgress::default(),
                 |row| {
@@ -1685,8 +1721,7 @@ mod tests {
             &rows,
             false,
             false,
-            "synthetic-account",
-            &["user@example.invalid".into()],
+            &synthetic_identity(&["user@example.invalid"]),
             &MailCache::default(),
             &progress,
             |row| {
@@ -1732,8 +1767,7 @@ mod tests {
             &rows,
             false,
             false,
-            "synthetic-account",
-            &[],
+            &synthetic_identity(&[]),
             &MailCache::default(),
             &progress,
             |row| Ok(hydrated_row(&row)),
@@ -1777,8 +1811,7 @@ mod tests {
             &rows,
             false,
             false,
-            "synthetic-account",
-            &[],
+            &synthetic_identity(&[]),
             &MailCache::default(),
             &progress,
             |row| {
@@ -1812,6 +1845,8 @@ mod tests {
             conversation: "cached-conversation".into(),
             account: "synthetic-account".into(),
             own_addresses: vec!["cached@example.invalid".into()],
+            own_display_name: Some("Synthetic User".into()),
+            own_given_name: Some("Synthetic".into()),
             sender_address: "sender@example.invalid".into(),
             to: vec!["recipient@example.invalid".into()],
             cc: vec!["observer@example.invalid".into()],
@@ -1848,8 +1883,7 @@ mod tests {
             &rows,
             false,
             false,
-            "synthetic-account",
-            &[],
+            &synthetic_identity(&[]),
             &cache,
             &progress,
             |row| {
@@ -1906,8 +1940,7 @@ mod tests {
             &rows,
             false,
             false,
-            "synthetic-account",
-            &[],
+            &synthetic_identity(&[]),
             &MailCache::default(),
             &progress,
             |row| {
