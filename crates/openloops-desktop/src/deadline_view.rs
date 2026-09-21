@@ -43,6 +43,15 @@ pub enum DeadlineView {
     Unknown,
 }
 
+/// Scan-time decision-model classification for a deadline phrase that the
+/// deterministic parser and generic-event-word fallback could not classify.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeadlineKindHint {
+    EventTied,
+    Soft,
+    Unknown,
+}
+
 /// Generic event nouns naming the KIND of gathering rather than which one --
 /// shared with [`crate::review_scan`]'s event-name matching (one list, so
 /// the words that make [`classify`] fall back to [`DeadlineView::EventTied`]
@@ -73,6 +82,16 @@ pub fn classify(
     message_timestamp: i64,
     now: i64,
     local_offset_seconds: i32,
+) -> DeadlineView {
+    classify_with_hint(quote, message_timestamp, now, local_offset_seconds, None)
+}
+
+pub fn classify_with_hint(
+    quote: &str,
+    message_timestamp: i64,
+    now: i64,
+    local_offset_seconds: i32,
+    hint: Option<DeadlineKindHint>,
 ) -> DeadlineView {
     let context = ParseContext {
         message_timestamp: UnixSeconds(message_timestamp),
@@ -138,7 +157,11 @@ pub fn classify(
             }) {
                 DeadlineView::EventTied
             } else {
-                DeadlineView::Unknown
+                match hint {
+                    Some(DeadlineKindHint::EventTied) => DeadlineView::EventTied,
+                    Some(DeadlineKindHint::Soft) => DeadlineView::Soft,
+                    Some(DeadlineKindHint::Unknown) | None => DeadlineView::Unknown,
+                }
             }
         }
     }
@@ -445,6 +468,50 @@ mod tests {
         assert_eq!(
             classify("whenever", MESSAGE, MESSAGE, 0),
             DeadlineView::Unknown
+        );
+    }
+
+    #[test]
+    fn scan_time_hint_applies_only_after_deterministic_fallbacks_fail() {
+        assert_eq!(
+            classify_with_hint(
+                "before kickoff",
+                MESSAGE,
+                MESSAGE,
+                0,
+                Some(DeadlineKindHint::EventTied),
+            ),
+            DeadlineView::EventTied
+        );
+        assert_eq!(
+            classify_with_hint(
+                "before kickoff",
+                MESSAGE,
+                MESSAGE,
+                0,
+                Some(DeadlineKindHint::Soft),
+            ),
+            DeadlineView::Soft
+        );
+        assert_eq!(
+            classify_with_hint(
+                "before kickoff",
+                MESSAGE,
+                MESSAGE,
+                0,
+                Some(DeadlineKindHint::Unknown),
+            ),
+            DeadlineView::Unknown
+        );
+        assert_eq!(
+            classify_with_hint(
+                "before the meeting",
+                MESSAGE,
+                MESSAGE,
+                0,
+                Some(DeadlineKindHint::Soft),
+            ),
+            DeadlineView::EventTied
         );
     }
 

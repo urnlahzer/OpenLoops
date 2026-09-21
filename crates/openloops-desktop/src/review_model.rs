@@ -3,7 +3,7 @@ use crate::claim_view::{
     Anchor, EventPassed, LoopItem, LoopItems, Owner, ResolutionKind, ResolvedUpdate,
     SuggestedUpdate, SuggestedUpdateKind,
 };
-use crate::deadline_view::{DeadlineView, classify};
+use crate::deadline_view::{DeadlineView, classify, classify_with_hint};
 use crate::loop_state::{Decision, Decisions, Record, Reminder, now};
 use openloops_graph::live::{
     reminders::ReminderRequest,
@@ -607,7 +607,13 @@ impl ReviewState {
                 .find(|m| m.input.handle == anchor.message)
                 .unwrap_or(source);
             let offset = scanning::local_offset_seconds(message.input.timestamp, now_offset);
-            classify(&anchor.quote, message.input.timestamp, now, offset)
+            classify_with_hint(
+                &anchor.quote,
+                message.input.timestamp,
+                now,
+                offset,
+                item.deadline_kind_hint,
+            )
         });
         Some(CardContext {
             record,
@@ -670,6 +676,7 @@ impl ReviewState {
                     quote: value,
                     context: update.evidence_text,
                 });
+                item.deadline_kind_hint = None;
                 item.unverified_deadline = false;
                 SuggestionOutcome::DeadlineApplied
             }
@@ -1325,6 +1332,7 @@ pub fn layout_fixture() -> ReviewState {
                 quote: "Friday".into(),
                 context: body.into(),
             }),
+            deadline_kind_hint: None,
             event: None,
             event_time: None,
             resolution: Some(Anchor {
@@ -1368,6 +1376,7 @@ pub fn layout_fixture() -> ReviewState {
                 quote: "Friday".into(),
                 context: body.into(),
             }),
+            deadline_kind_hint: None,
             event: None,
             event_time: None,
             resolution: None,
@@ -1403,6 +1412,7 @@ pub fn layout_fixture() -> ReviewState {
                 quote: "Friday".into(),
                 context: "Please confirm the vendor invoice by end of day Friday.".into(),
             }),
+            deadline_kind_hint: None,
             event: None,
             event_time: None,
             resolution: None,
@@ -1922,6 +1932,7 @@ mod tests {
             kind: "request".into(),
             evidence: anchor.clone(),
             deadline: Some(anchor),
+            deadline_kind_hint: None,
             event: None,
             event_time: None,
             resolution: None,

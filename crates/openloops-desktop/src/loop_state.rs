@@ -604,6 +604,7 @@ mod tests {
                 context: "Please send the synthetic draft.".into(),
             },
             deadline: None,
+            deadline_kind_hint: None,
             event: None,
             event_time: None,
             resolution: None,
