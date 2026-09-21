@@ -178,6 +178,8 @@ callers do not know which backend answered.
 
 ### P1. Closure and suggested updates (`scan_closures`)
 
+Status: implemented on `feat/jev-closure-pass`.
+
 Today: one chat-model call per reachable conversation, at most 8 loop
 handles per call and 40 calls per scan.
 
@@ -193,22 +195,28 @@ later: {paragraph_text, from_user, days_later}}` and four nouls:
   obligation."
 - `modified`: "The later text changes what the obligation requires."
 
-Paragraphs are batched: one request per (loop, message) with the message's
-paragraphs as an array in state and the four questions asked per paragraph
-(question ids carry the paragraph ordinal). Pairs are evaluated concurrently
-under the existing parallel limiter.
+The tuned state shape is preserved with one request per (loop, message,
+paragraph), capped at the first 8 body paragraphs of each later message.
+Question ids carry the paragraph ordinal. Requests are evaluated concurrently
+under the decision client's parallel limit.
 
 Recombination in code: highest probability above the accept threshold wins,
 closure preferred on ties, one `SuggestedUpdate` per loop. `deadline_changed`
 needs a temporal value the schema can carry; the code enumerates date
-candidates from the paragraph with the existing prose parsers and asks a
-`choice` over them plus `none`; no candidate means no deadline-change
-suggestion. Gray-band pairs go to the chat model exactly as the closure pass
-does today, restricted to those pairs. Every suggestion still needs review;
-`validation::route` is unchanged.
+candidates from the winning paragraph with the existing prose parsers. Exactly
+one normalizable candidate supplies the value, no candidate drops that outcome,
+and multiple candidates escalate the pair. Gray-band pairs go to the chat model
+exactly as the closure pass does today, restricted to those loops and grouped by
+conversation. Every suggestion still needs review; `validation::route` is
+unchanged.
 
-Result: no handle cap, no 40-call cap, and the same-thread and cross-thread
-routes both become exhaustive.
+Follow-up: `closure.modified` remains at chance on synthetic data. The next
+tuning round plans to replace the four nouls with one `closure.outcome` choice
+question.
+
+Result: decision requests have no handle or 40-call cap, while escalated chat
+work retains the 40-conversation cap; the same-thread and cross-thread routes
+both become exhaustive.
 
 ### P2. Triage before the primary pass
 

@@ -165,14 +165,18 @@ affected conversation. Other conversation failures remain visible while the
 scan continues. There are no automatic request retries or silent model
 substitutions.
 
-After the per-conversation pass, a bounded closure pass makes one governed
-model call per conversation that can reach open requests: a later message you
-sent in the same thread, or a later message you sent to the waiting party in
-another conversation. Each call offers up to 8 open requests as opaque handles
-and accepts only closure, deadline-change and modification claims that name an
-offered handle; every accepted claim becomes a pending suggested update. A scan
-makes at most 40 such calls. Requests found earlier in the same scan are the
-only ones offered, because no mail text is stored between scans.
+After the per-conversation pass, the closure pass checks later messages that can
+reach open requests: a later message in the same thread, or a conversation
+reached through a later message you sent to the waiting party. With the
+`OpenRouter` decision-model setting enabled, `Jev` checks one later paragraph
+per request (the first 8 body paragraphs per message). Accepted answers become
+pending suggested updates. Gray-band loop/message pairs are grouped by
+conversation and sent to the existing governed chat-model closure call, capped
+at 40 conversations per scan. Coverage notes report content-free counts for
+decision-model suggestions, escalated pairs, and skipped pairs. With the
+setting off, the existing chat-model closure pass runs unchanged. Requests
+found earlier in the same scan are the only ones offered, because no mail text
+is stored between scans.
 
 ## Saved decisions and reminders
 

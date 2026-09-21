@@ -14,7 +14,8 @@ use std::sync::atomic::Ordering;
 #[path = "review_scan.rs"]
 mod scanning;
 pub(crate) use scanning::{
-    ConversationFailure, FailureReason, ReviewMessage, ScanProgress, ScanResult, probe, scan,
+    ConversationFailure, FailureReason, ReviewMessage, ScanOptions, ScanProgress, ScanResult,
+    probe, scan,
 };
 
 pub(crate) const SHOW_HANDLED_LABEL: &str = "Show resolved, handled, and dismissed";

@@ -11,13 +11,18 @@ use openloops_contracts::{
 };
 use openloops_domain::deadline::UnixSeconds;
 use openloops_domain::deadline_parse::{
-    DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT, ParseContext, TimezoneContext, Weekday,
+    DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT, ParseContext, TemporalKind as DeadlineTemporalKind,
+    TimezoneContext, Weekday, reparse,
 };
 use openloops_graph::live::{ConnectionError, review::MailItem};
 use openloops_inference::{
     analysis::{AcceptedClaim, ClaimAnalysis, ReviewEvidence, analyze_claims, rejection_label},
     blocks::CanonicalBlock,
     canonical::canonicalize_plain,
+    decision::{
+        Answer, DECISION_DEADLINE, DecisionClient, OpenRouterDecisions, Questions,
+        registry::Registry,
+    },
     message::CanonicalMessage,
     ollama::OllamaCloud,
     openrouter::OpenRouter,
@@ -2352,7 +2357,7 @@ fn push_unique_expectation(items: &mut Vec<LoopItem>, item: LoopItem) {
 /// resent, because `network_policy.retries` forbids automatically
 /// retrying a request that already carried content.
 pub fn scan(
-    provider: Provider,
+    options: ScanOptions,
     key: String,
     model: &str,
     parallel: usize,
@@ -2367,7 +2372,9 @@ pub fn scan(
         })
         .count();
     progress.total.store(selected_messages, Ordering::Relaxed);
-    let client = connect(provider, key, model, parallel)?;
+    let decision_key = (options.provider == Provider::OpenRouter && options.use_decision_model)
+        .then(|| key.clone());
+    let client = connect(options.provider, key, model, parallel)?;
     let client = client.as_ref();
     let pass = ParallelPass::new(client.max_parallel());
     let mut result = scan_conversations_filtered(
@@ -2378,8 +2385,45 @@ pub fn scan(
         &|conversation| governed_pass(client, conversation, Some(&progress.cancel)),
     );
     close_passed_events(&mut result, messages, chrono::Utc::now().timestamp());
-    scan_closures(messages, progress, &mut result, &pass, client);
+    let decision_client = if result.primary_scan_transport_error {
+        None
+    } else {
+        maybe_decision_client(options, || {
+            Ok(OpenRouterDecisions::connect(
+                decision_key.expect("decision key exists when enabled"),
+                &Registry::get().model,
+            )?
+            .with_max_parallel(parallel))
+        })?
+    };
+    scan_closures_selected(
+        messages,
+        progress,
+        &mut result,
+        &pass,
+        client,
+        decision_client
+            .as_ref()
+            .map(|value| value as &dyn DecisionClient),
+    );
     Ok(result)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScanOptions {
+    pub provider: Provider,
+    pub use_decision_model: bool,
+}
+
+fn maybe_decision_client<T>(
+    options: ScanOptions,
+    connect: impl FnOnce() -> Result<T, ProviderError>,
+) -> Result<Option<T>, ProviderError> {
+    if options.provider == Provider::OpenRouter && options.use_decision_model {
+        connect().map(Some)
+    } else {
+        Ok(None)
+    }
 }
 /// Builds the one-line diagnostic note for a successfully analyzed
 /// conversation (`index` is 0-based; the note is 1-based), or `None` when
@@ -3559,6 +3603,10 @@ const MAX_LOOP_HANDLES: usize = 8;
 /// and the evidence messages of the loops it offers.
 const MAX_REQUEST_MESSAGES: usize = 40;
 
+/// Decision-model requests inspect at most the first eight body paragraphs
+/// of one later message.
+const MAX_CLOSURE_PARAGRAPHS: usize = 8;
+
 /// One open, you-owed loop offered to the closure pass: its scan-local
 /// opaque handle, the index of its item in `ScanResult::analysis.items`,
 /// and the message its evidence anchors to.
@@ -3836,6 +3884,458 @@ fn collect_updates(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum DecisionOutcome {
+    Fulfilled,
+    Withdrawn,
+    DeadlineChanged,
+    Modified,
+}
+
+impl DecisionOutcome {
+    const ALL: [Self; 4] = [
+        Self::Fulfilled,
+        Self::Withdrawn,
+        Self::DeadlineChanged,
+        Self::Modified,
+    ];
+
+    const fn registry_id(self) -> &'static str {
+        match self {
+            Self::Fulfilled => "closure.fulfilled",
+            Self::Withdrawn => "closure.withdrawn",
+            Self::DeadlineChanged => "closure.deadline_changed",
+            Self::Modified => "closure.modified",
+        }
+    }
+
+    const fn suffix(self) -> &'static str {
+        match self {
+            Self::Fulfilled => "fulfilled",
+            Self::Withdrawn => "withdrawn",
+            Self::DeadlineChanged => "deadline_changed",
+            Self::Modified => "modified",
+        }
+    }
+
+    const fn kind(self) -> SuggestedUpdateKind {
+        match self {
+            Self::Fulfilled | Self::Withdrawn => SuggestedUpdateKind::Closure,
+            Self::DeadlineChanged => SuggestedUpdateKind::DeadlineChange,
+            Self::Modified => SuggestedUpdateKind::Modification,
+        }
+    }
+}
+
+struct DecisionPair<'a> {
+    offered: usize,
+    source_timestamp: i64,
+    later: &'a ReviewMessage,
+}
+
+struct DecisionParagraphJob {
+    pair: usize,
+    ordinal: usize,
+    text: String,
+}
+
+fn decision_pairs<'a>(
+    reach: &BTreeMap<ConversationKey<'a>, Vec<usize>>,
+    offered: &[OfferedLoop<'a>],
+    messages: &'a [ReviewMessage],
+) -> Vec<DecisionPair<'a>> {
+    let mut pairs = Vec::new();
+    for (&(account, conversation), loops) in reach {
+        for &offered_index in loops {
+            let source_timestamp = offered[offered_index].source.input.timestamp;
+            pairs.extend(
+                messages
+                    .iter()
+                    .filter(|message| {
+                        message.account == account
+                            && message.conversation == conversation
+                            && message.input.timestamp > source_timestamp
+                    })
+                    .map(|later| DecisionPair {
+                        offered: offered_index,
+                        source_timestamp,
+                        later,
+                    }),
+            );
+        }
+    }
+    pairs.sort_by_key(|pair| {
+        (
+            pair.offered,
+            pair.later.input.timestamp,
+            pair.later.input.handle.as_str(),
+        )
+    });
+    pairs
+}
+
+fn decision_paragraph_jobs(pairs: &[DecisionPair<'_>]) -> Vec<DecisionParagraphJob> {
+    pairs
+        .iter()
+        .enumerate()
+        .flat_map(|(pair, value)| {
+            value
+                .later
+                .input
+                .message
+                .body_blocks
+                .iter()
+                .take(MAX_CLOSURE_PARAGRAPHS)
+                .enumerate()
+                .map(move |(ordinal, block)| DecisionParagraphJob {
+                    pair,
+                    ordinal,
+                    text: block.as_string(),
+                })
+        })
+        .collect()
+}
+
+fn closure_questions(ordinal: usize) -> Result<Questions, ProviderError> {
+    let request_ids: Vec<String> = DecisionOutcome::ALL
+        .iter()
+        .map(|outcome| format!("p{ordinal}.{}", outcome.suffix()))
+        .collect();
+    let mapped: Vec<(&str, &str)> = DecisionOutcome::ALL
+        .iter()
+        .zip(&request_ids)
+        .map(|(outcome, request)| (outcome.registry_id(), request.as_str()))
+        .collect();
+    Questions::from_registry_with_ids(&mapped)
+}
+
+fn closure_state(item: &LoopItem, pair: &DecisionPair<'_>, paragraph: &str) -> serde_json::Value {
+    let days_later = (pair.later.input.timestamp - pair.source_timestamp).div_euclid(86_400);
+    serde_json::json!({
+        "obligation": {
+            "title": item.action,
+            "evidence_text": item.evidence.context,
+        },
+        "later": {
+            "paragraph_text": paragraph,
+            "from_user": pair.later.input.from_user,
+            "days_later": days_later,
+        }
+    })
+}
+
+struct DecisionProbabilities {
+    values: [(DecisionOutcome, f64); 4],
+}
+
+enum DecisionJobResult {
+    Answer(DecisionProbabilities),
+    Failed,
+}
+
+fn decide_paragraph(
+    client: &dyn DecisionClient,
+    item: &LoopItem,
+    pair: &DecisionPair<'_>,
+    job: &DecisionParagraphJob,
+    cancel: &AtomicBool,
+) -> Result<DecisionProbabilities, ProviderError> {
+    let questions = closure_questions(job.ordinal)?;
+    let state = closure_state(item, pair, &job.text);
+    let answers = client.decide(&state, &questions, Some(cancel), DECISION_DEADLINE)?;
+    let mut values = [(DecisionOutcome::Fulfilled, 0.0); 4];
+    for (slot, outcome) in DecisionOutcome::ALL.iter().copied().enumerate() {
+        let id = format!("p{}.{}", job.ordinal, outcome.suffix());
+        let Some(Answer::Noul { probability }) = answers.get(&id) else {
+            return Err(ProviderError::InvalidResponse);
+        };
+        values[slot] = (outcome, *probability);
+    }
+    Ok(DecisionProbabilities { values })
+}
+
+fn normalized_deadline(pair: &DecisionPair<'_>, text: &str) -> Result<Option<String>, ()> {
+    let timestamp = pair.later.input.timestamp;
+    let offset = local_offset_seconds(timestamp, 0);
+    let Some(timezone) = chrono::FixedOffset::east_opt(offset) else {
+        return Ok(None);
+    };
+    let context = governed_temporal_context(&pair.later.input);
+    let values: Vec<String> = prose_event_time_candidates(text, timestamp, offset)
+        .into_iter()
+        .filter_map(|(start, _, _)| {
+            let local = timezone.timestamp_opt(start, 0).single()?;
+            let value = local.format("%Y-%m-%d").to_string();
+            reparse(DeadlineTemporalKind::Date, &value, &context)
+                .is_ok()
+                .then_some(value)
+        })
+        .collect();
+    match values.as_slice() {
+        [] => Ok(None),
+        [value] => Ok(Some(value.clone())),
+        _ => Err(()),
+    }
+}
+
+fn accepted_update(
+    pair: &DecisionPair<'_>,
+    jobs: &[DecisionParagraphJob],
+    maxima: &BTreeMap<DecisionOutcome, (f64, usize)>,
+) -> Result<Option<SuggestedUpdate>, ()> {
+    let mut accepted = Vec::new();
+    for (&outcome, &(probability, job_index)) in maxima {
+        let threshold = Registry::get()
+            .question(outcome.registry_id())
+            .expect("closure registry question");
+        if probability < threshold.accept {
+            continue;
+        }
+        let temporal = if outcome == DecisionOutcome::DeadlineChanged {
+            let Some(value) = normalized_deadline(pair, &jobs[job_index].text)? else {
+                continue;
+            };
+            Some(value)
+        } else {
+            None
+        };
+        accepted.push((outcome, probability, job_index, temporal));
+    }
+    let Some((outcome, probability, job_index, temporal_value)) =
+        accepted.into_iter().max_by(|left, right| {
+            left.1.total_cmp(&right.1).then_with(|| {
+                (left.0 == DecisionOutcome::Fulfilled).cmp(&(right.0 == DecisionOutcome::Fulfilled))
+            })
+        })
+    else {
+        return Ok(None);
+    };
+    let job = &jobs[job_index];
+    let confidence_micros = format!("{:.0}", probability * 1_000_000.0)
+        .parse()
+        .expect("validated probability rounds into u32");
+    Ok(Some(SuggestedUpdate {
+        kind: outcome.kind(),
+        evidence_text: job.text.clone(),
+        source_message: pair.later.input.handle.clone(),
+        source_block: job.ordinal,
+        temporal_value,
+        confidence_micros,
+    }))
+}
+
+fn pair_has_escalation(
+    pair: &DecisionPair<'_>,
+    jobs: &[DecisionParagraphJob],
+    maxima: &BTreeMap<DecisionOutcome, (f64, usize)>,
+) -> bool {
+    maxima.iter().any(|(&outcome, &(probability, job_index))| {
+        let threshold = Registry::get()
+            .question(outcome.registry_id())
+            .expect("closure registry question");
+        if probability < threshold.escalate || probability >= threshold.accept {
+            return false;
+        }
+        outcome != DecisionOutcome::DeadlineChanged
+            || matches!(
+                normalized_deadline(pair, &jobs[job_index].text),
+                Ok(Some(_)) | Err(())
+            )
+    })
+}
+
+fn recombine_decisions(
+    pairs: &[DecisionPair<'_>],
+    jobs: &[DecisionParagraphJob],
+    outcomes: JobResults<DecisionJobResult>,
+    offered: &[OfferedLoop<'_>],
+) -> (
+    BTreeMap<usize, SuggestedUpdate>,
+    BTreeSet<usize>,
+    usize,
+    bool,
+) {
+    let mut maxima = vec![BTreeMap::new(); pairs.len()];
+    let mut skipped = BTreeSet::new();
+    let mut cancelled = false;
+    for (slot, outcome) in outcomes {
+        let pair_index = jobs[slot].pair;
+        match outcome {
+            JobOutcome::Completed(Ok(DecisionJobResult::Answer(answer))) => {
+                for (kind, probability) in answer.values {
+                    let entry = maxima[pair_index].entry(kind).or_insert((0.0, slot));
+                    if probability > entry.0 {
+                        *entry = (probability, slot);
+                    }
+                }
+            }
+            JobOutcome::Completed(Err(ProviderError::Cancelled)) => cancelled = true,
+            JobOutcome::NotStarted => {}
+            JobOutcome::Completed(Ok(DecisionJobResult::Failed) | Err(_))
+            | JobOutcome::Panicked => {
+                skipped.insert(pair_index);
+            }
+        }
+    }
+    let mut best = BTreeMap::new();
+    let mut escalated = BTreeSet::new();
+    for (pair_index, pair) in pairs.iter().enumerate() {
+        if skipped.contains(&pair_index) || maxima[pair_index].is_empty() {
+            continue;
+        }
+        match accepted_update(pair, jobs, &maxima[pair_index]) {
+            Err(()) => {
+                escalated.insert(pair_index);
+            }
+            Ok(Some(update)) => {
+                let item = offered[pair.offered].item;
+                if best
+                    .get(&item)
+                    .is_none_or(|current| outranks(&update, current))
+                {
+                    best.insert(item, update);
+                }
+            }
+            Ok(None) if pair_has_escalation(pair, jobs, &maxima[pair_index]) => {
+                escalated.insert(pair_index);
+            }
+            Ok(None) => {}
+        }
+    }
+    (best, escalated, skipped.len(), cancelled)
+}
+
+fn apply_updates(result: &mut ScanResult, best: BTreeMap<usize, SuggestedUpdate>) -> usize {
+    let mut attached = 0;
+    for (item, update) in best {
+        let replace = result.analysis.items[item]
+            .suggested_update
+            .as_ref()
+            .is_none_or(|current| outranks(&update, current));
+        if replace {
+            if result.analysis.items[item].suggested_update.is_none() {
+                result.suggested_updates += 1;
+            }
+            result.analysis.items[item].suggested_update = Some(update);
+            attached += 1;
+        }
+    }
+    attached
+}
+
+fn escalated_reach<'a>(
+    pairs: &[DecisionPair<'a>],
+    escalated: &BTreeSet<usize>,
+) -> BTreeMap<ConversationKey<'a>, Vec<usize>> {
+    let mut reach: BTreeMap<ConversationKey<'a>, Vec<usize>> = BTreeMap::new();
+    for &pair_index in escalated {
+        let pair = &pairs[pair_index];
+        let loops = reach
+            .entry((
+                pair.later.account.as_str(),
+                pair.later.conversation.as_str(),
+            ))
+            .or_default();
+        if !loops.contains(&pair.offered) {
+            loops.push(pair.offered);
+        }
+    }
+    reach
+}
+
+fn scan_decision_closures(
+    messages: &[ReviewMessage],
+    progress: &ScanProgress,
+    result: &mut ScanResult,
+    chat_pass: &ParallelPass,
+    chat_client: &dyn ModelClient,
+    decision_client: &dyn DecisionClient,
+) {
+    let offered = offered_loops(&result.analysis.items, messages);
+    let reach = loops_by_conversation(&offered, &result.analysis.items, messages);
+    let pairs = decision_pairs(&reach, &offered, messages);
+    let jobs = decision_paragraph_jobs(&pairs);
+    progress.total.fetch_add(jobs.len(), Ordering::Relaxed);
+    progress.closure_phase.store(true, Ordering::Relaxed);
+    let decision_pass = ParallelPass::new(decision_client.max_parallel());
+    let processed_per_job = vec![1; jobs.len()];
+    progress
+        .conversation_total
+        .store(jobs.len(), Ordering::Relaxed);
+    let outcomes = run_jobs(&processed_per_job, &decision_pass, progress, &|slot| {
+        let job = &jobs[slot];
+        let pair = &pairs[job.pair];
+        match decide_paragraph(
+            decision_client,
+            &result.analysis.items[offered[pair.offered].item],
+            pair,
+            job,
+            &progress.cancel,
+        ) {
+            Ok(answer) => Ok(DecisionJobResult::Answer(answer)),
+            Err(ProviderError::Cancelled) => Err(ProviderError::Cancelled),
+            Err(_) => Ok(DecisionJobResult::Failed),
+        }
+    });
+    let (best, escalated, skipped, cancelled) =
+        recombine_decisions(&pairs, &jobs, outcomes, &offered);
+    result.cancelled |= cancelled;
+    let decision_suggestions = apply_updates(result, best);
+    let (chat_jobs, capped) = if cancelled || progress.cancel.load(Ordering::Relaxed) {
+        (Vec::new(), false)
+    } else {
+        closure_jobs(escalated_reach(&pairs, &escalated), messages)
+    };
+    progress.total.fetch_add(chat_jobs.len(), Ordering::Relaxed);
+    progress
+        .conversation_total
+        .store(jobs.len() + chat_jobs.len(), Ordering::Relaxed);
+    chat_pass.restart();
+    let chat_processed = vec![1; chat_jobs.len()];
+    let chat_outcomes = run_jobs(&chat_processed, chat_pass, progress, &|slot| {
+        closure_request(chat_client, &chat_jobs[slot], &offered, &progress.cancel)
+    });
+    merge_closure_outcomes(result, messages, &offered, &chat_jobs, chat_outcomes);
+    result.conversation_notes.push(format!(
+        "{decision_suggestions} suggested updates from the decision model, {} pairs escalated to the chat model, {skipped} skipped (rate limit / errors).",
+        escalated.len()
+    ));
+    if capped {
+        result.conversation_notes.push(format!(
+            "Escalated update checks were capped at {MAX_CLOSURE_CONVERSATIONS} conversations this scan."
+        ));
+    }
+}
+
+fn scan_closures_selected(
+    messages: &[ReviewMessage],
+    progress: &ScanProgress,
+    result: &mut ScanResult,
+    pass: &ParallelPass,
+    chat_client: &dyn ModelClient,
+    decision_client: Option<&dyn DecisionClient>,
+) {
+    if result.primary_scan_transport_error {
+        return;
+    }
+    if let Some(decision_client) = decision_client {
+        scan_decision_closures(
+            messages,
+            progress,
+            result,
+            pass,
+            chat_client,
+            decision_client,
+        );
+        progress.reset_pass();
+        if progress.cancel.load(Ordering::Relaxed) {
+            result.cancelled = true;
+        }
+    } else {
+        scan_closures(messages, progress, result, pass, chat_client);
+    }
+}
+
 /// After the primary per-conversation scan, asks the model once per
 /// conversation that could bear on an open loop whether a later message
 /// closes or changes it. The loops offered are the open `request`/`promise`
@@ -3933,10 +4433,7 @@ fn merge_closure_outcomes(
             JobOutcome::Completed(Err(_)) | JobOutcome::NotStarted => {}
         }
     }
-    for (item, update) in best {
-        result.analysis.items[item].suggested_update = Some(update);
-        result.suggested_updates += 1;
-    }
+    apply_updates(result, best);
     if rate_limited > 0 {
         result.conversation_notes.push(format!(
             "{rate_limited} update check(s) were rate-limited; they were not resent."
@@ -8819,6 +9316,96 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         }
     }
 
+    type FixedDecisionAnswer<'a> =
+        dyn Fn(usize, &serde_json::Value) -> Result<[f64; 4], ProviderError> + Send + Sync + 'a;
+
+    struct FixedDecisionClient<'a> {
+        answer: Box<FixedDecisionAnswer<'a>>,
+        calls: AtomicUsize,
+        states: Mutex<Vec<serde_json::Value>>,
+        parallel: usize,
+    }
+
+    impl<'a> FixedDecisionClient<'a> {
+        fn new(
+            answer: impl Fn(usize, &serde_json::Value) -> Result<[f64; 4], ProviderError>
+            + Send
+            + Sync
+            + 'a,
+        ) -> Self {
+            Self {
+                answer: Box::new(answer),
+                calls: AtomicUsize::new(0),
+                states: Mutex::new(Vec::new()),
+                parallel: 1,
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::Relaxed)
+        }
+
+        fn state(&self, index: usize) -> serde_json::Value {
+            self.states.lock().unwrap_or_else(PoisonError::into_inner)[index].clone()
+        }
+    }
+
+    impl DecisionClient for FixedDecisionClient<'_> {
+        fn model(&self) -> &'static str {
+            "fixed"
+        }
+
+        fn max_parallel(&self) -> usize {
+            self.parallel
+        }
+
+        fn decide(
+            &self,
+            state: &serde_json::Value,
+            questions: &Questions,
+            _cancel: Option<&AtomicBool>,
+            deadline: Duration,
+        ) -> Result<openloops_inference::decision::Answers, ProviderError> {
+            assert_eq!(deadline, DECISION_DEADLINE);
+            let call = self.calls.fetch_add(1, Ordering::Relaxed);
+            self.states
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(state.clone());
+            let probabilities = (self.answer)(call, state)?;
+            let request =
+                openloops_inference::decision::request_body(self.model(), state, questions, false)?;
+            let request: serde_json::Value =
+                serde_json::from_slice(&request).map_err(|_| ProviderError::InvalidQuestion)?;
+            let ids = request["questions"]
+                .as_object()
+                .ok_or(ProviderError::InvalidQuestion)?
+                .keys();
+            let mut answers = serde_json::Map::new();
+            for id in ids {
+                let probability = DecisionOutcome::ALL
+                    .iter()
+                    .position(|outcome| id.ends_with(outcome.suffix()))
+                    .map(|index| probabilities[index])
+                    .ok_or(ProviderError::InvalidQuestion)?;
+                answers.insert(
+                    id.clone(),
+                    serde_json::json!({"type":"noul", "noul":probability}),
+                );
+            }
+            let response = serde_json::json!({
+                "model": self.model(),
+                "answers": answers,
+                "usage": {"input_tokens": 1}
+            });
+            openloops_inference::decision::parse_answers(
+                &serde_json::to_vec(&response).map_err(|_| ProviderError::InvalidResponse)?,
+                self.model(),
+                questions,
+            )
+        }
+    }
+
     const EMPTY_CLAIMS: &str = r#"{"schema_version":1,"claims":[]}"#;
 
     /// One `analysis-output-v1` claim citing the whole body block 0 of
@@ -8920,6 +9507,25 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         result
     }
 
+    fn run_decision_closures(
+        all: &[ReviewMessage],
+        items: Vec<LoopItem>,
+        decision: &dyn DecisionClient,
+        chat: &dyn ModelClient,
+        progress: &ScanProgress,
+    ) -> ScanResult {
+        let mut result = closure_result(items);
+        super::scan_closures_selected(
+            all,
+            progress,
+            &mut result,
+            &ParallelPass::new(1),
+            chat,
+            Some(decision),
+        );
+        result
+    }
+
     /// The closed request `closure_test_messages` builds in conversation
     /// `c1`, plus a later user reply to the same person in conversation `c2`.
     fn cross_thread_fixture() -> (Vec<ReviewMessage>, LoopItem) {
@@ -8927,6 +9533,219 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         let reply = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
         all.push(prepare(&reply, "Sent", all.len()).unwrap());
         (all, item)
+    }
+
+    fn empty_chat() -> ScriptedClient<'static> {
+        ScriptedClient::new(|_, _| Ok(EMPTY_CLAIMS.to_string()))
+    }
+
+    #[test]
+    fn decision_fulfilled_attaches_the_paragraph_confidence_and_tuned_state_shape() {
+        let (all, item) = cross_thread_fixture();
+        let decision = FixedDecisionClient::new(|_, _| Ok([0.81, 0.1, 0.1, 0.1]));
+        let chat = empty_chat();
+        let result =
+            run_decision_closures(&all, vec![item], &decision, &chat, &ScanProgress::default());
+
+        assert_eq!(decision.calls(), 1);
+        assert_eq!(chat.calls(), 0);
+        assert_eq!(
+            serde_json::to_vec(&decision.state(0)).unwrap(),
+            br#"{"obligation":{"title":"Pay the 350 fee","evidence_text":"Can we meet?"},"later":{"paragraph_text":"Sure, let's do it.","from_user":true,"days_later":1}}"#
+        );
+        let update = result.analysis.items[0].suggested_update.as_ref().unwrap();
+        assert_eq!(update.kind, SuggestedUpdateKind::Closure);
+        assert_eq!(update.evidence_text, "Sure, let's do it.");
+        assert_eq!(update.source_message, "m1");
+        assert_eq!(update.source_block, 0);
+        assert_eq!(update.confidence_micros, 810_000);
+    }
+
+    #[test]
+    fn decision_withdrawn_wins_by_probability_and_fulfilled_wins_a_tie() {
+        let (mut all, item) = closure_test_messages();
+        let reply = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
+        let mut reply = prepare(&reply, "Sent", all.len()).unwrap();
+        reply.input.message.body_blocks = vec![
+            CanonicalBlock::new("Fulfilled paragraph.").unwrap(),
+            CanonicalBlock::new("Withdrawn paragraph.").unwrap(),
+        ];
+        all.push(reply);
+        for (withdrawn, expected) in [
+            (0.82, "Withdrawn paragraph."),
+            (0.8, "Fulfilled paragraph."),
+        ] {
+            let decision = FixedDecisionClient::new(move |_, state| {
+                if state["later"]["paragraph_text"] == "Fulfilled paragraph." {
+                    Ok([0.8, 0.1, 0.1, 0.1])
+                } else {
+                    Ok([0.1, withdrawn, 0.1, 0.1])
+                }
+            });
+            let result = run_decision_closures(
+                &all,
+                vec![item.clone()],
+                &decision,
+                &empty_chat(),
+                &ScanProgress::default(),
+            );
+            let update = result.analysis.items[0].suggested_update.as_ref().unwrap();
+            assert_eq!(update.kind, SuggestedUpdateKind::Closure);
+            assert_eq!(update.evidence_text, expected);
+        }
+    }
+
+    #[test]
+    fn gray_band_escalates_only_that_conversation_and_loop_to_chat() {
+        let (all, item) = cross_thread_fixture();
+        let decision = FixedDecisionClient::new(|_, _| Ok([0.66, 0.1, 0.1, 0.1]));
+        let chat = ScriptedClient::new(|_, user| Ok(close_first_loop(user)));
+        let result =
+            run_decision_closures(&all, vec![item], &decision, &chat, &ScanProgress::default());
+
+        assert_eq!(chat.calls(), 1);
+        assert_eq!(offered_handles(&chat.payload(0)), ["loop-1-m0-b0"]);
+        assert_eq!(result.suggested_updates, 1);
+        assert!(result.conversation_notes.iter().any(|note| {
+            note.contains("0 suggested updates from the decision model, 1 pairs escalated")
+        }));
+    }
+
+    #[test]
+    fn decision_deadline_requires_exactly_one_normalized_candidate() {
+        let run = |text: &str| {
+            let (mut all, item) = closure_test_messages();
+            let reply = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
+            let mut reply = prepare(&reply, "Sent", all.len()).unwrap();
+            reply.input.message.body_blocks = vec![CanonicalBlock::new(text).unwrap()];
+            all.push(reply);
+            let decision = FixedDecisionClient::new(|_, _| Ok([0.1, 0.1, 0.8, 0.1]));
+            let chat = ScriptedClient::new(|_, _| Ok(EMPTY_CLAIMS.to_string()));
+            let result =
+                run_decision_closures(&all, vec![item], &decision, &chat, &ScanProgress::default());
+            (result, chat.calls())
+        };
+
+        let (single, calls) = run("Please use September 20, 2026.");
+        assert_eq!(calls, 0);
+        let update = single.analysis.items[0].suggested_update.as_ref().unwrap();
+        assert_eq!(update.kind, SuggestedUpdateKind::DeadlineChange);
+        assert_eq!(update.temporal_value.as_deref(), Some("2026-09-20"));
+
+        let (none, calls) = run("Please use the later date.");
+        assert_eq!(calls, 0);
+        assert!(none.analysis.items[0].suggested_update.is_none());
+
+        let (multiple, calls) = run("Use September 20, 2026 or September 21, 2026.");
+        assert_eq!(calls, 1);
+        assert!(multiple.analysis.items[0].suggested_update.is_none());
+    }
+
+    #[test]
+    fn decision_rate_limit_is_counted_once_and_never_resent() {
+        let (all, item) = cross_thread_fixture();
+        let decision = FixedDecisionClient::new(|_, _| Err(ProviderError::RateLimited));
+        let result = run_decision_closures(
+            &all,
+            vec![item],
+            &decision,
+            &empty_chat(),
+            &ScanProgress::default(),
+        );
+
+        assert_eq!(decision.calls(), 1);
+        assert!(result.conversation_notes.iter().any(|note| {
+            note.ends_with("0 pairs escalated to the chat model, 1 skipped (rate limit / errors).")
+        }));
+    }
+
+    #[test]
+    fn decision_cancel_before_dispatch_sends_nothing() {
+        let (all, item) = cross_thread_fixture();
+        let decision = FixedDecisionClient::new(|_, _| Ok([0.8, 0.1, 0.1, 0.1]));
+        let progress = ScanProgress::default();
+        progress.cancel.store(true, Ordering::Relaxed);
+        let result = run_decision_closures(&all, vec![item], &decision, &empty_chat(), &progress);
+
+        assert_eq!(decision.calls(), 0);
+        assert!(result.cancelled);
+
+        let decision = FixedDecisionClient::new(|_, _| Err(ProviderError::Cancelled));
+        let chat = empty_chat();
+        let result = run_decision_closures(
+            &all,
+            vec![closure_test_messages().1],
+            &decision,
+            &chat,
+            &ScanProgress::default(),
+        );
+        assert_eq!(decision.calls(), 1);
+        assert_eq!(chat.calls(), 0);
+        assert!(result.cancelled);
+    }
+
+    #[test]
+    fn toggle_off_runs_the_unchanged_chat_pass_without_a_decision_call() {
+        let (all, item) = cross_thread_fixture();
+        let constructions = AtomicUsize::new(0);
+        let connected = maybe_decision_client(
+            ScanOptions {
+                provider: Provider::OpenRouter,
+                use_decision_model: false,
+            },
+            || {
+                constructions.fetch_add(1, Ordering::Relaxed);
+                Ok(FixedDecisionClient::new(|_, _| {
+                    panic!("decision client must stay unused")
+                }))
+            },
+        )
+        .unwrap();
+        let chat = ScriptedClient::new(|_, user| Ok(close_first_loop(user)));
+        let mut result = closure_result(vec![item]);
+        super::scan_closures_selected(
+            &all,
+            &ScanProgress::default(),
+            &mut result,
+            &ParallelPass::new(1),
+            &chat,
+            None,
+        );
+
+        assert!(connected.is_none());
+        assert_eq!(constructions.load(Ordering::Relaxed), 0);
+        assert_eq!(chat.calls(), 1);
+        assert_eq!(result.suggested_updates, 1);
+    }
+
+    #[test]
+    fn decision_requests_only_the_first_eight_body_paragraphs() {
+        let (mut all, item) = closure_test_messages();
+        let reply = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
+        let mut reply = prepare(&reply, "Sent", all.len()).unwrap();
+        reply.input.message.body_blocks = (0..10)
+            .map(|index| CanonicalBlock::new(&format!("Paragraph {index}")).unwrap())
+            .collect();
+        all.push(reply);
+        let decision = FixedDecisionClient::new(|_, _| Ok([0.1, 0.1, 0.1, 0.1]));
+        run_decision_closures(
+            &all,
+            vec![item],
+            &decision,
+            &empty_chat(),
+            &ScanProgress::default(),
+        );
+
+        assert_eq!(decision.calls(), MAX_CLOSURE_PARAGRAPHS);
+        let texts: Vec<String> = (0..decision.calls())
+            .map(|index| {
+                decision.state(index)["later"]["paragraph_text"]
+                    .as_str()
+                    .unwrap()
+                    .into()
+            })
+            .collect();
+        assert!(!texts.contains(&"Paragraph 8".to_string()));
     }
 
     #[test]
