@@ -93,6 +93,26 @@ pub struct SuggestedUpdate {
     pub confidence_micros: u32,
 }
 
+/// One owner accept/reject decision on a [`SuggestedUpdate`], kept in
+/// [`crate::review_model::ReviewState`] after `LoopItem::suggested_update`
+/// itself is cleared (see `ReviewState::resolve_suggested_update`), purely
+/// so [`crate::training_export`] can still recover a gold label for a
+/// closure pair the owner has already acted on.
+#[derive(Clone)]
+pub struct ResolvedUpdate {
+    /// The owing [`LoopItem`]'s own evidence anchor at the moment of
+    /// resolution -- identifies which obligation this decision belongs to.
+    pub obligation_message: String,
+    pub obligation_block: usize,
+    pub obligation_action_phrase: String,
+    pub obligation_evidence_text: String,
+    pub kind: SuggestedUpdateKind,
+    /// The later paragraph the suggestion cited.
+    pub source_message: String,
+    pub source_block: usize,
+    pub accepted: bool,
+}
+
 #[derive(Clone)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -138,6 +158,47 @@ pub fn claim_shape(claim_type: ClaimType) -> Option<(&'static str, &'static str,
         ClaimType::Delegation => Some(("request", "Delegated: ", Owner::You)),
         ClaimType::Attribution => Some(("attributed", "Someone else owes: ", Owner::Unclear)),
         ClaimType::PossibleClosure | ClaimType::DeadlineChange | ClaimType::Modification => None,
+    }
+}
+
+/// The governed claim type a projected [`LoopItem`] came from, recovered
+/// from its `kind`/`action` fields -- see [`claim_kind_of`]. Distinguishes
+/// [`ClaimType::Request`] from [`ClaimType::Question`] and
+/// [`ClaimType::Delegation`], all three of which `claim_shape` projects to
+/// the same `"request"` card kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveredClaimKind {
+    Request,
+    Question,
+    Promise,
+    Delegation,
+    Attribution,
+}
+
+/// Recovers which governed claim type produced `item`, for a caller (today,
+/// only [`crate::training_export`]) that needs the original [`ClaimType`]
+/// distinction `claim_shape` collapses away. Matches `item.kind` against the
+/// card kind each `claim_shape` arm returns, then `item.action`'s prefix
+/// (`card_action` always starts the action string with the arm's own
+/// prefix) to tell apart the kinds that share a card kind.
+#[must_use]
+pub fn claim_kind_of(item: &LoopItem) -> Option<RecoveredClaimKind> {
+    match item.kind.as_str() {
+        "request" => {
+            if item.action.starts_with(claim_shape(ClaimType::Question)?.1) {
+                Some(RecoveredClaimKind::Question)
+            } else if item
+                .action
+                .starts_with(claim_shape(ClaimType::Delegation)?.1)
+            {
+                Some(RecoveredClaimKind::Delegation)
+            } else {
+                Some(RecoveredClaimKind::Request)
+            }
+        }
+        "promise" => Some(RecoveredClaimKind::Promise),
+        "attributed" => Some(RecoveredClaimKind::Attribution),
+        _ => None,
     }
 }
 

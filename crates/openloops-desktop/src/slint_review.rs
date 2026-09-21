@@ -2848,6 +2848,61 @@ mod tests {
         assert!(cancel.cancel.load(Ordering::Relaxed));
         assert!(model.load_progress.is_none());
         assert!(model.mail_cache.is_empty());
+        drop(model);
+
+        // Training export: `can-export-training` needs both a loaded scan
+        // and folder text, folder edits never save, and the button is a
+        // two-press confirm (first press only arms it; the write happens on
+        // the second).
+        let export_model = Rc::new(RefCell::new(AppModel::with_store(Ok(None))));
+        {
+            let mut model = export_model.borrow_mut();
+            model.review = crate::review_model::layout_fixture();
+        }
+        crate::slint_ui::register_training_export_callbacks(&window, &export_model);
+        crate::slint_ui::sync(&export_model.borrow(), &window);
+        assert!(
+            !window.get_can_export_training(),
+            "no folder text typed yet"
+        );
+        let export_folder = std::env::temp_dir().join(format!(
+            "openloops-ui-test-training-export-{}",
+            std::process::id()
+        ));
+        window.invoke_training_export_folder_edited(
+            export_folder.to_string_lossy().into_owned().into(),
+        );
+        assert_eq!(
+            window.get_training_export_folder().as_str(),
+            export_folder.to_string_lossy().as_ref()
+        );
+        assert!(
+            window.get_can_export_training(),
+            "folder set and a scan is loaded"
+        );
+        assert!(!export_model.borrow().training_export_folder.is_empty());
+        assert!(!export_folder.join("triage.jsonl").exists());
+
+        window.invoke_export_training_data();
+        assert!(export_model.borrow().training_export_armed == app_model::ExportArmed::Yes);
+        assert!(
+            !export_folder.join("triage.jsonl").exists(),
+            "the first press only arms the confirm, it never writes"
+        );
+
+        window.invoke_export_training_data();
+        assert!(export_model.borrow().training_export_armed == app_model::ExportArmed::No);
+        assert!(export_folder.join("triage.jsonl").exists());
+        assert!(export_folder.join("closure.jsonl").exists());
+        assert!(
+            window
+                .get_training_export_status()
+                .as_str()
+                .starts_with("Wrote "),
+            "status: {}",
+            window.get_training_export_status()
+        );
+        std::fs::remove_dir_all(&export_folder).ok();
     }
 
     #[test]
