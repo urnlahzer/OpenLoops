@@ -56,6 +56,8 @@ export component AppWindow inherits Window {
     in-out property <bool> use-decision-model;
     in property <string> decision-status;
     in property <bool> decision-succeeded;
+    in-out property <int> extraction-backend-index;
+    in property <bool> can-select-extraction-backend;
     in property <string> model-busy-line;
     in property <string> provider-disclosure;
     in property <string> key-placeholder;
@@ -135,6 +137,7 @@ export component AppWindow inherits Window {
     callback test-model;
     callback decision-model-toggled(bool);
     callback check-decision-model;
+    callback extraction-backend-selected(int);
     callback training-export-folder-edited(string);
     callback export-training-data;
     callback scan-inboxes;
@@ -176,6 +179,7 @@ export component AppWindow inherits Window {
                 ollama-plan-index <=> root.ollama-plan-index; ollama-plan-options: root.ollama-plan-options; openrouter-parallel <=> root.openrouter-parallel;
                 parallel-field-focused <=> root.parallel-field-focused; model-status: root.model-status; model-succeeded: root.model-succeeded; model-busy-line: root.model-busy-line;
                 use-decision-model <=> root.use-decision-model; decision-status: root.decision-status; decision-succeeded: root.decision-succeeded;
+                extraction-backend-index <=> root.extraction-backend-index; can-select-extraction-backend: root.can-select-extraction-backend;
                 training-export-folder <=> root.training-export-folder; can-export-training: root.can-export-training;
                 training-export-status: root.training-export-status; training-export-succeeded: root.training-export-succeeded;
                 provider-disclosure: root.provider-disclosure; key-placeholder: root.key-placeholder; load-models-label: root.load-models-label;
@@ -187,6 +191,7 @@ export component AppWindow inherits Window {
                 load-models => { root.load-models(); } model-selected(value) => { root.model-selected(value); } plan-selected(index) => { root.plan-selected(index); }
                 parallel-committed(value) => { root.parallel-committed(value); } test-model => { root.test-model(); }
                 decision-model-toggled(value) => { root.decision-model-toggled(value); } check-decision-model => { root.check-decision-model(); }
+                extraction-backend-selected(index) => { root.extraction-backend-selected(index); }
                 training-export-folder-edited(value) => { root.training-export-folder-edited(value); } export-training-data => { root.export-training-data(); }
             }
             if root.active-screen == 0: ReviewScreen {

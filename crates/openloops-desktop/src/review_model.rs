@@ -1163,6 +1163,8 @@ pub fn scan_strip(progress: Option<&ScanProgress>, review: &ReviewState) -> Scan
         "Triaging paragraphs"
     } else if progress.closure_phase.load(Ordering::Relaxed) {
         "Checking for updates to open loops"
+    } else if progress.extraction_phase.load(Ordering::Relaxed) {
+        "Finding open loops (decision model)"
     } else {
         "Finding open loops"
     };

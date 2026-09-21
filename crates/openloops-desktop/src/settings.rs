@@ -99,6 +99,37 @@ pub const MIN_OPENROUTER_PARALLEL: u16 = 1;
 pub const MAX_OPENROUTER_PARALLEL: u16 = 100;
 pub const DEFAULT_OPENROUTER_PARALLEL: u16 = 32;
 
+/// P5's gated primary-pass switch: which pipeline decides which paragraphs
+/// are open loops. `ChatModel` is the pipeline P0-P4 already ship
+/// (`analyze_claims`); `DecisionModel` is the Jev-native extractor,
+/// selectable only while the decision model toggle is also on. The owner
+/// flips this manually after the compare-decisions probe shows the
+/// agreement numbers the design doc's P5 gate names; nothing in the app
+/// flips it automatically.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExtractionBackend {
+    #[default]
+    ChatModel,
+    DecisionModel,
+}
+
+impl ExtractionBackend {
+    const fn tag(self) -> &'static str {
+        match self {
+            Self::ChatModel => "chat",
+            Self::DecisionModel => "decision",
+        }
+    }
+
+    fn parse(tag: &str) -> Result<Self, SettingsError> {
+        match tag {
+            "chat" => Ok(Self::ChatModel),
+            "decision" => Ok(Self::DecisionModel),
+            _ => Err(SettingsError::Invalid),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Settings {
     pub client_id: String,
@@ -114,6 +145,7 @@ pub struct Settings {
     /// [`MIN_OPENROUTER_PARALLEL`]..=[`MAX_OPENROUTER_PARALLEL`].
     pub openrouter_parallel: u16,
     pub use_decision_model: bool,
+    pub extraction_backend: ExtractionBackend,
 }
 
 impl Default for Settings {
@@ -130,6 +162,7 @@ impl Default for Settings {
             ollama_plan: OllamaPlan::default(),
             openrouter_parallel: DEFAULT_OPENROUTER_PARALLEL,
             use_decision_model: false,
+            extraction_backend: ExtractionBackend::ChatModel,
         }
     }
 }
@@ -206,6 +239,7 @@ impl Settings {
             self.ollama_plan.tag(),
             parallel.as_str(),
             decision.as_str(),
+            self.extraction_backend.tag(),
         ];
         let size = fields
             .iter()
@@ -231,6 +265,8 @@ impl Settings {
     /// request, so those scans stay sequential exactly as they were) and
     /// the default `OpenRouter` parallel ceiling. Records written before the
     /// decision setting existed end after the tenth field and load with it off.
+    /// Records written before the extraction-backend setting existed end
+    /// after the eleventh field and load as [`ExtractionBackend::ChatModel`].
     fn decode(bytes: &[u8]) -> Result<Self, SettingsError> {
         if bytes.len() > MAX_BYTES {
             return Err(SettingsError::Invalid);
@@ -255,6 +291,9 @@ impl Settings {
         }
         if !remaining.is_empty() {
             settings.use_decision_model = parse_bool(&next(&mut remaining)?)?;
+        }
+        if !remaining.is_empty() {
+            settings.extraction_backend = ExtractionBackend::parse(&next(&mut remaining)?)?;
         }
         if !remaining.is_empty() {
             return Err(SettingsError::Invalid);
@@ -375,6 +414,7 @@ mod tests {
             ollama_plan: OllamaPlan::Max,
             openrouter_parallel: 64,
             use_decision_model: true,
+            extraction_backend: ExtractionBackend::DecisionModel,
         }
     }
 
@@ -424,6 +464,7 @@ mod tests {
             ]
             .concat(),
         );
+        let parallel_string = settings.openrouter_parallel.to_string();
         let concurrency_end = boundary(
             &[
                 legacy.as_slice(),
@@ -432,7 +473,22 @@ mod tests {
                     settings.openrouter_key.as_str(),
                     settings.openrouter_selected.as_str(),
                     settings.ollama_plan.tag(),
-                    &settings.openrouter_parallel.to_string(),
+                    parallel_string.as_str(),
+                ],
+            ]
+            .concat(),
+        );
+        let decision_string = settings.use_decision_model.to_string();
+        let decision_end = boundary(
+            &[
+                legacy.as_slice(),
+                &[
+                    settings.provider.tag(),
+                    settings.openrouter_key.as_str(),
+                    settings.openrouter_selected.as_str(),
+                    settings.ollama_plan.tag(),
+                    parallel_string.as_str(),
+                    decision_string.as_str(),
                 ],
             ]
             .concat(),
@@ -460,6 +516,13 @@ mod tests {
                 assert!(!truncated.use_decision_model);
                 continue;
             }
+            if length == decision_end {
+                // Likewise for the boundary before the extraction-backend field.
+                let truncated = Settings::decode(&encoded[..length]).unwrap();
+                assert!(truncated.use_decision_model);
+                assert_eq!(truncated.extraction_backend, ExtractionBackend::ChatModel);
+                continue;
+            }
             assert!(Settings::decode(&encoded[..length]).is_err());
         }
         let mut bad = encoded.to_vec();
@@ -477,15 +540,38 @@ mod tests {
         assert_eq!(decoded.ollama_plan, OllamaPlan::Max);
         assert_eq!(decoded.openrouter_parallel, 64);
         assert!(decoded.use_decision_model);
+        assert_eq!(decoded.extraction_backend, ExtractionBackend::DecisionModel);
     }
 
     #[test]
     fn records_written_before_the_decision_setting_default_it_off() {
         let settings = synthetic();
         let encoded = settings.encode().unwrap();
-        let old_end = encoded.len() - (4 + "true".len());
+        let extraction_field_bytes = 4 + settings.extraction_backend.tag().len();
+        let decision_field_bytes = 4 + settings.use_decision_model.to_string().len();
+        let old_end = encoded.len() - extraction_field_bytes - decision_field_bytes;
         let decoded = Settings::decode(&encoded[..old_end]).unwrap();
         assert!(!decoded.use_decision_model);
+        assert_eq!(decoded.extraction_backend, ExtractionBackend::ChatModel);
+
+        let mut invalid = encoded[..old_end].to_vec();
+        invalid.extend_from_slice(&u32::try_from("maybe".len()).unwrap().to_le_bytes());
+        invalid.extend_from_slice(b"maybe");
+        assert_eq!(
+            Settings::decode(&invalid).err(),
+            Some(SettingsError::Invalid)
+        );
+    }
+
+    #[test]
+    fn records_written_before_the_extraction_backend_setting_default_to_chat_model() {
+        let settings = synthetic();
+        let encoded = settings.encode().unwrap();
+        let extraction_field_bytes = 4 + settings.extraction_backend.tag().len();
+        let old_end = encoded.len() - extraction_field_bytes;
+        let decoded = Settings::decode(&encoded[..old_end]).unwrap();
+        assert!(decoded.use_decision_model);
+        assert_eq!(decoded.extraction_backend, ExtractionBackend::ChatModel);
 
         let mut invalid = encoded[..old_end].to_vec();
         invalid.extend_from_slice(&u32::try_from("maybe".len()).unwrap().to_le_bytes());
@@ -612,6 +698,25 @@ mod tests {
         short.extend_from_slice(&u32::try_from("openrouter".len()).unwrap().to_le_bytes());
         short.extend_from_slice(b"openrouter");
         assert_eq!(Settings::decode(&short).err(), Some(SettingsError::Invalid));
+    }
+
+    #[test]
+    fn extraction_backend_round_trips_and_rejects_an_unknown_tag() {
+        for backend in [
+            ExtractionBackend::ChatModel,
+            ExtractionBackend::DecisionModel,
+        ] {
+            let settings = Settings {
+                extraction_backend: backend,
+                ..synthetic()
+            };
+            let decoded = Settings::decode(&settings.encode().unwrap()).unwrap();
+            assert_eq!(decoded.extraction_backend, backend);
+        }
+        assert_eq!(
+            ExtractionBackend::parse("synthetic_backend"),
+            Err(SettingsError::Invalid)
+        );
     }
 
     #[test]

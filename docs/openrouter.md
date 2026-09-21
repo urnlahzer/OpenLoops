@@ -28,7 +28,12 @@ In the [native setup window](native-setup.md), on the Connections tab:
    default.
 7. Click **Check decision model** to run the content-free endpoint check and
    report whether that endpoint accepts the `provider.zdr` member.
-8. Optionally, with a scan result loaded, type an absolute folder path
+8. With the decision model on, **Find loops with** switches between **Chat
+   model** (default) and **Decision model**. This is the gated P5 switch:
+   flip it only after the `--compare-decisions` probe shows at least 90%
+   claim-type agreement on 200 or more paragraphs of your own mail. Gray-band
+   paragraphs still go to the chat model either way.
+9. Optionally, with a scan result loaded, type an absolute folder path
    outside the repository into **Training export folder** and click
    **Export training data** twice (the first click only arms a warning) to
    write the current scan's mail text as training data for the `Jev`
@@ -80,6 +85,22 @@ user as `from_user`; at most the first 40 body paragraphs of each message are
 checked. The answer contains probabilities for the six registered triage
 questions and no generated text. Conversations that continue to the chat model
 omit accepted boilerplate paragraphs without renumbering the surviving blocks.
+
+When **Find loops with** is set to **Decision model**, the triage request
+above is replaced by one combined per-paragraph request: the same six
+triage nouls, plus `extract.claim_type` (the same choice P4 already sends
+in `--compare-decisions`), plus `extract.waiting_party` (a choice over that
+conversation's own participant handles, capped at 254, plus `none`) and
+`extract.temporal` (a choice over date candidates the app's own prose
+parser found in that paragraph, normalized before sending, plus `none`;
+sent only when at least one candidate exists). The request additionally
+carries `to_user`, `cc_user`, the signed-in user's display and given name,
+and the participant catalog's own display text -- the same facts the
+governed chat request already carries, reshaped for a typed choice instead
+of free text. Nothing about a Jev answer is persisted; a confident claim is
+assembled locally and never re-sent. A gray-band `extract.claim_type`
+answer, or a request error, sends that paragraph's whole conversation to
+the unchanged chat-model request instead.
 
 Closure checks may also be sent to
 `POST /api/alpha/decisions` with request members `model`, `state`, `questions`,

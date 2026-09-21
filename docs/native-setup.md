@@ -28,7 +28,11 @@ unattended background service remain on the implementation roadmap.
      That listing is public, so it is fetched without sending the key. Only
      models with a zero-data-retention endpoint appear, and every request pins
      ZDR-only routing. The optional Jev decision-model toggle is off by default
-     and has its own content-free check. See [OpenRouter](openrouter.md).
+     and has its own content-free check. With it on, **Find loops with** picks
+     between **Chat model** (default) and **Decision model** -- the gated P5
+     extraction switch; leave it on **Chat model** until the
+     `--compare-decisions` probe justifies flipping it. See
+     [OpenRouter](openrouter.md).
 4. To switch, select another model and test it. No automatic fallback occurs.
    A failed test distinguishes authentication, rate limiting, account balance,
    HTTP server/request errors, timeouts, and invalid analysis output. Upstream

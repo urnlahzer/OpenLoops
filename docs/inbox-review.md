@@ -176,6 +176,19 @@ Coverage details report content-free triage counts and identify skipped threads
 as having no obligations found by triage; **Rescan** with the setting off sends
 those threads through the unchanged chat-model path.
 
+With **Find loops with** additionally set to **Decision model** (a control
+shown under the decision-model toggle, enabled only while that toggle is
+on), the triage pass above is replaced: one combined per-paragraph request
+carries the triage questions plus a claim-type choice, a waiting-party
+choice over the conversation's own participants, and (when the paragraph
+names a date) a temporal choice, and a confident, non-gray-band answer is
+assembled into a card through the same review path a chat-model card takes.
+A paragraph whose claim type lands in the gray band sends its whole
+conversation to the chat-model pass instead (the owner-set gate: flip this
+switch only after the compare-decisions probe shows at least 90% claim-type
+agreement on 200 or more paragraphs of your own mail). It is off (chat
+model) by default.
+
 The same setting also lets `Jev` answer only the residue left by the existing
 deterministic recap, event-scoping, event-name, duplicate-action, thread-merge,
 and deadline-kind rules. Deterministic matches still short-circuit. Distinct
