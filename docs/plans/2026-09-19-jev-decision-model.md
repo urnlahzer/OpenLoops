@@ -243,6 +243,8 @@ signature and footer text from every card title.
 
 ### P3. Rule replacements
 
+Status: implemented on `feat/jev-rule-residue`.
+
 Each keeps its current fast path and asks Jev only when the fast path is
 silent or ambiguous. Each question is answered once per input and cached in
 memory for the scan.

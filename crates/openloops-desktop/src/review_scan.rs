@@ -3,7 +3,9 @@ use crate::claim_view::{
     SuggestedUpdateKind, action_phrase, card_action, claim_shape, resolve_owner, uncertainty_text,
     waiting_party_display,
 };
-use crate::deadline_view::{DeadlineView, EVENT_GENERIC_NOUNS, classify};
+use crate::deadline_view::{
+    DeadlineKindHint, DeadlineView, EVENT_GENERIC_NOUNS, classify, classify_with_hint,
+};
 use crate::settings::Provider;
 use chrono::{Datelike, TimeZone};
 use openloops_contracts::{
@@ -817,10 +819,18 @@ const PROSE_EVENT_NAME_WINDOW: usize = 120;
 /// workshop" must not shadow a later "Sep 15" reschedule of the same
 /// meeting. Equal names in different conversations remain separate so each
 /// entry retains the scope it was learned from.
+#[cfg(test)]
 pub fn build_event_index(messages: &[ReviewMessage]) -> Vec<EventRef> {
+    build_event_index_with_rules(messages, None)
+}
+
+fn build_event_index_with_rules(
+    messages: &[ReviewMessage],
+    rules: Option<&RuleDecisions>,
+) -> Vec<EventRef> {
     let mut best: BTreeMap<(String, String), EventRef> = BTreeMap::new();
     for message in messages {
-        let Some((name, start, end, source)) = learn_one_event(message) else {
+        let Some((name, start, end, source)) = learn_one_event(message, rules) else {
             continue;
         };
         if name.split_whitespace().count() < 2 {
@@ -956,7 +966,49 @@ const RECAP_BODY_SCAN_CHARS: usize = 600;
 /// marker) is never mistaken for one. These are recognition hints, not the
 /// only defense against closing a request from a past-tense summary -- see
 /// [`close_from_index`]'s and [`close_from_stated_time`]'s temporal guard.
+#[cfg(test)]
 pub(crate) fn is_meeting_recap_artifact(message: &ReviewMessage) -> bool {
+    is_meeting_recap_artifact_fast(message)
+}
+
+fn recap_state(message: &ReviewMessage) -> serde_json::Value {
+    serde_json::json!({
+        "sender": message.input.message.sender.as_ref().map_or_else(String::new, CanonicalBlock::as_string),
+        "subject": message.input.message.subject.as_string(),
+        "first_paragraph": message.input.message.body_blocks.first().map_or_else(String::new, CanonicalBlock::as_string),
+    })
+}
+
+fn recap_residue_candidate(message: &ReviewMessage) -> bool {
+    if is_meeting_recap_artifact_fast(message) {
+        return false;
+    }
+    let subject = message.input.message.subject.as_string().to_lowercase();
+    let body = message
+        .input
+        .message
+        .body_blocks
+        .first()
+        .map(|block| block.as_string().to_lowercase())
+        .unwrap_or_default();
+    RECAP_SUBJECT_HINTS
+        .iter()
+        .any(|hint| subject.contains(hint))
+        || RECAP_BODY_MARKERS
+            .iter()
+            .any(|marker| body.contains(marker))
+}
+
+fn is_meeting_recap_artifact_with_rules(
+    message: &ReviewMessage,
+    rules: Option<&RuleDecisions>,
+) -> bool {
+    is_meeting_recap_artifact_fast(message)
+        || (recap_residue_candidate(message)
+            && rules.is_some_and(|cache| cache.noul(RULE_RECAP, &recap_state(message))))
+}
+
+fn is_meeting_recap_artifact_fast(message: &ReviewMessage) -> bool {
     let sender = message
         .input
         .message
@@ -1036,8 +1088,11 @@ pub(crate) fn recap_meeting_time(message: &ReviewMessage) -> Option<(i64, bool)>
 /// the Graph/subject entry was out of date, or the message is a
 /// [`is_meeting_recap_artifact`] describing an event that has already
 /// happened).
-fn learn_one_event(message: &ReviewMessage) -> Option<(String, i64, i64, EventSource)> {
-    if is_meeting_recap_artifact(message) {
+fn learn_one_event(
+    message: &ReviewMessage,
+    rules: Option<&RuleDecisions>,
+) -> Option<(String, i64, i64, EventSource)> {
+    if is_meeting_recap_artifact_with_rules(message, rules) {
         return None;
     }
     let subject = message.input.message.subject.as_string();
@@ -1366,10 +1421,24 @@ fn meaningful_event_tokens(text: &str) -> BTreeSet<String> {
 /// tokens must appear in the name (so a short, specific phrase like "our
 /// quarterly workshop" can still identify a longer name it is a strict
 /// subset of).
+#[cfg(test)]
 pub fn match_event<'a>(
     phrase: &str,
     evidence_timestamp: i64,
     index: &'a [EventRef],
+) -> Option<&'a EventRef> {
+    match_event_with_rules(phrase, evidence_timestamp, index, None)
+}
+
+fn event_match_state(phrase: &str, event_name: &str) -> serde_json::Value {
+    serde_json::json!({"phrase": phrase, "event_name": event_name})
+}
+
+fn match_event_with_rules<'a>(
+    phrase: &str,
+    evidence_timestamp: i64,
+    index: &'a [EventRef],
+    rules: Option<&RuleDecisions>,
 ) -> Option<&'a EventRef> {
     let phrase_tokens = meaningful_event_tokens(phrase);
     if phrase_tokens.is_empty() {
@@ -1386,7 +1455,11 @@ pub fn match_event<'a>(
             if shared == 0 {
                 return false;
             }
-            name_tokens.len() < 2 || shared >= 2 || phrase_tokens.is_subset(&name_tokens)
+            let fast =
+                name_tokens.len() < 2 || shared >= 2 || phrase_tokens.is_subset(&name_tokens);
+            fast || rules.is_some_and(|cache| {
+                cache.noul(RULE_EVENT_MATCH, &event_match_state(phrase, &event.name))
+            })
         })
         .min_by_key(|event| (event.start - evidence_timestamp, &event.message_handle))
 }
@@ -1405,10 +1478,20 @@ pub fn match_event<'a>(
 /// "Send the draft agreement to Alex". Restricted to
 /// [`EventSource::Meeting`] and [`EventSource::Subject`] -- structured
 /// calendar evidence, not an inference from ordinary prose.
+#[cfg(test)]
 fn match_event_by_text<'a>(
     phrase: &str,
     evidence_timestamp: i64,
     index: &'a [EventRef],
+) -> Option<&'a EventRef> {
+    match_event_by_text_with_rules(phrase, evidence_timestamp, index, None)
+}
+
+fn match_event_by_text_with_rules<'a>(
+    phrase: &str,
+    evidence_timestamp: i64,
+    index: &'a [EventRef],
+    rules: Option<&RuleDecisions>,
 ) -> Option<&'a EventRef> {
     let phrase_tokens = meaningful_event_tokens(phrase);
     if phrase_tokens.is_empty() {
@@ -1422,7 +1505,13 @@ fn match_event_by_text<'a>(
         })
         .filter(|event| {
             let name_tokens = meaningful_event_tokens(&event.name);
-            name_tokens.len() >= 2 && phrase_tokens.intersection(&name_tokens).count() >= 2
+            let shared = phrase_tokens.intersection(&name_tokens).count();
+            name_tokens.len() >= 2
+                && (shared >= 2
+                    || (shared > 0
+                        && rules.is_some_and(|cache| {
+                            cache.noul(RULE_EVENT_MATCH, &event_match_state(phrase, &event.name))
+                        })))
         })
         .min_by_key(|event| (event.start - evidence_timestamp, &event.message_handle))
 }
@@ -1684,7 +1773,11 @@ fn resolve_owner_with_vocative_guard(
 /// response has been parsed, while the source conversation and account
 /// addresses are still available. This is intentionally part of projection:
 /// every later closure and coverage pass sees the corrected item.
-fn correct_recap_attribution(analysis: &mut LoopItems, conversation: &[&ReviewMessage]) {
+fn correct_recap_attribution(
+    analysis: &mut LoopItems,
+    conversation: &[&ReviewMessage],
+    rules: Option<&RuleDecisions>,
+) {
     for item in &mut analysis.items {
         if item.waiting_party == "Not established" {
             continue;
@@ -1695,7 +1788,7 @@ fn correct_recap_attribution(analysis: &mut LoopItems, conversation: &[&ReviewMe
         else {
             continue;
         };
-        if !is_meeting_recap_artifact(source) {
+        if !is_meeting_recap_artifact_with_rules(source, rules) {
             continue;
         }
         let Some(waiting_address) = waiting_party_address(&item.waiting_party) else {
@@ -1734,7 +1827,11 @@ fn correct_recap_attribution(analysis: &mut LoopItems, conversation: &[&ReviewMe
     }
 }
 
-fn tag_call_summaries(analysis: &mut LoopItems, conversation: &[&ReviewMessage]) {
+fn tag_call_summaries(
+    analysis: &mut LoopItems,
+    conversation: &[&ReviewMessage],
+    rules: Option<&RuleDecisions>,
+) {
     for item in &mut analysis.items {
         let Some(source) = conversation
             .iter()
@@ -1742,7 +1839,7 @@ fn tag_call_summaries(analysis: &mut LoopItems, conversation: &[&ReviewMessage])
         else {
             continue;
         };
-        if is_meeting_recap_artifact(source) {
+        if is_meeting_recap_artifact_with_rules(source, rules) {
             item.from_call_summary = true;
             if let Some((meeting_time, approx)) = recap_meeting_time(source) {
                 item.meeting_time = Some(meeting_time);
@@ -2417,6 +2514,7 @@ fn map_accepted_claim(
         kind: kind.to_string(),
         evidence,
         deadline,
+        deadline_kind_hint: None,
         event,
         event_time: None,
         resolution: None,
@@ -2486,6 +2584,302 @@ const TRIAGE_IDS: &[&str] = &[
     "triage.boilerplate",
     "triage.automated_notification",
 ];
+
+const RULE_RECAP: &str = "rules.recap";
+const RULE_SCOPED_EVENT: &str = "rules.scoped_event";
+const RULE_EVENT_MATCH: &str = "rules.event_match";
+const RULE_DUPLICATE_ACTION: &str = "rules.duplicate_action";
+const RULE_THREAD_MERGE: &str = "rules.thread_merge";
+const RULE_DEADLINE_KIND: &str = "rules.deadline_kind";
+
+#[derive(Clone, Copy)]
+enum RuleCategory {
+    Recap,
+    Event,
+    Duplicate,
+    Thread,
+    Deadline,
+}
+
+#[derive(Default)]
+struct RuleDecisions {
+    answers: BTreeMap<(String, Vec<u8>), Option<Answer>>,
+    recap: usize,
+    event: usize,
+    duplicates: usize,
+    threads: usize,
+    deadlines: usize,
+    skipped: usize,
+}
+
+impl RuleDecisions {
+    fn key(id: &str, state: &serde_json::Value) -> (String, Vec<u8>) {
+        (
+            id.to_owned(),
+            serde_json::to_vec(state).expect("rule state is serializable"),
+        )
+    }
+
+    fn noul(&self, id: &str, state: &serde_json::Value) -> bool {
+        let accept = Registry::get()
+            .question(id)
+            .expect("required rule question")
+            .accept;
+        matches!(
+            self.answers.get(&Self::key(id, state)),
+            Some(Some(Answer::Noul { probability })) if *probability >= accept
+        )
+    }
+
+    fn choice(&self, id: &str, state: &serde_json::Value) -> Option<&str> {
+        let accept = Registry::get()
+            .question(id)
+            .expect("required rule question")
+            .accept;
+        match self.answers.get(&Self::key(id, state)) {
+            Some(Some(Answer::Choice {
+                choice, confidence, ..
+            })) if *confidence >= accept => Some(choice),
+            _ => None,
+        }
+    }
+
+    fn record_answer(&mut self, category: RuleCategory) {
+        match category {
+            RuleCategory::Recap => self.recap += 1,
+            RuleCategory::Event => self.event += 1,
+            RuleCategory::Duplicate => self.duplicates += 1,
+            RuleCategory::Thread => self.threads += 1,
+            RuleCategory::Deadline => self.deadlines += 1,
+        }
+    }
+
+    fn note(&self) -> String {
+        let answered = self.recap + self.event + self.duplicates + self.threads + self.deadlines;
+        format!(
+            "Decision model answered {answered} rule questions (recap {}, event {}, duplicates {}, threads {}, deadlines {}); {} skipped.",
+            self.recap, self.event, self.duplicates, self.threads, self.deadlines, self.skipped
+        )
+    }
+}
+
+fn decide_rule_states(
+    id: &str,
+    category: RuleCategory,
+    states: Vec<serde_json::Value>,
+    cache: &mut RuleDecisions,
+    client: &dyn DecisionClient,
+    progress: &ScanProgress,
+) -> Result<(), ProviderError> {
+    let mut unique = BTreeMap::new();
+    for state in states {
+        let key = RuleDecisions::key(id, &state);
+        if !cache.answers.contains_key(&key) {
+            unique.entry(key).or_insert(state);
+        }
+    }
+    if unique.is_empty() {
+        return Ok(());
+    }
+    let jobs: Vec<_> = unique.into_iter().collect();
+    let questions = Questions::from_registry(&[id])?;
+    let pass = ParallelPass::new(client.max_parallel());
+    let processed = vec![1; jobs.len()];
+    let outcomes = run_jobs(&processed, &pass, progress, &|slot| {
+        client
+            .decide(
+                &jobs[slot].1,
+                &questions,
+                Some(&progress.cancel),
+                DECISION_DEADLINE,
+            )
+            .map(|answers| answers.get(id).cloned())
+    });
+    let mut completed = BTreeSet::new();
+    for (slot, outcome) in outcomes {
+        completed.insert(slot);
+        let answer = match outcome {
+            JobOutcome::Completed(Ok(answer)) => answer,
+            JobOutcome::Completed(Err(_)) | JobOutcome::Panicked | JobOutcome::NotStarted => None,
+        };
+        if answer.is_some() {
+            cache.record_answer(category);
+        } else {
+            cache.skipped += 1;
+        }
+        cache.answers.insert(jobs[slot].0.clone(), answer);
+    }
+    for (slot, (key, _)) in jobs.iter().enumerate() {
+        if !completed.contains(&slot) {
+            cache.skipped += 1;
+            cache.answers.insert(key.clone(), None);
+        }
+    }
+    Ok(())
+}
+
+fn recap_rule_states(messages: &[ReviewMessage]) -> Vec<serde_json::Value> {
+    messages
+        .iter()
+        .filter(|message| recap_residue_candidate(message))
+        .map(recap_state)
+        .collect()
+}
+
+fn duplicate_rule_states(items: &[LoopItem]) -> Vec<serde_json::Value> {
+    let mut states = Vec::new();
+    for (index, a) in items.iter().enumerate() {
+        for b in &items[index + 1..] {
+            if a.evidence.message == b.evidence.message && !a.action.eq_ignore_ascii_case(&b.action)
+            {
+                states.push(serde_json::json!({"action_a": a.action, "action_b": b.action}));
+            }
+        }
+    }
+    states
+}
+
+fn apply_duplicate_rules(items: &mut Vec<LoopItem>, rules: &RuleDecisions) {
+    let mut duplicates = BTreeSet::new();
+    for (index, a) in items.iter().enumerate() {
+        for (other, b) in items.iter().enumerate().skip(index + 1) {
+            if a.evidence.message != b.evidence.message || a.action.eq_ignore_ascii_case(&b.action)
+            {
+                continue;
+            }
+            let state = serde_json::json!({"action_a": a.action, "action_b": b.action});
+            if rules.noul(RULE_DUPLICATE_ACTION, &state) {
+                duplicates.insert(other);
+            }
+        }
+    }
+    let mut index = 0usize;
+    items.retain(|_| {
+        let keep = !duplicates.contains(&index);
+        index += 1;
+        keep
+    });
+}
+
+fn deadline_rule_states(items: &[LoopItem], messages: &[ReviewMessage]) -> Vec<serde_json::Value> {
+    items
+        .iter()
+        .filter_map(|item| {
+            let deadline = item.deadline.as_ref()?;
+            let timestamp = messages
+                .iter()
+                .find(|message| message.input.handle == deadline.message)
+                .map_or(0, |message| message.input.timestamp);
+            matches!(
+                classify(&deadline.quote, timestamp, timestamp, 0),
+                DeadlineView::Unknown
+            )
+            .then_some(deadline)
+        })
+        .map(|deadline| serde_json::json!({"phrase": deadline.quote}))
+        .collect()
+}
+
+fn apply_deadline_rules(items: &mut [LoopItem], messages: &[ReviewMessage], rules: &RuleDecisions) {
+    for item in items {
+        let Some(deadline) = &item.deadline else {
+            continue;
+        };
+        let timestamp = messages
+            .iter()
+            .find(|message| message.input.handle == deadline.message)
+            .map_or(0, |message| message.input.timestamp);
+        if !matches!(
+            classify(&deadline.quote, timestamp, timestamp, 0),
+            DeadlineView::Unknown
+        ) {
+            continue;
+        }
+        let state = serde_json::json!({"phrase": deadline.quote});
+        item.deadline_kind_hint = match rules.choice(RULE_DEADLINE_KIND, &state) {
+            Some("event_tied") => Some(DeadlineKindHint::EventTied),
+            Some("soft") => Some(DeadlineKindHint::Soft),
+            Some("unknown") => Some(DeadlineKindHint::Unknown),
+            _ => None,
+        };
+    }
+}
+
+fn event_rule_states(
+    items: &[LoopItem],
+    messages: &[ReviewMessage],
+    index: &[EventRef],
+    now: i64,
+) -> Vec<serde_json::Value> {
+    let mut states = Vec::new();
+    for item in items {
+        if item.resolution.is_some() || item.event_passed.is_some() {
+            continue;
+        }
+        if !has_scoped_event_language(item) {
+            states.push(scoped_event_state(item));
+        }
+        let Some(source) = messages
+            .iter()
+            .find(|message| message.input.handle == item.evidence.message)
+        else {
+            continue;
+        };
+        let offset = local_offset_seconds(source.input.timestamp, 0);
+        let named = named_event_phrase(item, source.input.timestamp, now, offset);
+        if let Some(phrase) = named {
+            collect_event_match_states(&mut states, phrase, source.input.timestamp, index, false);
+        } else {
+            collect_event_match_states(
+                &mut states,
+                &item.action,
+                source.input.timestamp,
+                index,
+                true,
+            );
+            collect_event_match_states(
+                &mut states,
+                &item.evidence.quote,
+                source.input.timestamp,
+                index,
+                true,
+            );
+        }
+    }
+    states
+}
+
+fn collect_event_match_states(
+    states: &mut Vec<serde_json::Value>,
+    phrase: &str,
+    evidence_timestamp: i64,
+    index: &[EventRef],
+    text_match: bool,
+) {
+    let phrase_tokens = meaningful_event_tokens(phrase);
+    if phrase_tokens.is_empty() {
+        return;
+    }
+    for event in index {
+        if event.start < evidence_timestamp
+            || event.start - evidence_timestamp > 60 * 86_400
+            || (text_match && !matches!(event.source, EventSource::Meeting | EventSource::Subject))
+        {
+            continue;
+        }
+        let name_tokens = meaningful_event_tokens(&event.name);
+        let shared = phrase_tokens.intersection(&name_tokens).count();
+        let fast = if text_match {
+            name_tokens.len() >= 2 && shared >= 2
+        } else {
+            shared > 0
+                && (name_tokens.len() < 2 || shared >= 2 || phrase_tokens.is_subset(&name_tokens))
+        };
+        if shared > 0 && (!text_match || name_tokens.len() >= 2) && !fast {
+            states.push(event_match_state(phrase, &event.name));
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SignalBand {
@@ -2692,6 +3086,95 @@ fn triage_pass(
     Ok(collect_triage_results(&selected, &jobs, outcomes))
 }
 
+fn prepare_rule_messages(
+    messages: &[ReviewMessage],
+    rules: &mut RuleDecisions,
+    decision: &dyn DecisionClient,
+    progress: &ScanProgress,
+) -> Result<Vec<ReviewMessage>, ProviderError> {
+    decide_rule_states(
+        RULE_RECAP,
+        RuleCategory::Recap,
+        recap_rule_states(messages),
+        rules,
+        decision,
+        progress,
+    )?;
+    decide_rule_states(
+        RULE_THREAD_MERGE,
+        RuleCategory::Thread,
+        thread_rule_states(messages),
+        rules,
+        decision,
+        progress,
+    )?;
+    let mut merged = messages.to_vec();
+    merge_threads_with_rules(&mut merged, Some(rules));
+    Ok(merged)
+}
+
+fn apply_rule_residue(
+    result: &mut ScanResult,
+    messages: &[ReviewMessage],
+    rules: &mut RuleDecisions,
+    decision: &dyn DecisionClient,
+    progress: &ScanProgress,
+) -> Result<(), ProviderError> {
+    let all_messages: Vec<_> = messages.iter().collect();
+    correct_recap_attribution(&mut result.analysis, &all_messages, Some(rules));
+    tag_call_summaries(&mut result.analysis, &all_messages, Some(rules));
+
+    decide_rule_states(
+        RULE_DUPLICATE_ACTION,
+        RuleCategory::Duplicate,
+        duplicate_rule_states(&result.analysis.items),
+        rules,
+        decision,
+        progress,
+    )?;
+    apply_duplicate_rules(&mut result.analysis.items, rules);
+
+    decide_rule_states(
+        RULE_DEADLINE_KIND,
+        RuleCategory::Deadline,
+        deadline_rule_states(&result.analysis.items, messages),
+        rules,
+        decision,
+        progress,
+    )?;
+    apply_deadline_rules(&mut result.analysis.items, messages, rules);
+
+    let now = chrono::Utc::now().timestamp();
+    let event_index = build_event_index_with_rules(messages, Some(rules));
+    let event_states = event_rule_states(&result.analysis.items, messages, &event_index, now);
+    decide_rule_states(
+        RULE_SCOPED_EVENT,
+        RuleCategory::Event,
+        event_states
+            .iter()
+            .filter(|state| state.get("request_text").is_some())
+            .cloned()
+            .collect(),
+        rules,
+        decision,
+        progress,
+    )?;
+    decide_rule_states(
+        RULE_EVENT_MATCH,
+        RuleCategory::Event,
+        event_states
+            .into_iter()
+            .filter(|state| state.get("phrase").is_some())
+            .collect(),
+        rules,
+        decision,
+        progress,
+    )?;
+    close_passed_events_with_rules(result, messages, now, Some(rules));
+    result.conversation_notes.push(rules.note());
+    Ok(())
+}
+
 /// Analyzes `messages`, running up to `parallel` model requests at once.
 ///
 /// Conversations are independent of one another and so are the closure
@@ -2728,6 +3211,12 @@ pub fn scan(
         )?
         .with_max_parallel(parallel))
     })?;
+    let mut rule_decisions = decision_client.as_ref().map(|_| RuleDecisions::default());
+    let mut rule_messages = None;
+    if let (Some(decision), Some(rules)) = (decision_client.as_ref(), rule_decisions.as_mut()) {
+        rule_messages = Some(prepare_rule_messages(messages, rules, decision, progress)?);
+    }
+    let messages = rule_messages.as_deref().unwrap_or(messages);
     let triage = decision_client
         .as_ref()
         .map(|decision| triage_pass(messages, progress, conversation_filter, decision))
@@ -2772,7 +3261,11 @@ pub fn scan(
             selected_messages,
         );
     }
-    close_passed_events(&mut result, messages, chrono::Utc::now().timestamp());
+    if let (Some(decision), Some(rules)) = (decision_client.as_ref(), rule_decisions.as_mut()) {
+        apply_rule_residue(&mut result, messages, rules, decision, progress)?;
+    } else {
+        close_passed_events(&mut result, messages, chrono::Utc::now().timestamp());
+    }
     let decision_for_closure = if result.primary_scan_transport_error {
         None
     } else {
@@ -3405,8 +3898,8 @@ fn merge_conversation(
                 .map_or_else(String::new, |message| message.conversation.clone());
             result.analyzed += conversation.len();
             result.analyzed_conversations += 1;
-            correct_recap_attribution(&mut analysis, conversation);
-            tag_call_summaries(&mut analysis, conversation);
+            correct_recap_attribution(&mut analysis, conversation, None);
+            tag_call_summaries(&mut analysis, conversation, None);
             if let Some(note) = conversation_note(index, conversation, &analysis) {
                 result.conversation_notes.push(note.clone());
                 result
@@ -3609,7 +4102,13 @@ fn named_event_phrase(
     }
     let deadline = item.deadline.as_ref()?;
     matches!(
-        classify(&deadline.quote, message_timestamp, now, offset),
+        classify_with_hint(
+            &deadline.quote,
+            message_timestamp,
+            now,
+            offset,
+            item.deadline_kind_hint,
+        ),
         DeadlineView::EventTied
     )
     .then_some(deadline.quote.as_str())
@@ -3623,15 +4122,32 @@ fn text_matched_event<'a>(
     item: &LoopItem,
     source: &ReviewMessage,
     index: &'a [EventRef],
+    rules: Option<&RuleDecisions>,
 ) -> Option<&'a EventRef> {
-    match_event_by_text(&item.action, source.input.timestamp, index)
-        .or_else(|| match_event_by_text(&item.evidence.quote, source.input.timestamp, index))
+    match_event_by_text_with_rules(&item.action, source.input.timestamp, index, rules).or_else(
+        || {
+            match_event_by_text_with_rules(
+                &item.evidence.quote,
+                source.input.timestamp,
+                index,
+                rules,
+            )
+        },
+    )
 }
 
 /// Whether an otherwise unnamed request uses language that connects it to a
 /// gathering in its own conversation. Event nouns are matched as whole
 /// alphanumeric tokens; the timing phrases are intentionally narrow.
 fn has_scoped_event_language(item: &LoopItem) -> bool {
+    has_scoped_event_language_with_rules(item, None)
+}
+
+fn scoped_event_state(item: &LoopItem) -> serde_json::Value {
+    serde_json::json!({"request_text": format!("{} {}", item.action, item.evidence.quote)})
+}
+
+fn has_scoped_event_language_with_rules(item: &LoopItem, rules: Option<&RuleDecisions>) -> bool {
     const EVENT_NOUN_FOLLOWERS: &[&str] = &[
         "notes",
         "minutes",
@@ -3641,7 +4157,7 @@ fn has_scoped_event_language(item: &LoopItem) -> bool {
         "invite",
         "link",
     ];
-    [&item.action, &item.evidence.quote].iter().any(|text| {
+    let fast = [&item.action, &item.evidence.quote].iter().any(|text| {
         let lower = text.to_lowercase();
         let words: Vec<&str> = lower
             .split(|c: char| !c.is_alphanumeric())
@@ -3654,7 +4170,8 @@ fn has_scoped_event_language(item: &LoopItem) -> bool {
                         .get(index + 1)
                         .is_none_or(|next| !EVENT_NOUN_FOLLOWERS.contains(next)))
         })
-    })
+    });
+    fast || rules.is_some_and(|cache| cache.noul(RULE_SCOPED_EVENT, &scoped_event_state(item)))
 }
 
 /// Whether `item`'s own deadline phrase, classified against `message_timestamp`,
@@ -3669,7 +4186,13 @@ fn event_tied_deadline(item: &LoopItem, message_timestamp: i64, now: i64) -> boo
     };
     let offset = local_offset_seconds(message_timestamp, 0);
     matches!(
-        classify(&deadline.quote, message_timestamp, now, offset),
+        classify_with_hint(
+            &deadline.quote,
+            message_timestamp,
+            now,
+            offset,
+            item.deadline_kind_hint,
+        ),
         DeadlineView::EventTied
     )
 }
@@ -3692,6 +4215,7 @@ fn scoped_event<'a>(
     messages: &[ReviewMessage],
     index: &'a [EventRef],
     now: i64,
+    rules: Option<&RuleDecisions>,
 ) -> Option<&'a EventRef> {
     let normally_qualifying = |event: &&EventRef| {
         matches!(
@@ -3712,7 +4236,7 @@ fn scoped_event<'a>(
                         && rule_3_applies(item, messages, now, event.end)))
         })
         .filter(|event| {
-            has_scoped_event_language(item)
+            has_scoped_event_language_with_rules(item, rules)
                 || event_tied_deadline(item, source.input.timestamp, now)
                 || rule_3_applies(item, messages, now, event.end)
         })
@@ -3721,7 +4245,7 @@ fn scoped_event<'a>(
                 .iter()
                 .filter(normally_qualifying)
                 .filter(|event| event.conversation == source.conversation);
-            has_scoped_event_language(item)
+            has_scoped_event_language_with_rules(item, rules)
                 .then(|| events.next().filter(|_| events.next().is_none()))?
         })
 }
@@ -3732,7 +4256,13 @@ fn deadline_boundary(item: &LoopItem, messages: &[ReviewMessage], now: i64) -> O
         .iter()
         .find(|message| message.input.handle == deadline.message)?;
     let offset = local_offset_seconds(message.input.timestamp, 0);
-    match classify(&deadline.quote, message.input.timestamp, now, offset) {
+    match classify_with_hint(
+        &deadline.quote,
+        message.input.timestamp,
+        now,
+        offset,
+        item.deadline_kind_hint,
+    ) {
         DeadlineView::PastDue { boundary, .. }
         | DeadlineView::Due { boundary, .. }
         | DeadlineView::DueDate { boundary, .. }
@@ -3774,7 +4304,13 @@ fn deadline_is_event_time(
         return false;
     };
     let offset = local_offset_seconds(message.input.timestamp, 0);
-    match classify(&deadline.quote, message.input.timestamp, now, offset) {
+    match classify_with_hint(
+        &deadline.quote,
+        message.input.timestamp,
+        now,
+        offset,
+        item.deadline_kind_hint,
+    ) {
         DeadlineView::PastDue {
             boundary,
             offset_seconds,
@@ -3956,7 +4492,16 @@ fn set_event_time_from_source(item: &mut LoopItem, event: &EventRef, messages: &
 /// visible), unless `result.cancelled` -- a cancelled scan's counts would be
 /// partial and therefore misleading.
 pub fn close_passed_events(result: &mut ScanResult, messages: &[ReviewMessage], now: i64) {
-    let index = build_event_index(messages);
+    close_passed_events_with_rules(result, messages, now, None);
+}
+
+fn close_passed_events_with_rules(
+    result: &mut ScanResult,
+    messages: &[ReviewMessage],
+    now: i64,
+    rules: Option<&RuleDecisions>,
+) {
+    let index = build_event_index_with_rules(messages, rules);
     let mut named = 0usize;
     let mut timed = 0usize;
     let mut matched = 0usize;
@@ -3982,7 +4527,8 @@ pub fn close_passed_events(result: &mut ScanResult, messages: &[ReviewMessage], 
         let named_phrase_present = named_phrase.is_some();
         if let Some(phrase) = named_phrase {
             named += 1;
-            let event_match = match_event(&phrase, source.input.timestamp, &index);
+            let event_match =
+                match_event_with_rules(&phrase, source.input.timestamp, &index, rules);
             matched += usize::from(event_match.is_some());
             if let Some(event) = event_match {
                 set_event_time_from_source(item, event, messages);
@@ -3999,7 +4545,7 @@ pub fn close_passed_events(result: &mut ScanResult, messages: &[ReviewMessage], 
             }
         }
 
-        if let Some(event) = scoped_event(item, source, messages, &index, now) {
+        if let Some(event) = scoped_event(item, source, messages, &index, now, rules) {
             scoped += 1;
             set_event_time_from_source(item, event, messages);
             if close_from_index(item, event, messages, now, source.input.timestamp) {
@@ -4009,7 +4555,9 @@ pub fn close_passed_events(result: &mut ScanResult, messages: &[ReviewMessage], 
             continue;
         }
 
-        if !named_phrase_present && let Some(event) = text_matched_event(item, source, &index) {
+        if !named_phrase_present
+            && let Some(event) = text_matched_event(item, source, &index, rules)
+        {
             matched_by_text += 1;
             if close_from_index(item, event, messages, now, source.input.timestamp) {
                 closed_from_index += 1;
@@ -5300,30 +5848,167 @@ fn should_merge(
     address_group_counts: &BTreeMap<(&str, &str), usize>,
     max_gap_seconds: i64,
 ) -> bool {
+    should_merge_with_rules(
+        account,
+        a,
+        b,
+        &ThreadMergeContext {
+            messages,
+            groups_per_account,
+            address_group_counts,
+            max_gap_seconds,
+            rules: None,
+        },
+    )
+}
+
+struct ThreadMergeContext<'a> {
+    messages: &'a [ReviewMessage],
+    groups_per_account: &'a BTreeMap<&'a str, usize>,
+    address_group_counts: &'a BTreeMap<(&'a str, &'a str), usize>,
+    max_gap_seconds: i64,
+    rules: Option<&'a RuleDecisions>,
+}
+
+fn thread_merge_state(
+    a: &ThreadGroup,
+    b: &ThreadGroup,
+    messages: &[ReviewMessage],
+) -> serde_json::Value {
+    let earliest = |group: &ThreadGroup| {
+        group
+            .indices
+            .iter()
+            .map(|index| &messages[*index])
+            .min_by_key(|message| message.input.timestamp)
+            .expect("thread group is non-empty")
+    };
+    let a = earliest(a);
+    let b = earliest(b);
+    serde_json::json!({
+        "subject_a": a.input.message.subject.as_string(),
+        "subject_b": b.input.message.subject.as_string(),
+        "first_paragraph_a": a.input.message.body_blocks.first().map_or_else(String::new, CanonicalBlock::as_string),
+        "first_paragraph_b": b.input.message.body_blocks.first().map_or_else(String::new, CanonicalBlock::as_string),
+    })
+}
+
+fn should_merge_with_rules(
+    account: &str,
+    a: &ThreadGroup,
+    b: &ThreadGroup,
+    context: &ThreadMergeContext<'_>,
+) -> bool {
     // Neither group's raw subjects carried a calendar-response prefix, and
     // neither is a group source -- both keep their own thread identity.
     if a.has_team || b.has_team || a.has_calendar_prefix || b.has_calendar_prefix {
         return false;
     }
     // A shared normalized subject that is non-empty and substantial.
+    let any_subject_match = a.subjects.intersection(&b.subjects).next().is_some();
     let subjects_match = a
         .subjects
         .intersection(&b.subjects)
         .any(|s| subject_strong_enough(s));
-    if !subjects_match {
+    if !any_subject_match {
         return false;
     }
     // A shared `other_addresses` entry that is not a shared-mailbox or
     // distribution-list address.
+    let any_address_match = a.addresses.intersection(&b.addresses).next().is_some();
     let addresses_match = a.addresses.intersection(&b.addresses).any(|addr| {
-        !is_shared_mailbox_address(account, addr, groups_per_account, address_group_counts)
+        !is_shared_mailbox_address(
+            account,
+            addr,
+            context.groups_per_account,
+            context.address_group_counts,
+        )
     });
-    if !addresses_match {
+    if !any_address_match {
         return false;
     }
     // The nearest pair of messages across the two groups is within
     // `max_gap_seconds` of each other.
-    groups_within(a, b, messages, max_gap_seconds)
+    if !groups_within(a, b, context.messages, context.max_gap_seconds) {
+        return false;
+    }
+    (subjects_match && addresses_match)
+        || context.rules.is_some_and(|cache| {
+            cache.noul(
+                RULE_THREAD_MERGE,
+                &thread_merge_state(a, b, context.messages),
+            )
+        })
+}
+
+fn thread_rule_states(messages: &[ReviewMessage]) -> Vec<serde_json::Value> {
+    const MAX_GAP_SECONDS: i64 = 259_200;
+    let mut groups: BTreeMap<(String, String), ThreadGroup> = BTreeMap::new();
+    for (index, message) in messages.iter().enumerate() {
+        let group = groups
+            .entry((message.account.clone(), message.conversation.clone()))
+            .or_default();
+        let raw_subject = message.input.message.subject.as_string();
+        let subject = normalize_subject(&raw_subject);
+        if !subject.is_empty() {
+            group.subjects.insert(subject);
+        }
+        group.has_calendar_prefix |= raw_subject_has_calendar_prefix(&raw_subject);
+        group.has_team |= message.input.team;
+        group
+            .addresses
+            .extend(message.other_addresses.iter().cloned());
+        group.indices.push(index);
+    }
+    let keys: Vec<_> = groups.keys().cloned().collect();
+    let values: Vec<_> = groups.into_values().collect();
+    let mut groups_per_account: BTreeMap<&str, usize> = BTreeMap::new();
+    for (account, _) in &keys {
+        *groups_per_account.entry(account).or_insert(0) += 1;
+    }
+    let mut address_group_counts = BTreeMap::new();
+    for ((account, _), group) in keys.iter().zip(&values) {
+        for address in &group.addresses {
+            *address_group_counts
+                .entry((account.as_str(), address.as_str()))
+                .or_insert(0) += 1;
+        }
+    }
+    let mut states = Vec::new();
+    for a in 0..values.len() {
+        for b in (a + 1)..values.len() {
+            if keys[a].0 != keys[b].0
+                || values[a].has_team
+                || values[b].has_team
+                || values[a].has_calendar_prefix
+                || values[b].has_calendar_prefix
+                || values[a]
+                    .subjects
+                    .intersection(&values[b].subjects)
+                    .next()
+                    .is_none()
+                || values[a]
+                    .addresses
+                    .intersection(&values[b].addresses)
+                    .next()
+                    .is_none()
+                || !groups_within(&values[a], &values[b], messages, MAX_GAP_SECONDS)
+                || should_merge(
+                    &keys[a].0,
+                    &values[a],
+                    &values[b],
+                    messages,
+                    &groups_per_account,
+                    &address_group_counts,
+                    MAX_GAP_SECONDS,
+                )
+            {
+                continue;
+            }
+            states.push(thread_merge_state(&values[a], &values[b], messages));
+        }
+    }
+    states
 }
 
 /// Merges conversation groups (keyed by account + Graph `conversationId`)
@@ -5351,6 +6036,13 @@ fn should_merge(
 /// is deterministic regardless of input order. Returns how many of the
 /// original groups were absorbed into another (0 when nothing merged).
 pub fn merge_threads(messages: &mut [ReviewMessage]) -> usize {
+    merge_threads_with_rules(messages, None)
+}
+
+fn merge_threads_with_rules(
+    messages: &mut [ReviewMessage],
+    rules: Option<&RuleDecisions>,
+) -> usize {
     const MAX_GAP_SECONDS: i64 = 259_200;
     let mut groups: BTreeMap<(String, String), ThreadGroup> = BTreeMap::new();
     for (i, m) in messages.iter().enumerate() {
@@ -5394,19 +6086,23 @@ pub fn merge_threads(messages: &mut [ReviewMessage]) -> usize {
         }
     }
     let mut parent: Vec<usize> = (0..group_count).collect();
+    let merge_context = ThreadMergeContext {
+        messages,
+        groups_per_account: &groups_per_account,
+        address_group_counts: &address_group_counts,
+        max_gap_seconds: MAX_GAP_SECONDS,
+        rules,
+    };
     for a in 0..group_count {
         for b in (a + 1)..group_count {
             if keys[a].0 != keys[b].0 {
                 continue;
             }
-            if should_merge(
+            if should_merge_with_rules(
                 &keys[a].0,
                 &group_values[a],
                 &group_values[b],
-                messages,
-                &groups_per_account,
-                &address_group_counts,
-                MAX_GAP_SECONDS,
+                &merge_context,
             ) {
                 union_find_union(&mut parent, a, b);
             }
@@ -7440,6 +8136,7 @@ at the downtown courthouse. Let me know if that works.",
                 context: "Please send the draft.".into(),
             },
             deadline: None,
+            deadline_kind_hint: None,
             event: None,
             event_time: None,
             resolution: None,
@@ -8343,6 +9040,7 @@ at the downtown courthouse. Let me know if that works.",
                 context: "Can we meet?".into(),
             },
             deadline: None,
+            deadline_kind_hint: None,
             event: None,
             event_time: None,
             resolution: None,
@@ -9961,6 +10659,470 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 questions,
             )
         }
+    }
+
+    type RuleAnswer<'a> = dyn Fn(&str, &serde_json::Value) -> Result<serde_json::Value, ProviderError>
+        + Send
+        + Sync
+        + 'a;
+
+    struct FixedRuleDecisionClient<'a> {
+        answer: Box<RuleAnswer<'a>>,
+        calls: AtomicUsize,
+        states: Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl<'a> FixedRuleDecisionClient<'a> {
+        fn new(
+            answer: impl Fn(&str, &serde_json::Value) -> Result<serde_json::Value, ProviderError>
+            + Send
+            + Sync
+            + 'a,
+        ) -> Self {
+            Self {
+                answer: Box::new(answer),
+                calls: AtomicUsize::new(0),
+                states: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn noul(probability: f64) -> Self {
+            Self::new(move |_, _| Ok(serde_json::json!({"type":"noul", "noul":probability})))
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::Relaxed)
+        }
+
+        fn state(&self, index: usize) -> serde_json::Value {
+            self.states.lock().unwrap_or_else(PoisonError::into_inner)[index].clone()
+        }
+    }
+
+    impl DecisionClient for FixedRuleDecisionClient<'_> {
+        fn model(&self) -> &'static str {
+            "fixed-rule"
+        }
+
+        fn max_parallel(&self) -> usize {
+            1
+        }
+
+        fn decide(
+            &self,
+            state: &serde_json::Value,
+            questions: &Questions,
+            _cancel: Option<&AtomicBool>,
+            deadline: Duration,
+        ) -> Result<openloops_inference::decision::Answers, ProviderError> {
+            assert_eq!(deadline, DECISION_DEADLINE);
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.states
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(state.clone());
+            let request =
+                openloops_inference::decision::request_body(self.model(), state, questions, false)?;
+            let request: serde_json::Value =
+                serde_json::from_slice(&request).map_err(|_| ProviderError::InvalidQuestion)?;
+            let question = request["questions"]
+                .as_object()
+                .and_then(|values| values.keys().next())
+                .ok_or(ProviderError::InvalidQuestion)?;
+            let answer = (self.answer)(question, state)?;
+            let response = serde_json::json!({
+                "model": self.model(),
+                "answers": {(question): answer},
+                "usage": {"input_tokens": 1}
+            });
+            openloops_inference::decision::parse_answers(
+                &serde_json::to_vec(&response).map_err(|_| ProviderError::InvalidResponse)?,
+                self.model(),
+                questions,
+            )
+        }
+    }
+
+    fn answer_rules(
+        id: &str,
+        category: RuleCategory,
+        states: Vec<serde_json::Value>,
+        client: &dyn DecisionClient,
+    ) -> RuleDecisions {
+        let mut rules = RuleDecisions::default();
+        decide_rule_states(
+            id,
+            category,
+            states,
+            &mut rules,
+            client,
+            &ScanProgress::default(),
+        )
+        .unwrap();
+        rules
+    }
+
+    #[test]
+    fn rule_fast_paths_create_no_decision_state() {
+        let mut vendor = synthetic("Ordinary text.", 0, "vendor");
+        vendor.sender = "Service <notes@fathom.video>".into();
+        vendor.sender_address = "notes@fathom.video".into();
+        let vendor = prepare(&vendor, "Inbox", 0).unwrap();
+        assert!(is_meeting_recap_artifact(&vendor));
+        assert!(recap_rule_states(&[vendor]).is_empty());
+
+        let mut item = expectation_for("m0");
+        item.action = "Attend the workshop".into();
+        assert!(has_scoped_event_language(&item));
+        assert!(duplicate_rule_states(&[item.clone(), item.clone()]).is_empty());
+
+        let event = EventRef {
+            name: "Quarterly planning workshop".into(),
+            start: 100,
+            end: 200,
+            conversation: "event".into(),
+            message_handle: "event-message".into(),
+            source: EventSource::Meeting,
+        };
+        let mut states = Vec::new();
+        collect_event_match_states(&mut states, "quarterly planning", 0, &[event], false);
+        assert!(states.is_empty());
+
+        item.deadline = Some(Anchor {
+            message: "m0".into(),
+            block: 0,
+            quote: "Friday".into(),
+            context: String::new(),
+        });
+        let message = prepare(&synthetic("Synthetic.", 0, "deadline"), "Inbox", 0).unwrap();
+        item.deadline.as_mut().unwrap().message = message.input.handle.clone();
+        assert!(deadline_rule_states(&[item], &[message]).is_empty());
+
+        let mut threads = vec![
+            prepare(&synthetic("First.", 0, "a"), "Inbox", 0).unwrap(),
+            prepare(&synthetic("Second.", 1, "b"), "Inbox", 1).unwrap(),
+        ];
+        assert_eq!(merge_threads(&mut threads), 1);
+        assert!(thread_rule_states(&threads).is_empty());
+    }
+
+    #[test]
+    fn recap_residue_is_byte_exact_cached_and_accept_only() {
+        let mut mail = synthetic("A short update.", 0, "recap-residue");
+        mail.subject = "Project recap".into();
+        let message = prepare(&mail, "Inbox", 0).unwrap();
+        let states = recap_rule_states(std::slice::from_ref(&message));
+        assert_eq!(states.len(), 1);
+
+        let accepted = FixedRuleDecisionClient::noul(0.9);
+        let mut rules = answer_rules(
+            RULE_RECAP,
+            RuleCategory::Recap,
+            vec![states[0].clone(), states[0].clone()],
+            &accepted,
+        );
+        decide_rule_states(
+            RULE_RECAP,
+            RuleCategory::Recap,
+            states,
+            &mut rules,
+            &accepted,
+            &ScanProgress::default(),
+        )
+        .unwrap();
+        assert_eq!(accepted.calls(), 1);
+        assert_eq!(
+            serde_json::to_vec(&accepted.state(0)).unwrap(),
+            br#"{"sender":"Alex <alex@example.invalid>","subject":"Project recap","first_paragraph":"A short update."}"#
+        );
+        assert!(is_meeting_recap_artifact_with_rules(&message, Some(&rules)));
+        let mut analysis = LoopItems {
+            items: vec![expectation_for(&message.input.handle)],
+            rejected: 0,
+            rejection_reasons: Vec::new(),
+            degraded: 0,
+        };
+        analysis.items[0].waiting_party = "user@example.invalid".into();
+        correct_recap_attribution(&mut analysis, &[&message], Some(&rules));
+        tag_call_summaries(&mut analysis, &[&message], Some(&rules));
+        assert_eq!(analysis.items[0].waiting_party, "Not established");
+        assert!(analysis.items[0].owner == Owner::You);
+        assert!(analysis.items[0].from_call_summary);
+
+        for probability in [0.49, 0.1] {
+            let client = FixedRuleDecisionClient::noul(probability);
+            let fallback = answer_rules(
+                RULE_RECAP,
+                RuleCategory::Recap,
+                vec![recap_state(&message)],
+                &client,
+            );
+            assert!(!is_meeting_recap_artifact_with_rules(
+                &message,
+                Some(&fallback)
+            ));
+        }
+        let error = FixedRuleDecisionClient::new(|_, _| Err(ProviderError::RateLimited));
+        let fallback = answer_rules(
+            RULE_RECAP,
+            RuleCategory::Recap,
+            vec![recap_state(&message)],
+            &error,
+        );
+        assert!(!is_meeting_recap_artifact_with_rules(
+            &message,
+            Some(&fallback)
+        ));
+        assert_eq!((error.calls(), fallback.skipped), (1, 1));
+    }
+
+    #[test]
+    fn event_rule_residues_accept_and_other_bands_keep_today_behavior() {
+        let mut item = expectation_for("m0");
+        item.action = "Coordinate the packet".into();
+        item.evidence.quote = "Please prepare the packet.".into();
+        let scoped_state = scoped_event_state(&item);
+        assert!(!has_scoped_event_language(&item));
+        let accepted = FixedRuleDecisionClient::noul(0.9);
+        let rules = answer_rules(
+            RULE_SCOPED_EVENT,
+            RuleCategory::Event,
+            vec![scoped_state.clone()],
+            &accepted,
+        );
+        assert!(has_scoped_event_language_with_rules(&item, Some(&rules)));
+        assert_eq!(
+            serde_json::to_vec(&accepted.state(0)).unwrap(),
+            br#"{"request_text":"Coordinate the packet Please prepare the packet."}"#
+        );
+
+        let event = EventRef {
+            name: "Planning workshop schedule".into(),
+            start: 100,
+            end: 200,
+            conversation: "event".into(),
+            message_handle: "event-message".into(),
+            source: EventSource::Meeting,
+        };
+        assert!(match_event("planning request", 0, std::slice::from_ref(&event)).is_none());
+        let state = event_match_state("planning request", &event.name);
+        let rules = answer_rules(
+            RULE_EVENT_MATCH,
+            RuleCategory::Event,
+            vec![state],
+            &FixedRuleDecisionClient::noul(0.9),
+        );
+        assert!(match_event_with_rules("planning request", 0, &[event], Some(&rules)).is_some());
+        let text_event = EventRef {
+            name: "Planning workshop schedule".into(),
+            start: 100,
+            end: 200,
+            conversation: "event".into(),
+            message_handle: "event-message".into(),
+            source: EventSource::Meeting,
+        };
+        assert!(
+            match_event_by_text("planning request", 0, std::slice::from_ref(&text_event)).is_none()
+        );
+        assert!(
+            match_event_by_text_with_rules("planning request", 0, &[text_event], Some(&rules))
+                .is_some()
+        );
+
+        for (id, gray) in [(RULE_SCOPED_EVENT, 0.8), (RULE_EVENT_MATCH, 0.69)] {
+            for probability in [gray, 0.1] {
+                let state = if id == RULE_SCOPED_EVENT {
+                    scoped_state.clone()
+                } else {
+                    event_match_state("planning request", "Planning workshop schedule")
+                };
+                let rules = answer_rules(
+                    id,
+                    RuleCategory::Event,
+                    vec![state.clone()],
+                    &FixedRuleDecisionClient::noul(probability),
+                );
+                assert!(!rules.noul(id, &state));
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_and_thread_residues_apply_only_on_accept() {
+        let first = expectation_for("m0");
+        let mut second = first.clone();
+        second.action = "Provide the draft".into();
+        let states = duplicate_rule_states(&[first.clone(), second.clone()]);
+        assert_eq!(states.len(), 1);
+        let client = FixedRuleDecisionClient::noul(0.9);
+        let rules = answer_rules(
+            RULE_DUPLICATE_ACTION,
+            RuleCategory::Duplicate,
+            states,
+            &client,
+        );
+        let mut items = vec![first, second];
+        apply_duplicate_rules(&mut items, &rules);
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            serde_json::to_vec(&client.state(0)).unwrap(),
+            br#"{"action_a":"Send the draft","action_b":"Provide the draft"}"#
+        );
+
+        let mut a = synthetic("First paragraph.", 0, "thread-a");
+        a.subject = "Hi".into();
+        let mut b = synthetic("Second paragraph.", 1, "thread-b");
+        b.subject = "Hi".into();
+        let mut messages = vec![
+            prepare(&a, "Inbox", 0).unwrap(),
+            prepare(&b, "Inbox", 1).unwrap(),
+        ];
+        assert_eq!(merge_threads(&mut messages.clone()), 0);
+        let states = thread_rule_states(&messages);
+        assert_eq!(states.len(), 1);
+        let client = FixedRuleDecisionClient::noul(0.9);
+        let rules = answer_rules(RULE_THREAD_MERGE, RuleCategory::Thread, states, &client);
+        assert_eq!(merge_threads_with_rules(&mut messages, Some(&rules)), 1);
+        assert_eq!(
+            serde_json::to_vec(&client.state(0)).unwrap(),
+            br#"{"subject_a":"Hi","subject_b":"Hi","first_paragraph_a":"First paragraph.","first_paragraph_b":"Second paragraph."}"#
+        );
+    }
+
+    #[test]
+    fn deadline_choice_is_stored_and_rendering_consults_it() {
+        let message = prepare(&synthetic("Synthetic.", 0, "deadline"), "Inbox", 0).unwrap();
+        let mut item = expectation_for(&message.input.handle);
+        item.deadline = Some(Anchor {
+            message: message.input.handle.clone(),
+            block: 0,
+            quote: "before kickoff".into(),
+            context: String::new(),
+        });
+        let states =
+            deadline_rule_states(std::slice::from_ref(&item), std::slice::from_ref(&message));
+        let client = FixedRuleDecisionClient::new(|_, _| {
+            Ok(serde_json::json!({
+                "type":"choice",
+                "choice":"event_tied",
+                "probabilities":{"event_tied":0.9,"soft":0.05,"unknown":0.05},
+                "confidence":0.9
+            }))
+        });
+        let rules = answer_rules(RULE_DEADLINE_KIND, RuleCategory::Deadline, states, &client);
+        apply_deadline_rules(
+            std::slice::from_mut(&mut item),
+            std::slice::from_ref(&message),
+            &rules,
+        );
+        assert_eq!(item.deadline_kind_hint, Some(DeadlineKindHint::EventTied));
+        assert_eq!(
+            classify_with_hint(
+                "before kickoff",
+                message.input.timestamp,
+                message.input.timestamp,
+                0,
+                item.deadline_kind_hint,
+            ),
+            DeadlineView::EventTied
+        );
+        assert_eq!(
+            serde_json::to_vec(&client.state(0)).unwrap(),
+            br#"{"phrase":"before kickoff"}"#
+        );
+        for confidence in [0.69, 0.1] {
+            let client = FixedRuleDecisionClient::new(move |_, _| {
+                Ok(serde_json::json!({
+                    "type":"choice",
+                    "choice":"event_tied",
+                    "probabilities":{"event_tied":0.9,"soft":0.05,"unknown":0.05},
+                    "confidence":confidence
+                }))
+            });
+            let states =
+                deadline_rule_states(std::slice::from_ref(&item), std::slice::from_ref(&message));
+            let rules = answer_rules(RULE_DEADLINE_KIND, RuleCategory::Deadline, states, &client);
+            let mut fallback = item.clone();
+            fallback.deadline_kind_hint = None;
+            apply_deadline_rules(
+                std::slice::from_mut(&mut fallback),
+                std::slice::from_ref(&message),
+                &rules,
+            );
+            assert_eq!(fallback.deadline_kind_hint, None);
+        }
+    }
+
+    #[test]
+    fn rule_counter_note_is_content_free_and_exact() {
+        let rules = RuleDecisions {
+            recap: 1,
+            event: 2,
+            duplicates: 3,
+            threads: 4,
+            deadlines: 5,
+            skipped: 6,
+            ..RuleDecisions::default()
+        };
+        assert_eq!(
+            rules.note(),
+            "Decision model answered 15 rule questions (recap 1, event 2, duplicates 3, threads 4, deadlines 5); 6 skipped."
+        );
+    }
+
+    #[test]
+    fn every_rule_gray_reject_and_error_falls_back() {
+        for id in [
+            RULE_RECAP,
+            RULE_SCOPED_EVENT,
+            RULE_EVENT_MATCH,
+            RULE_DUPLICATE_ACTION,
+            RULE_THREAD_MERGE,
+        ] {
+            let registered = Registry::get().question(id).unwrap();
+            let state = serde_json::json!({"synthetic": id});
+            for probability in [registered.accept.midpoint(registered.escalate), 0.0] {
+                let rules = answer_rules(
+                    id,
+                    RuleCategory::Event,
+                    vec![state.clone()],
+                    &FixedRuleDecisionClient::noul(probability),
+                );
+                assert!(!rules.noul(id, &state), "{id}");
+            }
+            let error = FixedRuleDecisionClient::new(|_, _| Err(ProviderError::RateLimited));
+            let rules = answer_rules(id, RuleCategory::Event, vec![state.clone()], &error);
+            assert!(!rules.noul(id, &state), "{id}");
+            assert_eq!((error.calls(), rules.skipped), (1, 1));
+        }
+
+        let state = serde_json::json!({"phrase":"before kickoff"});
+        for confidence in [0.69, 0.1] {
+            let client = FixedRuleDecisionClient::new(move |_, _| {
+                Ok(serde_json::json!({
+                    "type":"choice",
+                    "choice":"soft",
+                    "probabilities":{"event_tied":0.05,"soft":0.9,"unknown":0.05},
+                    "confidence":confidence
+                }))
+            });
+            let rules = answer_rules(
+                RULE_DEADLINE_KIND,
+                RuleCategory::Deadline,
+                vec![state.clone()],
+                &client,
+            );
+            assert_eq!(rules.choice(RULE_DEADLINE_KIND, &state), None);
+        }
+        let error = FixedRuleDecisionClient::new(|_, _| Err(ProviderError::RateLimited));
+        let rules = answer_rules(
+            RULE_DEADLINE_KIND,
+            RuleCategory::Deadline,
+            vec![state.clone()],
+            &error,
+        );
+        assert_eq!(rules.choice(RULE_DEADLINE_KIND, &state), None);
+        assert_eq!((error.calls(), rules.skipped), (1, 1));
     }
 
     fn triage_message(body: &str) -> ReviewMessage {

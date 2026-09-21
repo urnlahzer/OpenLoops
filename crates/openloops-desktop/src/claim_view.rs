@@ -3,6 +3,8 @@
 use openloops_contracts::{AmbiguityCode, ClaimType, Nullable};
 use openloops_inference::{blocks::CanonicalBlock, message::CanonicalMessage};
 
+use crate::deadline_view::DeadlineKindHint;
+
 /// How the signed-in user appears among a message's recipients.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum UserRecipient {
@@ -126,6 +128,7 @@ pub struct LoopItem {
     pub kind: String,
     pub evidence: Anchor,
     pub deadline: Option<Anchor>,
+    pub deadline_kind_hint: Option<DeadlineKindHint>,
     pub event: Option<Anchor>,
     pub event_time: Option<Anchor>,
     pub resolution: Option<Anchor>,

@@ -176,6 +176,15 @@ Coverage details report content-free triage counts and identify skipped threads
 as having no obligations found by triage; **Rescan** with the setting off sends
 those threads through the unchanged chat-model path.
 
+The same setting also lets `Jev` answer only the residue left by the existing
+deterministic recap, event-scoping, event-name, duplicate-action, thread-merge,
+and deadline-kind rules. Deterministic matches still short-circuit. Distinct
+rule inputs are asked at most once per scan, failures and uncertain answers
+keep the prior deterministic result, and deadline answers are computed during
+the scan rather than from the UI thread. Coverage details add one content-free
+line with answered and skipped rule-question counts; turning the setting off
+keeps the previous rule behavior and creates no decision client.
+
 After the per-conversation pass, the closure pass checks later messages that can
 reach open requests: a later message in the same thread, or a conversation
 reached through a later message you sent to the waiting party. With the

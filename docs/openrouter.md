@@ -24,7 +24,8 @@ In the [native setup window](native-setup.md), on the Connections tab:
 5. Click **Test selected model** for a content-free generation check against
    the selected model. It sends no email and creates no task.
 6. Optionally turn on **Use the Jev decision model for closure checks and
-   triage**. It is off by default, and P0 does not change scan behavior.
+   triage**. The same toggle also enables rule-residue questions. It is off by
+   default.
 7. Click **Check decision model** to run the content-free endpoint check and
    report whether that endpoint accepts the `provider.zdr` member.
 8. Optionally, with a scan result loaded, type an absolute folder path
@@ -90,6 +91,16 @@ body paragraphs of a later message are checked. The model is
 `typesafe/jev-1.13` and is validated against the ZDR listing before any content
 is sent. Its answers are probabilities, never text, and nothing from them is
 persisted. Gray-band pairs go to the governed chat-model closure call.
+
+Rule-residue requests use the same Decisions endpoint, ZDR routing, concurrency
+limit, cancellation, 20-second deadline, and never-resend policy. They send
+only the fields named by the applicable registered question: recap detection
+sends `sender`, `subject`, and `first_paragraph`; event scoping sends
+`request_text` (the card action plus its evidence quote); event matching sends
+`phrase` and `event_name`; duplicate detection sends `action_a` and `action_b`;
+thread merging sends `subject_a`, `subject_b`, `first_paragraph_a`, and
+`first_paragraph_b`; and deadline classification sends `phrase`. Answers and
+the per-scan state cache remain in memory and are not persisted.
 
 The governed conversation projection omits a quoted-history block only when
 Unicode-whitespace normalization makes it exactly duplicate an earlier message
