@@ -220,10 +220,13 @@ both become exhaustive.
 
 ### P2. Triage before the primary pass
 
-Per message, one request with the message's paragraphs as array state and,
-per paragraph, nouls: `asks_recipient`, `commits_sender`, `asks_question`,
+Status: implemented on `feat/jev-triage`.
+
+Per body paragraph, one request with state `{subject, paragraph_text,
+from_user}` and the nouls `asks_recipient`, `commits_sender`, `asks_question`,
 `names_time`, `boilerplate` (signature, legal footer, unsubscribe,
-disclaimer), `automated_notification`.
+disclaimer), and `automated_notification`. Each message is capped at its first
+40 body paragraphs.
 
 Uses, all in code:
 

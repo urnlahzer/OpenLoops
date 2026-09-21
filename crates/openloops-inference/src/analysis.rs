@@ -8,7 +8,7 @@
 //! mailbox content beyond what [`projection`] copies in, and no upstream
 //! error text or response body escapes this module -- every failure is a
 //! fixed [`ProviderError`].
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::atomic::AtomicBool;
 
 use serde_json::{Value, json};
@@ -109,7 +109,24 @@ pub fn analyze_claims(
     context: &SuppliedContext<'_>,
     cancel: Option<&AtomicBool>,
 ) -> Result<ClaimAnalysis, ProviderError> {
-    let (system, user) = projection(context)?;
+    analyze_claims_omitting(client, context, cancel, &BTreeMap::new())
+}
+
+/// Sends the governed projection while withholding selected body blocks.
+///
+/// Omitted blocks keep their original ordinals: the projection skips them
+/// during emission instead of compacting the message's body-block vector.
+/// Validation still uses the complete local context, so any returned evidence
+/// resolves against the same ordinal the model saw.
+/// # Errors
+/// Rejects oversized input, tool calls, partial responses, and invalid analysis.
+pub fn analyze_claims_omitting(
+    client: &dyn ModelClient,
+    context: &SuppliedContext<'_>,
+    cancel: Option<&AtomicBool>,
+    omitted_body_blocks: &BTreeMap<String, BTreeSet<usize>>,
+) -> Result<ClaimAnalysis, ProviderError> {
+    let (system, user) = projection_omitting(context, omitted_body_blocks)?;
     let answer = client.complete(&system, &user, cancel, deadline_for(context.messages.len()))?;
     claim_analysis(answer.as_bytes(), context)
 }
@@ -342,7 +359,9 @@ fn validate_block_sizes(message: &CanonicalMessage) -> Result<(), ProviderError>
 }
 
 fn projected_message_blocks(
+    source_handle: &str,
     message: &CanonicalMessage,
+    omitted_body_blocks: &BTreeMap<String, BTreeSet<usize>>,
     earlier_body_text: &HashSet<String>,
     emitted_quote_text: &mut HashSet<String>,
     text_bytes: &mut usize,
@@ -351,6 +370,12 @@ fn projected_message_blocks(
     let mut blocks = Vec::new();
     push_projected_block(&mut blocks, "subject", 0, &message.subject, text_bytes)?;
     for (ordinal, block) in message.body_blocks.iter().enumerate() {
+        if omitted_body_blocks
+            .get(source_handle)
+            .is_some_and(|omitted| omitted.contains(&ordinal))
+        {
+            continue;
+        }
         push_projected_block(&mut blocks, "body_block", ordinal, block, text_bytes)?;
     }
     for (ordinal, block) in message.quote_blocks.iter().enumerate() {
@@ -375,6 +400,13 @@ fn projected_message_blocks(
 }
 
 fn projection(context: &SuppliedContext<'_>) -> Result<(String, String), ProviderError> {
+    projection_omitting(context, &BTreeMap::new())
+}
+
+fn projection_omitting(
+    context: &SuppliedContext<'_>,
+    omitted_body_blocks: &BTreeMap<String, BTreeSet<usize>>,
+) -> Result<(String, String), ProviderError> {
     if !valid_handle(context.user.handle) {
         return Err(ProviderError::InvalidAnalysis);
     }
@@ -399,7 +431,9 @@ fn projection(context: &SuppliedContext<'_>) -> Result<(String, String), Provide
             return Err(ProviderError::InputTooLarge);
         }
         let blocks = projected_message_blocks(
+            source.handle,
             message,
+            omitted_body_blocks,
             &earlier_body_text,
             &mut emitted_quote_text,
             &mut text_bytes,

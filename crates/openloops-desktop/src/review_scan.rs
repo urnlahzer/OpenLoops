@@ -16,7 +16,10 @@ use openloops_domain::deadline_parse::{
 };
 use openloops_graph::live::{ConnectionError, review::MailItem};
 use openloops_inference::{
-    analysis::{AcceptedClaim, ClaimAnalysis, ReviewEvidence, analyze_claims, rejection_label},
+    analysis::{
+        AcceptedClaim, ClaimAnalysis, ReviewEvidence, analyze_claims, analyze_claims_omitting,
+        rejection_label,
+    },
     blocks::CanonicalBlock,
     canonical::canonicalize_plain,
     decision::{
@@ -1479,6 +1482,8 @@ pub struct ScanProgress {
     /// {n}") rather than the primary per-conversation pass ("Conversation
     /// {i} of {n}").
     pub closure_phase: AtomicBool,
+    /// Set only while decision-model paragraph triage is running.
+    pub triage_phase: AtomicBool,
 }
 
 impl ScanProgress {
@@ -2216,6 +2221,16 @@ fn governed_pass(
     Ok(map_claim_analysis(&analysis, conversation))
 }
 
+fn governed_pass_omitting(
+    client: &dyn ModelClient,
+    conversation: &[ConversationMessage],
+    cancel: Option<&AtomicBool>,
+    omitted_body_blocks: &BTreeMap<String, BTreeSet<usize>>,
+) -> Result<LoopItems, ProviderError> {
+    let analysis = governed_call_omitting(client, conversation, &[], cancel, omitted_body_blocks)?;
+    Ok(map_claim_analysis(&analysis, conversation))
+}
+
 /// One governed request over `conversation`, offering `loop_handles` as the
 /// `loop_candidate_handles` the model may name in `related_loop_handles`.
 /// The primary pass offers none; the closure pass offers the open loops
@@ -2227,6 +2242,16 @@ fn governed_call(
     conversation: &[ConversationMessage],
     loop_handles: &[&str],
     cancel: Option<&AtomicBool>,
+) -> Result<ClaimAnalysis, ProviderError> {
+    governed_call_omitting(client, conversation, loop_handles, cancel, &BTreeMap::new())
+}
+
+fn governed_call_omitting(
+    client: &dyn ModelClient,
+    conversation: &[ConversationMessage],
+    loop_handles: &[&str],
+    cancel: Option<&AtomicBool>,
+    omitted_body_blocks: &BTreeMap<String, BTreeSet<usize>>,
 ) -> Result<ClaimAnalysis, ProviderError> {
     let messages: Vec<MessageContext> = conversation
         .iter()
@@ -2265,7 +2290,11 @@ fn governed_call(
         participants: &participants,
         loop_candidate_handles: loop_handles,
     };
-    analyze_claims(client, &context, cancel)
+    if omitted_body_blocks.is_empty() {
+        analyze_claims(client, &context, cancel)
+    } else {
+        analyze_claims_omitting(client, &context, cancel, omitted_body_blocks)
+    }
 }
 
 /// One of the two fixed reasons [`map_accepted_claim`] skips a claim
@@ -2449,6 +2478,220 @@ fn push_unique_expectation(items: &mut Vec<LoopItem>, item: LoopItem) {
     }
 }
 
+const TRIAGE_IDS: &[&str] = &[
+    "triage.asks_recipient",
+    "triage.commits_sender",
+    "triage.asks_question",
+    "triage.names_time",
+    "triage.boilerplate",
+    "triage.automated_notification",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SignalBand {
+    Signal,
+    Gray,
+    Negative,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ParagraphTriage {
+    signal: SignalBand,
+    boilerplate: bool,
+    notification: bool,
+}
+
+#[derive(Default)]
+struct TriageResult {
+    skipped: BTreeSet<(String, String)>,
+    omitted_body_blocks: BTreeMap<String, BTreeSet<usize>>,
+    boilerplate_dropped: usize,
+    request_errors: usize,
+    stop_class_error: bool,
+    cancelled: bool,
+}
+
+fn triage_probability(answers: &openloops_inference::decision::Answers, id: &str) -> f64 {
+    match answers.get(id) {
+        Some(Answer::Noul { probability }) => *probability,
+        _ => 0.0,
+    }
+}
+
+fn classify_triage(answers: &openloops_inference::decision::Answers) -> ParagraphTriage {
+    let registry = Registry::get();
+    let signal_ids = &TRIAGE_IDS[..3];
+    let signal = if signal_ids.iter().any(|id| {
+        triage_probability(answers, id) >= registry.question(id).expect("triage question").accept
+    }) {
+        SignalBand::Signal
+    } else if signal_ids.iter().any(|id| {
+        let probability = triage_probability(answers, id);
+        let question = registry.question(id).expect("triage question");
+        probability >= question.escalate && probability < question.accept
+    }) {
+        SignalBand::Gray
+    } else {
+        SignalBand::Negative
+    };
+    let below_signal_escalation = signal_ids.iter().all(|id| {
+        triage_probability(answers, id) < registry.question(id).expect("triage question").escalate
+    });
+    let boilerplate = triage_probability(answers, "triage.boilerplate")
+        >= registry
+            .question("triage.boilerplate")
+            .expect("triage question")
+            .accept
+        && below_signal_escalation;
+    let notification = triage_probability(answers, "triage.automated_notification")
+        >= registry
+            .question("triage.automated_notification")
+            .expect("triage question")
+            .accept;
+    ParagraphTriage {
+        signal,
+        boilerplate,
+        notification,
+    }
+}
+
+fn triage_state(message: &ReviewMessage, ordinal: usize) -> serde_json::Value {
+    serde_json::json!({
+        "subject": message.input.message.subject.as_string(),
+        "paragraph_text": message.input.message.body_blocks[ordinal].as_string(),
+        "from_user": message.input.from_user,
+    })
+}
+
+fn triage_jobs(messages: &[&ReviewMessage]) -> Vec<(usize, usize)> {
+    messages
+        .iter()
+        .enumerate()
+        .flat_map(|(message_index, message)| {
+            (0..message.input.message.body_blocks.len().min(MAX_BODY_BLOCKS))
+                .map(move |ordinal| (message_index, ordinal))
+        })
+        .collect()
+}
+
+fn collect_triage_results(
+    messages: &[&ReviewMessage],
+    jobs: &[(usize, usize)],
+    outcomes: JobResults<ParagraphTriage>,
+) -> TriageResult {
+    let mut result = TriageResult::default();
+    let mut classified = vec![Vec::new(); messages.len()];
+    for (slot, outcome) in outcomes {
+        let (message_index, ordinal) = jobs[slot];
+        let paragraph = match outcome {
+            JobOutcome::Completed(Ok(answer)) => answer,
+            JobOutcome::Completed(Err(ProviderError::Cancelled)) => {
+                result.cancelled = true;
+                continue;
+            }
+            JobOutcome::Completed(Err(error)) => {
+                result.request_errors += 1;
+                result.stop_class_error |= is_stop_error(error);
+                ParagraphTriage {
+                    signal: SignalBand::Signal,
+                    boilerplate: false,
+                    notification: false,
+                }
+            }
+            JobOutcome::Panicked => {
+                result.request_errors += 1;
+                ParagraphTriage {
+                    signal: SignalBand::Signal,
+                    boilerplate: false,
+                    notification: false,
+                }
+            }
+            JobOutcome::NotStarted => continue,
+        };
+        if paragraph.boilerplate {
+            result
+                .omitted_body_blocks
+                .entry(messages[message_index].input.handle.clone())
+                .or_default()
+                .insert(ordinal);
+            result.boilerplate_dropped += 1;
+        }
+        classified[message_index].push(paragraph);
+    }
+    if !result.stop_class_error && !result.cancelled {
+        result.skipped = skipped_triage_conversations(messages, &classified);
+    } else {
+        result.omitted_body_blocks.clear();
+        result.boilerplate_dropped = 0;
+    }
+    result
+}
+
+fn skipped_triage_conversations(
+    messages: &[&ReviewMessage],
+    classified: &[Vec<ParagraphTriage>],
+) -> BTreeSet<(String, String)> {
+    let mut conversations: BTreeMap<(&str, &str), Vec<usize>> = BTreeMap::new();
+    for (index, message) in messages.iter().enumerate() {
+        conversations
+            .entry((&message.account, &message.conversation))
+            .or_default()
+            .push(index);
+    }
+    conversations
+        .into_iter()
+        .filter_map(|((account, conversation), message_indices)| {
+            let has_signal = message_indices.iter().any(|index| {
+                classified[*index]
+                    .iter()
+                    .any(|answer| answer.signal != SignalBand::Negative)
+            });
+            let notification_only = message_indices.iter().all(|index| {
+                !classified[*index].is_empty()
+                    && classified[*index].iter().all(|answer| answer.notification)
+            });
+            (!has_signal || notification_only)
+                .then(|| (account.to_owned(), conversation.to_owned()))
+        })
+        .collect()
+}
+
+fn triage_pass(
+    messages: &[ReviewMessage],
+    progress: &ScanProgress,
+    conversation_filter: Option<&BTreeSet<String>>,
+    decision_client: &dyn DecisionClient,
+) -> Result<TriageResult, ProviderError> {
+    let selected: Vec<&ReviewMessage> = messages
+        .iter()
+        .filter(|message| {
+            conversation_filter.is_none_or(|filter| filter.contains(&message.conversation))
+        })
+        .collect();
+    let jobs = triage_jobs(&selected);
+    let questions = Questions::from_registry(TRIAGE_IDS)?;
+    progress.triage_phase.store(true, Ordering::Relaxed);
+    progress.processed.store(0, Ordering::Relaxed);
+    progress.total.store(jobs.len(), Ordering::Relaxed);
+    progress
+        .conversation_total
+        .store(jobs.len(), Ordering::Relaxed);
+    let pass = ParallelPass::new(decision_client.max_parallel());
+    let outcomes = run_jobs(&vec![1; jobs.len()], &pass, progress, &|slot| {
+        let (message_index, ordinal) = jobs[slot];
+        decision_client
+            .decide(
+                &triage_state(selected[message_index], ordinal),
+                &questions,
+                Some(&progress.cancel),
+                DECISION_DEADLINE,
+            )
+            .map(|answers| classify_triage(&answers))
+    });
+    progress.reset_pass();
+    Ok(collect_triage_results(&selected, &jobs, outcomes))
+}
+
 /// Analyzes `messages`, running up to `parallel` model requests at once.
 ///
 /// Conversations are independent of one another and so are the closure
@@ -2473,30 +2716,69 @@ pub fn scan(
             conversation_filter.is_none_or(|filter| filter.contains(&message.conversation))
         })
         .count();
-    progress.total.store(selected_messages, Ordering::Relaxed);
     let decision_key = (options.provider == Provider::OpenRouter && options.use_decision_model)
         .then(|| key.clone());
     let client = connect(options.provider, key, model, parallel)?;
     let client = client.as_ref();
     let pass = ParallelPass::new(client.max_parallel());
-    let mut result = scan_conversations_filtered(
-        messages,
-        progress,
-        &pass,
-        conversation_filter,
-        &|conversation| governed_pass(client, conversation, Some(&progress.cancel)),
-    );
+    let decision_client = maybe_decision_client(options, || {
+        Ok(OpenRouterDecisions::connect(
+            decision_key.expect("decision key exists when enabled"),
+            &Registry::get().model,
+        )?
+        .with_max_parallel(parallel))
+    })?;
+    let triage = decision_client
+        .as_ref()
+        .map(|decision| triage_pass(messages, progress, conversation_filter, decision))
+        .transpose()?;
+    progress.triage_phase.store(false, Ordering::Relaxed);
+    progress.processed.store(0, Ordering::Relaxed);
+    progress.total.store(selected_messages, Ordering::Relaxed);
+    let mut result = if let Some(triage) = &triage {
+        let primary_messages: Vec<ReviewMessage> = messages
+            .iter()
+            .filter(|message| {
+                conversation_filter.is_none_or(|filter| filter.contains(&message.conversation))
+                    && !triage
+                        .skipped
+                        .contains(&(message.account.clone(), message.conversation.clone()))
+            })
+            .cloned()
+            .collect();
+        scan_conversations_filtered(&primary_messages, progress, &pass, None, &|conversation| {
+            governed_pass_omitting(
+                client,
+                conversation,
+                Some(&progress.cancel),
+                &triage.omitted_body_blocks,
+            )
+        })
+    } else {
+        scan_conversations_filtered(
+            messages,
+            progress,
+            &pass,
+            conversation_filter,
+            &|conversation| governed_pass(client, conversation, Some(&progress.cancel)),
+        )
+    };
+    if let Some(triage) = &triage {
+        apply_triage_coverage(
+            &mut result,
+            messages,
+            conversation_filter,
+            triage,
+            selected_messages,
+        );
+    }
     close_passed_events(&mut result, messages, chrono::Utc::now().timestamp());
-    let decision_client = if result.primary_scan_transport_error {
+    let decision_for_closure = if result.primary_scan_transport_error {
         None
     } else {
-        maybe_decision_client(options, || {
-            Ok(OpenRouterDecisions::connect(
-                decision_key.expect("decision key exists when enabled"),
-                &Registry::get().model,
-            )?
-            .with_max_parallel(parallel))
-        })?
+        decision_client
+            .as_ref()
+            .map(|value| value as &dyn DecisionClient)
     };
     scan_closures_selected(
         messages,
@@ -2504,11 +2786,71 @@ pub fn scan(
         &mut result,
         &pass,
         client,
-        decision_client
-            .as_ref()
-            .map(|value| value as &dyn DecisionClient),
+        decision_for_closure,
     );
     Ok(result)
+}
+
+fn apply_triage_coverage(
+    result: &mut ScanResult,
+    messages: &[ReviewMessage],
+    conversation_filter: Option<&BTreeSet<String>>,
+    triage: &TriageResult,
+    selected_messages: usize,
+) {
+    let ordered = conversations_by_size(messages, conversation_filter);
+    result.total = selected_messages;
+    result.conversation_count = ordered.len();
+    for (index, conversation) in ordered.iter().enumerate() {
+        let Some(first) = conversation.first() else {
+            continue;
+        };
+        let key = (first.account.clone(), first.conversation.clone());
+        if !triage.skipped.contains(&key) {
+            continue;
+        }
+        let note = format!(
+            "Conversation {} ({} messages; subject: {}): no obligations found by triage.",
+            index + 1,
+            conversation.len(),
+            subject_snippet(conversation),
+        );
+        result.analyzed += conversation.len();
+        result.analyzed_conversations += 1;
+        result.conversation_notes.push(note.clone());
+        result
+            .conversation_notes_by_id
+            .entry(first.conversation.clone())
+            .or_default()
+            .push(note);
+        result
+            .conversation_quality
+            .insert(first.conversation.clone(), (0, 0));
+        result
+            .conversation_rejection_reasons
+            .insert(first.conversation.clone(), Vec::new());
+    }
+    let mut note = format!(
+        "{} conversations skipped by triage, {} boilerplate paragraphs dropped, {} triage requests skipped (rate limit / errors).",
+        triage.skipped.len(),
+        triage.boilerplate_dropped,
+        triage.request_errors,
+    );
+    if triage.stop_class_error {
+        note.push_str(
+            " Triage stopped after a provider error; every conversation continued to the primary pass.",
+        );
+    }
+    if !triage.skipped.is_empty()
+        && !result
+            .conversation_notes
+            .iter()
+            .any(|existing| existing.contains("Rescan"))
+    {
+        note.push_str(" Rescan with the decision model off to analyze skipped conversations.");
+    }
+    result.conversation_notes.push(note);
+    result.cancelled |= triage.cancelled;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9507,7 +9849,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
     }
 
     type FixedDecisionAnswer<'a> =
-        dyn Fn(usize, &serde_json::Value) -> Result<[f64; 4], ProviderError> + Send + Sync + 'a;
+        dyn Fn(usize, &serde_json::Value) -> Result<Vec<f64>, ProviderError> + Send + Sync + 'a;
 
     struct FixedDecisionClient<'a> {
         answer: Box<FixedDecisionAnswer<'a>>,
@@ -9524,7 +9866,9 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
             + 'a,
         ) -> Self {
             Self {
-                answer: Box::new(answer),
+                answer: Box::new(move |index, state| {
+                    answer(index, state).map(|values| values.to_vec())
+                }),
                 calls: AtomicUsize::new(0),
                 states: Mutex::new(Vec::new()),
                 parallel: 1,
@@ -9537,6 +9881,22 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
 
         fn state(&self, index: usize) -> serde_json::Value {
             self.states.lock().unwrap_or_else(PoisonError::into_inner)[index].clone()
+        }
+
+        fn triage(
+            answer: impl Fn(usize, &serde_json::Value) -> Result<[f64; 6], ProviderError>
+            + Send
+            + Sync
+            + 'a,
+        ) -> Self {
+            Self {
+                answer: Box::new(move |index, state| {
+                    answer(index, state).map(|values| values.to_vec())
+                }),
+                calls: AtomicUsize::new(0),
+                states: Mutex::new(Vec::new()),
+                parallel: 1,
+            }
         }
     }
 
@@ -9573,11 +9933,18 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 .keys();
             let mut answers = serde_json::Map::new();
             for id in ids {
-                let probability = DecisionOutcome::ALL
-                    .iter()
-                    .position(|outcome| id.ends_with(outcome.suffix()))
-                    .map(|index| probabilities[index])
-                    .ok_or(ProviderError::InvalidQuestion)?;
+                let probability = if probabilities.len() == DecisionOutcome::ALL.len() {
+                    DecisionOutcome::ALL
+                        .iter()
+                        .position(|outcome| id.ends_with(outcome.suffix()))
+                        .map(|index| probabilities[index])
+                } else {
+                    TRIAGE_IDS
+                        .iter()
+                        .position(|candidate| id == candidate)
+                        .map(|index| probabilities[index])
+                }
+                .ok_or(ProviderError::InvalidQuestion)?;
                 answers.insert(
                     id.clone(),
                     serde_json::json!({"type":"noul", "noul":probability}),
@@ -9594,6 +9961,157 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 questions,
             )
         }
+    }
+
+    fn triage_message(body: &str) -> ReviewMessage {
+        prepare(&synthetic(body, 0, "triage-thread"), "Inbox", 0).unwrap()
+    }
+
+    fn run_triage(messages: &[ReviewMessage], decision: &dyn DecisionClient) -> TriageResult {
+        triage_pass(messages, &ScanProgress::default(), None, decision).unwrap()
+    }
+
+    #[test]
+    fn triage_request_state_is_byte_exact_and_signal_keeps_the_conversation() {
+        let message = triage_message("Please send the synthetic report.");
+        let decision = FixedDecisionClient::triage(|_, _| Ok([0.8, 0.1, 0.1, 0.1, 0.1, 0.1]));
+
+        let triage = run_triage(std::slice::from_ref(&message), &decision);
+
+        assert_eq!(decision.calls(), 1);
+        assert_eq!(
+            serde_json::to_vec(&decision.state(0)).unwrap(),
+            br#"{"subject":"Synthetic budget conversation","paragraph_text":"Please send the synthetic report.","from_user":false}"#
+        );
+        assert!(triage.skipped.is_empty());
+    }
+
+    #[test]
+    fn triage_all_negative_skips_but_a_gray_band_keeps_the_conversation() {
+        let message = triage_message("Synthetic status only.");
+        let negative = FixedDecisionClient::triage(|_, _| Ok([0.1; 6]));
+        let gray = FixedDecisionClient::triage(|_, _| Ok([0.47, 0.1, 0.1, 0.1, 0.1, 0.1]));
+
+        assert_eq!(
+            run_triage(std::slice::from_ref(&message), &negative)
+                .skipped
+                .len(),
+            1
+        );
+        assert!(run_triage(&[message], &gray).skipped.is_empty());
+    }
+
+    #[test]
+    fn triage_drops_boilerplate_without_compacting_projection_ordinals() {
+        let message = triage_message("Keep this paragraph.\n\nSynthetic footer.\n\nKeep this too.");
+        let decision = FixedDecisionClient::triage(|_, state| {
+            if state["paragraph_text"] == "Synthetic footer." {
+                Ok([0.1, 0.1, 0.1, 0.1, 0.9, 0.1])
+            } else {
+                Ok([0.8, 0.1, 0.1, 0.1, 0.1, 0.1])
+            }
+        });
+        let triage = run_triage(std::slice::from_ref(&message), &decision);
+        let chat = ScriptedClient::new(|_, _| Ok(EMPTY_CLAIMS.to_string()));
+        governed_pass_omitting(
+            &chat,
+            std::slice::from_ref(&message.input),
+            None,
+            &triage.omitted_body_blocks,
+        )
+        .unwrap();
+        let payload =
+            openloops_contracts::parse_strict_json(&payload_json(&chat.payload(0))).unwrap();
+        let ordinals: Vec<u64> = payload["messages"][0]["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|block| block["component"] == "body_block")
+            .map(|block| block["block_ordinal"].as_u64().unwrap())
+            .collect();
+
+        assert_eq!(ordinals, [0, 2]);
+        assert_eq!(triage.boilerplate_dropped, 1);
+    }
+
+    #[test]
+    fn triage_notification_only_conversation_skips_the_primary_pass() {
+        let message = triage_message("Synthetic automated notification.");
+        let decision = FixedDecisionClient::triage(|_, _| Ok([0.8, 0.1, 0.1, 0.1, 0.1, 0.9]));
+
+        assert_eq!(run_triage(&[message], &decision).skipped.len(), 1);
+    }
+
+    #[test]
+    fn triage_paragraph_errors_fail_open_and_rate_limits_are_never_resent() {
+        let message = triage_message("Synthetic paragraph.");
+        for error in [ProviderError::InvalidResponse, ProviderError::RateLimited] {
+            let decision = FixedDecisionClient::triage(move |_, _| Err(error));
+            let triage = run_triage(std::slice::from_ref(&message), &decision);
+            assert_eq!(decision.calls(), 1);
+            assert_eq!(triage.request_errors, 1);
+            assert!(triage.skipped.is_empty());
+        }
+    }
+
+    #[test]
+    fn triage_stop_class_error_runs_every_conversation_in_the_primary_pass() {
+        let mut messages = [
+            triage_message("First synthetic paragraph."),
+            triage_message("Second synthetic paragraph."),
+        ];
+        messages[1].conversation = "triage-thread-two".into();
+        messages[1].input.handle = "m1".into();
+        let decision = FixedDecisionClient::triage(|_, _| Err(ProviderError::Network));
+        let triage = run_triage(&messages, &decision);
+        let chat = ScriptedClient::new(|_, _| Ok(EMPTY_CLAIMS.to_string()));
+        super::scan_conversations(
+            &messages,
+            &ScanProgress::default(),
+            &ParallelPass::new(1),
+            &|conversation| {
+                governed_pass_omitting(&chat, conversation, None, &triage.omitted_body_blocks)
+            },
+        );
+
+        assert!(triage.stop_class_error);
+        assert!(triage.skipped.is_empty());
+        assert!(triage.omitted_body_blocks.is_empty());
+        assert_eq!(chat.calls(), 2);
+    }
+
+    #[test]
+    fn triage_caps_each_message_at_forty_paragraph_requests() {
+        let mut message = triage_message("Synthetic paragraph.");
+        message.input.message.body_blocks = (0..45)
+            .map(|index| CanonicalBlock::new(&format!("Synthetic paragraph {index}.")).unwrap())
+            .collect();
+        let decision = FixedDecisionClient::triage(|_, _| Ok([0.1; 6]));
+
+        run_triage(&[message], &decision);
+
+        assert_eq!(decision.calls(), MAX_BODY_BLOCKS);
+    }
+
+    #[test]
+    fn triage_coverage_has_counters_reason_and_one_rescan_hint() {
+        let message = triage_message("Synthetic footer.");
+        let decision = FixedDecisionClient::triage(|_, _| Ok([0.1, 0.1, 0.1, 0.1, 0.9, 0.1]));
+        let triage = run_triage(std::slice::from_ref(&message), &decision);
+        let mut result = empty_result(0);
+        apply_triage_coverage(&mut result, &[message], None, &triage, 1);
+
+        assert!(
+            result
+                .conversation_notes
+                .iter()
+                .any(|note| { note.ends_with("no obligations found by triage.") })
+        );
+        let aggregate = result.conversation_notes.last().unwrap();
+        assert!(aggregate.contains("1 conversations skipped by triage"));
+        assert!(aggregate.contains("1 boilerplate paragraphs dropped"));
+        assert!(aggregate.contains("0 triage requests skipped"));
+        assert_eq!(aggregate.matches("Rescan").count(), 1);
     }
 
     const EMPTY_CLAIMS: &str = r#"{"schema_version":1,"claims":[]}"#;
