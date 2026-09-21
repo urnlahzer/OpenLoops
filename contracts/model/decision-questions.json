@@ -252,6 +252,24 @@
       },
       "type": "choice"
     },
+    "extract.temporal": {
+      "accept": 0.7,
+      "escalate": 0.3,
+      "instructions": "Which named time, date, or deadline candidate, if any, does this paragraph express?",
+      "options": {
+        "none": "No temporal candidate applies to this paragraph."
+      },
+      "type": "choice"
+    },
+    "extract.waiting_party": {
+      "accept": 0.7,
+      "escalate": 0.3,
+      "instructions": "Which participant is waiting on the signed-in user for this paragraph?",
+      "options": {
+        "none": "No participant is waiting on the signed-in user for this paragraph."
+      },
+      "type": "choice"
+    },
     "rules.deadline_kind": {
       "accept": 0.7,
       "escalate": 0.65,

@@ -287,7 +287,7 @@ $decisionQuestions = Read-Json $DecisionQuestionsPath 'P0-MODEL-DECISIONS-001'
 if ($null -ne $decisionQuestions) {
     $decisionCanonical = $decisionQuestions | ConvertTo-Json -Depth 100 -Compress
     $decisionHash = Sha256-Hex $decisionCanonical
-    if ($decisionHash -ne 'd333840b9184f090ec06623941f2701fe99de53157dccab3576a6b52abb70a01' -or $decisionQuestions.schema_version -ne 1 -or $decisionQuestions.model -ne 'typesafe/jev-1.13') { Fail 'P0-MODEL-DECISIONS-001' }
+    if ($decisionHash -ne '4bd00f0347538f3e91865079e36f70bee8e814685e92382840e22cea6c763ce2' -or $decisionQuestions.schema_version -ne 1 -or $decisionQuestions.model -ne 'typesafe/jev-1.13') { Fail 'P0-MODEL-DECISIONS-001' }
     $questionsProperty = $decisionQuestions.PSObject.Properties['questions']
     if ($null -eq $questionsProperty -or @($questionsProperty.Value.PSObject.Properties).Count -eq 0) {
         Fail 'P0-MODEL-DECISIONS-001'

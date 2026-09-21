@@ -6,7 +6,7 @@ use crate::claim_view::{
 use crate::deadline_view::{
     DeadlineKindHint, DeadlineView, EVENT_GENERIC_NOUNS, classify, classify_with_hint,
 };
-use crate::settings::Provider;
+use crate::settings::{ExtractionBackend, Provider};
 use chrono::{Datelike, TimeZone};
 use openloops_contracts::{
     AmbiguityCode, Claim, ClaimType, EvidenceComponent, Nullable, TemporalKind,
@@ -20,13 +20,13 @@ use openloops_graph::live::{ConnectionError, review::MailItem};
 use openloops_inference::{
     analysis::{
         AcceptedClaim, ClaimAnalysis, ReviewEvidence, analyze_claims, analyze_claims_omitting,
-        rejection_label,
+        claim_analysis_from_document, rejection_label,
     },
     blocks::CanonicalBlock,
     canonical::canonicalize_plain,
     decision::{
-        Answer, DECISION_DEADLINE, DecisionClient, OpenRouterDecisions, Questions,
-        registry::Registry,
+        Answer, Answers, DECISION_DEADLINE, DecisionClient, MAX_CHOICE_OPTIONS,
+        OpenRouterDecisions, Questions, registry::Registry,
     },
     message::CanonicalMessage,
     ollama::OllamaCloud,
@@ -1575,6 +1575,9 @@ pub struct ScanProgress {
     pub closure_phase: AtomicBool,
     /// Set only while decision-model paragraph triage is running.
     pub triage_phase: AtomicBool,
+    /// Set only while P5's combined decision-model extraction pass
+    /// ([`extraction_pass`]) is running.
+    pub extraction_phase: AtomicBool,
 }
 
 impl ScanProgress {
@@ -3219,50 +3222,21 @@ pub fn scan(
         rule_messages = Some(prepare_rule_messages(messages, rules, decision, progress)?);
     }
     let messages = rule_messages.as_deref().unwrap_or(messages);
-    let triage = decision_client
-        .as_ref()
-        .map(|decision| triage_pass(messages, progress, conversation_filter, decision))
-        .transpose()?;
-    progress.triage_phase.store(false, Ordering::Relaxed);
-    progress.processed.store(0, Ordering::Relaxed);
-    progress.total.store(selected_messages, Ordering::Relaxed);
-    let mut result = if let Some(triage) = &triage {
-        let primary_messages: Vec<ReviewMessage> = messages
-            .iter()
-            .filter(|message| {
-                conversation_filter.is_none_or(|filter| filter.contains(&message.conversation))
-                    && !triage
-                        .skipped
-                        .contains(&(message.account.clone(), message.conversation.clone()))
-            })
-            .cloned()
-            .collect();
-        scan_conversations_filtered(&primary_messages, progress, &pass, None, &|conversation| {
-            governed_pass_omitting(
-                client,
-                conversation,
-                Some(&progress.cancel),
-                &triage.omitted_body_blocks,
-            )
-        })
-    } else {
-        scan_conversations_filtered(
-            messages,
-            progress,
-            &pass,
-            conversation_filter,
-            &|conversation| governed_pass(client, conversation, Some(&progress.cancel)),
-        )
+    let clients = PrimaryPassClients {
+        client,
+        decision_client: decision_client
+            .as_ref()
+            .map(|value| value as &dyn DecisionClient),
     };
-    if let Some(triage) = &triage {
-        apply_triage_coverage(
-            &mut result,
-            messages,
-            conversation_filter,
-            triage,
-            selected_messages,
-        );
-    }
+    let mut result = run_primary_pass(
+        options,
+        clients,
+        messages,
+        progress,
+        &pass,
+        conversation_filter,
+        selected_messages,
+    )?;
     if let (Some(decision), Some(rules)) = (decision_client.as_ref(), rule_decisions.as_mut()) {
         apply_rule_residue(&mut result, messages, rules, decision, progress)?;
     } else {
@@ -3283,6 +3257,119 @@ pub fn scan(
         client,
         decision_for_closure,
     );
+    Ok(result)
+}
+
+/// The chat and (optional) decision clients [`run_primary_pass`] needs,
+/// bundled to keep its own argument count under clippy's limit.
+#[derive(Clone, Copy)]
+struct PrimaryPassClients<'a> {
+    client: &'a dyn ModelClient,
+    decision_client: Option<&'a dyn DecisionClient>,
+}
+
+/// The scan's primary (non-closure) pass: P5's decision-model extraction
+/// when [`ExtractionBackend::DecisionModel`] is selected and a decision
+/// client is available, P2's triage-gated chat pass when the decision
+/// model is on but extraction stays on the chat model, or the plain chat
+/// pass otherwise. Applies whichever pass's own coverage notes
+/// ([`apply_triage_coverage`] plus, for P5, [`extraction_coverage_note`]).
+/// # Errors
+/// Returns the fixed provider error either pass stopped on.
+fn run_primary_pass(
+    options: ScanOptions,
+    clients: PrimaryPassClients<'_>,
+    messages: &[ReviewMessage],
+    progress: &ScanProgress,
+    pass: &ParallelPass,
+    conversation_filter: Option<&BTreeSet<String>>,
+    selected_messages: usize,
+) -> Result<ScanResult, ProviderError> {
+    let PrimaryPassClients {
+        client,
+        decision_client,
+    } = clients;
+    if let Some(decision) = decision_client
+        && options.extraction_backend == ExtractionBackend::DecisionModel
+    {
+        let extraction = extraction_pass(messages, progress, conversation_filter, decision);
+        progress.processed.store(0, Ordering::Relaxed);
+        progress.total.store(selected_messages, Ordering::Relaxed);
+        let primary_messages: Vec<ReviewMessage> = messages
+            .iter()
+            .filter(|message| {
+                conversation_filter.is_none_or(|filter| filter.contains(&message.conversation))
+                    && !extraction
+                        .triage
+                        .skipped
+                        .contains(&(message.account.clone(), message.conversation.clone()))
+            })
+            .cloned()
+            .collect();
+        let mut result =
+            scan_conversations_filtered(&primary_messages, progress, pass, None, &|conversation| {
+                extraction_assemble_or_escalate(
+                    client,
+                    conversation,
+                    Some(&progress.cancel),
+                    &extraction,
+                )
+            });
+        apply_triage_coverage(
+            &mut result,
+            messages,
+            conversation_filter,
+            &extraction.triage,
+            selected_messages,
+        );
+        result
+            .conversation_notes
+            .push(extraction_coverage_note(&extraction));
+        return Ok(result);
+    }
+    let triage = decision_client
+        .map(|decision| triage_pass(messages, progress, conversation_filter, decision))
+        .transpose()?;
+    progress.triage_phase.store(false, Ordering::Relaxed);
+    progress.processed.store(0, Ordering::Relaxed);
+    progress.total.store(selected_messages, Ordering::Relaxed);
+    let mut result = if let Some(triage) = &triage {
+        let primary_messages: Vec<ReviewMessage> = messages
+            .iter()
+            .filter(|message| {
+                conversation_filter.is_none_or(|filter| filter.contains(&message.conversation))
+                    && !triage
+                        .skipped
+                        .contains(&(message.account.clone(), message.conversation.clone()))
+            })
+            .cloned()
+            .collect();
+        scan_conversations_filtered(&primary_messages, progress, pass, None, &|conversation| {
+            governed_pass_omitting(
+                client,
+                conversation,
+                Some(&progress.cancel),
+                &triage.omitted_body_blocks,
+            )
+        })
+    } else {
+        scan_conversations_filtered(
+            messages,
+            progress,
+            pass,
+            conversation_filter,
+            &|conversation| governed_pass(client, conversation, Some(&progress.cancel)),
+        )
+    };
+    if let Some(triage) = &triage {
+        apply_triage_coverage(
+            &mut result,
+            messages,
+            conversation_filter,
+            triage,
+            selected_messages,
+        );
+    }
     Ok(result)
 }
 
@@ -3352,6 +3439,9 @@ fn apply_triage_coverage(
 pub struct ScanOptions {
     pub provider: Provider,
     pub use_decision_model: bool,
+    /// P5's gated primary-pass switch; read only while `use_decision_model`
+    /// and `provider == OpenRouter` also hold (see [`scan`]).
+    pub extraction_backend: ExtractionBackend,
 }
 
 fn maybe_decision_client<T>(
@@ -3364,6 +3454,680 @@ fn maybe_decision_client<T>(
         Ok(None)
     }
 }
+
+// ---------------------------------------------------------------------------
+// P5: the gated Jev-native extraction switch (`ExtractionBackend::
+// DecisionModel`). One combined per-paragraph decision request carries the
+// registry triage questions (§P2) plus `extract.claim_type`,
+// `extract.waiting_party`, and `extract.temporal`, so a conversation is
+// never triaged and extracted separately. A paragraph whose `claim_type`
+// lands in the gray band escalates its whole conversation to the chat
+// pass, exactly as an error on any of that conversation's paragraph
+// requests does (fail open). Confident, non-gray paragraphs are assembled
+// into `analysis-output-v1` claims in code and run through the same
+// `validation::validate` + `map_accepted_claim` path a chat-model claim
+// takes.
+// ---------------------------------------------------------------------------
+
+/// Registry id for the primary-pass claim-type choice question.
+const EXTRACT_CLAIM_TYPE_ID: &str = "extract.claim_type";
+/// Registry id for the primary-pass waiting-party choice question. Its
+/// registry entry carries only bootstrap instructions/thresholds: the real
+/// options are the conversation's own participant handles, issued fresh
+/// per conversation in code (see [`extraction_waiting_party_options`]).
+const EXTRACT_WAITING_PARTY_ID: &str = "extract.waiting_party";
+/// Registry id for the primary-pass temporal choice question. Like
+/// `extract.waiting_party`, its real options are per-paragraph date
+/// candidates issued in code (see [`extraction_temporal_candidates`]).
+const EXTRACT_TEMPORAL_ID: &str = "extract.temporal";
+/// The reserved option key meaning "none of the offered choices applies",
+/// shared by every extraction choice question.
+const EXTRACT_NONE: &str = "none";
+const EXTRACT_NONE_WAITING_PARTY: &str =
+    "No participant is waiting on the signed-in user for this paragraph.";
+const EXTRACT_NONE_TEMPORAL: &str = "No temporal candidate applies to this paragraph.";
+/// [`Questions::choice`]'s own cap is [`MAX_CHOICE_OPTIONS`]; one slot is
+/// always reserved for the `none` option.
+const MAX_EXTRACTION_OPTIONS: usize = MAX_CHOICE_OPTIONS - 1;
+
+/// One conversation's issued waiting-party option: the same governed
+/// handle [`governed_participant_handles`] issues, and that handle's
+/// desktop display text.
+#[derive(Clone)]
+struct WaitingPartyOption {
+    handle: String,
+    display: String,
+}
+
+/// One paragraph's normalized temporal candidate: the option key sent to
+/// Jev and the `deadline_parse`-grammar value it stands for.
+struct TemporalCandidate {
+    handle: String,
+    value: String,
+}
+
+/// The conversation-wide waiting-party catalog a combined extraction
+/// request offers: the same participant handles [`governed_participant_handles`]
+/// issues for the whole conversation, capped and described exactly as
+/// `map_accepted_claim`'s [`waiting_party_display`] would describe them.
+fn extraction_waiting_party_options(
+    conversation: &[ConversationMessage],
+) -> Vec<WaitingPartyOption> {
+    governed_participant_handles(conversation)
+        .into_iter()
+        .take(MAX_EXTRACTION_OPTIONS)
+        .map(|(handle, ..)| {
+            let display = waiting_party_display(&Nullable::Value(handle.clone()), conversation);
+            WaitingPartyOption { handle, display }
+        })
+        .collect()
+}
+
+/// One paragraph's date candidates: every date [`prose_event_time_candidates`]
+/// finds, deduplicated and normalized into the `deadline_parse` grammar the
+/// same way P1's `normalized_deadline` does, discarding any the deterministic
+/// parser cannot reproduce.
+fn extraction_temporal_candidates(
+    message: &ConversationMessage,
+    ordinal: usize,
+) -> Vec<TemporalCandidate> {
+    let text = message.message.body_blocks[ordinal].as_string();
+    let offset = local_offset_seconds(message.timestamp, 0);
+    let Some(timezone) = chrono::FixedOffset::east_opt(offset) else {
+        return Vec::new();
+    };
+    let context = governed_temporal_context(message);
+    let mut seen = BTreeSet::new();
+    prose_event_time_candidates(&text, message.timestamp, offset)
+        .into_iter()
+        .filter_map(|(start, _, _)| {
+            let local = timezone.timestamp_opt(start, 0).single()?;
+            let value = local.format("%Y-%m-%d").to_string();
+            reparse(DeadlineTemporalKind::Date, &value, &context).ok()?;
+            seen.insert(value.clone()).then_some(value)
+        })
+        .take(MAX_EXTRACTION_OPTIONS)
+        .enumerate()
+        .map(|(index, value)| TemporalCandidate {
+            handle: format!("t{index}"),
+            value,
+        })
+        .collect()
+}
+
+/// One combined request's state: `{subject, paragraph_text, from_user,
+/// to_user, cc_user, user: {display_name, given_name}, participants:
+/// [{handle, text}...]}`, documented alongside its
+/// `tools/jev-optimize/jev_optimize/questions.py` mirror so both can be
+/// tuned together.
+fn extraction_state(
+    message: &ConversationMessage,
+    ordinal: usize,
+    user_display_name: Option<&str>,
+    user_given_name: Option<&str>,
+    waiting_party: &[WaitingPartyOption],
+) -> serde_json::Value {
+    serde_json::json!({
+        "subject": message.message.subject.as_string(),
+        "paragraph_text": message.message.body_blocks[ordinal].as_string(),
+        "from_user": message.from_user,
+        "to_user": message.to_user(),
+        "cc_user": message.cc_user(),
+        "user": {
+            "display_name": user_display_name,
+            "given_name": user_given_name,
+        },
+        "participants": waiting_party
+            .iter()
+            .map(|option| serde_json::json!({"handle": option.handle, "text": option.display}))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Builds one combined request's questions: the registry triage ids plus
+/// `extract.claim_type` (both static, from the registry), plus
+/// `extract.waiting_party` (dynamic options, always asked) and
+/// `extract.temporal` (dynamic options, asked only when `temporal` is
+/// non-empty).
+/// # Errors
+/// Returns [`ProviderError::InvalidQuestion`] when a registry id this
+/// pipeline requires is missing or malformed.
+fn extraction_questions(
+    waiting_party: &[WaitingPartyOption],
+    temporal: &[TemporalCandidate],
+) -> Result<Questions, ProviderError> {
+    let mut ids: Vec<&str> = TRIAGE_IDS.to_vec();
+    ids.push(EXTRACT_CLAIM_TYPE_ID);
+    let mut questions = Questions::from_registry(&ids)?;
+    let waiting_party_registered = Registry::get()
+        .question(EXTRACT_WAITING_PARTY_ID)
+        .ok_or(ProviderError::InvalidQuestion)?;
+    let mut waiting_party_options: Vec<(&str, &str)> = waiting_party
+        .iter()
+        .map(|option| (option.handle.as_str(), option.display.as_str()))
+        .collect();
+    waiting_party_options.push((EXTRACT_NONE, EXTRACT_NONE_WAITING_PARTY));
+    questions = questions.choice(
+        EXTRACT_WAITING_PARTY_ID,
+        &waiting_party_registered.instructions,
+        &waiting_party_options,
+    )?;
+    if temporal.is_empty() {
+        return Ok(questions);
+    }
+    let temporal_registered = Registry::get()
+        .question(EXTRACT_TEMPORAL_ID)
+        .ok_or(ProviderError::InvalidQuestion)?;
+    let mut temporal_options: Vec<(&str, &str)> = temporal
+        .iter()
+        .map(|candidate| (candidate.handle.as_str(), candidate.value.as_str()))
+        .collect();
+    temporal_options.push((EXTRACT_NONE, EXTRACT_NONE_TEMPORAL));
+    questions.choice(
+        EXTRACT_TEMPORAL_ID,
+        &temporal_registered.instructions,
+        &temporal_options,
+    )
+}
+
+/// One confident paragraph's assembled claim fields, ready to become one
+/// `analysis-output-v1` claim.
+struct ExtractedClaimFields {
+    claim_type: ClaimType,
+    /// The winning `extract.claim_type` option's own probability.
+    confidence: f64,
+    waiting_party_handle: Option<String>,
+    /// Whether `waiting_party_handle` is `None` because the answer was
+    /// gray-band or `none`, for a request or question claim (the `identity`
+    /// ambiguity code).
+    waiting_party_ambiguous: bool,
+    temporal_value: Option<String>,
+    /// Whether a temporal candidate existed but the choice was not
+    /// confident (the `deadline` ambiguity code).
+    temporal_ambiguous: bool,
+}
+
+/// One paragraph's decided outcome: a confident claim, a gray-band
+/// escalation (the whole conversation goes to the chat pass), or nothing
+/// (a confident `none`, or below the escalate band).
+enum ClaimTypeOutcome {
+    Confident(ExtractedClaimFields),
+    Gray,
+    NoClaim,
+}
+
+/// Resolves `extract.waiting_party`: `Some(handle)` only for a confident,
+/// non-`none` answer; `true` (ambiguous) for anything else (gray, `none`,
+/// or a confident negative -- there is no negative band for a choice
+/// question, so this is exactly "not confidently one of the issued
+/// handles").
+fn classify_waiting_party(
+    answers: &Answers,
+    options: &[WaitingPartyOption],
+) -> Result<(Option<String>, bool), ProviderError> {
+    let registered = Registry::get()
+        .question(EXTRACT_WAITING_PARTY_ID)
+        .ok_or(ProviderError::InvalidQuestion)?;
+    let Some(Answer::Choice {
+        choice, confidence, ..
+    }) = answers.get(EXTRACT_WAITING_PARTY_ID)
+    else {
+        return Err(ProviderError::InvalidResponse);
+    };
+    if *confidence >= registered.accept && choice != EXTRACT_NONE {
+        if !options.iter().any(|option| &option.handle == choice) {
+            return Err(ProviderError::InvalidResponse);
+        }
+        return Ok((Some(choice.clone()), false));
+    }
+    Ok((None, true))
+}
+
+/// Resolves `extract.temporal`: `Some(normalized value)` only for a
+/// confident, non-`none` answer among the candidates actually offered;
+/// `true` (ambiguous) when candidates existed but the choice was not
+/// confident. Always `(None, false)` when no candidate was offered at all.
+fn classify_temporal(
+    answers: &Answers,
+    candidates: &[TemporalCandidate],
+) -> Result<(Option<String>, bool), ProviderError> {
+    if candidates.is_empty() {
+        return Ok((None, false));
+    }
+    let registered = Registry::get()
+        .question(EXTRACT_TEMPORAL_ID)
+        .ok_or(ProviderError::InvalidQuestion)?;
+    let Some(Answer::Choice {
+        choice, confidence, ..
+    }) = answers.get(EXTRACT_TEMPORAL_ID)
+    else {
+        return Err(ProviderError::InvalidResponse);
+    };
+    if *confidence >= registered.accept && choice != EXTRACT_NONE {
+        let Some(candidate) = candidates
+            .iter()
+            .find(|candidate| &candidate.handle == choice)
+        else {
+            return Err(ProviderError::InvalidResponse);
+        };
+        return Ok((Some(candidate.value.clone()), false));
+    }
+    Ok((None, true))
+}
+
+fn claim_type_from_choice(choice: &str) -> Result<ClaimType, ProviderError> {
+    match choice {
+        "request" => Ok(ClaimType::Request),
+        "promise" => Ok(ClaimType::Promise),
+        "question" => Ok(ClaimType::Question),
+        "attribution" => Ok(ClaimType::Attribution),
+        "delegation" => Ok(ClaimType::Delegation),
+        _ => Err(ProviderError::InvalidResponse),
+    }
+}
+
+/// Classifies one paragraph's whole combined answer into a
+/// [`ClaimTypeOutcome`]: the gray band on `extract.claim_type` always wins
+/// (the owner decision: gray band goes to the chat model), a confident
+/// non-`none` choice assembles the claim's remaining fields, and anything
+/// else is [`ClaimTypeOutcome::NoClaim`].
+fn classify_claim_type(
+    answers: &Answers,
+    waiting_party: &[WaitingPartyOption],
+    temporal: &[TemporalCandidate],
+) -> Result<ClaimTypeOutcome, ProviderError> {
+    let registered = Registry::get()
+        .question(EXTRACT_CLAIM_TYPE_ID)
+        .ok_or(ProviderError::InvalidQuestion)?;
+    let Some(Answer::Choice {
+        choice,
+        probabilities,
+        confidence,
+    }) = answers.get(EXTRACT_CLAIM_TYPE_ID)
+    else {
+        return Err(ProviderError::InvalidResponse);
+    };
+    if *confidence >= registered.escalate && *confidence < registered.accept {
+        return Ok(ClaimTypeOutcome::Gray);
+    }
+    if *confidence < registered.accept || choice == EXTRACT_NONE {
+        return Ok(ClaimTypeOutcome::NoClaim);
+    }
+    let claim_type = claim_type_from_choice(choice)?;
+    let probability = *probabilities
+        .get(choice)
+        .ok_or(ProviderError::InvalidResponse)?;
+    let (waiting_party_handle, waiting_party_ambiguous) =
+        classify_waiting_party(answers, waiting_party)?;
+    let (temporal_value, temporal_ambiguous) = classify_temporal(answers, temporal)?;
+    let identity_sensitive = matches!(claim_type, ClaimType::Request | ClaimType::Question);
+    Ok(ClaimTypeOutcome::Confident(ExtractedClaimFields {
+        claim_type,
+        confidence: probability,
+        waiting_party_handle,
+        waiting_party_ambiguous: waiting_party_ambiguous && identity_sensitive,
+        temporal_value,
+        temporal_ambiguous,
+    }))
+}
+
+/// One paragraph's whole combined-request outcome: this paragraph's
+/// [`ParagraphTriage`] (fed into the same [`collect_triage_results`] P2
+/// uses, so skip/boilerplate reporting is unchanged) and its
+/// [`ClaimTypeOutcome`].
+struct ExtractionAnswer {
+    triage: ParagraphTriage,
+    claim: ClaimTypeOutcome,
+}
+
+/// One combined request for `(message, ordinal)`, offering the
+/// conversation's waiting-party catalog and this paragraph's own temporal
+/// candidates.
+/// # Errors
+/// Returns the fixed provider or validation failure [`DecisionClient::decide`] gave.
+fn extraction_job(
+    decision: &dyn DecisionClient,
+    message: &ConversationMessage,
+    ordinal: usize,
+    user_display_name: Option<&str>,
+    user_given_name: Option<&str>,
+    waiting_party: &[WaitingPartyOption],
+    cancel: Option<&AtomicBool>,
+) -> Result<ExtractionAnswer, ProviderError> {
+    let temporal = extraction_temporal_candidates(message, ordinal);
+    let questions = extraction_questions(waiting_party, &temporal)?;
+    let state = extraction_state(
+        message,
+        ordinal,
+        user_display_name,
+        user_given_name,
+        waiting_party,
+    );
+    let answers = decision.decide(&state, &questions, cancel, DECISION_DEADLINE)?;
+    Ok(ExtractionAnswer {
+        triage: classify_triage(&answers),
+        claim: classify_claim_type(&answers, waiting_party, &temporal)?,
+    })
+}
+
+/// Builds one confident paragraph's `analysis-output-v1` claim, evidence
+/// citing the whole paragraph body block exactly like the chat pipeline's
+/// whole-block rule.
+fn extraction_claim_json(
+    message: &ConversationMessage,
+    ordinal: usize,
+    fields: &ExtractedClaimFields,
+) -> serde_json::Value {
+    let block_len = message.message.body_blocks[ordinal].scalar_len();
+    let mut ambiguity_codes: Vec<&str> = Vec::new();
+    if fields.waiting_party_ambiguous {
+        ambiguity_codes.push("identity");
+    }
+    if fields.temporal_ambiguous {
+        ambiguity_codes.push("deadline");
+    }
+    let waiting_party_handle = fields
+        .waiting_party_handle
+        .as_ref()
+        .map_or(serde_json::Value::Null, |handle| serde_json::json!(handle));
+    let temporal = fields.temporal_value.as_ref().map_or(
+        serde_json::Value::Null,
+        |value| serde_json::json!({"text_evidence_index": 0, "kind": "date", "value": value}),
+    );
+    let confidence_micros: u32 = format!("{:.0}", fields.confidence.clamp(0.0, 1.0) * 1_000_000.0)
+        .parse()
+        .expect("a clamped [0,1] confidence rounds into u32");
+    serde_json::json!({
+        "claim_type": claim_type_tag(fields.claim_type),
+        "evidence": [{
+            "source_handle": message.handle,
+            "component": "body_block",
+            "block_ordinal": ordinal,
+            "range_start": 0,
+            "range_end": block_len,
+        }],
+        "waiting_party_handle": waiting_party_handle,
+        "related_loop_handles": Vec::<String>::new(),
+        "temporal": temporal,
+        "confidence_micros": confidence_micros,
+        "ambiguity_codes": ambiguity_codes,
+    })
+}
+
+/// The closed 5-member subset of [`ClaimType`] extraction ever classifies
+/// into (see [`claim_type_from_choice`]); an exhaustive match rather than a
+/// wildcard, so a new [`ClaimType`] variant fails to compile here instead
+/// of silently tagging as something wrong.
+fn claim_type_tag(claim_type: ClaimType) -> &'static str {
+    match claim_type {
+        ClaimType::Request => "request",
+        ClaimType::Promise => "promise",
+        ClaimType::Question => "question",
+        ClaimType::Attribution => "attribution",
+        ClaimType::Delegation => "delegation",
+        ClaimType::DeadlineChange | ClaimType::PossibleClosure | ClaimType::Modification => {
+            unreachable!(
+                "extraction only ever classifies request/promise/question/attribution/delegation"
+            )
+        }
+    }
+}
+
+/// Every combined-request answer for one scan, keyed for two later steps:
+/// [`collect_triage_results`]-shaped skip/boilerplate reporting, and
+/// per-conversation claim assembly or chat escalation.
+struct ExtractionOutcome {
+    triage: TriageResult,
+    /// Confident claims, keyed by the message handle they cite as
+    /// evidence -- [`ReviewMessage::input`]'s handle is unique across the
+    /// whole loaded set, so this resolves correctly regardless of how
+    /// [`scan_conversations_filtered`] later groups conversations.
+    claims_by_handle: BTreeMap<String, Vec<serde_json::Value>>,
+    /// Message handles belonging to a conversation that must go to the
+    /// chat pass instead: a gray-band `extract.claim_type` answer, or a
+    /// request-level error, on any of that conversation's paragraphs.
+    needs_chat_handles: BTreeSet<String>,
+    decision_extracted_conversations: usize,
+    chat_escalated_conversations: usize,
+}
+
+/// The per-conversation waiting-party catalog for every selected message,
+/// indexed the same way as `selected` itself.
+fn extraction_waiting_party_catalog(selected: &[&ReviewMessage]) -> Vec<Vec<WaitingPartyOption>> {
+    let mut conversations: BTreeMap<(&str, &str), Vec<usize>> = BTreeMap::new();
+    for (index, message) in selected.iter().enumerate() {
+        conversations
+            .entry((&message.account, &message.conversation))
+            .or_default()
+            .push(index);
+    }
+    let mut catalog = vec![Vec::new(); selected.len()];
+    for indices in conversations.into_values() {
+        let mut ordered = indices.clone();
+        ordered.sort_by_key(|&index| selected[index].input.timestamp);
+        let conversation: Vec<ConversationMessage> = ordered
+            .iter()
+            .map(|&index| selected[index].input.clone())
+            .collect();
+        let options = extraction_waiting_party_options(&conversation);
+        for index in indices {
+            catalog[index].clone_from(&options);
+        }
+    }
+    catalog
+}
+
+/// Runs the combined per-paragraph decision pass across every message
+/// [`conversation_filter`] selects, mirroring [`triage_pass`]'s own flat,
+/// single-request-set shape. Every per-paragraph request failure is
+/// captured per job (fail open, see [`partition_extraction_outcomes`])
+/// rather than stopping the pass, so this never itself fails.
+fn extraction_pass(
+    messages: &[ReviewMessage],
+    progress: &ScanProgress,
+    conversation_filter: Option<&BTreeSet<String>>,
+    decision_client: &dyn DecisionClient,
+) -> ExtractionOutcome {
+    let selected: Vec<&ReviewMessage> = messages
+        .iter()
+        .filter(|message| {
+            conversation_filter.is_none_or(|filter| filter.contains(&message.conversation))
+        })
+        .collect();
+    let jobs = triage_jobs(&selected);
+    let waiting_party_catalog = extraction_waiting_party_catalog(&selected);
+    progress.extraction_phase.store(true, Ordering::Relaxed);
+    progress.processed.store(0, Ordering::Relaxed);
+    progress.total.store(jobs.len(), Ordering::Relaxed);
+    progress
+        .conversation_total
+        .store(jobs.len(), Ordering::Relaxed);
+    let pass = ParallelPass::new(decision_client.max_parallel());
+    let outcomes = run_jobs(&vec![1; jobs.len()], &pass, progress, &|slot| {
+        let (message_index, ordinal) = jobs[slot];
+        let message = selected[message_index];
+        extraction_job(
+            decision_client,
+            &message.input,
+            ordinal,
+            message.own_display_name.as_deref(),
+            message.own_given_name.as_deref(),
+            &waiting_party_catalog[message_index],
+            Some(&progress.cancel),
+        )
+    });
+    progress.reset_pass();
+    progress.extraction_phase.store(false, Ordering::Relaxed);
+    partition_extraction_outcomes(&selected, &jobs, &outcomes)
+}
+
+/// Splits [`extraction_pass`]'s raw job outcomes into P2-shaped triage
+/// reporting (via [`collect_triage_results`]) and P5's own claim/escalation
+/// bookkeeping.
+fn partition_extraction_outcomes(
+    selected: &[&ReviewMessage],
+    jobs: &[(usize, usize)],
+    outcomes: &JobResults<ExtractionAnswer>,
+) -> ExtractionOutcome {
+    let triage_outcomes: JobResults<ParagraphTriage> = outcomes
+        .iter()
+        .map(|(slot, outcome)| {
+            let mapped = match outcome {
+                JobOutcome::Completed(Ok(answer)) => JobOutcome::Completed(Ok(answer.triage)),
+                JobOutcome::Completed(Err(error)) => JobOutcome::Completed(Err(*error)),
+                JobOutcome::Panicked => JobOutcome::Panicked,
+                JobOutcome::NotStarted => JobOutcome::NotStarted,
+            };
+            (*slot, mapped)
+        })
+        .collect();
+    let triage = collect_triage_results(selected, jobs, triage_outcomes);
+    let mut claims_by_handle: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
+    let mut needs_chat: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut all_conversations: BTreeSet<(String, String)> = BTreeSet::new();
+    for (slot, outcome) in outcomes {
+        let (message_index, ordinal) = jobs[*slot];
+        let message = selected[message_index];
+        let key = (message.account.clone(), message.conversation.clone());
+        if triage.skipped.contains(&key) {
+            continue;
+        }
+        all_conversations.insert(key.clone());
+        match outcome {
+            JobOutcome::Completed(Ok(answer)) => match &answer.claim {
+                ClaimTypeOutcome::Gray => {
+                    needs_chat.insert(key);
+                }
+                ClaimTypeOutcome::Confident(fields) => {
+                    claims_by_handle
+                        .entry(message.input.handle.clone())
+                        .or_default()
+                        .push(extraction_claim_json(&message.input, ordinal, fields));
+                }
+                ClaimTypeOutcome::NoClaim => {}
+            },
+            JobOutcome::Completed(Err(ProviderError::Cancelled)) | JobOutcome::NotStarted => {}
+            JobOutcome::Completed(Err(_)) | JobOutcome::Panicked => {
+                needs_chat.insert(key);
+            }
+        }
+    }
+    let needs_chat_handles: BTreeSet<String> = selected
+        .iter()
+        .filter(|message| {
+            needs_chat.contains(&(message.account.clone(), message.conversation.clone()))
+        })
+        .map(|message| message.input.handle.clone())
+        .collect();
+    let chat_escalated_conversations = needs_chat.intersection(&all_conversations).count();
+    ExtractionOutcome {
+        triage,
+        claims_by_handle,
+        needs_chat_handles,
+        decision_extracted_conversations: all_conversations.len() - chat_escalated_conversations,
+        chat_escalated_conversations,
+    }
+}
+
+/// One conversation's [`MessageContext`] catalog, the shape
+/// `governed_call_omitting` and P5's own claim assembly both build a
+/// [`SuppliedContext`] from.
+fn conversation_message_contexts(conversation: &[ConversationMessage]) -> Vec<MessageContext<'_>> {
+    conversation
+        .iter()
+        .map(|m| MessageContext {
+            handle: m.handle.as_str(),
+            message: &m.message,
+            temporal_context: governed_temporal_context(m),
+            from_user: m.from_user,
+            to_user: m.to_user(),
+            cc_user: m.cc_user(),
+        })
+        .collect()
+}
+
+/// One conversation's [`ParticipantHandle`] catalog, built from
+/// [`governed_participant_handles`]'s owned tuples.
+fn conversation_participant_handles<'a>(
+    owned_handles: &'a [(String, &'a str, ParticipantSlot, bool)],
+) -> Vec<ParticipantHandle<'a>> {
+    owned_handles
+        .iter()
+        .map(
+            |(handle, message_handle, slot, is_user)| ParticipantHandle {
+                handle: handle.as_str(),
+                message_handle,
+                slot: *slot,
+                is_user: *is_user,
+            },
+        )
+        .collect()
+}
+
+/// Assembles one conversation's precomputed decision claims (if any) into
+/// [`LoopItems`] through the same `validate` + `map_accepted_claim` path a
+/// chat-model claim takes, or falls back to the chat pass when the
+/// conversation needs it (gray band or a decision request error, fail
+/// open).
+/// # Errors
+/// Returns the fixed provider or validation failure either path gave.
+fn extraction_assemble_or_escalate(
+    client: &dyn ModelClient,
+    conversation: &[ConversationMessage],
+    cancel: Option<&AtomicBool>,
+    extraction: &ExtractionOutcome,
+) -> Result<LoopItems, ProviderError> {
+    let needs_chat = conversation
+        .iter()
+        .any(|message| extraction.needs_chat_handles.contains(&message.handle));
+    if needs_chat {
+        return governed_pass(client, conversation, cancel);
+    }
+    let mut claims: Vec<serde_json::Value> = Vec::new();
+    for message in conversation {
+        if let Some(message_claims) = extraction.claims_by_handle.get(&message.handle) {
+            claims.extend(message_claims.iter().cloned());
+        }
+    }
+    if claims.is_empty() {
+        return Ok(LoopItems {
+            items: vec![],
+            rejected: 0,
+            rejection_reasons: vec![],
+            degraded: 0,
+        });
+    }
+    let document = serde_json::json!({"schema_version": 1, "claims": claims}).to_string();
+    let message_contexts = conversation_message_contexts(conversation);
+    let owned_handles = governed_participant_handles(conversation);
+    let participants = conversation_participant_handles(&owned_handles);
+    let context = SuppliedContext {
+        user: UserIdentity {
+            handle: "user",
+            display_name: conversation
+                .first()
+                .and_then(|message| message.user_display_name.as_deref()),
+            given_name: conversation
+                .first()
+                .and_then(|message| message.user_given_name.as_deref()),
+        },
+        messages: &message_contexts,
+        participants: &participants,
+        loop_candidate_handles: &[],
+    };
+    let analysis = claim_analysis_from_document(document.as_bytes(), &context)?;
+    Ok(map_claim_analysis(&analysis, conversation))
+}
+
+/// Builds one scan's "N conversations extracted by the decision model, M
+/// sent to the chat model (gray band / errors)" note.
+fn extraction_coverage_note(extraction: &ExtractionOutcome) -> String {
+    format!(
+        "{} conversations extracted by the decision model, {} sent to the chat model (gray band / errors).",
+        extraction.decision_extracted_conversations, extraction.chat_escalated_conversations,
+    )
+}
+
 /// Builds the one-line diagnostic note for a successfully analyzed
 /// conversation (`index` is 0-based; the note is 1-based), or `None` when
 /// the conversation needs no attention. `conversation` must already be
@@ -11754,6 +12518,408 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
 
     const EMPTY_CLAIMS: &str = r#"{"schema_version":1,"claims":[]}"#;
 
+    // -----------------------------------------------------------------
+    // P5: the gated decision-model extraction switch.
+    // -----------------------------------------------------------------
+
+    fn extraction_message(body: &str) -> ReviewMessage {
+        prepare(&synthetic(body, 0, "extraction-thread"), "Inbox", 0).unwrap()
+    }
+
+    /// One combined-request script: the six triage nouls, the
+    /// `extract.claim_type` choice (choice, its own probability, confidence),
+    /// and the `extract.waiting_party`/`extract.temporal` choices (choice,
+    /// confidence).
+    struct ExtractionAnswerScript {
+        triage: [f64; 6],
+        claim: (&'static str, f64, f64),
+        waiting_party: (&'static str, f64),
+        temporal: (&'static str, f64),
+    }
+
+    impl ExtractionAnswerScript {
+        /// A paragraph with clear triage signal, a confident `claim_choice`,
+        /// a confident `waiting_party` handle, and no temporal candidate.
+        fn confident(claim_choice: &'static str, waiting_party: &'static str) -> Self {
+            Self {
+                triage: [0.8, 0.1, 0.1, 0.1, 0.1, 0.1],
+                claim: (claim_choice, 0.9, 0.9),
+                waiting_party: (waiting_party, 0.9),
+                temporal: ("none", 0.9),
+            }
+        }
+
+        /// `extract.claim_type`'s confidence sits in `request`'s registered
+        /// gray band (0.3..0.7).
+        fn gray() -> Self {
+            Self {
+                triage: [0.8, 0.1, 0.1, 0.1, 0.1, 0.1],
+                claim: ("request", 0.5, 0.5),
+                waiting_party: ("none", 0.9),
+                temporal: ("none", 0.9),
+            }
+        }
+
+        /// A confident `none` claim choice: clear triage signal (so the
+        /// conversation is not triage-skipped), but no claim assembles.
+        fn none() -> Self {
+            Self {
+                triage: [0.8, 0.1, 0.1, 0.1, 0.1, 0.1],
+                claim: ("none", 0.95, 0.95),
+                waiting_party: ("none", 0.9),
+                temporal: ("none", 0.9),
+            }
+        }
+    }
+
+    type ExtractionScriptFn<'a> = dyn Fn(usize, &serde_json::Value) -> Result<ExtractionAnswerScript, ProviderError>
+        + Send
+        + Sync
+        + 'a;
+
+    /// A [`DecisionClient`] double for P5's combined per-paragraph request:
+    /// answers every id the request actually asked (triage nouls,
+    /// `extract.claim_type`, `extract.waiting_party`, and -- only when
+    /// asked -- `extract.temporal`) from one [`ExtractionAnswerScript`] per
+    /// call, reading each choice question's own issued option set back out
+    /// of the request it just built so a script never has to know the
+    /// per-paragraph dynamic handles in advance.
+    struct FixedExtractionClient<'a> {
+        script: Box<ExtractionScriptFn<'a>>,
+        calls: AtomicUsize,
+        states: Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl<'a> FixedExtractionClient<'a> {
+        fn new(
+            script: impl Fn(usize, &serde_json::Value) -> Result<ExtractionAnswerScript, ProviderError>
+            + Send
+            + Sync
+            + 'a,
+        ) -> Self {
+            Self {
+                script: Box::new(script),
+                calls: AtomicUsize::new(0),
+                states: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::Relaxed)
+        }
+
+        fn state(&self, index: usize) -> serde_json::Value {
+            self.states.lock().unwrap_or_else(PoisonError::into_inner)[index].clone()
+        }
+    }
+
+    fn extraction_fixed_choice(
+        question: &serde_json::Value,
+        choice: &str,
+        probability: f64,
+        confidence: f64,
+    ) -> Result<serde_json::Value, ProviderError> {
+        let options = question["criteria"]
+            .as_object()
+            .ok_or(ProviderError::InvalidQuestion)?;
+        let mut probabilities = serde_json::Map::new();
+        for key in options.keys() {
+            probabilities.insert(
+                key.clone(),
+                serde_json::Value::from(if key == choice { probability } else { 0.0 }),
+            );
+        }
+        Ok(serde_json::json!({
+            "type": "choice",
+            "choice": choice,
+            "probabilities": probabilities,
+            "confidence": confidence,
+        }))
+    }
+
+    fn extraction_fixed_answer(
+        id: &str,
+        question: &serde_json::Value,
+        script: &ExtractionAnswerScript,
+    ) -> Result<serde_json::Value, ProviderError> {
+        if let Some(index) = TRIAGE_IDS.iter().position(|candidate| *candidate == id) {
+            return Ok(serde_json::json!({"type": "noul", "noul": script.triage[index]}));
+        }
+        match id {
+            EXTRACT_CLAIM_TYPE_ID => {
+                let (choice, probability, confidence) = script.claim;
+                extraction_fixed_choice(question, choice, probability, confidence)
+            }
+            EXTRACT_WAITING_PARTY_ID => {
+                let (choice, confidence) = script.waiting_party;
+                extraction_fixed_choice(question, choice, confidence, confidence)
+            }
+            EXTRACT_TEMPORAL_ID => {
+                let (choice, confidence) = script.temporal;
+                extraction_fixed_choice(question, choice, confidence, confidence)
+            }
+            _ => Err(ProviderError::InvalidQuestion),
+        }
+    }
+
+    impl DecisionClient for FixedExtractionClient<'_> {
+        fn model(&self) -> &'static str {
+            "fixed-extraction"
+        }
+
+        fn max_parallel(&self) -> usize {
+            1
+        }
+
+        fn decide(
+            &self,
+            state: &serde_json::Value,
+            questions: &Questions,
+            _cancel: Option<&AtomicBool>,
+            deadline: Duration,
+        ) -> Result<Answers, ProviderError> {
+            assert_eq!(deadline, DECISION_DEADLINE);
+            let call = self.calls.fetch_add(1, Ordering::Relaxed);
+            self.states
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(state.clone());
+            let script = (self.script)(call, state)?;
+            let request =
+                openloops_inference::decision::request_body(self.model(), state, questions, false)?;
+            let request: serde_json::Value =
+                serde_json::from_slice(&request).map_err(|_| ProviderError::InvalidQuestion)?;
+            let ids: Vec<String> = request["questions"]
+                .as_object()
+                .ok_or(ProviderError::InvalidQuestion)?
+                .keys()
+                .cloned()
+                .collect();
+            let mut answers = serde_json::Map::new();
+            for id in &ids {
+                let question = &request["questions"][id.as_str()];
+                answers.insert(id.clone(), extraction_fixed_answer(id, question, &script)?);
+            }
+            let response = serde_json::json!({
+                "model": self.model(),
+                "answers": answers,
+                "usage": {"input_tokens": 1}
+            });
+            openloops_inference::decision::parse_answers(
+                &serde_json::to_vec(&response).map_err(|_| ProviderError::InvalidResponse)?,
+                self.model(),
+                questions,
+            )
+        }
+    }
+
+    #[test]
+    fn extraction_request_state_is_byte_exact() {
+        let message = extraction_message("Please send the synthetic report.");
+        let conversation = [message.input.clone()];
+        let waiting_party = extraction_waiting_party_options(&conversation);
+
+        let state = extraction_state(
+            &conversation[0],
+            0,
+            message.own_display_name.as_deref(),
+            message.own_given_name.as_deref(),
+            &waiting_party,
+        );
+
+        assert_eq!(
+            serde_json::to_vec(&state).unwrap(),
+            br#"{"subject":"Synthetic budget conversation","paragraph_text":"Please send the synthetic report.","from_user":false,"to_user":true,"cc_user":false,"user":{"display_name":null,"given_name":null},"participants":[{"handle":"m0-sender","text":"Alex <alex@example.invalid>"},{"handle":"m0-to-0","text":"user@example.invalid"}]}"#
+        );
+    }
+
+    #[test]
+    fn extraction_waiting_party_choice_resolves_to_its_display_text() {
+        let message = extraction_message("Please send the synthetic report.");
+        let conversation = [message.input.clone()];
+
+        let options = extraction_waiting_party_options(&conversation);
+
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| (option.handle.as_str(), option.display.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("m0-sender", "Alex <alex@example.invalid>"),
+                ("m0-to-0", "user@example.invalid"),
+            ]
+        );
+    }
+
+    #[test]
+    fn extraction_confident_claim_assembles_the_same_loopitem_shape_chat_claims_get() {
+        let message = extraction_message("Please send the synthetic report.");
+        let conversation = [message.input.clone()];
+        let fields = ExtractedClaimFields {
+            claim_type: ClaimType::Request,
+            confidence: 0.9,
+            waiting_party_handle: Some("m0-sender".to_string()),
+            waiting_party_ambiguous: false,
+            temporal_value: None,
+            temporal_ambiguous: false,
+        };
+        let claim = extraction_claim_json(&conversation[0], 0, &fields);
+        let extraction = ExtractionOutcome {
+            triage: TriageResult::default(),
+            claims_by_handle: BTreeMap::from([("m0".to_string(), vec![claim])]),
+            needs_chat_handles: BTreeSet::new(),
+            decision_extracted_conversations: 1,
+            chat_escalated_conversations: 0,
+        };
+        let chat = ScriptedClient::new(|_, _| panic!("chat model must stay unused"));
+
+        let items =
+            extraction_assemble_or_escalate(&chat, &conversation, None, &extraction).unwrap();
+
+        assert_eq!(chat.calls(), 0);
+        assert_eq!(items.items.len(), 1);
+        let item = &items.items[0];
+        assert_eq!(item.kind, "request");
+        assert!(item.owner == Owner::You);
+        assert_eq!(item.waiting_party, "Alex <alex@example.invalid>");
+        assert_eq!(item.evidence.message, "m0");
+        assert_eq!(item.evidence.quote, "Please send the synthetic report.");
+        assert!(!item.action.is_empty());
+    }
+
+    #[test]
+    fn extraction_temporal_candidate_becomes_a_classified_deadline_anchor() {
+        let message = extraction_message("Please use September 20, 2026.");
+        let conversation = [message.input.clone()];
+        let fields = ExtractedClaimFields {
+            claim_type: ClaimType::Request,
+            confidence: 0.9,
+            waiting_party_handle: None,
+            waiting_party_ambiguous: false,
+            temporal_value: Some("2026-09-20".to_string()),
+            temporal_ambiguous: false,
+        };
+        let claim = extraction_claim_json(&conversation[0], 0, &fields);
+        let extraction = ExtractionOutcome {
+            triage: TriageResult::default(),
+            claims_by_handle: BTreeMap::from([("m0".to_string(), vec![claim])]),
+            needs_chat_handles: BTreeSet::new(),
+            decision_extracted_conversations: 1,
+            chat_escalated_conversations: 0,
+        };
+        let chat = ScriptedClient::new(|_, _| panic!("chat model must stay unused"));
+
+        let items =
+            extraction_assemble_or_escalate(&chat, &conversation, None, &extraction).unwrap();
+
+        let deadline = items.items[0]
+            .deadline
+            .as_ref()
+            .expect("a confident temporal candidate must produce a deadline anchor");
+        assert_eq!(deadline.quote, "2026-09-20");
+        assert_eq!(deadline.message, "m0");
+    }
+
+    #[test]
+    fn extraction_gray_band_escalates_only_that_conversation_to_the_chat_pass() {
+        let confident = extraction_message("Please send the synthetic report.");
+        let mut gray = extraction_message("Please review the synthetic draft.");
+        gray.conversation = "extraction-thread-two".into();
+        gray.input.handle = "m1".into();
+        let messages = [confident, gray];
+        let decision = FixedExtractionClient::new(|_, state| {
+            if state["paragraph_text"] == "Please review the synthetic draft." {
+                Ok(ExtractionAnswerScript::gray())
+            } else {
+                Ok(ExtractionAnswerScript::confident("request", "m0-sender"))
+            }
+        });
+        let chat = ScriptedClient::new(|_, _| Ok(EMPTY_CLAIMS.to_string()));
+
+        let result = run_primary_pass(
+            ScanOptions {
+                provider: Provider::OpenRouter,
+                use_decision_model: true,
+                extraction_backend: ExtractionBackend::DecisionModel,
+            },
+            PrimaryPassClients {
+                client: &chat,
+                decision_client: Some(&decision),
+            },
+            &messages,
+            &ScanProgress::default(),
+            &ParallelPass::new(2),
+            None,
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(chat.calls(), 1);
+        assert_eq!(decision.calls(), 2);
+        assert_eq!(
+            decision.state(0)["paragraph_text"],
+            "Please send the synthetic report."
+        );
+        assert_eq!(result.analysis.items.len(), 1);
+        assert_eq!(result.analysis.items[0].evidence.message, "m0");
+    }
+
+    #[test]
+    fn extraction_none_yields_no_items_and_no_chat_call() {
+        let message = extraction_message("Thanks, all set.");
+        let decision = FixedExtractionClient::new(|_, _| Ok(ExtractionAnswerScript::none()));
+        let chat = ScriptedClient::new(|_, _| panic!("chat model must stay unused"));
+
+        let result = run_primary_pass(
+            ScanOptions {
+                provider: Provider::OpenRouter,
+                use_decision_model: true,
+                extraction_backend: ExtractionBackend::DecisionModel,
+            },
+            PrimaryPassClients {
+                client: &chat,
+                decision_client: Some(&decision),
+            },
+            std::slice::from_ref(&message),
+            &ScanProgress::default(),
+            &ParallelPass::new(1),
+            None,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(chat.calls(), 0);
+        assert!(result.analysis.items.is_empty());
+    }
+
+    #[test]
+    fn extraction_request_error_fails_open_to_the_chat_pass() {
+        let message = extraction_message("Please send the synthetic report.");
+        let decision = FixedExtractionClient::new(|_, _| Err(ProviderError::InvalidResponse));
+        let chat = ScriptedClient::new(|_, _| Ok(EMPTY_CLAIMS.to_string()));
+
+        run_primary_pass(
+            ScanOptions {
+                provider: Provider::OpenRouter,
+                use_decision_model: true,
+                extraction_backend: ExtractionBackend::DecisionModel,
+            },
+            PrimaryPassClients {
+                client: &chat,
+                decision_client: Some(&decision),
+            },
+            std::slice::from_ref(&message),
+            &ScanProgress::default(),
+            &ParallelPass::new(1),
+            None,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(chat.calls(), 1);
+    }
+
     /// One `analysis-output-v1` claim citing the whole body block 0 of
     /// `message` (`length` scalars).
     fn closure_claim(
@@ -12238,6 +13404,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
             ScanOptions {
                 provider: Provider::OpenRouter,
                 use_decision_model: false,
+                extraction_backend: ExtractionBackend::ChatModel,
             },
             || {
                 constructions.fetch_add(1, Ordering::Relaxed);

@@ -115,6 +115,43 @@ class ExtractClaimType(TriageBase):
     confidence: float = dspy.OutputField(desc="Confidence in the selected claim type.")
 
 
+# `extract.waiting_party` and `extract.temporal` (P5) are dynamic-option
+# choice questions: the app issues a fresh option set per request (the
+# conversation's own participant handles, or a paragraph's own normalized
+# date candidates), not a fixed vocabulary this harness can enumerate.
+# Their `state` shape (documented in full in
+# `docs/plans/2026-09-19-jev-decision-model.md`'s P5 section, and mirrored
+# by `crates/openloops-desktop/src/review_scan.rs`'s `extraction_state`) is
+# `{subject, paragraph_text, from_user, to_user, cc_user, user:
+# {display_name, given_name}, participants: [{handle, text}...]}`. The
+# `options` below are bootstrap placeholders (`none` only) so the registry
+# entry is well-formed; tuning their *instructions* wording can proceed on
+# this bootstrap text, but this harness has no labeled corpus for either
+# question yet -- see the design doc's P5 section for what a corpus would
+# need.
+class ExtractWaitingParty(TriageBase):
+    """Which participant is waiting on the signed-in user for this paragraph?"""
+
+    participants: list[dict[str, str]] = dspy.InputField()
+    choice: str = dspy.OutputField(desc="The waiting participant's issued handle, or none.")
+    probabilities: dict[str, float] = dspy.OutputField(
+        desc="Probability for each issued participant-handle option, plus none."
+    )
+    confidence: float = dspy.OutputField(desc="Confidence in the selected waiting party.")
+
+
+class ExtractTemporal(TriageBase):
+    """Which named time, date, or deadline candidate, if any, does this paragraph express?"""
+
+    choice: str = dspy.OutputField(
+        desc="The chosen normalized temporal candidate's issued handle, or none."
+    )
+    probabilities: dict[str, float] = dspy.OutputField(
+        desc="Probability for each issued temporal-candidate option, plus none."
+    )
+    confidence: float = dspy.OutputField(desc="Confidence in the selected temporal candidate.")
+
+
 def _rule_signature(name: str, instructions: str, fields: tuple[str, ...]) -> type[dspy.Signature]:
     annotations = {field: str for field in fields} | {"probability": float}
     namespace = {"__annotations__": annotations, "__doc__": instructions}
@@ -250,6 +287,24 @@ SPECS: dict[str, QuestionSpec] = {
             "delegation": "The paragraph delegates an obligation from one party to another.",
             "none": "The paragraph expresses none of the listed claim types.",
         },
+    ),
+    "extract.waiting_party": QuestionSpec(
+        "extract",
+        ExtractWaitingParty,
+        "Which participant is waiting on the signed-in user for this paragraph",
+        ("paragraph_text", "participants"),
+        (*_TRIAGE_FIELDS, "participants"),
+        "choice",
+        {"none": "No participant is waiting on the signed-in user for this paragraph."},
+    ),
+    "extract.temporal": QuestionSpec(
+        "extract",
+        ExtractTemporal,
+        "Which named time, date, or deadline candidate, if any, does this paragraph express",
+        ("paragraph_text",),
+        _TRIAGE_FIELDS,
+        "choice",
+        {"none": "No temporal candidate applies to this paragraph."},
     ),
     "rules.recap": QuestionSpec(
         "rules", RulesRecap,

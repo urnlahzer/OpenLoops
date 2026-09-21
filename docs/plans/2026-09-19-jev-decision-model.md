@@ -305,12 +305,100 @@ unchanged.
 
 ### P5. Extraction switch, gated
 
+Status: implemented on `feat/jev-extraction-switch`.
+
 Flip the primary pass to the Jev-native extractor when P4 shows at least 90%
 agreement on (has claim, claim type) and 85% on waiting party across 200 or
 more paragraphs of the owner's real mail, with the chat model kept for
 gray-band paragraphs (owner decision). The chat model remains selectable as
 the extractor on the Sources screen. Thresholds move to the settings store
 only if the owner asks.
+
+The switch is manual: `extraction_backend` (`ExtractionBackend::ChatModel` by
+default, or `DecisionModel`), a 12th settings field alongside
+`use_decision_model`, shown on the Sources screen under the decision-model
+toggle as a "Find loops with: Chat model / Decision model" segmented control,
+enabled only while the decision model toggle is also on. The owner reads the
+gate directly off the control's own helper text and flips it after the
+`--compare-decisions` probe (P4) shows the named agreement numbers; nothing
+in the app measures or enforces the threshold automatically, since P4's
+compare mode deliberately does not attempt `extract.waiting_party` yet (no
+chat-side silver label exists to compare it against) -- the 85%
+waiting-party figure remains an owner judgment call against the review
+screen's own output until a waiting-party comparison is built.
+
+When the switch is on (and the decision model is on, `OpenRouter`), the
+primary pass sends one combined per-paragraph request -- for the first 40
+body paragraphs of each selected message, the same per-message cap P2's
+triage pass already carries -- with the registry triage ids (so a paragraph
+is never triaged and extracted separately) plus three new registry-pinned
+questions:
+
+- `extract.claim_type`: the same choice P4 already registered (`request`,
+  `promise`, `question`, `attribution`, `delegation`, `none`).
+- `extract.waiting_party`: a choice over the conversation's own participant
+  handles (the same handles `governed_participant_handles` issues, capped at
+  254 plus `none`), descriptions taken from the desktop's own
+  `waiting_party_display`. The registry entry carries only the bootstrap
+  instructions and thresholds; its `options` member is a one-entry
+  placeholder (`none`) since the real per-request options are dynamic and
+  issued in code, not tunable static text.
+- `extract.temporal`: a choice over the date candidates the existing prose
+  parser (`prose_event_time_candidates`) finds in that paragraph, normalized
+  into the `deadline_parse` grammar exactly as P1's `normalized_deadline`
+  does, plus `none`. Asked only when at least one candidate exists.
+
+Request state shape (documented here and mirrored in
+`tools/jev-optimize/jev_optimize/questions.py`, which now carries
+`QuestionSpec` entries for both new ids with their `intent`/`primary_fields`
+but no corpus derivation yet -- see below):
+
+```json
+{
+  "subject": "...",
+  "paragraph_text": "...",
+  "from_user": false,
+  "to_user": true,
+  "cc_user": false,
+  "user": {"display_name": null, "given_name": null},
+  "participants": [{"handle": "m0-sender", "text": "Alex <alex@example.invalid>"}]
+}
+```
+
+Assembly, in code, mirrors P1's own recombination: a paragraph yields a
+claim when `extract.claim_type` is confident (>= accept) and not `none`,
+with evidence citing the whole paragraph body block (the chat pipeline's
+own whole-block rule), `waiting_party_handle` from a confident
+`extract.waiting_party` answer, `temporal` from a confident
+`extract.temporal` answer normalized to a `date` hypothesis,
+`confidence_micros` from the winning `claim_type` option's own probability,
+and ambiguity codes `identity` (waiting party gray/none on a request or
+question) / `deadline` (a temporal candidate existed but the choice was not
+confident). The claim is serialized as one `analysis-output-v1` document and
+run through the identical `validation::validate` + `map_accepted_claim` path
+a chat-model claim takes (new `openloops_inference::analysis::
+claim_analysis_from_document`, a thin wrapper the decision path reaches that
+the byte-parsing chat path already used internally) -- owner resolution,
+vocative guard, fingerprints, and titles are unchanged.
+
+Gray band on `extract.claim_type` sends that paragraph's whole conversation
+to the unchanged chat-model primary pass (owner decision); a request-level
+error on any of a conversation's paragraphs fails open the same way. A
+conversation with no gray-band paragraph and no confident claim yields no
+items, exactly as today's chat pass can. The scan strip shows "Finding open
+loops (decision model)" while this pass runs, and the coverage note reports
+"N conversations extracted by the decision model, M sent to the chat model
+(gray band / errors)".
+
+Deviation from the original P5 scope note above: corpus derivation for
+`extract.waiting_party`/`extract.temporal` from training-export rows is not
+implemented in this phase -- both are dynamic-option choice questions (the
+options are per-conversation handles or per-paragraph date candidates, not
+a fixed vocabulary a synthetic/Enron/owner-export row could carry as a
+static label), so DSPy tuning for their *instructions* wording can proceed
+on the bootstrap text already in the registry, but the harness has no
+labeled examples for them yet. A future phase that wants to tune these two
+questions needs its own corpus design first.
 
 ## What does not change
 
@@ -348,7 +436,7 @@ only if the owner asks.
 | P2 | `feat/jev-triage` | Triage request and projection trimming. |
 | P3 | `feat/jev-rule-residue` | The seven rule replacements, one commit each. |
 | P4 | `feat/jev-compare-probe` | Measuring mode. |
-| P5 | `feat/jev-extraction` | The switch, after P4 numbers. |
+| P5 | `feat/jev-extraction-switch` | The switch, after P4 numbers. |
 
 O follows P0. P1 and P2 are independent after O. P3 items are independent of
 each other. P5 waits on P4 and on a re-run of O with owner export data.

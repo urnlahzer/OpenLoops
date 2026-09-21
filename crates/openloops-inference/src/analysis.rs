@@ -131,6 +131,24 @@ pub fn analyze_claims_omitting(
     claim_analysis(answer.as_bytes(), context)
 }
 
+/// Validates and bridges an already-assembled `analysis-output-v1` document
+/// built in code, for a caller (the P5 decision-model extractor) that
+/// constructs its own claims from typed decision answers rather than
+/// receiving them from a chat model. Runs the identical steps 1-10
+/// [`analyze_claims`] runs on provider output -- schema, bounds, handle
+/// membership, participant slot, temporal reparse, and consistency -- so a
+/// code-assembled claim gets exactly the same acceptance guarantees as a
+/// model-produced one.
+/// # Errors
+/// Rejects an oversized, malformed, or schema-invalid document exactly as
+/// [`analyze_claims`] does for provider output.
+pub fn claim_analysis_from_document(
+    bytes: &[u8],
+    context: &SuppliedContext<'_>,
+) -> Result<ClaimAnalysis, ProviderError> {
+    claim_analysis(bytes, context)
+}
+
 fn claim_analysis(
     bytes: &[u8],
     context: &SuppliedContext<'_>,

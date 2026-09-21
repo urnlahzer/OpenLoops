@@ -487,6 +487,8 @@ pub mod registry {
         "closure.modified",
         "closure.outcome",
         "extract.claim_type",
+        "extract.temporal",
+        "extract.waiting_party",
         "triage.asks_recipient",
         "triage.commits_sender",
         "triage.asks_question",

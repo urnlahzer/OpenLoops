@@ -6,7 +6,9 @@ use crate::{
         AccountDisplay, AppModel, ExportArmed, Outcome, Service, SettingsPresence, Status,
     },
     review_model::{ReviewState, ScanStrip, load_strip, open_badge_count, scan_strip},
-    settings::{MAX_OPENROUTER_PARALLEL, MIN_OPENROUTER_PARALLEL, OllamaPlan, Provider},
+    settings::{
+        ExtractionBackend, MAX_OPENROUTER_PARALLEL, MIN_OPENROUTER_PARALLEL, OllamaPlan, Provider,
+    },
     training_export,
 };
 use openloops_graph::live::{ConnectionConfig, check_connection, clear_session};
@@ -332,6 +334,11 @@ pub(crate) fn sync(model: &AppModel, window: &AppWindow) {
     window.set_use_decision_model(model.use_decision_model);
     window.set_decision_status(joined_status(&model.decision_status).into());
     window.set_decision_succeeded(model.decision_status.succeeded);
+    window.set_extraction_backend_index(match model.extraction_backend {
+        ExtractionBackend::ChatModel => 0,
+        ExtractionBackend::DecisionModel => 1,
+    });
+    window.set_can_select_extraction_backend(model.can_select_extraction_backend());
     window.set_training_export_folder(model.training_export_folder.clone().into());
     window.set_training_export_status(joined_status(&model.training_export_status).into());
     window.set_training_export_succeeded(model.training_export_status.succeeded);
@@ -1041,6 +1048,25 @@ pub fn run() -> Result<(), slint::PlatformError> {
             }
             model_ref.use_decision_model = value;
             model_ref.decision_status = Status::default();
+            finish_edit(&mut model_ref);
+            drop(model_ref);
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_extraction_backend_selected(move |index| {
+            let mut model_ref = model.borrow_mut();
+            let backend = if index == 1 {
+                ExtractionBackend::DecisionModel
+            } else {
+                ExtractionBackend::ChatModel
+            };
+            if backend == model_ref.extraction_backend {
+                return;
+            }
+            model_ref.extraction_backend = backend;
             finish_edit(&mut model_ref);
             drop(model_ref);
             refresh(&model, &weak);

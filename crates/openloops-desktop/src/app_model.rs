@@ -7,7 +7,8 @@ use std::time::Instant;
 
 use crate::review_model::{CardContext, ReviewState};
 use crate::settings::{
-    OllamaPlan, Provider, Settings, SettingsError, SettingsStore, max_parallel, production_store,
+    ExtractionBackend, OllamaPlan, Provider, Settings, SettingsError, SettingsStore, max_parallel,
+    production_store,
 };
 use openloops_graph::live::{
     ConnectionConfig, ConnectionError, ConnectionReport, clear_session,
@@ -100,6 +101,9 @@ pub struct AppModel {
     pub openrouter_selected: String,
     pub openrouter_parallel: u16,
     pub use_decision_model: bool,
+    /// P5's gated primary-pass switch. See
+    /// [`crate::settings::ExtractionBackend`].
+    pub extraction_backend: ExtractionBackend,
     /// The owner-typed destination for a training-data export -- in-memory
     /// only, never part of [`Settings`]/[`AppModel::save_settings`]. See
     /// [`crate::training_export`].
@@ -157,6 +161,7 @@ impl AppModel {
             openrouter_selected: String::new(),
             openrouter_parallel: crate::settings::DEFAULT_OPENROUTER_PARALLEL,
             use_decision_model: false,
+            extraction_backend: ExtractionBackend::ChatModel,
             training_export_folder: String::new(),
             training_export_status: Status::default(),
             training_export_armed: ExportArmed::No,
@@ -218,6 +223,7 @@ impl AppModel {
         self.ollama_plan = settings.ollama_plan;
         self.openrouter_parallel = settings.openrouter_parallel;
         self.use_decision_model = settings.use_decision_model;
+        self.extraction_backend = settings.extraction_backend;
         self.openrouter_key = settings.openrouter_key;
         self.openrouter_selected = settings.openrouter_selected;
         self.zdr_models = if self.openrouter_selected.is_empty() {
@@ -291,6 +297,7 @@ impl AppModel {
             ollama_plan: self.ollama_plan,
             openrouter_parallel: self.openrouter_parallel,
             use_decision_model: self.use_decision_model,
+            extraction_backend: self.extraction_backend,
         };
         match store.save(&settings) {
             Ok(()) => {
@@ -737,6 +744,12 @@ impl AppModel {
     pub fn provider_disclosure(&self) -> &'static str {
         match self.provider {
             Provider::OllamaCloud => "Ollama Cloud",
+            Provider::OpenRouter
+                if self.use_decision_model
+                    && self.extraction_backend == ExtractionBackend::DecisionModel =>
+            {
+                "OpenRouter, restricted to zero-data-retention endpoints, including the Jev decision model for closure checks, triage, and finding open loops"
+            }
             Provider::OpenRouter if self.use_decision_model => {
                 "OpenRouter, restricted to zero-data-retention endpoints, including the Jev decision model"
             }
@@ -749,6 +762,14 @@ impl AppModel {
         self.provider == Provider::OpenRouter
             && !self.openrouter_key.is_empty()
             && self.use_decision_model
+    }
+
+    /// Whether the "Find loops with" segmented control may be used: P5's
+    /// switch is gated on the decision model toggle, same rule as "Check
+    /// decision model".
+    #[must_use]
+    pub fn can_select_extraction_backend(&self) -> bool {
+        self.provider == Provider::OpenRouter && self.use_decision_model
     }
 
     /// Whether "Export training data" may be pressed: a scan result is
@@ -775,6 +796,7 @@ impl AppModel {
         let model = self.selected_model().to_owned();
         let provider = self.provider;
         let use_decision_model = self.use_decision_model;
+        let extraction_backend = self.extraction_backend;
         let parallel = self.max_parallel();
         let progress = Arc::new(crate::review_model::ScanProgress::default());
         progress.total.store(messages.len(), Ordering::Relaxed);
@@ -795,6 +817,7 @@ impl AppModel {
                         crate::review_model::ScanOptions {
                             provider,
                             use_decision_model,
+                            extraction_backend,
                         },
                         key.to_string(),
                         &model,
@@ -868,6 +891,7 @@ impl AppModel {
         let model = self.selected_model().to_owned();
         let provider = self.provider;
         let use_decision_model = self.use_decision_model;
+        let extraction_backend = self.extraction_backend;
         let parallel = self.max_parallel();
         let progress = Arc::new(crate::review_model::ScanProgress::default());
         self.scan_progress = Some(progress.clone());
@@ -883,6 +907,7 @@ impl AppModel {
                     crate::review_model::ScanOptions {
                         provider,
                         use_decision_model,
+                        extraction_backend,
                     },
                     key.to_string(),
                     &model,
@@ -1185,6 +1210,45 @@ mod tests {
         assert!(app.provider_disclosure().contains("Jev decision model"));
         app.provider = Provider::OllamaCloud;
         assert!(!app.provider_disclosure().contains("Jev"));
+    }
+
+    #[test]
+    fn provider_disclosure_names_finding_open_loops_only_when_the_extraction_switch_is_on() {
+        let mut app = AppModel::with_store(Ok(None));
+        app.provider = Provider::OpenRouter;
+        app.use_decision_model = true;
+        assert!(!app.provider_disclosure().contains("finding open loops"));
+        app.extraction_backend = ExtractionBackend::DecisionModel;
+        assert!(app.provider_disclosure().contains("finding open loops"));
+        // Turning the decision model itself off must remove the mention
+        // even though the extraction switch is still set to DecisionModel.
+        app.use_decision_model = false;
+        assert!(!app.provider_disclosure().contains("finding open loops"));
+    }
+
+    #[test]
+    fn extraction_backend_is_selectable_only_with_openrouter_and_the_decision_model_on() {
+        let mut app = AppModel::with_store(Ok(None));
+        assert!(!app.can_select_extraction_backend());
+        app.provider = Provider::OpenRouter;
+        assert!(!app.can_select_extraction_backend());
+        app.use_decision_model = true;
+        assert!(app.can_select_extraction_backend());
+        app.provider = Provider::OllamaCloud;
+        assert!(!app.can_select_extraction_backend());
+    }
+
+    #[test]
+    fn apply_settings_round_trips_extraction_backend() {
+        let memory = MemoryStore::default();
+        let mut app = AppModel::with_store(Ok(Some(Box::new(memory.clone()))));
+        app.extraction_backend = ExtractionBackend::DecisionModel;
+        app.save_settings();
+        let reopened = AppModel::with_store(Ok(Some(Box::new(memory))));
+        assert_eq!(
+            reopened.extraction_backend,
+            ExtractionBackend::DecisionModel
+        );
     }
 
     #[test]
