@@ -39,6 +39,10 @@
     "provider_schema_request": "no provider-side format or tools field is sent in the MVP contract; strict application validation of analysis-output-v1 is authoritative",
     "tool_calls": "prohibited; tools functions images attachments linked-document contents and remote retrieval fields are absent",
     "input": "one changed message projection plus at most forty relevance-selected context projections supplied by deterministic code",
+    "projection_top_level_fields_in_order": ["user", "messages", "participant_handles", "related_loop_handles"],
+    "user_identity_fields_in_order": ["handle", "display_name", "given_name"],
+    "message_projection_fields_in_order": ["source_handle", "from_user", "to_user", "cc_user", "blocks"],
+    "participant_projection_fields_in_order": ["handle", "source_handle", "component", "block_ordinal", "is_user"],
     "allowed_components": ["subject", "body_block", "quote_block", "sender", "to", "cc", "attachment_name", "link_label"],
     "maximum_context_messages": 40,
     "maximum_blocks_per_message": 64,
@@ -84,6 +88,7 @@
   "settings_disclosure": {
     "policy_version": "model-sensitivity-v1",
     "ui_visibility": "show provider profile exact endpoint model label external-data disclosure and every confidence or detection sensitivity before provider use and whenever settings are reviewed",
+    "transmitted_identity": "the signed-in user's display and given name plus per-message sender, to-recipient, and cc-recipient ownership facts are transmitted for attribution",
     "sensitivities": [
       {"id":"request_sensitivity","allowed_values":["low","standard","high"],"default":"standard","default_semantics":"high-recall standard","prerequisite":"provider configured for inferred cases","change_behavior":"offers bounded replay with review-only results"},
       {"id":"deadline_inference_sensitivity","allowed_values":["explicit-only","standard","high"],"default":"standard","prerequisite":"provider optional","change_behavior":"offers bounded replay and never overwrites user resolution automatically"},

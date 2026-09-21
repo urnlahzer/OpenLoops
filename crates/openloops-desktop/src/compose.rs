@@ -161,7 +161,9 @@ pub fn default_probe_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{compose_probe, default_probe_path};
-    use openloops_inference::validation::{AnalysisResult, SuppliedContext, validate};
+    use openloops_inference::validation::{
+        AnalysisResult, SuppliedContext, UserIdentity, validate,
+    };
 
     #[test]
     fn compose_probe_links_every_layer_without_executing_anything() {
@@ -190,6 +192,11 @@ mod tests {
         // itself performs.
         let validate_reference: fn(&[u8], &SuppliedContext<'_>) -> AnalysisResult = validate;
         let context = SuppliedContext {
+            user: UserIdentity {
+                handle: "user",
+                display_name: None,
+                given_name: None,
+            },
             messages: &[],
             participants: &[],
             loop_candidate_handles: &[],

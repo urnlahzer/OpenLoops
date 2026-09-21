@@ -144,6 +144,9 @@ JsonCase 'request byte bound widened' 'P0-MODEL-REQUEST-001' 'contracts/model/pr
 JsonCase 'URL component allowed' 'P0-MODEL-REQUEST-001' 'contracts/model/provider-boundary.json' { param($c) $c.request_contract.allowed_components += 'url' }
 JsonCase 'attachment bytes no longer prohibited' 'P0-MODEL-REQUEST-001' 'contracts/model/provider-boundary.json' { param($c) $c.request_contract.prohibited = @($c.request_contract.prohibited | Where-Object { $_ -ne 'attachment bytes' }) }
 JsonCase 'untrusted framing weakened' 'P0-MODEL-REQUEST-001' 'contracts/model/provider-boundary.json' { param($c) $c.request_contract.untrusted_delimiting = 'plain concatenation' }
+JsonCase 'user identity field omitted' 'P0-MODEL-REQUEST-001' 'contracts/model/provider-boundary.json' { param($c) $c.request_contract.user_identity_fields_in_order = @('handle','display_name') }
+JsonCase 'message ownership fact omitted' 'P0-MODEL-REQUEST-001' 'contracts/model/provider-boundary.json' { param($c) $c.request_contract.message_projection_fields_in_order = @('source_handle','from_user','to_user','blocks') }
+JsonCase 'participant user marker omitted' 'P0-MODEL-REQUEST-001' 'contracts/model/provider-boundary.json' { param($c) $c.request_contract.participant_projection_fields_in_order = @('handle','source_handle','component','block_ordinal') }
 
 JsonCase 'response byte bound widened' 'P0-MODEL-RESPONSE-001' 'contracts/model/provider-boundary.json' { param($c) $c.response_contract.maximum_response_bytes = 262145 }
 JsonCase 'wall time bound widened' 'P0-MODEL-RESPONSE-001' 'contracts/model/provider-boundary.json' { param($c) $c.response_contract.maximum_wall_time_seconds = 151 }
@@ -180,6 +183,7 @@ JsonCase 'request sensitivity default drift' 'P0-MODEL-CONSENT-001' 'contracts/m
 JsonCase 'decision model default enabled' 'P0-MODEL-CONSENT-001' 'contracts/model/provider-boundary.json' { param($c) ($c.settings_disclosure.sensitivities | Where-Object id -eq 'decision_model').default = 'on' }
 JsonCase 'review threshold default broadened' 'P0-MODEL-CONSENT-001' 'contracts/model/provider-boundary.json' { param($c) $c.settings_disclosure.review_thresholds.safe_default = 'automatic' }
 JsonCase 'settings change starts replay' 'P0-MODEL-CONSENT-001' 'contracts/model/provider-boundary.json' { param($c) $c.settings_disclosure.global_change_behavior = 'replay immediately' }
+JsonCase 'identity transmission disclosure removed' 'P0-MODEL-CONSENT-001' 'contracts/model/provider-boundary.json' { param($c) $c.settings_disclosure.PSObject.Properties.Remove('transmitted_identity') }
 
 JsonCase 'model becomes lifecycle authority' 'P0-MODEL-AUTHORITY-001' 'contracts/model/provider-boundary.json' { param($c) $c.semantic_policy.never_authority_for = @($c.semantic_policy.never_authority_for | Where-Object { $_ -ne 'lifecycle transition' }) }
 JsonCase 'schema valid marked safe' 'P0-MODEL-AUTHORITY-001' 'contracts/model/provider-boundary.json' { param($c) $c.semantic_policy.schema_valid_is_not_safe = $false }

@@ -35,6 +35,10 @@ review](inbox-review.md) sends complete bounded conversations, recipient
 context, signed-in ownership facts, and only the opaque open-loop handles that
 the bounded suggested-update pass may reference. Source text and card titles
 are resolved locally. Scanning requires no manual message selection.
+The projection includes the signed-in user's display and given name and
+authoritative per-message facts for whether the user is the sender, a direct
+recipient, or a cc recipient; participant slots also state whether they are the
+user.
 The governed projection removes a quoted-history block only when collapsed
 Unicode whitespace makes it exactly duplicate an earlier message body or a
 quote already emitted; quotes with edits or inline replies remain.

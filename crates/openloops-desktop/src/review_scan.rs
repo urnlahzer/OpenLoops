@@ -31,7 +31,9 @@ use openloops_inference::{
         REPLY_HISTORY_CHUNK_MAX_CHARS, chunk_reply_history, is_underscore_separator,
         starts_with_ascii_ci,
     },
-    validation::{MessageContext, ParticipantHandle, ParticipantSlot, SuppliedContext},
+    validation::{
+        MessageContext, ParticipantHandle, ParticipantSlot, SuppliedContext, UserIdentity,
+    },
     walker::canonicalize_html,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -51,6 +53,9 @@ pub struct ReviewMessage {
     /// Addresses belonging to the signed-in account, preserved for
     /// deterministic attribution checks after model output is projected.
     pub own_addresses: Vec<String>,
+    /// Signed-in identity kept in memory only for governed attribution.
+    pub own_display_name: Option<String>,
+    pub own_given_name: Option<String>,
     /// Lowercase addresses of sender, to, and cc, minus the account's own
     /// addresses, deduplicated and sorted. Used to link conversations that
     /// Exchange split into different `conversationId`s but that share
@@ -1624,6 +1629,52 @@ fn participant_display_name(label: &str) -> Option<&str> {
     (!name.is_empty()).then_some(name)
 }
 
+fn participant_given_name(label: &str) -> Option<&str> {
+    participant_display_name(label)?.split_whitespace().next()
+}
+
+fn begins_with_non_user_vocative(text: &str, source: &ConversationMessage) -> bool {
+    let Some((vocative, _)) = text.trim_start().split_once(',') else {
+        return false;
+    };
+    let vocative = vocative.trim();
+    if vocative.is_empty()
+        || source
+            .user_given_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case(vocative))
+    {
+        return false;
+    }
+    source
+        .message
+        .sender
+        .iter()
+        .chain(&source.message.to)
+        .chain(&source.message.cc)
+        .filter(|participant| !participant_is_user(participant, &source.own_addresses))
+        .any(|participant| {
+            let label = participant.as_string();
+            participant_given_name(&label).is_some_and(|name| name.eq_ignore_ascii_case(vocative))
+        })
+}
+
+fn resolve_owner_with_vocative_guard(
+    claim_type: ClaimType,
+    owner: Owner,
+    text: &str,
+    source: &ConversationMessage,
+) -> (Owner, bool) {
+    let guarded = matches!(claim_type, ClaimType::Request | ClaimType::Question)
+        && owner == Owner::You
+        && begins_with_non_user_vocative(text, source);
+    if guarded {
+        (Owner::Unclear, true)
+    } else {
+        (resolve_owner(owner, source), false)
+    }
+}
+
 /// Corrects the known recap-service attribution failure after the model
 /// response has been parsed, while the source conversation and account
 /// addresses are still available. This is intentionally part of projection:
@@ -1920,6 +1971,25 @@ fn split_oversized_paragraph_by_lines(paragraph: &str) -> Vec<String> {
     pieces
 }
 
+/// Whether the signed-in user sent this message, and how they appear among
+/// its recipients, from the account's own addresses.
+fn user_relation(item: &MailItem) -> (bool, crate::claim_view::UserRecipient) {
+    let is_own = |address: &String| {
+        item.own_addresses
+            .iter()
+            .any(|own| address.eq_ignore_ascii_case(own))
+    };
+    let from_user = is_own(&item.sender_address);
+    let recipient = if item.to.iter().any(is_own) {
+        crate::claim_view::UserRecipient::To
+    } else if item.cc.iter().any(is_own) {
+        crate::claim_view::UserRecipient::Cc
+    } else {
+        crate::claim_view::UserRecipient::NotAddressed
+    };
+    (from_user, recipient)
+}
+
 pub fn prepare(
     item: &MailItem,
     source: &str,
@@ -1973,22 +2043,17 @@ pub fn prepare(
     let timestamp = chrono::DateTime::parse_from_rfc3339(&item.received)
         .map_err(|_| ConnectionError::ResourceUnavailable)?
         .timestamp();
-    let from_user = item
-        .own_addresses
-        .iter()
-        .any(|a| a.eq_ignore_ascii_case(&item.sender_address));
-    let to_user = item.to.iter().any(|a| {
-        item.own_addresses
-            .iter()
-            .any(|own| a.eq_ignore_ascii_case(own))
-    });
+    let (from_user, recipient) = user_relation(item);
     let other_addresses = other_addresses(item);
     Ok(ReviewMessage {
         input: ConversationMessage {
             handle: format!("m{index}"),
             timestamp,
             from_user,
-            to_user,
+            recipient,
+            own_addresses: item.own_addresses.clone(),
+            user_display_name: item.own_display_name.clone(),
+            user_given_name: item.own_given_name.clone(),
             team: item.team,
             message: CanonicalMessage {
                 subject: block(&item.subject)?,
@@ -2024,6 +2089,8 @@ pub fn prepare(
             .to_string(),
         web_link: item.web_link.clone(),
         own_addresses: item.own_addresses.clone(),
+        own_display_name: item.own_display_name.clone(),
+        own_given_name: item.own_given_name.clone(),
         other_addresses,
         event: mail_event_time(item),
     })
@@ -2077,7 +2144,7 @@ fn connect(
 /// [`governed_pass`] offers as `SuppliedContext::participants`.
 fn governed_participant_handles(
     conversation: &[ConversationMessage],
-) -> Vec<(String, &str, ParticipantSlot)> {
+) -> Vec<(String, &str, ParticipantSlot, bool)> {
     let mut handles = Vec::new();
     for m in conversation {
         if m.message.sender.is_some() {
@@ -2085,6 +2152,7 @@ fn governed_participant_handles(
                 format!("{}-sender", m.handle),
                 m.handle.as_str(),
                 ParticipantSlot::Sender,
+                m.from_user,
             ));
         }
         for i in 0..m.message.to.len() {
@@ -2092,6 +2160,7 @@ fn governed_participant_handles(
                 format!("{}-to-{i}", m.handle),
                 m.handle.as_str(),
                 ParticipantSlot::To(i),
+                participant_is_user(&m.message.to[i], &m.own_addresses),
             ));
         }
         for i in 0..m.message.cc.len() {
@@ -2099,10 +2168,19 @@ fn governed_participant_handles(
                 format!("{}-cc-{i}", m.handle),
                 m.handle.as_str(),
                 ParticipantSlot::Cc(i),
+                participant_is_user(&m.message.cc[i], &m.own_addresses),
             ));
         }
     }
     handles
+}
+
+fn participant_is_user(block: &CanonicalBlock, own_addresses: &[String]) -> bool {
+    waiting_party_address(&block.as_string()).is_some_and(|address| {
+        own_addresses
+            .iter()
+            .any(|own| own.eq_ignore_ascii_case(&address))
+    })
 }
 
 /// The [`ParseContext`] one message's temporal hypotheses reparse against:
@@ -2156,18 +2234,33 @@ fn governed_call(
             handle: m.handle.as_str(),
             message: &m.message,
             temporal_context: governed_temporal_context(m),
+            from_user: m.from_user,
+            to_user: m.to_user(),
+            cc_user: m.cc_user(),
         })
         .collect();
     let owned_handles = governed_participant_handles(conversation);
     let participants: Vec<ParticipantHandle> = owned_handles
         .iter()
-        .map(|(handle, message_handle, slot)| ParticipantHandle {
-            handle: handle.as_str(),
-            message_handle,
-            slot: *slot,
-        })
+        .map(
+            |(handle, message_handle, slot, is_user)| ParticipantHandle {
+                handle: handle.as_str(),
+                message_handle,
+                slot: *slot,
+                is_user: *is_user,
+            },
+        )
         .collect();
     let context = SuppliedContext {
+        user: UserIdentity {
+            handle: "user",
+            display_name: conversation
+                .first()
+                .and_then(|message| message.user_display_name.as_deref()),
+            given_name: conversation
+                .first()
+                .and_then(|message| message.user_given_name.as_deref()),
+        },
         messages: &messages,
         participants: &participants,
         loop_candidate_handles: loop_handles,
@@ -2269,7 +2362,16 @@ fn map_accepted_claim(
     } else {
         base_owner
     };
-    let owner = resolve_owner(base_owner, source_message);
+    let (owner, vocative_guard) = resolve_owner_with_vocative_guard(
+        claim.claim_type,
+        base_owner,
+        &primary.text,
+        source_message,
+    );
+    let mut ambiguity_codes = claim.ambiguity_codes.clone();
+    if vocative_guard && !ambiguity_codes.contains(&AmbiguityCode::Identity) {
+        ambiguity_codes.push(AmbiguityCode::Identity);
+    }
     let waiting_party = waiting_party_display(&claim.waiting_party_handle, conversation);
     let (deadline, event) = temporal_anchors(claim, &accepted.evidence);
     let evidence = Anchor {
@@ -2290,7 +2392,7 @@ fn map_accepted_claim(
         event_time: None,
         resolution: None,
         resolution_kind: None,
-        uncertainty: uncertainty_text(claim.claim_type, &claim.ambiguity_codes),
+        uncertainty: uncertainty_text(claim.claim_type, &ambiguity_codes),
         unverified_deadline: false,
         unverified_resolution: false,
         cross_thread: false,
@@ -3068,8 +3170,17 @@ fn scan_conversations_filtered(
         .store(ordered.len(), Ordering::Relaxed);
     let processed_per_job: Vec<usize> = ordered.iter().map(Vec::len).collect();
     let mut outcomes = run_jobs(&processed_per_job, pass, progress, &|index| {
-        let inputs: Vec<ConversationMessage> =
-            ordered[index].iter().map(|m| m.input.clone()).collect();
+        let inputs: Vec<ConversationMessage> = ordered[index]
+            .iter()
+            .map(|message| {
+                let mut input = message.input.clone();
+                input
+                    .user_display_name
+                    .clone_from(&message.own_display_name);
+                input.user_given_name.clone_from(&message.own_given_name);
+                input
+            })
+            .collect();
         analyze(&inputs)
     });
     // A job the pass stopped before any worker ever reached it has no
@@ -5070,7 +5181,11 @@ pub fn probe(provider: Provider, key: String, model: &str) -> Result<usize, Prov
             .map_err(|_| ProviderError::InvalidAnalysis)?
             .input;
         m.from_user = from_user;
-        m.to_user = to_user;
+        m.recipient = if to_user {
+            crate::claim_view::UserRecipient::To
+        } else {
+            crate::claim_view::UserRecipient::NotAddressed
+        };
         m.team = team;
         if from_user {
             set_outgoing(&mut m);
@@ -5162,12 +5277,16 @@ fn governed_probe_update(
     let mut request_message = prepare(request, "Synthetic", 0)
         .map_err(|_| ProviderError::InvalidAnalysis)?
         .input;
-    request_message.to_user = true;
+    request_message.recipient = crate::claim_view::UserRecipient::To;
     let mut reply_message = prepare(reply, "Synthetic", 1)
         .map_err(|_| ProviderError::InvalidAnalysis)?
         .input;
     reply_message.from_user = reply_from_user;
-    reply_message.to_user = !reply_from_user;
+    reply_message.recipient = if reply_from_user {
+        crate::claim_view::UserRecipient::NotAddressed
+    } else {
+        crate::claim_view::UserRecipient::To
+    };
     if reply_from_user {
         set_outgoing(&mut reply_message);
     }
@@ -5286,6 +5405,71 @@ mod tests {
     use super::*;
     use crate::claim_view::DELEGATION_UNCERTAINTY;
     use std::time::Instant;
+
+    fn vocative_message() -> ConversationMessage {
+        ConversationMessage {
+            handle: "m0".into(),
+            message: CanonicalMessage {
+                subject: CanonicalBlock::new("Synthetic thread").unwrap(),
+                body_blocks: vec![],
+                quote_blocks: vec![],
+                sender: Some(
+                    CanonicalBlock::new("Taylor Sender <sender@example.invalid>").unwrap(),
+                ),
+                to: vec![
+                    CanonicalBlock::new("Synthetic User <user@example.invalid>").unwrap(),
+                    CanonicalBlock::new("Jordan Recipient <recipient@example.invalid>").unwrap(),
+                ],
+                cc: vec![CanonicalBlock::new("Casey Observer <observer@example.invalid>").unwrap()],
+                attachment_names: vec![],
+                link_labels: vec![],
+            },
+            timestamp: 0,
+            from_user: false,
+            recipient: crate::claim_view::UserRecipient::To,
+            own_addresses: vec!["user@example.invalid".into()],
+            user_display_name: Some("Synthetic User".into()),
+            user_given_name: Some("Synthetic".into()),
+            team: false,
+        }
+    }
+
+    #[test]
+    fn non_user_vocative_downgrades_request_owner_with_identity_ambiguity() {
+        let (owner, identity) = resolve_owner_with_vocative_guard(
+            ClaimType::Request,
+            Owner::You,
+            "Jordan, find a time.",
+            &vocative_message(),
+        );
+        assert!(owner == Owner::Unclear);
+        assert!(identity);
+    }
+
+    #[test]
+    fn user_or_unknown_or_absent_vocative_leaves_owner_unchanged() {
+        let message = vocative_message();
+        for text in [
+            "Synthetic, find a time.",
+            "Morgan, find a time.",
+            "Please find a time.",
+        ] {
+            let (owner, identity) =
+                resolve_owner_with_vocative_guard(ClaimType::Request, Owner::You, text, &message);
+            assert!(owner == Owner::You, "text: {text}");
+            assert!(!identity, "text: {text}");
+        }
+    }
+
+    #[test]
+    fn prepare_marks_the_user_in_cc() {
+        let mut item = synthetic("Synthetic note.", 0, "cc");
+        item.to = vec!["recipient@example.invalid".into()];
+        item.cc = vec!["user@example.invalid".into()];
+        let prepared = prepare(&item, "Inbox", 0).unwrap();
+        assert!(!prepared.input.to_user());
+        assert!(prepared.input.cc_user());
+    }
 
     /// Runs the primary pass with a single worker and an `FnMut` callback:
     /// the shape the pass had before it was parallelized. Most tests here
@@ -5473,7 +5657,10 @@ mod tests {
             },
             timestamp: timestamp("2026-08-28T12:00:00Z"),
             from_user: false,
-            to_user: true,
+            recipient: crate::claim_view::UserRecipient::To,
+            own_addresses: vec!["user@example.invalid".into()],
+            user_display_name: Some("Synthetic User".into()),
+            user_given_name: Some("Synthetic".into()),
             team: false,
         };
         let m1 = ConversationMessage {
@@ -5490,7 +5677,10 @@ mod tests {
             },
             timestamp: timestamp("2026-08-29T09:00:00Z"),
             from_user: true,
-            to_user: false,
+            recipient: crate::claim_view::UserRecipient::NotAddressed,
+            own_addresses: vec!["user@example.invalid".into()],
+            user_display_name: Some("Synthetic User".into()),
+            user_given_name: Some("Synthetic".into()),
             team: false,
         };
         let m0_len = m0_body.chars().count();

@@ -130,8 +130,8 @@ fn create_after_sign_in(
     body: &[u8],
     graph_origin: &str,
 ) -> Result<ReminderOutcome, ConnectionError> {
-    let (signed_in_account, _) = review::identity_from_origin(http, token, graph_origin)?;
-    if signed_in_account != scanned_account {
+    let signed_in = review::identity_from_origin(http, token, graph_origin)?;
+    if signed_in.account != scanned_account {
         return Ok(ReminderOutcome::NotCreated(
             ReminderFailure::AccountMismatch,
         ));
@@ -220,8 +220,8 @@ pub fn complete(
     }
     let mut dispatched = false;
     let result = with_scopes(config, true, |http, token, _| {
-        let (signed_in, _) = review::identity(http, token)?;
-        if signed_in != account {
+        let signed_in = review::identity(http, token)?;
+        if signed_in.account != account {
             return Err(ConnectionError::InvalidConfiguration);
         }
         let mut url = Url::parse("https://graph.microsoft.com/v1.0/me/todo/lists/")
@@ -278,8 +278,8 @@ pub fn check_status(
         return TaskStatusOutcome::Unknown(ConnectionError::InvalidConfiguration);
     }
     let result = with_scopes(config, true, |http, token, _| {
-        let (signed_in, _) = review::identity(http, token)?;
-        if signed_in != account {
+        let signed_in = review::identity(http, token)?;
+        if signed_in.account != account {
             return Err(ConnectionError::InvalidConfiguration);
         }
         let mut url = Url::parse("https://graph.microsoft.com/v1.0/me/todo/lists/")
