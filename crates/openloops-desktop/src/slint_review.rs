@@ -1037,12 +1037,19 @@ pub(crate) fn scan_strip_view(
             stopping,
         } => {
             let downloading = *phase == "Downloading recent messages";
+            let triaging = *phase == "Triaging paragraphs";
             let conversation = if downloading {
                 format!("Source {conversation_index} of {conversation_total}")
+            } else if triaging {
+                format!("Paragraph {conversation_index} of {conversation_total}")
             } else {
                 format!("Conversation {conversation_index} of {conversation_total}")
             };
-            let messages = format!("{processed} / {total} messages");
+            let messages = if triaging {
+                format!("{processed} / {total} paragraphs")
+            } else {
+                format!("{processed} / {total} messages")
+            };
             (
                 ScanStripModel {
                     state: "scanning".into(),
@@ -3248,6 +3255,21 @@ mod tests {
         assert_eq!(view.messages.as_str(), "11 / 42 messages");
         assert_eq!(view.elapsed.as_str(), "7s on this request");
         assert_eq!(chip, "Scanning · Conversation 3 of 9 · 11 / 42 messages");
+
+        let triaging = ScanStrip::Scanning {
+            phase: "Triaging paragraphs",
+            conversation_index: 3,
+            conversation_total: 9,
+            processed: 11,
+            total: 42,
+            elapsed_secs: 7,
+            percent: 26,
+            stopping: false,
+        };
+        let (view, chip) = scan_strip_view(&triaging, &app, &cards);
+        assert_eq!(view.conversation.as_str(), "Paragraph 3 of 9");
+        assert_eq!(view.messages.as_str(), "11 / 42 paragraphs");
+        assert_eq!(chip, "Scanning · Paragraph 3 of 9 · 11 / 42 paragraphs");
 
         let (finished, chip) = scan_strip_view(&scan_strip(None, &app.review), &app, &cards);
         // T7: the fixture now seeds `source_failures = 5` (brief §5), so a

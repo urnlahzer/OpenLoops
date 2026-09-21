@@ -72,7 +72,15 @@ plus authoritative per-message facts for whether the user is the sender, a
 direct recipient, or a cc recipient. Participant slots carry a user marker so
 requests addressed to someone else are not attributed to the signed-in user.
 
-When the decision model is on, closure checks may also be sent to
+When the decision model is on, triage requests are sent before the governed
+conversation request. Each triage request contains exactly the message subject,
+one body paragraph as `paragraph_text`, and whether the message was sent by the
+user as `from_user`; at most the first 40 body paragraphs of each message are
+checked. The answer contains probabilities for the six registered triage
+questions and no generated text. Conversations that continue to the chat model
+omit accepted boilerplate paragraphs without renumbering the surviving blocks.
+
+Closure checks may also be sent to
 `POST /api/alpha/decisions` with request members `model`, `state`, `questions`,
 and `provider: {"zdr": true}` when the endpoint accepts it (which the check
 reports). Each request contains the obligation title, its resolved evidence

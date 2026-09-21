@@ -1152,7 +1152,9 @@ pub fn scan_strip(progress: Option<&ScanProgress>, review: &ReviewState) -> Scan
             ScanStrip::Idle
         };
     };
-    let phase = if progress.closure_phase.load(Ordering::Relaxed) {
+    let phase = if progress.triage_phase.load(Ordering::Relaxed) {
+        "Triaging paragraphs"
+    } else if progress.closure_phase.load(Ordering::Relaxed) {
         "Checking for updates to open loops"
     } else {
         "Finding open loops"
@@ -2960,6 +2962,12 @@ the scan stopped after a provider error."
             }
             other => panic!("expected Scanning, got {other:?}"),
         }
+        progress.triage_phase.store(true, Ordering::Relaxed);
+        match scan_strip(Some(&progress), &review) {
+            ScanStrip::Scanning { phase, .. } => assert_eq!(phase, "Triaging paragraphs"),
+            other => panic!("expected Scanning, got {other:?}"),
+        }
+        progress.triage_phase.store(false, Ordering::Relaxed);
         progress.closure_phase.store(true, Ordering::Relaxed);
         match scan_strip(Some(&progress), &review) {
             ScanStrip::Scanning { phase, .. } => {

@@ -165,6 +165,17 @@ affected conversation. Other conversation failures remain visible while the
 scan continues. There are no automatic request retries or silent model
 substitutions.
 
+With the `OpenRouter` decision-model setting enabled, a triage pass runs before
+the per-conversation analysis. `Jev` receives one body paragraph per request
+(up to 40 per message) and decides whether it contains a request, commitment,
+question, time reference, boilerplate, or an automated notification. Threads
+with no accepted or gray-band obligation signal, and notification-only threads,
+skip the chat-model pass. Accepted boilerplate is omitted from conversations
+that continue, while surviving body blocks retain their original ordinals.
+Coverage details report content-free triage counts and identify skipped threads
+as having no obligations found by triage; **Rescan** with the setting off sends
+those threads through the unchanged chat-model path.
+
 After the per-conversation pass, the closure pass checks later messages that can
 reach open requests: a later message in the same thread, or a conversation
 reached through a later message you sent to the waiting party. With the
