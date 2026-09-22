@@ -1578,6 +1578,9 @@ pub struct ScanProgress {
     /// Set only while P5's combined decision-model extraction pass
     /// ([`extraction_pass`]) is running.
     pub extraction_phase: AtomicBool,
+    /// Set only while a P3 rule-residue decision pass
+    /// ([`decide_rule_states`]) is running.
+    pub rules_phase: AtomicBool,
 }
 
 impl ScanProgress {
@@ -2690,6 +2693,15 @@ fn decide_rule_states(
     let questions = Questions::from_registry(&[id])?;
     let pass = ParallelPass::new(client.max_parallel());
     let processed = vec![1; jobs.len()];
+    // `total` only ever grows here (never reset), so the overall scan
+    // percent stays monotonic across every rule category this pass runs;
+    // `processed` is added to in lockstep by `run_jobs`, so it never runs
+    // past `total`.
+    progress.rules_phase.store(true, Ordering::Relaxed);
+    progress.total.fetch_add(jobs.len(), Ordering::Relaxed);
+    progress
+        .conversation_total
+        .store(jobs.len(), Ordering::Relaxed);
     let outcomes = run_jobs(&processed, &pass, progress, &|slot| {
         client
             .decide(
@@ -2700,6 +2712,8 @@ fn decide_rule_states(
             )
             .map(|answers| answers.get(id).cloned())
     });
+    progress.reset_pass();
+    progress.rules_phase.store(false, Ordering::Relaxed);
     let mut completed = BTreeSet::new();
     for (slot, outcome) in outcomes {
         completed.insert(slot);
@@ -12000,6 +12014,114 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         )
         .unwrap();
         rules
+    }
+
+    #[test]
+    fn decide_rule_states_accounts_progress_and_resets_phase() {
+        let client = FixedRuleDecisionClient::noul(0.9);
+        let mut rules = RuleDecisions::default();
+        let progress = ScanProgress::default();
+        let states = vec![
+            serde_json::json!({"a": 1}),
+            serde_json::json!({"a": 2}),
+            serde_json::json!({"a": 3}),
+        ];
+
+        decide_rule_states(
+            RULE_RECAP,
+            RuleCategory::Recap,
+            states,
+            &mut rules,
+            &client,
+            &progress,
+        )
+        .unwrap();
+
+        let processed = progress.processed.load(Ordering::Relaxed);
+        let total = progress.total.load(Ordering::Relaxed);
+        assert_eq!(processed, 3);
+        assert_eq!(total, 3);
+        assert_eq!(progress.snapshot().conversation_index, 0);
+        assert!(!progress.rules_phase.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn apply_rule_residue_keeps_processed_within_total_and_resets_phase() {
+        let mut a = expectation_for("m0");
+        a.action = "Send the draft".into();
+        let mut b = expectation_for("m0");
+        b.action = "Send the report".into();
+        let mut result = empty_result(0);
+        result.analysis.items = vec![a, b];
+
+        let messages: Vec<ReviewMessage> = Vec::new();
+        let client = FixedRuleDecisionClient::noul(0.9);
+        let mut rules = RuleDecisions::default();
+        let progress = ScanProgress::default();
+
+        apply_rule_residue(&mut result, &messages, &mut rules, &client, &progress).unwrap();
+
+        let processed = progress.processed.load(Ordering::Relaxed);
+        let total = progress.total.load(Ordering::Relaxed);
+        assert!(
+            total > 0,
+            "expected the residue pass to run at least one job"
+        );
+        assert_eq!(processed, total);
+        assert_eq!(progress.snapshot().conversation_index, 0);
+        assert!(!progress.rules_phase.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn scan_shaped_pipeline_keeps_processed_within_total() {
+        let mut recap_mail = synthetic("A short update.", 0, "residue-pipeline");
+        recap_mail.subject = "Project recap".into();
+        let message = prepare(&recap_mail, "Inbox", 0).unwrap();
+        let messages = vec![message];
+
+        let chat = ScriptedClient::new(|_, _| Ok(EMPTY_CLAIMS.to_string()));
+        let rules_client = FixedRuleDecisionClient::noul(0.9);
+        let progress = ScanProgress::default();
+        let mut rules = RuleDecisions::default();
+
+        let rule_messages =
+            prepare_rule_messages(&messages, &mut rules, &rules_client, &progress).unwrap();
+
+        let mut result = run_primary_pass(
+            ScanOptions {
+                provider: Provider::OpenRouter,
+                use_decision_model: true,
+                extraction_backend: ExtractionBackend::ChatModel,
+            },
+            PrimaryPassClients {
+                client: &chat,
+                decision_client: None,
+            },
+            &rule_messages,
+            &progress,
+            &ParallelPass::new(1),
+            None,
+            rule_messages.len(),
+        )
+        .unwrap();
+
+        apply_rule_residue(
+            &mut result,
+            &rule_messages,
+            &mut rules,
+            &rules_client,
+            &progress,
+        )
+        .unwrap();
+
+        let processed = progress.processed.load(Ordering::Relaxed);
+        let total = progress.total.load(Ordering::Relaxed);
+        assert!(
+            processed <= total,
+            "processed {processed} exceeded total {total}"
+        );
+        assert_eq!(progress.snapshot().conversation_index, 0);
+        assert!(!progress.rules_phase.load(Ordering::Relaxed));
     }
 
     #[test]
