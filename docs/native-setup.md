@@ -110,7 +110,8 @@ need to be unpinned and re-pinned (or `ie4uinit.exe -show` run) once.
 
 The native window uses Slint 1.17.1 with the Fluent style and native renderer. A narrow
 `settings.rs` module uses pinned `keyring-core` and `windows-native-keyring-store`
-dependencies to access only the `OpenLoops/Setup/v1` generic credential, with
+dependencies to access the `OpenLoops/Setup/v1`, `OpenLoops/Decisions/v1`, and
+`OpenLoops/Relations/v1` generic credentials, with
 credential search disabled. Network requests run on
 a background thread, inputs are disabled while a request is pending, and the
 window remains responsive with elapsed-time feedback. Settings operations are

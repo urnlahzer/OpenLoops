@@ -90,6 +90,48 @@ pub struct Decisions {
     pub error: Option<String>,
 }
 
+#[derive(Clone)]
+pub struct LoopKeys(Zeroizing<[u8; 32]>);
+
+impl LoopKeys {
+    pub fn key(
+        &self,
+        account: &str,
+        source: &str,
+        block: usize,
+        quote: &str,
+        action_phrase: &str,
+    ) -> [u8; 32] {
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(self.0.as_ref()).expect("fixed length HMAC key");
+        let block = block.to_string();
+        let quote = normalize_for_fingerprint(quote);
+        let action_phrase = normalize_for_fingerprint(action_phrase);
+        for field in [
+            "openloops-expectation-v2",
+            account,
+            source,
+            &block,
+            &quote,
+            &action_phrase,
+        ] {
+            mac.update(&(field.len() as u64).to_le_bytes());
+            mac.update(field.as_bytes());
+        }
+        mac.finalize().into_bytes().into()
+    }
+
+    pub(crate) fn domain_key(&self, fields: &[&str]) -> [u8; 32] {
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(self.0.as_ref()).expect("fixed length HMAC key");
+        for field in fields {
+            mac.update(&(field.len() as u64).to_le_bytes());
+            mac.update(field.as_bytes());
+        }
+        mac.finalize().into_bytes().into()
+    }
+}
+
 fn failure() -> String {
     "Saved loop decisions are unavailable or changed in another window. Close the other window and reopen OpenLoops; your previous decisions have been preserved.".into()
 }
@@ -222,23 +264,11 @@ impl Decisions {
         quote: &str,
         action_phrase: &str,
     ) -> [u8; 32] {
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(self.secret.as_ref()).expect("fixed length HMAC key");
-        let block = block.to_string();
-        let quote = normalize_for_fingerprint(quote);
-        let action_phrase = normalize_for_fingerprint(action_phrase);
-        for field in [
-            "openloops-expectation-v2",
-            account,
-            source,
-            &block,
-            &quote,
-            &action_phrase,
-        ] {
-            mac.update(&(field.len() as u64).to_le_bytes());
-            mac.update(field.as_bytes());
-        }
-        mac.finalize().into_bytes().into()
+        self.keys()
+            .key(account, source, block, quote, action_phrase)
+    }
+    pub(crate) fn keys(&self) -> LoopKeys {
+        LoopKeys(self.secret.clone())
     }
     pub fn get(&self, key: &[u8; 32]) -> Record {
         self.records
@@ -288,7 +318,7 @@ impl Decisions {
         if let Some(entry) = &self.entry {
             // One OS-protected, empty lock file serializes the credential CAS.
             // It contains no record, account identifier, key or mailbox content.
-            let _writer = writer_lock()?;
+            let _writer = writer_lock("OpenLoops-decision-writer.lock")?;
             let current = match entry.get_secret() {
                 Ok(b) => Zeroizing::new(b),
                 Err(keyring_core::Error::NoEntry) => Zeroizing::new(vec![]),
@@ -307,8 +337,8 @@ impl Decisions {
 }
 
 #[cfg(windows)]
-fn writer_lock() -> Result<std::fs::File, ()> {
-    exclusive_writer_file(&std::env::temp_dir().join("OpenLoops-decision-writer.lock"))
+pub(crate) fn writer_lock(name: &str) -> Result<std::fs::File, ()> {
+    exclusive_writer_file(&std::env::temp_dir().join(name))
 }
 
 #[cfg(windows)]
@@ -325,7 +355,7 @@ fn exclusive_writer_file(path: &std::path::Path) -> Result<std::fs::File, ()> {
 }
 
 #[cfg(not(windows))]
-fn writer_lock() -> Result<std::fs::File, ()> {
+pub(crate) fn writer_lock(_name: &str) -> Result<std::fs::File, ()> {
     Err(())
 }
 
@@ -618,6 +648,7 @@ mod tests {
             from_call_summary: false,
             meeting_time: None,
             meeting_time_approx: false,
+            mentions: Vec::new(),
         };
         let state = Decisions {
             secret: Zeroizing::new([7; 32]),

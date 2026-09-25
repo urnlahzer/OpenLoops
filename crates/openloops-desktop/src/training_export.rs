@@ -9,6 +9,7 @@
 //! logs or returns row content; callers may only surface row counts.
 
 use crate::claim_view::{LoopItem, Owner, RecoveredClaimKind, SuggestedUpdateKind, claim_kind_of};
+use crate::link_state::LinkKind;
 use crate::review_model::{
     ReviewMessage, ReviewState, closure_candidates, same_thread_closure_candidates,
 };
@@ -28,6 +29,8 @@ const MAX_ROWS_PER_FILE: usize = 20_000;
 pub struct ExportSummary {
     pub triage_rows: usize,
     pub closure_rows: usize,
+    pub rules_rows: usize,
+    pub files_written: usize,
 }
 
 #[derive(Debug)]
@@ -59,11 +62,123 @@ pub fn export(review: &ReviewState, folder: &Path) -> Result<ExportSummary, Expo
     std::fs::create_dir_all(folder)?;
     let triage = triage_rows(review);
     let closure = closure_rows(review);
+    let rules = rules_rows(review);
     write_jsonl(&folder.join("triage.jsonl"), &triage)?;
     write_jsonl(&folder.join("closure.jsonl"), &closure)?;
+    write_jsonl(&folder.join("rules.jsonl"), &rules)?;
     Ok(ExportSummary {
         triage_rows: triage.len(),
         closure_rows: closure.len(),
+        rules_rows: rules.len(),
+        files_written: 3,
+    })
+}
+
+fn rules_rows(review: &ReviewState) -> Vec<Value> {
+    let Some(analysis) = &review.analysis else {
+        return Vec::new();
+    };
+    let cards = review.card_contexts(&analysis.items);
+    let actions: std::collections::BTreeMap<[u8; 32], &str> = cards
+        .iter()
+        .zip(&analysis.items)
+        .filter_map(|(card, item)| {
+            card.as_ref()
+                .map(|card| (card.record.key, item.action.as_str()))
+        })
+        .collect();
+    let mut rows = Vec::new();
+    for link in &review.relations.links {
+        let duplicate = match link.kind {
+            LinkKind::SameLoop => Some(true),
+            LinkKind::NotSameLoop => Some(false),
+            LinkKind::SameThread | LinkKind::NotSameThread => None,
+        };
+        if let Some(label) = duplicate
+            && let (Some(action_a), Some(action_b)) = (actions.get(&link.a), actions.get(&link.b))
+        {
+            rows.push(rule_duplicate_row(action_a, action_b, label));
+        }
+    }
+    let threads = thread_export_groups(review);
+    for link in &review.relations.links {
+        let merged = match link.kind {
+            LinkKind::SameThread => Some(true),
+            LinkKind::NotSameThread => Some(false),
+            LinkKind::SameLoop | LinkKind::NotSameLoop => None,
+        };
+        if let Some(label) = merged
+            && let (Some(a), Some(b)) = (threads.get(&link.a), threads.get(&link.b))
+        {
+            rows.push(rule_thread_row(a, b, label));
+        }
+    }
+    rows.truncate(MAX_ROWS_PER_FILE);
+    rows
+}
+
+fn rule_duplicate_row(action_a: &str, action_b: &str, duplicate: bool) -> Value {
+    serde_json::json!({
+        "action_a": action_a,
+        "action_b": action_b,
+        "id": stable_id(&format!("rules|duplicate|{action_a}|{action_b}")),
+        "label": {"rules.duplicate_action": duplicate},
+        "label_source": "gold",
+        "set": "rules",
+        "source": "owner",
+    })
+}
+
+struct ThreadExport<'a> {
+    subject: String,
+    first_paragraph: String,
+    marker: &'a str,
+}
+
+fn thread_export_groups(
+    review: &ReviewState,
+) -> std::collections::BTreeMap<[u8; 32], ThreadExport<'_>> {
+    let mut groups: std::collections::BTreeMap<(String, String), Vec<&ReviewMessage>> =
+        std::collections::BTreeMap::new();
+    for message in &review.messages {
+        groups
+            .entry((message.account.clone(), message.conversation.clone()))
+            .or_default()
+            .push(message);
+    }
+    groups
+        .into_iter()
+        .filter_map(|((account, conversation), messages)| {
+            let earliest = messages
+                .into_iter()
+                .min_by_key(|message| message.input.timestamp)?;
+            let key = review.relations.thread_key(&account, &conversation);
+            Some((
+                key,
+                ThreadExport {
+                    subject: earliest.input.message.subject.as_string(),
+                    first_paragraph: earliest.input.message.body_blocks.first().map_or_else(
+                        String::new,
+                        openloops_inference::blocks::CanonicalBlock::as_string,
+                    ),
+                    marker: earliest.input.handle.as_str(),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn rule_thread_row(a: &ThreadExport<'_>, b: &ThreadExport<'_>, merged: bool) -> Value {
+    serde_json::json!({
+        "subject_a": a.subject,
+        "subject_b": b.subject,
+        "first_paragraph_a": a.first_paragraph,
+        "first_paragraph_b": b.first_paragraph,
+        "id": stable_id(&format!("rules|thread|{}|{}", a.marker, b.marker)),
+        "label": {"rules.thread_merge": merged},
+        "label_source": "gold",
+        "set": "rules",
+        "source": "owner",
     })
 }
 
@@ -450,6 +565,60 @@ mod tests {
         text.lines()
             .map(|line| serde_json::from_str(line).expect("valid json line"))
             .collect()
+    }
+
+    #[test]
+    fn rules_rows_carry_exactly_the_allowed_keys() {
+        let mut review = layout_fixture();
+        let cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
+        let a = cards[0].as_ref().unwrap().record.key;
+        let b = cards[1].as_ref().unwrap().record.key;
+        review.relations.set(LinkKind::SameLoop, a, b).unwrap();
+        let rows = rules_rows(&review);
+        assert_eq!(rows.len(), 1);
+        let object = rows[0].as_object().unwrap();
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "action_a",
+                "action_b",
+                "id",
+                "label",
+                "label_source",
+                "set",
+                "source"
+            ]
+        );
+        assert_eq!(
+            object["label"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["rules.duplicate_action"]
+        );
+    }
+
+    #[test]
+    fn a_same_loop_link_yields_gold_duplicate_rows() {
+        let mut review = layout_fixture();
+        let cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
+        review
+            .relations
+            .set(
+                LinkKind::SameLoop,
+                cards[0].as_ref().unwrap().record.key,
+                cards[1].as_ref().unwrap().record.key,
+            )
+            .unwrap();
+        let rows = rules_rows(&review);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["label_source"], "gold");
+        assert_eq!(rows[0]["source"], "owner");
+        assert_eq!(rows[0]["set"], "rules");
+        assert_eq!(rows[0]["label"]["rules.duplicate_action"], true);
     }
 
     #[test]

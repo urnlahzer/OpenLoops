@@ -1,9 +1,10 @@
 //! Toolkit-free review state and pure decision/urgency/status logic.
 use crate::claim_view::{
-    Anchor, EventPassed, LoopItem, LoopItems, Owner, ResolutionKind, ResolvedUpdate,
+    Anchor, EventPassed, LoopItem, LoopItems, MentionOrigin, Owner, ResolutionKind, ResolvedUpdate,
     SuggestedUpdate, SuggestedUpdateKind,
 };
 use crate::deadline_view::{DeadlineView, classify, classify_with_hint};
+use crate::link_state::{LinkKind, Relations};
 use crate::loop_state::{Decision, Decisions, Record, Reminder, now};
 use openloops_graph::live::{
     reminders::ReminderRequest,
@@ -70,6 +71,7 @@ pub(crate) struct CardContext {
     pub(crate) closed: bool,
     pub(crate) deadline: Option<DeadlineView>,
     pub(crate) from_call_summary: bool,
+    pub(crate) mentions: usize,
 }
 
 pub(crate) fn is_past_due(view: &DeadlineView) -> bool {
@@ -82,18 +84,34 @@ pub(crate) fn is_past_due(view: &DeadlineView) -> bool {
     )
 }
 
-fn card_rank(card: Option<&CardContext>) -> u8 {
-    match card {
+fn card_rank(card: Option<&CardContext>) -> (u8, u8) {
+    let group = match card {
         Some(card) if card.closed => 2,
         Some(card) if card.deadline.as_ref().is_some_and(is_past_due) => 0,
         _ => 1,
-    }
+    };
+    (group, u8::from(card.is_none_or(|card| card.mentions == 0)))
 }
 
 pub(crate) fn card_order(cards: &[Option<CardContext>]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..cards.len()).collect();
     order.sort_by_key(|&i| (card_rank(cards[i].as_ref()), i));
     order
+}
+
+fn find(parent: &mut [usize], index: usize) -> usize {
+    if parent[index] != index {
+        parent[index] = find(parent, parent[index]);
+    }
+    parent[index]
+}
+
+fn union(parent: &mut [usize], a: usize, b: usize) {
+    let a = find(parent, a);
+    let b = find(parent, b);
+    if a != b {
+        parent[b] = a;
+    }
 }
 
 /// What resolving a suggested update asks the caller to do next.
@@ -110,7 +128,6 @@ pub(crate) enum SuggestionOutcome {
     MarkHandled,
 }
 
-#[derive(Default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ReviewState {
     pub messages: Vec<ReviewMessage>,
@@ -124,6 +141,7 @@ pub struct ReviewState {
     pub failed_sources: BTreeSet<String>,
     pub failed_conversations_detail: Vec<ConversationFailure>,
     pub decisions: Decisions,
+    pub relations: Relations,
     /// Owner accept/reject outcomes on suggested updates, kept after
     /// [`LoopItem::suggested_update`] is cleared so a later training-data
     /// export ([`crate::training_export`]) can still recover the gold
@@ -175,6 +193,44 @@ pub struct ReviewState {
     conversation_notes_by_id: BTreeMap<String, Vec<String>>,
     conversation_rejection_reasons: BTreeMap<String, Vec<&'static str>>,
     closure_pass_failure: Option<String>,
+    pub(crate) linked_card_titles: BTreeMap<[u8; 32], String>,
+}
+
+impl Default for ReviewState {
+    fn default() -> Self {
+        let decisions = Decisions::default();
+        let relations = Relations::open_with(&decisions);
+        Self {
+            messages: Vec::new(),
+            notices: Vec::new(),
+            analysis: None,
+            analysis_model: String::new(),
+            scan_summary: String::new(),
+            scan_errors: Vec::new(),
+            scan_incomplete: false,
+            source_failures: 0,
+            failed_sources: BTreeSet::new(),
+            failed_conversations_detail: Vec::new(),
+            decisions,
+            relations,
+            resolved_updates: Vec::new(),
+            action_status: String::new(),
+            action_status_succeeded: false,
+            pending_reminder: None,
+            draft: None,
+            show_handled: false,
+            show_call_summaries: false,
+            search_query: String::new(),
+            scan_failed: false,
+            source_notes: BTreeMap::new(),
+            source_issue_counts: BTreeMap::new(),
+            conversation_quality: BTreeMap::new(),
+            conversation_notes_by_id: BTreeMap::new(),
+            conversation_rejection_reasons: BTreeMap::new(),
+            closure_pass_failure: None,
+            linked_card_titles: BTreeMap::new(),
+        }
+    }
 }
 
 struct MergedConversationMetadata {
@@ -456,6 +512,7 @@ impl ReviewState {
             self.scan_errors.push(failure);
         }
         self.analysis = Some(result.analysis);
+        self.apply_loop_links();
         self.analysis_model = model;
         self.resolved_updates.clear();
         // A rescan rebuilds `analysis`/`messages` from scratch; an open
@@ -721,6 +778,7 @@ impl ReviewState {
             closed,
             deadline,
             from_call_summary: item.from_call_summary,
+            mentions: item.mentions.len(),
         })
     }
 
@@ -815,6 +873,175 @@ impl ReviewState {
                 self.card_context(item, clock.timestamp(), clock.offset().local_minus_utc())
             })
             .collect()
+    }
+
+    pub fn apply_loop_links(&mut self) -> usize {
+        let Some(analysis) = self.analysis.as_ref() else {
+            return 0;
+        };
+        let cards = self.card_contexts(&analysis.items);
+        for (card, item) in cards.iter().zip(&analysis.items) {
+            if let Some(card) = card {
+                self.linked_card_titles
+                    .insert(card.record.key, item.action.clone());
+            }
+        }
+        let mut parent: Vec<usize> = (0..analysis.items.len()).collect();
+        let key_to_index: BTreeMap<[u8; 32], usize> = cards
+            .iter()
+            .enumerate()
+            .filter_map(|(index, card)| card.as_ref().map(|card| (card.record.key, index)))
+            .collect();
+        for (a, b) in self.relations.pairs(LinkKind::SameLoop) {
+            let (Some(&a), Some(&b)) = (key_to_index.get(&a), key_to_index.get(&b)) else {
+                continue;
+            };
+            union(&mut parent, a, b);
+        }
+        let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for index in 0..parent.len() {
+            let root = find(&mut parent, index);
+            groups.entry(root).or_default().push(index);
+        }
+        let timestamps: Vec<i64> = analysis
+            .items
+            .iter()
+            .map(|item| self.item_timestamp(item))
+            .collect();
+        let mut folds = Vec::new();
+        for mut group in groups.into_values().filter(|group| group.len() > 1) {
+            group.sort_by_key(|&index| (timestamps[index], index));
+            let survivor = group[0];
+            for &dropped in &group[1..] {
+                folds.push((survivor, dropped, timestamps[dropped]));
+            }
+        }
+        let count = folds.len();
+        let analysis = self.analysis.as_mut().expect("analysis was checked above");
+        for (survivor, dropped, timestamp) in &folds {
+            let dropped_item = analysis.items[*dropped].clone();
+            crate::claim_view::fold_into(
+                &mut analysis.items[*survivor],
+                dropped_item,
+                MentionOrigin::OwnerLink,
+                *timestamp,
+            );
+        }
+        let mut removals: Vec<usize> = folds.iter().map(|(_, dropped, _)| *dropped).collect();
+        removals.sort_unstable();
+        removals.dedup();
+        for index in removals.into_iter().rev() {
+            analysis.items.remove(index);
+        }
+        count
+    }
+
+    pub fn link_cards(&mut self, kind: LinkKind, a: usize, b: usize) -> Result<(), String> {
+        if a == b {
+            return Err("Select a different card.".into());
+        }
+        let analysis = self
+            .analysis
+            .as_ref()
+            .ok_or("No review results are loaded.")?;
+        let (item_a, item_b) = (
+            analysis
+                .items
+                .get(a)
+                .ok_or("The first card is unavailable.")?,
+            analysis
+                .items
+                .get(b)
+                .ok_or("The second card is unavailable.")?,
+        );
+        let keys = match kind {
+            LinkKind::SameLoop | LinkKind::NotSameLoop => {
+                let cards = self.card_contexts(&analysis.items);
+                let a = cards[a].as_ref().ok_or("The first card is unavailable.")?;
+                let b = cards[b].as_ref().ok_or("The second card is unavailable.")?;
+                (a.record.key, b.record.key)
+            }
+            LinkKind::SameThread | LinkKind::NotSameThread => {
+                let a = self
+                    .thread_key_for_item(item_a)
+                    .ok_or("The first conversation is unavailable.")?;
+                let b = self
+                    .thread_key_for_item(item_b)
+                    .ok_or("The second conversation is unavailable.")?;
+                if a == b {
+                    return Err("Already the same conversation".into());
+                }
+                (a, b)
+            }
+        };
+        let saved = self.relations.set(kind, keys.0, keys.1);
+        self.action_status_succeeded = saved.is_ok();
+        self.action_status = match &saved {
+            Ok(()) => {
+                "Link saved on this Windows account. No mail text or names were stored.".into()
+            }
+            Err(error) => error.clone(),
+        };
+        saved
+    }
+
+    pub fn unlink_card(&mut self, index: usize) -> Result<usize, String> {
+        let analysis = self
+            .analysis
+            .as_ref()
+            .ok_or("No review results are loaded.")?;
+        let item = analysis
+            .items
+            .get(index)
+            .ok_or("The card is unavailable.")?;
+        let card_key = self
+            .card_context(item, now(), chrono::Local::now().offset().local_minus_utc())
+            .ok_or("The card is unavailable.")?
+            .record
+            .key;
+        let thread_key = self.thread_key_for_item(item);
+        let mut changes = Vec::new();
+        for link in self.relations.links.clone() {
+            let replacement = match link.kind {
+                LinkKind::SameLoop if link.a == card_key || link.b == card_key => {
+                    Some(LinkKind::NotSameLoop)
+                }
+                LinkKind::SameThread
+                    if thread_key.is_some_and(|key| link.a == key || link.b == key) =>
+                {
+                    Some(LinkKind::NotSameThread)
+                }
+                _ => None,
+            };
+            if let Some(kind) = replacement {
+                changes.push((kind, link.a, link.b));
+            }
+        }
+        for &(kind, a, b) in &changes {
+            self.relations.set(kind, a, b)?;
+        }
+        self.action_status_succeeded = true;
+        self.action_status =
+            "Link removed on this Windows account. No mail text or names were stored.".into();
+        Ok(changes.len())
+    }
+
+    fn item_timestamp(&self, item: &LoopItem) -> i64 {
+        self.messages
+            .iter()
+            .find(|message| message.input.handle == item.evidence.message)
+            .map_or(0, |message| message.input.timestamp)
+    }
+
+    fn thread_key_for_item(&self, item: &LoopItem) -> Option<[u8; 32]> {
+        let message = self
+            .messages
+            .iter()
+            .find(|message| message.input.handle == item.evidence.message)?;
+        Some(
+            self.relations
+                .thread_key(&message.account, &message.conversation),
+        )
     }
 
     /// Still-open, reminder-bearing decisions eligible for a To Do sync
@@ -1456,6 +1683,7 @@ pub fn layout_fixture() -> ReviewState {
             from_call_summary: false,
             meeting_time: None,
             meeting_time_approx: false,
+            mentions: Vec::new(),
         },
         // Card 2: still needs a decision, no reminder -- this is the card
         // the preview's open draft attaches to. Its evidence message (m1)
@@ -1494,6 +1722,7 @@ pub fn layout_fixture() -> ReviewState {
             from_call_summary: false,
             meeting_time: None,
             meeting_time_approx: false,
+            mentions: Vec::new(),
         },
         // Card 3: a reminder attempt with no confirmed outcome, so the
         // preview also exercises the "attempted" marker callout and its two
@@ -1530,6 +1759,7 @@ pub fn layout_fixture() -> ReviewState {
             from_call_summary: false,
             meeting_time: None,
             meeting_time_approx: false,
+            mentions: Vec::new(),
         },
     ];
     // T7 (brief §5): `source_failures` must be set before `set_scan` runs --
@@ -2275,6 +2505,7 @@ mod tests {
             from_call_summary: false,
             meeting_time: None,
             meeting_time_approx: false,
+            mentions: Vec::new(),
         };
         (state, item)
     }
@@ -2410,7 +2641,7 @@ mod tests {
             state.decisions.records = vec![record];
             let card = state.card_context(&item, CLEARLY_PAST_DUE, 0).unwrap();
             assert!(card.terminal);
-            assert_eq!(card_rank(Some(&card)), 2);
+            assert_eq!(card_rank(Some(&card)), (2, 1));
         }
         state.decisions.records[0].decision = Decision::Review;
         let overdue = state.card_context(&item, CLEARLY_PAST_DUE, 0);
@@ -2419,7 +2650,7 @@ mod tests {
         let mut range_item = item.clone();
         range_item.deadline.as_mut().unwrap().quote = "this week".into();
         let range = state.card_context(&range_item, CLEARLY_PAST_WEEK, 0);
-        assert_eq!(card_rank(range.as_ref()), 0);
+        assert_eq!(card_rank(range.as_ref()), (0, 1));
         let (mut terminal_state, terminal_item) = aging_fixture();
         let mut record = terminal_state
             .card_context(&terminal_item, CLEARLY_PAST_DUE, 0)
@@ -2450,7 +2681,7 @@ mod tests {
         let resolved = resolved_state.card_context(&resolved_item, CLEARLY_DUE, 0);
         assert!(resolved.as_ref().unwrap().closed);
         assert!(!resolved.as_ref().unwrap().terminal);
-        assert_eq!(card_rank(resolved.as_ref()), 2);
+        assert_eq!(card_rank(resolved.as_ref()), (2, 1));
 
         // The same resolved item, once the saved decision explicitly
         // overrides closure with `Decision::Mine`, ranks and hides like any
@@ -2466,7 +2697,7 @@ mod tests {
         overridden_state.decisions.records = vec![override_record];
         let overridden = overridden_state.card_context(&resolved_item, CLEARLY_DUE, 0);
         assert!(!overridden.as_ref().unwrap().closed);
-        assert_eq!(card_rank(overridden.as_ref()), 1);
+        assert_eq!(card_rank(overridden.as_ref()), (1, 1));
     }
     #[test]
     fn past_reminder_times_are_rejected() {
@@ -2665,7 +2896,7 @@ mod tests {
         });
         let card = state.card_context(&item, 0, 0).unwrap();
         assert!(card.closed);
-        assert_eq!(card_rank(Some(&card)), 2);
+        assert_eq!(card_rank(Some(&card)), (2, 1));
         assert_eq!(
             status_base_label(Decision::Review, &item),
             event_passed_status_label(item.event_passed.as_ref().unwrap())
@@ -3112,6 +3343,7 @@ the scan stopped after a provider error."
                 closed,
                 deadline,
                 from_call_summary: false,
+                mentions: 0,
             };
             let expect = |deadline: Option<DeadlineView>, expected: ListGroup| {
                 let group = list_group(&card(deadline));
@@ -3219,6 +3451,7 @@ the scan stopped after a provider error."
             closed,
             deadline: None,
             from_call_summary: false,
+            mentions: 0,
         }
     }
 
@@ -3417,5 +3650,35 @@ the scan stopped after a provider error."
     #[test]
     fn show_call_summary_label_matches_the_review_spec() {
         assert_eq!(SHOW_CALL_SUMMARY_LABEL, "Show loops from call summaries");
+    }
+
+    #[test]
+    fn apply_loop_links_folds_the_newer_linked_card_into_the_older_and_respects_not_same() {
+        let mut review = layout_fixture();
+        review.messages[0].input.timestamp = 100;
+        review.messages[1].input.timestamp = 200;
+        let cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
+        let a = cards[0].as_ref().unwrap().record.key;
+        let b = cards[1].as_ref().unwrap().record.key;
+        review.relations.set(LinkKind::NotSameLoop, a, b).unwrap();
+        assert_eq!(review.apply_loop_links(), 0);
+        review.relations.set(LinkKind::SameLoop, a, b).unwrap();
+        assert_eq!(review.apply_loop_links(), 1);
+        let items = &review.analysis.as_ref().unwrap().items;
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].mentions.len(), 1);
+        assert_eq!(items[0].mentions[0].origin, MentionOrigin::OwnerLink);
+        assert_eq!(items[0].mentions[0].timestamp, 200);
+    }
+
+    #[test]
+    fn unlink_records_not_same_loop() {
+        let mut review = layout_fixture();
+        let cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
+        let a = cards[0].as_ref().unwrap().record.key;
+        let b = cards[1].as_ref().unwrap().record.key;
+        review.relations.set(LinkKind::SameLoop, a, b).unwrap();
+        assert_eq!(review.unlink_card(0).unwrap(), 1);
+        assert_eq!(review.relations.get(a, b), Some(LinkKind::NotSameLoop));
     }
 }

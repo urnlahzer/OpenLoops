@@ -2578,6 +2578,7 @@ fn map_accepted_claim(
         from_call_summary: false,
         meeting_time: None,
         meeting_time_approx: false,
+        mentions: Vec::new(),
     })
 }
 
@@ -9445,6 +9446,7 @@ at the downtown courthouse. Let me know if that works.",
             from_call_summary: false,
             meeting_time: None,
             meeting_time_approx: false,
+            mentions: Vec::new(),
         }
     }
 
@@ -10349,6 +10351,7 @@ at the downtown courthouse. Let me know if that works.",
             from_call_summary: false,
             meeting_time: None,
             meeting_time_approx: false,
+            mentions: Vec::new(),
         };
         (all, item)
     }

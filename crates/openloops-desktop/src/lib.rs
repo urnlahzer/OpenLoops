@@ -6,6 +6,7 @@ pub(crate) mod app_model;
 pub mod claim_view;
 #[cfg(feature = "native-ui")]
 pub(crate) mod deadline_view;
+pub(crate) mod link_state;
 #[cfg(feature = "native-ui")]
 pub(crate) mod loop_state;
 #[cfg(feature = "native-ui")]

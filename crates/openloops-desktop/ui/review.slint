@@ -97,6 +97,8 @@ export component ReviewScreen {
     in property <string> uncertainty;
     in property <string> action-status;
     in property <bool> action-status-succeeded;
+    in property <string> linking-status;
+    in property <bool> has-links;
     in property <bool> selected-open;
     in property <bool> selected-terminal;
     in property <bool> can-track;
@@ -140,6 +142,10 @@ export component ReviewScreen {
     callback move-selection(int);
     callback list-primary-action;
     callback decision(int);
+    callback link-loop;
+    callback link-thread;
+    callback unlink;
+    callback cancel-link;
     callback suggested-update-resolved(bool);
     callback open-reminder;
     callback draft-title-edited(string);
@@ -276,6 +282,7 @@ export component ReviewScreen {
                         vertical-stretch: 1; accessible-role: list; accessible-label: "Review expectations"; accessible-item-count: root.rows.length;
                         key-pressed(event) => {
                             if root.busy { return reject; }
+                            if event.text == Key.Escape { root.cancel-link(); return accept; }
                             if event.text == Key.UpArrow { root.move-selection(-1); return accept; }
                             if event.text == Key.DownArrow { root.move-selection(1); return accept; }
                             if event.text == Key.Return { root.list-primary-action(); return accept; }
@@ -406,6 +413,7 @@ export component ReviewScreen {
                                             text-color: Tokens.text-3;
                                             size: Tokens.font-11;
                                         }
+                                        if !root.linking-status.is-empty: WrappedText { text: root.linking-status; text-color: Tokens.text-2; size: Tokens.font-11; }
                                         // Decision callback codes are defined once in slint_review.rs.
                                         // Two rows, not one: an undecided Team-owned card shows Track
                                         // *and* Watch alongside all three terminal actions, five buttons
@@ -430,10 +438,14 @@ export component ReviewScreen {
                                             Rectangle { horizontal-stretch: 1; }
                                             OutlineButton { text: "Set To Do reminder…"; enabled: root.can-remind; clicked => { root.open-reminder(); } }
                                         }
-                                        if root.selected-open: HorizontalLayout { width: 100%; spacing: Tokens.space-2; alignment: start;
+                                        if root.selected-open: HorizontalLayout { width: 100%; spacing: Tokens.space-2;
                                             SecondaryButton { text: "Handled"; enabled: !root.busy; clicked => { root.decision(2); } }
                                             SecondaryButton { text: "Not mine / dismiss"; enabled: !root.busy; clicked => { root.decision(3); } }
                                             SecondaryButton { text: "No longer relevant"; enabled: !root.busy; clicked => { root.decision(5); } }
+                                            Rectangle { horizontal-stretch: 1; }
+                                            OutlineButton { text: "Same loop as…"; enabled: !root.busy; clicked => { root.link-loop(); } }
+                                            OutlineButton { text: "Same conversation as…"; enabled: !root.busy; clicked => { root.link-thread(); } }
+                                            if root.has-links: OutlineButton { text: "Not the same"; enabled: !root.busy; clicked => { root.unlink(); } }
                                         }
                                         // X3 (replaces the earlier egui-parity plan, S5): §4.5 and the
                                         // Companion show both actions on every closed card --

@@ -223,7 +223,7 @@ is stored between scans.
 ## Saved decisions and reminders
 
 The native preview stores a bounded versioned Windows Credential Manager record
-containing a random HMAC key, up to 50 keyed per-account source/action
+containing a random HMAC key, up to 55 keyed per-account source/action
 fingerprints, decision enums, reminder-attempt enums, and timestamps. No names,
 mail addresses, subjects, descriptions, source quotations, or Graph identifiers
 are in that record. Descriptions are reconstructed after the next scan.
@@ -239,10 +239,17 @@ decision does not complete or delete a Microsoft task. All remote content is
 limited to the reviewed task title/time and an opaque correlation reference.
 No email is sent and no shared task list is modified.
 
-Completed/dismissed records without reminders expire after 30 days when state
+Completed/dismissed records without reminders expire after 180 days when state
 is updated. Reminder records remain available for user reconciliation. Hitting
 the storage bound fails visibly and preserves existing records. A failed/corrupt
 read or detected concurrent edit stops saving rather than overwriting data.
+
+Owner-taught links use a second generic credential,
+`OpenLoops/Relations/v1`, containing at most 34 canonical pairs of HMAC
+fingerprints, link-kind tags, and timestamps. It contains no readable mail,
+names, addresses, subjects, or quotations. Resetting the decisions credential
+also replaces the HMAC key, so any saved relation fingerprints become orphaned
+and no longer match cards from later scans.
 
 This is a foreground native preview. Scans require a current in-process Microsoft
 session; there is no
@@ -255,11 +262,22 @@ API references: [messages](https://learn.microsoft.com/en-us/graph/api/user-list
 [To Do creation](https://learn.microsoft.com/en-us/graph/api/todotasklist-post-tasks?view=graph-rest-1.0),
 [Ollama structured-output limits](https://docs.ollama.com/capabilities/structured-outputs).
 
+# Linking loops and conversations
+
+**Same loop as…** and **Same conversation as…** start a two-step selection:
+choose the action, then select the other card. Escape cancels. **Not the same**
+records the opposite relationship for every current link involving the selected
+card. Same-loop links apply immediately by folding the newer card into the older
+card and showing the later evidence as **Asked again**. Conversation links are
+saved now and take effect during the next scan once rule consumption is enabled
+in PR 2. Only HMAC fingerprints, link-kind tags, and timestamps are stored.
+
 ### Training data export (deliberate exception)
 
 The Sources screen's OpenRouter card has an owner-invoked **Export training
 data** control: with a scan result loaded and a folder path typed into
-**Training export folder**, it writes `triage.jsonl` and `closure.jsonl` --
+**Training export folder**, it writes `triage.jsonl`, `closure.jsonl`, and
+`rules.jsonl` --
 real mail text (subjects, paragraphs, participants) from the currently
 loaded scan, plus the owner's own accept/reject decisions on suggested
 updates -- for the `Jev` question-optimization harness in
@@ -270,6 +288,12 @@ names outside this repository, and the button requires two presses (the
 first only arms a warning). The folder path itself lives in memory only for
 the running session and is never saved to Windows Credential Manager or any
 other settings record; nothing about the export is logged.
+
+`rules.jsonl` contains two gold owner-label shapes. Loop rows carry
+`action_a`, `action_b`, and `label.rules.duplicate_action`. Conversation rows
+carry `subject_a`, `subject_b`, `first_paragraph_a`, `first_paragraph_b`, and
+`label.rules.thread_merge`. Both also carry `id`, `label_source`, `set`, and
+`source`.
 
 # Retry failed conversations and sources
 
