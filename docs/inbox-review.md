@@ -42,6 +42,10 @@ in the normal application.
 1. **Scan inboxes** reuses the current Microsoft session when available (and
    otherwise opens sign-in), reads the visible 30-day history,
    and automatically analyzes conversations with the selected Ollama model.
+   When mail and a scan result are already loaded, the same button instead
+   checks for new mail: it downloads only unknown messages, analyzes only
+   conversations that gained mail, preserves every other result and decision,
+   and asks whether new mail closes or changes loops already open.
    There is no individual message selection. Personal Inbox and Sent Items
    are joined by conversation identity, and a split identity is merged back
    in when the subject, an outside participant, and the timing all match.
@@ -110,9 +114,12 @@ in the normal application.
    Microsoft To Do owns notification delivery, including when OpenLoops closes.
    This first requires delegated Tasks.ReadWrite; the browser opens only when
    the current session does not already cover that incremental scope.
-5. **Rescan loaded mail** uses current in-memory mail without another Graph
-   read. **Stop scan** stops dispatching and abandons the requests in flight. **Clear results
-   and mail** removes memory content, preserving saved decisions and To Do tasks.
+5. **Scan inboxes** with loaded mail checks for new mail while retaining all
+   messages loaded earlier in the session. For a full reload, choose **Clear
+   results and mail** and then **Scan inboxes**. **Rescan loaded mail** uses
+   current in-memory mail without another Graph read. **Stop scan** stops
+   dispatching and abandons the requests in flight. **Clear results and mail**
+   removes memory content, preserving saved decisions and To Do tasks.
 
 ## Coverage and interpretation
 
@@ -131,6 +138,8 @@ There are at most 10 configured sources. Pagination is confined to the same
 Graph origin and collection path. A capped, inaccessible, or oversized source
 is visible as incomplete coverage. Conversations above 40 messages or the
 provider payload bound fail visibly instead of silently losing context.
+Each per-source coverage note is cumulative for the session and adds
+`; N new` when that source already had loaded messages before the check.
 Read-only Graph listings and body fetches retry once after two seconds for a
 timeout, interrupted connection, HTTP 503, or HTTP 504 (never HTTP 429), and a
 body failure skips only that message while reporting the source's failed count.
@@ -265,3 +274,24 @@ other settings record; nothing about the export is logged.
 # Retry failed conversations and sources
 
 After a Review scan, **Retry failed (N)** reloads only sources whose listing failed and re-analyzes only conversations that timed out, hit a transport or retryable provider failure, panicked, or were not started; newly loaded conversations from those sources are included automatically. It never resends rate-limited or quota-blocked conversations, and decisions on untouched conversations—as well as decisions whose retried item keeps the same fingerprint—are preserved.
+
+# Checking for new mail
+
+An in-session check builds its changed set from conversations containing an
+appended message plus the post-merge conversations of existing messages whose
+thread identity changed. The latter matters when a new message bridges two
+previously separate threads: the absorbed conversation must be rescanned so
+stale items are replaced.
+
+The primary pass analyzes only that changed set. Its closure pass can also
+offer old open loops from untouched conversations, but pairs those old loops
+only with messages appended by this check. Handled, dismissed, resolved, and
+event-passed loops are not re-offered. Results and decisions for every other
+conversation remain in memory unchanged.
+
+Stopping during mail loading appends nothing. Stopping during analysis merges
+the conversations that completed before cancellation. Known limitations are
+that old-versus-new cross-thread duplicate loops are not collapsed until a full
+scan, folders remain capped at their newest 100 rows, and messages that age out
+of the rolling 30-day window remain loaded until **Clear results and mail** or
+the app exits.

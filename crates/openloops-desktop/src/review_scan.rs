@@ -1621,6 +1621,7 @@ impl ScanProgress {
 }
 pub struct ScanResult {
     pub analysis: LoopItems,
+    pub prior_updates: Vec<PriorUpdate>,
     pub failures: Vec<String>,
     pub failed_conversations_detail: Vec<ConversationFailure>,
     pub analyzed: usize,
@@ -1674,6 +1675,47 @@ pub struct ScanResult {
     /// from `failures` (which counts unanalyzed conversations) since a
     /// closure-pass failure does not mean any conversation went unanalyzed.
     pub closure_pass_failure: Option<String>,
+}
+
+pub struct PriorUpdate {
+    pub message: String,
+    pub block: usize,
+    pub action_phrase: String,
+    pub update: SuggestedUpdate,
+}
+
+pub enum ScanScope<'a> {
+    Full,
+    Conversations(&'a BTreeSet<String>),
+    Incremental(IncrementalScope<'a>),
+}
+
+pub struct IncrementalScope<'a> {
+    pub conversations: &'a BTreeSet<String>,
+    pub new_messages: &'a BTreeSet<String>,
+    pub prior_items: Vec<LoopItem>,
+}
+
+impl ScanScope<'_> {
+    fn filter(&self) -> Option<&BTreeSet<String>> {
+        match self {
+            Self::Full => None,
+            Self::Conversations(conversations) => Some(conversations),
+            Self::Incremental(scope) => Some(scope.conversations),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ClosureScope<'a> {
+    prior_start: usize,
+    new_messages: &'a BTreeSet<String>,
+}
+
+impl ClosureScope<'_> {
+    fn admits(self, offered: &OfferedLoop<'_>, later: &ReviewMessage) -> bool {
+        offered.item < self.prior_start || self.new_messages.contains(&later.input.handle)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3210,8 +3252,9 @@ pub fn scan(
     parallel: usize,
     messages: &[ReviewMessage],
     progress: &ScanProgress,
-    conversation_filter: Option<&BTreeSet<String>>,
+    scope: ScanScope<'_>,
 ) -> Result<ScanResult, ProviderError> {
+    let conversation_filter = scope.filter();
     let selected_messages = messages
         .iter()
         .filter(|message| {
@@ -3256,6 +3299,16 @@ pub fn scan(
     } else {
         close_passed_events(&mut result, messages, chrono::Utc::now().timestamp());
     }
+    let closure_scope = match scope {
+        ScanScope::Incremental(scope) => {
+            let prior_start = offer_prior_items(&mut result, scope.prior_items);
+            Some(ClosureScope {
+                prior_start,
+                new_messages: scope.new_messages,
+            })
+        }
+        ScanScope::Full | ScanScope::Conversations(_) => None,
+    };
     let decision_for_closure = if result.primary_scan_transport_error {
         None
     } else {
@@ -3270,8 +3323,34 @@ pub fn scan(
         &pass,
         client,
         decision_for_closure,
+        closure_scope,
     );
+    if let Some(scope) = closure_scope {
+        take_prior_updates(&mut result, scope.prior_start);
+    }
     Ok(result)
+}
+
+fn offer_prior_items(result: &mut ScanResult, prior: Vec<LoopItem>) -> usize {
+    let prior_start = result.analysis.items.len();
+    result.analysis.items.extend(prior);
+    prior_start
+}
+
+fn take_prior_updates(result: &mut ScanResult, prior_start: usize) {
+    let mut moved = 0;
+    for mut item in result.analysis.items.split_off(prior_start) {
+        if let Some(update) = item.suggested_update.take() {
+            result.prior_updates.push(PriorUpdate {
+                message: item.evidence.message,
+                block: item.evidence.block,
+                action_phrase: item.action_phrase,
+                update,
+            });
+            moved += 1;
+        }
+    }
+    result.suggested_updates = result.suggested_updates.saturating_sub(moved);
 }
 
 /// The chat and (optional) decision clients [`run_primary_pass`] needs,
@@ -4639,6 +4718,7 @@ fn empty_result(total: usize) -> ScanResult {
             rejection_reasons: vec![],
             degraded: 0,
         },
+        prior_updates: vec![],
         failures: vec![],
         failed_conversations_detail: vec![],
         analyzed: 0,
@@ -5452,9 +5532,19 @@ fn loops_by_conversation<'a>(
     loops: &[OfferedLoop<'a>],
     items: &[LoopItem],
     messages: &'a [ReviewMessage],
+    scope: Option<ClosureScope<'_>>,
 ) -> BTreeMap<ConversationKey<'a>, Vec<usize>> {
     let (groups_per_account, address_group_counts) = conversation_group_address_counts(messages);
     let mut reach: BTreeMap<ConversationKey<'a>, Vec<usize>> = BTreeMap::new();
+    let new_conversations: BTreeSet<(&str, &str)> = scope
+        .into_iter()
+        .flat_map(|scope| {
+            messages
+                .iter()
+                .filter(move |message| scope.new_messages.contains(&message.input.handle))
+                .map(|message| (message.account.as_str(), message.conversation.as_str()))
+        })
+        .collect();
     for (index, offered) in loops.iter().enumerate() {
         let item = &items[offered.item];
         let source = offered.source;
@@ -5490,6 +5580,12 @@ fn loops_by_conversation<'a>(
             );
         }
         for conversation in targets {
+            if scope.is_some_and(|scope| {
+                offered.item >= scope.prior_start
+                    && !new_conversations.contains(&(source.account.as_str(), conversation))
+            }) {
+                continue;
+            }
             reach
                 .entry((source.account.as_str(), conversation))
                 .or_default()
@@ -5615,7 +5711,7 @@ fn suggested_update_for(
 
 /// Whether `candidate` should replace `current` as a loop's one suggested
 /// update: higher confidence wins, and a closure wins a tie.
-fn outranks(candidate: &SuggestedUpdate, current: &SuggestedUpdate) -> bool {
+pub(crate) fn outranks(candidate: &SuggestedUpdate, current: &SuggestedUpdate) -> bool {
     candidate.confidence_micros > current.confidence_micros
         || (candidate.confidence_micros == current.confidence_micros
             && candidate.kind == SuggestedUpdateKind::Closure
@@ -5633,6 +5729,7 @@ fn collect_updates(
     offered: &[OfferedLoop<'_>],
     messages: &[ReviewMessage],
     best: &mut BTreeMap<usize, SuggestedUpdate>,
+    scope: Option<ClosureScope<'_>>,
 ) {
     for accepted in &analysis.accepted {
         let related = &accepted.claim.related_loop_handles;
@@ -5655,6 +5752,12 @@ fn collect_updates(
             let Some(update) = suggested_update_for(accepted, target, messages) else {
                 continue;
             };
+            if scope.is_some_and(|scope| {
+                target.item >= scope.prior_start
+                    && !scope.new_messages.contains(&update.source_message)
+            }) {
+                continue;
+            }
             let replace = best
                 .get(&target.item)
                 .is_none_or(|current| outranks(&update, current));
@@ -5724,6 +5827,7 @@ fn decision_pairs<'a>(
     reach: &BTreeMap<ConversationKey<'a>, Vec<usize>>,
     offered: &[OfferedLoop<'a>],
     messages: &'a [ReviewMessage],
+    scope: Option<ClosureScope<'_>>,
 ) -> Vec<DecisionPair<'a>> {
     let mut pairs = Vec::new();
     for (&(account, conversation), loops) in reach {
@@ -5736,6 +5840,8 @@ fn decision_pairs<'a>(
                         message.account == account
                             && message.conversation == conversation
                             && message.input.timestamp > source_timestamp
+                            && scope
+                                .is_none_or(|scope| scope.admits(&offered[offered_index], message))
                     })
                     .map(|later| DecisionPair {
                         offered: offered_index,
@@ -6120,10 +6226,11 @@ fn scan_decision_closures(
     chat_pass: &ParallelPass,
     chat_client: &dyn ModelClient,
     decision_client: &dyn DecisionClient,
+    scope: Option<ClosureScope<'_>>,
 ) {
     let offered = offered_loops(&result.analysis.items, messages);
-    let reach = loops_by_conversation(&offered, &result.analysis.items, messages);
-    let pairs = decision_pairs(&reach, &offered, messages);
+    let reach = loops_by_conversation(&offered, &result.analysis.items, messages, scope);
+    let pairs = decision_pairs(&reach, &offered, messages, scope);
     let jobs = decision_paragraph_jobs(&pairs);
     progress.total.fetch_add(jobs.len(), Ordering::Relaxed);
     progress.closure_phase.store(true, Ordering::Relaxed);
@@ -6165,7 +6272,7 @@ fn scan_decision_closures(
     let chat_outcomes = run_jobs(&chat_processed, chat_pass, progress, &|slot| {
         closure_request(chat_client, &chat_jobs[slot], &offered, &progress.cancel)
     });
-    merge_closure_outcomes(result, messages, &offered, &chat_jobs, chat_outcomes);
+    merge_closure_outcomes(result, messages, &offered, &chat_jobs, chat_outcomes, scope);
     result.conversation_notes.push(format!(
         "{decision_suggestions} suggested updates from the decision model, {} pairs escalated to the chat model, {skipped} skipped (rate limit / errors).",
         escalated.len()
@@ -6184,6 +6291,7 @@ fn scan_closures_selected(
     pass: &ParallelPass,
     chat_client: &dyn ModelClient,
     decision_client: Option<&dyn DecisionClient>,
+    scope: Option<ClosureScope<'_>>,
 ) {
     if result.primary_scan_transport_error {
         return;
@@ -6196,13 +6304,14 @@ fn scan_closures_selected(
             pass,
             chat_client,
             decision_client,
+            scope,
         );
         progress.reset_pass();
         if progress.cancel.load(Ordering::Relaxed) {
             result.cancelled = true;
         }
     } else {
-        scan_closures(messages, progress, result, pass, chat_client);
+        scan_closures(messages, progress, result, pass, chat_client, scope);
     }
 }
 
@@ -6229,12 +6338,13 @@ fn scan_closures(
     result: &mut ScanResult,
     pass: &ParallelPass,
     client: &dyn ModelClient,
+    scope: Option<ClosureScope<'_>>,
 ) {
     if result.primary_scan_transport_error {
         return;
     }
     let offered = offered_loops(&result.analysis.items, messages);
-    let reach = loops_by_conversation(&offered, &result.analysis.items, messages);
+    let reach = loops_by_conversation(&offered, &result.analysis.items, messages, scope);
     let (jobs, capped) = closure_jobs(reach, messages);
     progress.total.fetch_add(jobs.len(), Ordering::Relaxed);
     progress
@@ -6249,7 +6359,7 @@ fn scan_closures(
     let outcomes = run_jobs(&processed_per_job, pass, progress, &|slot| {
         closure_request(client, &jobs[slot], &offered, &progress.cancel)
     });
-    merge_closure_outcomes(result, messages, &offered, &jobs, outcomes);
+    merge_closure_outcomes(result, messages, &offered, &jobs, outcomes, scope);
     // Idle once this pass ends, same as `scan_conversations`.
     progress.reset_pass();
     if progress.cancel.load(Ordering::Relaxed) {
@@ -6276,13 +6386,14 @@ fn merge_closure_outcomes(
     offered: &[OfferedLoop<'_>],
     jobs: &[ClosureJob<'_>],
     outcomes: JobResults<ClaimAnalysis>,
+    scope: Option<ClosureScope<'_>>,
 ) {
     let mut rate_limited = 0usize;
     let mut best: BTreeMap<usize, SuggestedUpdate> = BTreeMap::new();
     for (slot, outcome) in outcomes {
         match outcome {
             JobOutcome::Completed(Ok(analysis)) => {
-                collect_updates(&analysis, &jobs[slot], offered, messages, &mut best);
+                collect_updates(&analysis, &jobs[slot], offered, messages, &mut best, scope);
             }
             JobOutcome::Completed(Err(ProviderError::Cancelled)) => result.cancelled = true,
             JobOutcome::Completed(Err(
@@ -8702,6 +8813,7 @@ mod tests {
         item.action = "Send the draft agreement to Alex".into();
         messages.push(event_message);
         let mut result = ScanResult {
+            prior_updates: vec![],
             analysis: LoopItems {
                 items: vec![item],
                 rejected: 0,
@@ -8751,6 +8863,7 @@ mod tests {
         });
         messages.push(event_message);
         let mut result = ScanResult {
+            prior_updates: vec![],
             analysis: LoopItems {
                 items: vec![item],
                 rejected: 0,
@@ -10742,6 +10855,7 @@ at the downtown courthouse. Let me know if that works.",
         });
         messages.push(event_message);
         let mut result = ScanResult {
+            prior_updates: vec![],
             analysis: LoopItems {
                 items: vec![item],
                 rejected: 0,
@@ -10813,6 +10927,7 @@ at the downtown courthouse. Let me know if that works.",
         });
         messages.push(event_message);
         let mut result = ScanResult {
+            prior_updates: vec![],
             analysis: LoopItems {
                 items: vec![item],
                 rejected: 0,
@@ -10862,6 +10977,7 @@ at the downtown courthouse. Let me know if that works.",
         item.action = "Prepare materials for the Acme Contract Review".into();
         messages.push(event_message);
         let mut result = ScanResult {
+            prior_updates: vec![],
             analysis: LoopItems {
                 items: vec![item],
                 rejected: 0,
@@ -10913,6 +11029,7 @@ at the downtown courthouse. Let me know if that works.",
         item.action = "Prepare the Acme budget".into();
         messages.push(event_message);
         let mut result = ScanResult {
+            prior_updates: vec![],
             analysis: LoopItems {
                 items: vec![item],
                 rejected: 0,
@@ -10946,6 +11063,7 @@ at the downtown courthouse. Let me know if that works.",
     fn close_passed_events_always_pushes_a_coverage_note_even_when_nothing_is_learned() {
         let (messages, item) = closure_test_messages();
         let mut result = ScanResult {
+            prior_updates: vec![],
             analysis: LoopItems {
                 items: vec![item],
                 rejected: 0,
@@ -10984,6 +11102,7 @@ at the downtown courthouse. Let me know if that works.",
     fn close_passed_events_skips_the_note_when_the_scan_was_cancelled() {
         let (messages, item) = closure_test_messages();
         let mut result = ScanResult {
+            prior_updates: vec![],
             analysis: LoopItems {
                 items: vec![item],
                 rejected: 0,
@@ -11039,6 +11158,7 @@ at the downtown courthouse. Let me know if that works.",
         });
         let now = timestamp("2026-09-15T00:00:00Z"); // well past that Friday, any timezone
         let mut result = ScanResult {
+            prior_updates: vec![],
             analysis: LoopItems {
                 items: vec![item],
                 rejected: 0,
@@ -11103,6 +11223,7 @@ at the downtown courthouse. Let me know if that works.",
         });
         let now = timestamp("2026-09-15T00:00:00Z");
         let mut result = ScanResult {
+            prior_updates: vec![],
             analysis: LoopItems {
                 items: vec![item],
                 rejected: 0,
@@ -13137,7 +13258,14 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         progress: &ScanProgress,
     ) -> ScanResult {
         let mut result = closure_result(items);
-        super::scan_closures(all, progress, &mut result, &ParallelPass::new(1), client);
+        super::scan_closures(
+            all,
+            progress,
+            &mut result,
+            &ParallelPass::new(1),
+            client,
+            None,
+        );
         result
     }
 
@@ -13156,6 +13284,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
             &ParallelPass::new(1),
             chat,
             Some(decision),
+            None,
         );
         result
     }
@@ -13167,6 +13296,135 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         let reply = reply_to("sam@example.invalid", "v-1", "c2", "acct", "Fee");
         all.push(prepare(&reply, "Sent", all.len()).unwrap());
         (all, item)
+    }
+
+    #[test]
+    fn incremental_chat_closure_offers_prior_loop_only_against_conversations_with_new_mail() {
+        let (all, item) = cross_thread_fixture();
+        let new_messages = BTreeSet::from([all[1].input.handle.clone()]);
+        let client = ScriptedClient::new(|_, user| Ok(close_first_loop(user)));
+        let mut result = closure_result(Vec::new());
+        let prior_start = super::offer_prior_items(&mut result, vec![item]);
+        let scope = Some(ClosureScope {
+            prior_start,
+            new_messages: &new_messages,
+        });
+        super::scan_closures(
+            &all,
+            &ScanProgress::default(),
+            &mut result,
+            &ParallelPass::new(1),
+            &client,
+            scope,
+        );
+        super::take_prior_updates(&mut result, prior_start);
+        assert_eq!(client.calls(), 1);
+        assert!(result.analysis.items.is_empty());
+        assert_eq!(result.prior_updates.len(), 1);
+        assert_eq!(result.prior_updates[0].message, all[0].input.handle);
+    }
+
+    #[test]
+    fn incremental_chat_closure_ignores_a_claim_citing_an_old_message() {
+        let (all, item) = cross_thread_fixture();
+        let new_messages = BTreeSet::from([all[1].input.handle.clone()]);
+        let client = ScriptedClient::new(|_, user| {
+            let handles = offered_handles(user);
+            let (message, length) = message_with_body(user, "Can we meet?").unwrap();
+            Ok(claims_document(&[closure_claim(
+                "possible_closure",
+                &message,
+                length,
+                &[&handles[0]],
+                None,
+                900_000,
+            )]))
+        });
+        let mut result = closure_result(Vec::new());
+        let prior_start = super::offer_prior_items(&mut result, vec![item]);
+        super::scan_closures(
+            &all,
+            &ScanProgress::default(),
+            &mut result,
+            &ParallelPass::new(1),
+            &client,
+            Some(ClosureScope {
+                prior_start,
+                new_messages: &new_messages,
+            }),
+        );
+        super::take_prior_updates(&mut result, prior_start);
+        assert!(result.prior_updates.is_empty());
+    }
+
+    #[test]
+    fn incremental_decision_pairs_pair_prior_loops_only_with_new_messages() {
+        let (mut all, item) = cross_thread_fixture();
+        let new_handle = all[1].input.handle.clone();
+        let mut old = all[1].clone();
+        old.input.handle = "old-later".into();
+        old.input.timestamp -= 1;
+        all.push(old);
+        let new_messages = BTreeSet::from([new_handle.clone()]);
+        let decision = FixedDecisionClient::new(|_, _| Ok([0.9, 0.1, 0.1, 0.1]));
+        let mut result = closure_result(Vec::new());
+        let prior_start = super::offer_prior_items(&mut result, vec![item]);
+        super::scan_decision_closures(
+            &all,
+            &ScanProgress::default(),
+            &mut result,
+            &ParallelPass::new(1),
+            &empty_chat(),
+            &decision,
+            Some(ClosureScope {
+                prior_start,
+                new_messages: &new_messages,
+            }),
+        );
+        super::take_prior_updates(&mut result, prior_start);
+        assert_eq!(decision.calls(), all[1].input.message.body_blocks.len());
+        assert_eq!(result.prior_updates[0].update.source_message, new_handle);
+    }
+
+    #[test]
+    fn incremental_scope_leaves_new_items_unrestricted() {
+        let (all, item) = cross_thread_fixture();
+        let new_messages = BTreeSet::new();
+        let client = ScriptedClient::new(|_, user| Ok(close_first_loop(user)));
+        let mut result = closure_result(vec![item]);
+        super::scan_closures(
+            &all,
+            &ScanProgress::default(),
+            &mut result,
+            &ParallelPass::new(1),
+            &client,
+            Some(ClosureScope {
+                prior_start: 1,
+                new_messages: &new_messages,
+            }),
+        );
+        assert_eq!(client.calls(), 1);
+        assert!(result.analysis.items[0].suggested_update.is_some());
+    }
+
+    #[test]
+    fn scan_scope_filter_matches_previous_conversation_filter_behaviour() {
+        let conversations = BTreeSet::from(["selected".into()]);
+        let new_messages = BTreeSet::new();
+        assert!(ScanScope::Full.filter().is_none());
+        assert_eq!(
+            ScanScope::Conversations(&conversations).filter(),
+            Some(&conversations)
+        );
+        assert_eq!(
+            ScanScope::Incremental(IncrementalScope {
+                conversations: &conversations,
+                new_messages: &new_messages,
+                prior_items: Vec::new(),
+            })
+            .filter(),
+            Some(&conversations)
+        );
     }
 
     fn empty_chat() -> ScriptedClient<'static> {
@@ -13544,6 +13802,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
             &mut result,
             &ParallelPass::new(1),
             &chat,
+            None,
             None,
         );
 
@@ -13982,7 +14241,14 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         result.primary_scan_transport_error = true;
         let client = ScriptedClient::new(|_, _| Ok(EMPTY_CLAIMS.to_string()));
         let progress = ScanProgress::default();
-        super::scan_closures(&all, &progress, &mut result, &ParallelPass::new(1), &client);
+        super::scan_closures(
+            &all,
+            &progress,
+            &mut result,
+            &ParallelPass::new(1),
+            &client,
+            None,
+        );
 
         assert_eq!(client.calls(), 0);
         assert!(!progress.closure_phase.load(Ordering::Relaxed));
@@ -14055,6 +14321,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
             &mut result,
             &ParallelPass::new(1),
             &client,
+            None,
         );
 
         assert_eq!(client.calls(), 1);

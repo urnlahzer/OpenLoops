@@ -5,6 +5,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, atomic::Ordering};
 use std::time::Instant;
 
+use crate::claim_view::LoopItem;
 use crate::review_model::{CardContext, ReviewState};
 use crate::settings::{
     ExtractionBackend, OllamaPlan, Provider, Settings, SettingsError, SettingsStore, max_parallel,
@@ -27,6 +28,9 @@ pub(crate) enum Outcome {
     Generation(Result<(), ProviderError>),
     DecisionCheck(Result<DecisionCheckReport, ProviderError>),
     Mail(Result<Vec<openloops_graph::live::review::SourceReview>, ConnectionError>),
+    CheckMail {
+        sources: Result<Vec<openloops_graph::live::review::SourceReview>, ConnectionError>,
+    },
     Scan(
         Result<crate::review_model::ScanResult, ProviderError>,
         String,
@@ -41,6 +45,11 @@ pub(crate) enum Outcome {
         result: Result<crate::review_model::ScanResult, ProviderError>,
         conversations: BTreeSet<String>,
         attempted: usize,
+    },
+    CheckScan {
+        result: Result<crate::review_model::ScanResult, ProviderError>,
+        conversations: BTreeSet<String>,
+        new_messages: usize,
     },
     Reminder([u8; 32], openloops_graph::live::reminders::ReminderOutcome),
     ReminderCompletion(
@@ -131,12 +140,23 @@ pub struct AppModel {
     /// In-memory only and fully replaced after each successful load. One load is already bounded
     /// to at most 100 rows per folder and 10 configured sources, so no separate cache cap is needed.
     pub mail_cache: Arc<MailCache>,
+    pub(crate) last_mail_check: Option<i64>,
     /// Whether the most recent [`AppModel::reload_settings`] call (including
     /// the one `with_store` runs at construction) found an existing saved
     /// record. The native adapter reads this immediately after each such call,
     /// together with [`AppModel::ready_for_review`], to reproduce today's
     /// initial-tab decision without the model owning any UI-nav state.
     pub(crate) settings_presence: SettingsPresence,
+}
+
+struct ScanJobInputs {
+    key: String,
+    model: String,
+    provider: Provider,
+    options: crate::review_model::ScanOptions,
+    parallel: usize,
+    messages: Vec<crate::review_model::ReviewMessage>,
+    progress: Arc<crate::review_model::ScanProgress>,
 }
 
 impl AppModel {
@@ -181,6 +201,7 @@ impl AppModel {
             load_progress: None,
             scan_progress: None,
             mail_cache: Arc::new(MailCache::default()),
+            last_mail_check: None,
             settings_presence: SettingsPresence::Missing,
         };
         match store {
@@ -351,6 +372,7 @@ impl AppModel {
         }
         self.load_progress = None;
         self.mail_cache = Arc::new(MailCache::default());
+        self.last_mail_check = None;
     }
 
     pub(crate) fn start(
@@ -465,6 +487,7 @@ impl AppModel {
             }
             Outcome::Mail(Ok(sources)) => {
                 self.load_progress = None;
+                self.last_mail_check = Some(chrono::Utc::now().timestamp());
                 self.mail_cache = Arc::new(
                     sources
                         .iter()
@@ -491,6 +514,9 @@ impl AppModel {
                     lines: vec![error.to_string()],
                     succeeded: false,
                 };
+            }
+            Outcome::CheckMail { sources } => {
+                self.check_mail_outcome(sources, respawn.clone());
             }
             Outcome::RetryMail {
                 sources,
@@ -554,8 +580,96 @@ impl AppModel {
                 }
                 self.finish_retry_status(attempted);
             }
+            Outcome::CheckScan {
+                result,
+                conversations,
+                new_messages,
+            } => {
+                self.scan_progress = None;
+                match result {
+                    Ok(scan) => {
+                        let loops = scan.analysis.items.len();
+                        let updates = self.review.merge_scan(scan, &conversations);
+                        self.finish_check_status(new_messages, conversations.len(), loops, updates);
+                        self.dispatch_reminder_sync();
+                    }
+                    Err(error) => {
+                        self.review.scan_failed = true;
+                        self.review_status = Status {
+                            lines: vec![error.to_string()],
+                            succeeded: false,
+                        };
+                    }
+                }
+            }
         }
         true
+    }
+
+    fn check_mail_outcome(
+        &mut self,
+        sources: Result<Vec<openloops_graph::live::review::SourceReview>, ConnectionError>,
+        respawn: impl FnOnce() + Send + 'static,
+    ) {
+        self.load_progress = None;
+        let previous_check = self.last_mail_check;
+        self.last_mail_check = Some(chrono::Utc::now().timestamp());
+        match sources {
+            Ok(sources) => {
+                Arc::make_mut(&mut self.mail_cache).extend(
+                    sources
+                        .iter()
+                        .flat_map(|source| &source.messages)
+                        .map(|message| {
+                            (
+                                (message.account.clone(), message.id.clone()),
+                                message.clone(),
+                            )
+                        }),
+                );
+                let known: BTreeSet<String> = self
+                    .review
+                    .messages
+                    .iter()
+                    .map(|message| message.input.handle.clone())
+                    .collect();
+                let changed = self.review.append_sources(sources);
+                let new_messages: BTreeSet<String> = self
+                    .review
+                    .messages
+                    .iter()
+                    .map(|message| message.input.handle.clone())
+                    .filter(|handle| !known.contains(handle))
+                    .collect();
+                if changed.is_empty() {
+                    let local = chrono::DateTime::from_timestamp(
+                        previous_check.unwrap_or_else(|| chrono::Utc::now().timestamp()),
+                        0,
+                    )
+                    .unwrap_or_default()
+                    .with_timezone(&chrono::Local);
+                    self.review_status = Status {
+                        lines: vec![format!("No new mail since {}.", local.format("%H:%M"))],
+                        succeeded: true,
+                    };
+                } else {
+                    let prior = self.review.prior_open_items(&changed);
+                    self.start_check_scan(changed, new_messages, prior, respawn);
+                }
+            }
+            Err(ConnectionError::Cancelled) => {
+                self.review_status = Status {
+                    lines: vec!["Check stopped; no new mail was added.".into()],
+                    succeeded: false,
+                };
+            }
+            Err(error) => {
+                self.review_status = Status {
+                    lines: vec![error.to_string()],
+                    succeeded: false,
+                };
+            }
+        }
     }
 
     /// Keeps the Ollama Cloud selection only while the freshly loaded list
@@ -791,42 +905,33 @@ impl AppModel {
     }
 
     pub(crate) fn start_scan(&mut self, on_done: impl FnOnce() + Send + 'static) {
-        let messages = self.review.messages.clone();
-        let key = self.active_key().clone();
-        let model = self.selected_model().to_owned();
-        let provider = self.provider;
-        let use_decision_model = self.use_decision_model;
-        let extraction_backend = self.extraction_backend;
-        let parallel = self.max_parallel();
-        let progress = Arc::new(crate::review_model::ScanProgress::default());
-        progress.total.store(messages.len(), Ordering::Relaxed);
-        self.scan_progress = Some(progress.clone());
+        let inputs = self.scan_job_inputs();
+        inputs
+            .progress
+            .total
+            .store(inputs.messages.len(), Ordering::Relaxed);
         self.review.analysis = None;
         self.review.scan_summary.clear();
         self.review.scan_errors.clear();
         self.review_status = Status::default();
         self.start(
             Service::Review,
-            match provider {
+            match inputs.provider {
                 Provider::OllamaCloud => "Finding open loops with Ollama Cloud",
                 Provider::OpenRouter => "Finding open loops with OpenRouter",
             },
             move || {
                 Outcome::Scan(
                     crate::review_model::scan(
-                        crate::review_model::ScanOptions {
-                            provider,
-                            use_decision_model,
-                            extraction_backend,
-                        },
-                        key.to_string(),
-                        &model,
-                        parallel,
-                        &messages,
-                        &progress,
-                        None,
+                        inputs.options,
+                        inputs.key,
+                        &inputs.model,
+                        inputs.parallel,
+                        &inputs.messages,
+                        &inputs.progress,
+                        crate::review_model::ScanScope::Full,
                     ),
-                    model,
+                    inputs.model,
                 )
             },
             on_done,
@@ -886,38 +991,80 @@ impl AppModel {
         attempted: usize,
         on_done: impl FnOnce() + Send + 'static,
     ) {
-        let messages = self.review.messages.clone();
-        let key = self.active_key().clone();
-        let model = self.selected_model().to_owned();
-        let provider = self.provider;
-        let use_decision_model = self.use_decision_model;
-        let extraction_backend = self.extraction_backend;
-        let parallel = self.max_parallel();
-        let progress = Arc::new(crate::review_model::ScanProgress::default());
-        self.scan_progress = Some(progress.clone());
+        let inputs = self.scan_job_inputs();
         self.review_status = Status::default();
         self.start(
             Service::Review,
-            match provider {
+            match inputs.provider {
                 Provider::OllamaCloud => "Finding open loops with Ollama Cloud",
                 Provider::OpenRouter => "Finding open loops with OpenRouter",
             },
             move || Outcome::RetryScan {
                 result: crate::review_model::scan(
-                    crate::review_model::ScanOptions {
-                        provider,
-                        use_decision_model,
-                        extraction_backend,
-                    },
-                    key.to_string(),
-                    &model,
-                    parallel,
-                    &messages,
-                    &progress,
-                    Some(&conversations),
+                    inputs.options,
+                    inputs.key,
+                    &inputs.model,
+                    inputs.parallel,
+                    &inputs.messages,
+                    &inputs.progress,
+                    crate::review_model::ScanScope::Conversations(&conversations),
                 ),
                 conversations,
                 attempted,
+            },
+            on_done,
+        );
+    }
+
+    fn scan_job_inputs(&mut self) -> ScanJobInputs {
+        let progress = Arc::new(crate::review_model::ScanProgress::default());
+        self.scan_progress = Some(progress.clone());
+        ScanJobInputs {
+            key: self.active_key().to_string(),
+            model: self.selected_model().to_owned(),
+            provider: self.provider,
+            options: crate::review_model::ScanOptions {
+                provider: self.provider,
+                use_decision_model: self.use_decision_model,
+                extraction_backend: self.extraction_backend,
+            },
+            parallel: self.max_parallel(),
+            messages: self.review.messages.clone(),
+            progress,
+        }
+    }
+
+    pub(crate) fn start_check_scan(
+        &mut self,
+        conversations: BTreeSet<String>,
+        new_messages: BTreeSet<String>,
+        prior_items: Vec<LoopItem>,
+        on_done: impl FnOnce() + Send + 'static,
+    ) {
+        let inputs = self.scan_job_inputs();
+        let new_message_count = new_messages.len();
+        self.review_status = Status::default();
+        self.start(
+            Service::Review,
+            "Checking for new mail",
+            move || Outcome::CheckScan {
+                result: crate::review_model::scan(
+                    inputs.options,
+                    inputs.key,
+                    &inputs.model,
+                    inputs.parallel,
+                    &inputs.messages,
+                    &inputs.progress,
+                    crate::review_model::ScanScope::Incremental(
+                        crate::review_model::IncrementalScope {
+                            conversations: &conversations,
+                            new_messages: &new_messages,
+                            prior_items,
+                        },
+                    ),
+                ),
+                conversations,
+                new_messages: new_message_count,
             },
             on_done,
         );
@@ -928,6 +1075,25 @@ impl AppModel {
         self.review_status = Status {
             lines: vec![format!("Retried {attempted}; {remaining} still failing.")],
             succeeded: remaining == 0,
+        };
+    }
+
+    fn finish_check_status(
+        &mut self,
+        new_messages: usize,
+        conversations: usize,
+        loops: usize,
+        updates: usize,
+    ) {
+        let mut line = format!(
+            "{new_messages} new messages in {conversations} conversations; {loops} loops added, {updates} updates suggested."
+        );
+        if self.review.scan_summary.ends_with("; stopped by you") {
+            line.push_str("; stopped by you");
+        }
+        self.review_status = Status {
+            lines: vec![line],
+            succeeded: !self.review.scan_incomplete,
         };
     }
 
@@ -1072,7 +1238,10 @@ impl AccountDisplay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openloops_graph::live::SharedScope;
+    use openloops_graph::live::{
+        SharedScope,
+        review::{MailItem, SourceReview},
+    };
     use openloops_inference::decision::DecisionCheckReport;
     use std::{
         cell::{Cell, RefCell},
@@ -1103,6 +1272,46 @@ mod tests {
         fn delete(&self) -> Result<(), SettingsError> {
             *self.saved.borrow_mut() = None;
             Ok(())
+        }
+    }
+
+    fn check_source(messages: Vec<MailItem>) -> SourceReview {
+        SourceReview {
+            label: "Inbox".into(),
+            messages,
+            errors: vec![],
+            message_errors: vec![],
+            partial: false,
+            failed: false,
+        }
+    }
+
+    fn check_scan_result(items: Vec<LoopItem>) -> crate::review_model::ScanResult {
+        crate::review_model::ScanResult {
+            analysis: crate::claim_view::LoopItems {
+                items,
+                rejected: 0,
+                rejection_reasons: vec![],
+                degraded: 0,
+            },
+            prior_updates: vec![],
+            failures: vec![],
+            failed_conversations_detail: vec![],
+            analyzed: 1,
+            total: 1,
+            cancelled: false,
+            conversation_notes: vec![],
+            conversation_quality: std::collections::BTreeMap::default(),
+            conversation_notes_by_id: std::collections::BTreeMap::default(),
+            conversation_rejection_reasons: std::collections::BTreeMap::default(),
+            suggested_updates: 0,
+            event_closures: 0,
+            primary_scan_transport_error: false,
+            conversation_count: 1,
+            analyzed_conversations: 1,
+            failed_conversations: 0,
+            not_started_conversations: 0,
+            closure_pass_failure: None,
         }
     }
 
@@ -1415,6 +1624,126 @@ mod tests {
         assert_eq!(
             app.review_status.lines,
             ["Download stopped before the scan began."]
+        );
+    }
+
+    #[test]
+    fn check_mail_with_no_new_sources_reports_no_new_mail_since_last_check() {
+        let mut app = AppModel::with_store(Ok(None));
+        app.review = crate::review_model::layout_fixture();
+        app.last_mail_check = Some(0);
+        let (sender, receiver) = mpsc::channel();
+        app.pending = Some(receiver);
+        sender
+            .send(Outcome::CheckMail {
+                sources: Ok(Vec::new()),
+            })
+            .unwrap();
+        assert!(app.poll(|| {}));
+        let expected = chrono::DateTime::from_timestamp(0, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%H:%M");
+        assert_eq!(
+            app.review_status.lines,
+            [format!("No new mail since {expected}.")]
+        );
+        assert!(app.review_status.succeeded);
+    }
+
+    #[test]
+    fn check_mail_cancelled_leaves_review_untouched() {
+        let mut app = AppModel::with_store(Ok(None));
+        app.review = crate::review_model::layout_fixture();
+        let handles: Vec<_> = app
+            .review
+            .messages
+            .iter()
+            .map(|message| message.input.handle.clone())
+            .collect();
+        let item_count = app.review.analysis.as_ref().unwrap().items.len();
+        let (sender, receiver) = mpsc::channel();
+        app.pending = Some(receiver);
+        sender
+            .send(Outcome::CheckMail {
+                sources: Err(ConnectionError::Cancelled),
+            })
+            .unwrap();
+        assert!(app.poll(|| {}));
+        assert_eq!(
+            app.review
+                .messages
+                .iter()
+                .map(|message| message.input.handle.clone())
+                .collect::<Vec<_>>(),
+            handles
+        );
+        assert_eq!(
+            app.review.analysis.as_ref().unwrap().items.len(),
+            item_count
+        );
+        assert_eq!(
+            app.review_status.lines,
+            ["Check stopped; no new mail was added."]
+        );
+    }
+
+    #[test]
+    fn check_scan_outcome_merges_and_formats_counts() {
+        let mut app = AppModel::with_store(Ok(None));
+        app.review = crate::review_model::layout_fixture();
+        app.review.source_failures = 0;
+        let mut item = app.review.analysis.as_ref().unwrap().items[2].clone();
+        item.action = "Synthetic replacement action".into();
+        let (sender, receiver) = mpsc::channel();
+        app.pending = Some(receiver);
+        sender
+            .send(Outcome::CheckScan {
+                result: Ok(check_scan_result(vec![item])),
+                conversations: BTreeSet::from(["synthetic-thread-3".into()]),
+                new_messages: 2,
+            })
+            .unwrap();
+        assert!(app.poll(|| {}));
+        assert_eq!(
+            app.review_status.lines,
+            ["2 new messages in 1 conversations; 1 loops added, 0 updates suggested."]
+        );
+        assert!(app.review_status.succeeded);
+    }
+
+    #[test]
+    fn check_mail_extends_cache_without_replacing_it() {
+        let mut app = AppModel::with_store(Ok(None));
+        app.review = crate::review_model::layout_fixture();
+        Arc::make_mut(&mut app.mail_cache).insert(
+            ("existing-account".into(), "existing-id".into()),
+            MailItem::default(),
+        );
+        let known = MailItem {
+            id: "synthetic-0".into(),
+            account: "synthetic".into(),
+            conversation: "synthetic-thread".into(),
+            subject: "Quarterly planning".into(),
+            body: "Synthetic cached body.".into(),
+            received: "2026-09-06T12:00:00Z".into(),
+            ..MailItem::default()
+        };
+        let (sender, receiver) = mpsc::channel();
+        app.pending = Some(receiver);
+        sender
+            .send(Outcome::CheckMail {
+                sources: Ok(vec![check_source(vec![known])]),
+            })
+            .unwrap();
+        assert!(app.poll(|| {}));
+        assert!(
+            app.mail_cache
+                .contains_key(&("existing-account".into(), "existing-id".into()))
+        );
+        assert!(
+            app.mail_cache
+                .contains_key(&("synthetic".into(), "synthetic-0".into()))
         );
     }
 
