@@ -22,7 +22,7 @@ use crate::{
     },
 };
 use openloops_graph::live::{
-    ConnectionConfig,
+    ConnectionConfig, ConnectionError,
     review::{LoadProgress, load_recent_with, load_sources_with},
 };
 use openloops_inference::blocks::CanonicalBlock;
@@ -1497,6 +1497,64 @@ fn retry_failed_button(model: &AppModel, busy: bool) -> (usize, bool) {
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScanMode {
+    Full,
+    Incremental,
+}
+
+pub(crate) fn scan_mode(review: &ReviewState) -> ScanMode {
+    if review.analysis.is_some() && !review.messages.is_empty() {
+        ScanMode::Incremental
+    } else {
+        ScanMode::Full
+    }
+}
+
+fn start_mail_load(model: &Rc<RefCell<AppModel>>, mode: ScanMode) -> Result<(), ConnectionError> {
+    let config = {
+        let model = model.borrow();
+        ConnectionConfig::new(model.client_id.trim(), Some(&model.shared))
+            .and_then(|config| config.with_groups(Some(&model.groups)))?
+    };
+    let mut model_ref = model.borrow_mut();
+    if mode == ScanMode::Full {
+        let decisions = std::mem::take(&mut model_ref.review.decisions);
+        model_ref.review = ReviewState::default();
+        model_ref.review.decisions = decisions;
+        model_ref.review_status = Status::default();
+    }
+    let progress = std::sync::Arc::new(LoadProgress::default());
+    let cache = std::sync::Arc::clone(&model_ref.mail_cache);
+    model_ref.load_progress = Some(std::sync::Arc::clone(&progress));
+    let signed_in = openloops_graph::live::has_session();
+    match mode {
+        ScanMode::Full => model_ref.start(
+            Service::Review,
+            if signed_in {
+                "Downloading recent messages"
+            } else {
+                "Complete Microsoft sign-in; then downloading recent messages"
+            },
+            move || Outcome::Mail(load_recent_with(&config, &cache, &progress)),
+            || {},
+        ),
+        ScanMode::Incremental => model_ref.start(
+            Service::Review,
+            if signed_in {
+                "Checking for new mail"
+            } else {
+                "Complete Microsoft sign-in; then checking for new mail"
+            },
+            move || Outcome::CheckMail {
+                sources: load_recent_with(&config, &cache, &progress),
+            },
+            || {},
+        ),
+    }
+    Ok(())
+}
+
 pub(crate) fn sync_review(
     model: &AppModel,
     window: &AppWindow,
@@ -1709,32 +1767,12 @@ pub(crate) fn register_callbacks(
         let weak = window.as_weak();
         let timer = Rc::clone(&timer);
         window.on_scan_inboxes(move || {
-            let config = {
-                let model = model.borrow();
-                ConnectionConfig::new(model.client_id.trim(), Some(&model.shared))
-                    .and_then(|config| config.with_groups(Some(&model.groups)))
-            };
-            match config {
-                Ok(config) => {
-                    let mut model_ref = model.borrow_mut();
-                    let decisions = std::mem::take(&mut model_ref.review.decisions);
-                    model_ref.review = ReviewState::default();
-                    model_ref.review.decisions = decisions;
-                    model_ref.review_status = Status::default();
-                    let progress = std::sync::Arc::new(LoadProgress::default());
-                    let cache = std::sync::Arc::clone(&model_ref.mail_cache);
-                    model_ref.load_progress = Some(std::sync::Arc::clone(&progress));
-                    model_ref.start(
-                        Service::Review,
-                        if openloops_graph::live::has_session() {
-                            "Downloading recent messages"
-                        } else {
-                            "Complete Microsoft sign-in; then downloading recent messages"
-                        },
-                        move || Outcome::Mail(load_recent_with(&config, &cache, &progress)),
-                        || {},
-                    );
-                    REVIEW_UI.with(|state| state.borrow_mut().selected = None);
+            let mode = scan_mode(&model.borrow().review);
+            match start_mail_load(&model, mode) {
+                Ok(()) => {
+                    if mode == ScanMode::Full {
+                        REVIEW_UI.with(|state| state.borrow_mut().selected = None);
+                    }
                     start_timer(&timer);
                 }
                 Err(error) => {
@@ -2259,6 +2297,19 @@ mod tests {
 
     fn model() -> AppModel {
         AppModel::with_store(Ok(None))
+    }
+
+    #[test]
+    fn scan_mode_is_incremental_only_with_loaded_mail_and_a_scan_result() {
+        let mut review = ReviewState::default();
+        assert_eq!(scan_mode(&review), ScanMode::Full);
+        review = crate::review_model::layout_fixture();
+        assert_eq!(scan_mode(&review), ScanMode::Incremental);
+        review.analysis = None;
+        assert_eq!(scan_mode(&review), ScanMode::Full);
+        review = crate::review_model::layout_fixture();
+        review.messages.clear();
+        assert_eq!(scan_mode(&review), ScanMode::Full);
     }
 
     #[test]

@@ -14,8 +14,9 @@ use std::sync::atomic::Ordering;
 #[path = "review_scan.rs"]
 mod scanning;
 pub(crate) use scanning::{
-    ConversationFailure, FailureReason, ReviewMessage, ScanOptions, ScanProgress, ScanResult,
-    closure_candidates, compare_decisions, probe, same_thread_closure_candidates, scan,
+    ConversationFailure, FailureReason, IncrementalScope, PriorUpdate, ReviewMessage, ScanOptions,
+    ScanProgress, ScanResult, ScanScope, closure_candidates, compare_decisions, probe,
+    same_thread_closure_candidates, scan,
 };
 
 pub(crate) const SHOW_HANDLED_LABEL: &str = "Show resolved, handled, and dismissed";
@@ -183,6 +184,28 @@ struct MergedConversationMetadata {
     notes: Vec<String>,
 }
 
+fn attach_prior_updates(items: &mut [LoopItem], updates: Vec<PriorUpdate>) -> usize {
+    let mut attached = 0;
+    for prior in updates {
+        let Some(item) = items.iter_mut().find(|item| {
+            item.evidence.message == prior.message
+                && item.evidence.block == prior.block
+                && item.action_phrase == prior.action_phrase
+        }) else {
+            continue;
+        };
+        if item
+            .suggested_update
+            .as_ref()
+            .is_none_or(|current| scanning::outranks(&prior.update, current))
+        {
+            item.suggested_update = Some(prior.update);
+            attached += 1;
+        }
+    }
+    attached
+}
+
 fn conversation_coverage(
     conversation_count: usize,
     failures: &[ConversationFailure],
@@ -201,6 +224,43 @@ fn conversation_coverage(
     (analyzed, failed, not_started)
 }
 
+fn source_notes_for(
+    source: &SourceReview,
+    total: usize,
+    prior_count: usize,
+    mut prepared_notes: Vec<String>,
+    message_notes: Vec<String>,
+) -> Vec<String> {
+    let label = &source.label;
+    let new_count = total.saturating_sub(prior_count);
+    let new_suffix = (prior_count > 0).then(|| format!("; {new_count} new"));
+    prepared_notes.push(format!(
+        "{label}: {total} messages{}{}{}",
+        new_suffix.as_deref().unwrap_or_default(),
+        if source.partial {
+            "; coverage capped, more mail exists"
+        } else {
+            ""
+        },
+        if source.message_errors.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; {} message(s) could not be loaded",
+                source.message_errors.len()
+            )
+        },
+    ));
+    prepared_notes.extend(
+        source
+            .errors
+            .iter()
+            .map(|error| format!("{label}: {error}")),
+    );
+    prepared_notes.extend(message_notes);
+    prepared_notes
+}
+
 impl ReviewState {
     pub fn loaded(sources: Vec<SourceReview>) -> Self {
         let mut state = Self::default();
@@ -209,22 +269,29 @@ impl ReviewState {
     }
 
     /// Replaces source diagnostics and appends newly available messages, deduplicated by handle.
-    /// Returns the conversation ids contributed by the retried sources.
+    ///
+    /// Returns both appended conversations and existing conversations re-keyed by
+    /// `merge_threads`: a bridging message can absorb an old thread, whose stale
+    /// scan items must then be replaced by [`ReviewState::merge_scan`].
     pub fn append_sources(&mut self, sources: Vec<SourceReview>) -> BTreeSet<String> {
+        let previous_conversations: BTreeMap<String, String> = self
+            .messages
+            .iter()
+            .map(|message| (message.input.handle.clone(), message.conversation.clone()))
+            .collect();
         let mut appended_handles = BTreeSet::new();
         for source in sources {
             let label = source.label.clone();
-            let mut count = 0;
+            let prior_count = self.messages.iter().filter(|m| m.source == label).count();
             let mut issue_count =
                 usize::from(source.partial) + source.errors.len() + source.message_errors.len();
-            let mut notes = Vec::new();
             let mut prepare_failures = std::collections::BTreeMap::new();
             if source.failed {
                 self.failed_sources.insert(label.clone());
             } else {
                 self.failed_sources.remove(&label);
             }
-            for item in source.messages {
+            for item in &source.messages {
                 if self
                     .messages
                     .iter()
@@ -232,11 +299,10 @@ impl ReviewState {
                 {
                     continue;
                 }
-                match scanning::prepare(&item, &label, self.messages.len()) {
+                match scanning::prepare(item, &label, self.messages.len()) {
                     Ok(m) => {
                         appended_handles.insert(m.input.handle.clone());
                         self.messages.push(m);
-                        count += 1;
                     }
                     Err(error) => {
                         issue_count += 1;
@@ -244,41 +310,32 @@ impl ReviewState {
                     }
                 }
             }
-            notes.extend(prepare_failures.into_iter().map(|(reason, count)| {
-                format!(
-                    "{label}: {count} message(s) skipped during preparation ({}).",
-                    reason.trim_end_matches('.')
-                )
-            }));
-            notes.push(format!(
-                "{}: {count} messages{}{}",
-                label,
-                if source.partial {
-                    "; coverage capped, more mail exists"
-                } else {
-                    ""
-                },
-                if source.message_errors.is_empty() {
-                    String::new()
-                } else {
+            let prepared_notes = prepare_failures
+                .into_iter()
+                .map(|(reason, count)| {
                     format!(
-                        "; {} message(s) could not be loaded",
-                        source.message_errors.len()
+                        "{label}: {count} message(s) skipped during preparation ({}).",
+                        reason.trim_end_matches('.')
                     )
-                },
-            ));
-            notes.extend(source.errors.into_iter().map(|e| format!("{label}: {e}")));
+                })
+                .collect();
             let mut message_failures = std::collections::BTreeMap::new();
-            for error in source.message_errors {
+            for error in &source.message_errors {
                 *message_failures.entry(error.to_string()).or_insert(0usize) += 1;
             }
-            notes.extend(message_failures.into_iter().map(|(reason, count)| {
-                format!(
-                    "{}: {count} message(s) could not be loaded ({}).",
-                    label,
-                    reason.trim_end_matches('.')
-                )
-            }));
+            let message_notes = message_failures
+                .into_iter()
+                .map(|(reason, count)| {
+                    format!(
+                        "{}: {count} message(s) could not be loaded ({}).",
+                        label,
+                        reason.trim_end_matches('.')
+                    )
+                })
+                .collect();
+            let total = self.messages.iter().filter(|m| m.source == label).count();
+            let notes =
+                source_notes_for(&source, total, prior_count, prepared_notes, message_notes);
             self.source_notes.insert(label.clone(), notes);
             self.source_issue_counts.insert(label, issue_count);
         }
@@ -293,8 +350,36 @@ impl ReviewState {
         self.messages.sort_by_key(|m| m.input.timestamp);
         self.messages
             .iter()
-            .filter(|message| appended_handles.contains(&message.input.handle))
+            .filter(|message| {
+                appended_handles.contains(&message.input.handle)
+                    || previous_conversations
+                        .get(&message.input.handle)
+                        .is_some_and(|old| old != &message.conversation)
+            })
             .map(|message| message.conversation.clone())
+            .collect()
+    }
+
+    pub(crate) fn prior_open_items(&self, changed: &BTreeSet<String>) -> Vec<LoopItem> {
+        let Some(analysis) = &self.analysis else {
+            return Vec::new();
+        };
+        let cards = self.card_contexts(&analysis.items);
+        analysis
+            .items
+            .iter()
+            .zip(cards)
+            .filter(|(item, card)| {
+                item.resolution.is_none()
+                    && item.event_passed.is_none()
+                    && card.as_ref().is_none_or(|card| !card.closed)
+                    && self
+                        .messages
+                        .iter()
+                        .find(|message| message.input.handle == item.evidence.message)
+                        .is_some_and(|message| !changed.contains(&message.conversation))
+            })
+            .map(|(item, _)| item.clone())
             .collect()
     }
 
@@ -410,6 +495,17 @@ impl ReviewState {
             .append(&mut result.conversation_notes_by_id);
         self.conversation_rejection_reasons
             .append(&mut result.conversation_rejection_reasons);
+        let live: BTreeSet<&str> = self
+            .messages
+            .iter()
+            .map(|message| message.conversation.as_str())
+            .collect();
+        self.conversation_quality
+            .retain(|conversation, _| live.contains(conversation.as_str()));
+        self.conversation_notes_by_id
+            .retain(|conversation, _| live.contains(conversation.as_str()));
+        self.conversation_rejection_reasons
+            .retain(|conversation, _| live.contains(conversation.as_str()));
         let (rejected, degraded) = self
             .conversation_quality
             .values()
@@ -444,7 +540,7 @@ impl ReviewState {
     }
 
     /// Merges a subset scan into the existing analysis without disturbing untouched cards.
-    pub fn merge_scan(&mut self, mut result: ScanResult, retried: &BTreeSet<String>) {
+    pub fn merge_scan(&mut self, mut result: ScanResult, retried: &BTreeSet<String>) -> usize {
         self.scan_failed = false;
         let metadata = self.merge_conversation_metadata(&mut result, retried);
         let retried_handles: BTreeSet<String> = self
@@ -463,6 +559,7 @@ impl ReviewState {
             .items
             .retain(|item| !retried_handles.contains(&item.evidence.message));
         analysis.items.append(&mut result.analysis.items);
+        let attached = attach_prior_updates(&mut analysis.items, result.prior_updates);
         analysis.rejected = metadata.rejected;
         analysis.degraded = metadata.degraded;
         analysis.rejection_reasons = metadata.rejection_reasons;
@@ -499,6 +596,7 @@ impl ReviewState {
 
         let mut merged = ScanResult {
             analysis: self.analysis.take().expect("analysis initialized above"),
+            prior_updates: Vec::new(),
             failures: kept_lines,
             failed_conversations_detail: self.failed_conversations_detail.clone(),
             analyzed: 0,
@@ -508,7 +606,7 @@ impl ReviewState {
             conversation_quality: self.conversation_quality.clone(),
             conversation_notes_by_id: self.conversation_notes_by_id.clone(),
             conversation_rejection_reasons: self.conversation_rejection_reasons.clone(),
-            suggested_updates: result.suggested_updates,
+            suggested_updates: result.suggested_updates + attached,
             event_closures: 0,
             primary_scan_transport_error: result.primary_scan_transport_error,
             conversation_count,
@@ -529,7 +627,9 @@ impl ReviewState {
             .count();
         scanning::close_passed_events(&mut merged, &self.messages, chrono::Utc::now().timestamp());
         let model = self.analysis_model.clone();
+        let suggested_updates = merged.suggested_updates;
         self.set_scan(merged, model);
+        suggested_updates
     }
 
     #[must_use]
@@ -1440,6 +1540,7 @@ pub fn layout_fixture() -> ReviewState {
     state.source_failures = 5;
     state.set_scan(
         ScanResult {
+            prior_updates: vec![],
             analysis: LoopItems {
                 items,
                 rejected: 0,
@@ -1525,6 +1626,125 @@ mod tests {
             subject_short: "Synthetic subject".into(),
             reason,
         }
+    }
+
+    fn source_review(
+        label: &str,
+        messages: Vec<openloops_graph::live::review::MailItem>,
+    ) -> SourceReview {
+        SourceReview {
+            label: label.into(),
+            messages,
+            errors: vec![],
+            message_errors: vec![],
+            partial: false,
+            failed: false,
+        }
+    }
+
+    fn test_mail(
+        id: &str,
+        conversation: &str,
+        sender: &str,
+        to: Vec<&str>,
+    ) -> openloops_graph::live::review::MailItem {
+        openloops_graph::live::review::MailItem {
+            id: id.into(),
+            account: "synthetic-account".into(),
+            conversation: conversation.into(),
+            subject: "Quarterly planning details".into(),
+            body: "Synthetic body.".into(),
+            received: "2026-09-01T12:00:00Z".into(),
+            sender: format!("Synthetic <{sender}>"),
+            sender_address: sender.into(),
+            to: to.into_iter().map(str::to_owned).collect(),
+            own_addresses: vec!["user@example.invalid".into()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn append_sources_returns_rekeyed_conversations_when_merge_threads_absorbs_a_thread() {
+        let first = test_mail(
+            "old-a",
+            "cZ",
+            "p1@example.invalid",
+            vec!["user@example.invalid"],
+        );
+        let second = test_mail(
+            "old-b",
+            "cM",
+            "p2@example.invalid",
+            vec!["user@example.invalid"],
+        );
+        let mut state = ReviewState::loaded(vec![source_review("Inbox", vec![first, second])]);
+        assert_eq!(
+            state
+                .messages
+                .iter()
+                .map(|m| m.conversation.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            2
+        );
+        let bridge = test_mail(
+            "new-bridge",
+            "cA",
+            "user@example.invalid",
+            vec!["p1@example.invalid", "p2@example.invalid"],
+        );
+        let changed = state.append_sources(vec![source_review("Inbox", vec![bridge])]);
+        assert_eq!(changed, BTreeSet::from(["cA".into()]));
+        assert!(
+            state
+                .messages
+                .iter()
+                .all(|message| message.conversation == "cA")
+        );
+    }
+
+    #[test]
+    fn append_sources_reports_cumulative_count_with_new_suffix() {
+        let mut state = ReviewState::loaded(vec![source_review(
+            "Inbox",
+            vec![test_mail(
+                "one",
+                "c1",
+                "p1@example.invalid",
+                vec!["user@example.invalid"],
+            )],
+        )]);
+        state.append_sources(vec![source_review(
+            "Inbox",
+            vec![test_mail(
+                "two",
+                "c2",
+                "p2@example.invalid",
+                vec!["user@example.invalid"],
+            )],
+        )]);
+        assert!(
+            state
+                .notices
+                .iter()
+                .any(|note| note == "Inbox: 2 messages; 1 new")
+        );
+    }
+
+    #[test]
+    fn append_sources_ignores_known_ids_and_returns_empty_set() {
+        let source = source_review(
+            "Inbox",
+            vec![test_mail(
+                "known",
+                "c1",
+                "p1@example.invalid",
+                vec!["user@example.invalid"],
+            )],
+        );
+        let mut state = ReviewState::loaded(vec![source.clone()]);
+        assert!(state.append_sources(vec![source]).is_empty());
+        assert_eq!(state.messages.len(), 1);
     }
 
     #[test]
@@ -1677,6 +1897,111 @@ mod tests {
         );
         assert_eq!(state.decisions.get(&keys[0]).decision, records[0].decision);
         assert_eq!(state.decisions.get(&keys[1]).decision, records[1].decision);
+    }
+
+    fn suggested(kind: SuggestedUpdateKind, confidence_micros: u32) -> SuggestedUpdate {
+        SuggestedUpdate {
+            kind,
+            evidence_text: "Synthetic follow-up.".into(),
+            source_message: "m3".into(),
+            source_block: 0,
+            temporal_value: None,
+            confidence_micros,
+        }
+    }
+
+    #[test]
+    fn prior_open_items_excludes_changed_closed_and_handled_loops() {
+        let mut state = layout_fixture();
+        let handled = state.analysis.as_ref().unwrap().items[2].clone();
+        let message = state
+            .messages
+            .iter()
+            .find(|message| message.input.handle == handled.evidence.message)
+            .unwrap();
+        let key = state.decisions.fingerprint(
+            &message.account,
+            &message.id,
+            handled.evidence.block,
+            &handled.evidence.quote,
+            &handled.action_phrase,
+        );
+        state.decisions.records.retain(|record| record.key != key);
+        state.decisions.records.push(Record {
+            key,
+            decision: Decision::Done,
+            reminder: Reminder::None,
+            updated: now(),
+        });
+        let prior = state.prior_open_items(&BTreeSet::from(["synthetic-thread-3".into()]));
+        assert_eq!(prior.len(), 1);
+        assert_eq!(prior[0].evidence.message, "m1");
+    }
+
+    #[test]
+    fn merge_scan_attaches_prior_updates_by_evidence_without_readding_items() {
+        let mut state = layout_fixture();
+        let item = state.analysis.as_ref().unwrap().items[1].clone();
+        let before = state.analysis.as_ref().unwrap().items.len();
+        let mut result = empty_scan_result();
+        result.prior_updates.push(PriorUpdate {
+            message: item.evidence.message.clone(),
+            block: item.evidence.block,
+            action_phrase: item.action_phrase.clone(),
+            update: suggested(SuggestedUpdateKind::Closure, 800_000),
+        });
+        assert_eq!(state.merge_scan(result, &BTreeSet::new()), 1);
+        let items = &state.analysis.as_ref().unwrap().items;
+        assert_eq!(items.len(), before);
+        assert!(items[1].suggested_update.is_some());
+    }
+
+    #[test]
+    fn merge_scan_prior_update_respects_outranks() {
+        let mut state = layout_fixture();
+        let item = &mut state.analysis.as_mut().unwrap().items[1];
+        item.suggested_update = Some(suggested(SuggestedUpdateKind::Closure, 900_000));
+        let identity = (
+            item.evidence.message.clone(),
+            item.evidence.block,
+            item.action_phrase.clone(),
+        );
+        let mut result = empty_scan_result();
+        result.prior_updates.push(PriorUpdate {
+            message: identity.0,
+            block: identity.1,
+            action_phrase: identity.2,
+            update: suggested(SuggestedUpdateKind::Modification, 700_000),
+        });
+        assert_eq!(state.merge_scan(result, &BTreeSet::new()), 0);
+        assert_eq!(
+            state.analysis.as_ref().unwrap().items[1]
+                .suggested_update
+                .as_ref()
+                .unwrap()
+                .confidence_micros,
+            900_000
+        );
+    }
+
+    #[test]
+    fn merge_scan_drops_metadata_for_absorbed_conversation_ids() {
+        let mut state = layout_fixture();
+        state.conversation_quality.insert("absorbed".into(), (1, 1));
+        state
+            .conversation_notes_by_id
+            .insert("absorbed".into(), vec!["Synthetic note".into()]);
+        state
+            .conversation_rejection_reasons
+            .insert("absorbed".into(), vec!["Synthetic reason"]);
+        state.merge_scan(empty_scan_result(), &BTreeSet::new());
+        assert!(!state.conversation_quality.contains_key("absorbed"));
+        assert!(!state.conversation_notes_by_id.contains_key("absorbed"));
+        assert!(
+            !state
+                .conversation_rejection_reasons
+                .contains_key("absorbed")
+        );
     }
 
     #[test]
@@ -2247,6 +2572,7 @@ mod tests {
 
         state.set_scan(
             ScanResult {
+                prior_updates: vec![],
                 analysis: LoopItems {
                     items: vec![item],
                     rejected: 0,
@@ -2594,6 +2920,7 @@ mod tests {
 
     fn empty_scan_result() -> ScanResult {
         ScanResult {
+            prior_updates: vec![],
             analysis: LoopItems {
                 items: vec![],
                 rejected: 0,
@@ -2682,6 +3009,7 @@ the scan stopped after a provider error."
         let mut state = ReviewState::default();
         state.set_scan(
             ScanResult {
+                prior_updates: vec![],
                 analysis: LoopItems {
                     items: vec![],
                     rejected: 0,
