@@ -96,6 +96,8 @@ export component AppWindow inherits Window {
     in property <string> review-uncertainty;
     in property <string> review-action-status;
     in property <bool> review-action-status-succeeded;
+    in property <string> linking-status;
+    in property <bool> has-links;
     in property <bool> selected-open;
     in property <bool> selected-terminal;
     in property <bool> can-track;
@@ -155,6 +157,10 @@ export component AppWindow inherits Window {
     callback move-review-selection(int);
     callback list-primary-action;
     callback review-decision(int);
+    callback link-loop;
+    callback link-thread;
+    callback unlink;
+    callback cancel-link;
     callback suggested-update-resolved(bool);
     callback open-reminder;
     callback draft-title-edited(string);
@@ -201,7 +207,7 @@ export component AppWindow inherits Window {
                 scan-strip: root.scan-strip; coverage-open <=> root.coverage-open; has-analysis: root.review-has-analysis;
                 no-usable-items: root.review-no-usable-items; no-usable-text: root.review-no-usable-text; has-selection: root.review-has-selection;
                 pills: root.review-pills; title: root.review-title; meta: root.review-meta; uncertainty: root.review-uncertainty;
-                action-status: root.review-action-status; action-status-succeeded: root.review-action-status-succeeded; selected-open: root.selected-open; selected-terminal: root.selected-terminal;
+                action-status: root.review-action-status; action-status-succeeded: root.review-action-status-succeeded; linking-status: root.linking-status; has-links: root.has-links; selected-open: root.selected-open; selected-terminal: root.selected-terminal;
                 can-track: root.can-track; can-watch: root.can-watch; can-remind: root.can-remind;
                 draft-open: root.draft-open; draft-title <=> root.draft-title; draft-when <=> root.draft-when; draft-scheduled-line: root.draft-scheduled-line; draft-valid: root.draft-valid;
                 reminder-state: root.reminder-state; source-url: root.source-url; conversation-url: root.conversation-url; source-unavailable-note: root.source-unavailable-note; evidence-cards: root.evidence-cards; completion-card: root.completion-card; suggested-update: root.suggested-update; conversation-title: root.conversation-title; conversation-rows: root.conversation-rows;
@@ -212,7 +218,7 @@ export component AppWindow inherits Window {
                 coverage-toggled(value) => { root.coverage-toggled(value); } sources-link => { root.navigate(1); root.active-screen = 1; }
                 select-row(handle) => { root.select-review-row(handle); } move-selection(delta) => { root.move-review-selection(delta); }
                 list-primary-action => { root.list-primary-action(); }
-                decision(value) => { root.review-decision(value); } suggested-update-resolved(accept) => { root.suggested-update-resolved(accept); } open-reminder => { root.open-reminder(); }
+                decision(value) => { root.review-decision(value); } link-loop => { root.link-loop(); } link-thread => { root.link-thread(); } unlink => { root.unlink(); } cancel-link => { root.cancel-link(); } suggested-update-resolved(accept) => { root.suggested-update-resolved(accept); } open-reminder => { root.open-reminder(); }
                 draft-title-edited(value) => { root.draft-title-edited(value); } draft-when-edited(value) => { root.draft-when-edited(value); }
                 draft-in-hour => { root.draft-in-hour(); } draft-tomorrow => { root.draft-tomorrow(); } create-reminder => { root.create-reminder(); } cancel-reminder => { root.cancel-reminder(); }
                 reconcile-reminder(exists) => { root.reconcile-reminder(exists); } open-external(url) => { root.open-external(url); }

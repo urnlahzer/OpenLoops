@@ -215,6 +215,7 @@ pub(crate) fn sync(model: &AppModel, window: &AppWindow) {
         .map(|analysis| model.review.card_contexts(&analysis.items))
         .unwrap_or_default();
     let saved = model.review.decisions.records.len();
+    let links = model.review.relations.links.len();
     let provider = model.provider.label();
     let selected = model.selected_model();
     let busy = model.pending.is_some();
@@ -243,7 +244,9 @@ pub(crate) fn sync(model: &AppModel, window: &AppWindow) {
         Provider::OpenRouter => "OpenRouter".into(),
     });
     window.set_provider_connected(provider_connected(model));
-    window.set_status_left(format!("{saved} saved decisions · Windows Credential Manager").into());
+    window.set_status_left(
+        format!("{saved} saved decisions · {links} links · Windows Credential Manager").into(),
+    );
     window.set_status_center(if selected.is_empty() {
         "".into()
     } else {
@@ -482,29 +485,33 @@ pub(crate) fn register_training_export_callbacks(
             let mut model_ref = model.borrow_mut();
             if model_ref.training_export_armed == ExportArmed::Yes {
                 let folder = model_ref.training_export_folder.trim().to_owned();
-                model_ref.training_export_status =
-                    match training_export::export(&model_ref.review, std::path::Path::new(&folder))
-                    {
-                        Ok(summary) => Status {
-                            lines: vec![format!(
-                                "Wrote {} triage rows and {} closure rows.",
-                                summary.triage_rows, summary.closure_rows
-                            )],
-                            succeeded: true,
-                        },
-                        Err(training_export::ExportError::RelativePath) => Status {
-                            lines: vec!["Enter an absolute folder path.".into()],
-                            succeeded: false,
-                        },
-                        Err(training_export::ExportError::PathInRepo) => Status {
-                            lines: vec!["Choose a folder outside the repository.".into()],
-                            succeeded: false,
-                        },
-                        Err(training_export::ExportError::Io(error)) => Status {
-                            lines: vec![format!("Could not write to {folder} ({}).", error.kind())],
-                            succeeded: false,
-                        },
-                    };
+                model_ref.training_export_status = match training_export::export(
+                    &model_ref.review,
+                    std::path::Path::new(&folder),
+                ) {
+                    Ok(summary) => Status {
+                        lines: vec![format!(
+                            "Wrote {} files: {} triage rows, {} closure rows, and {} rules rows.",
+                            summary.files_written,
+                            summary.triage_rows,
+                            summary.closure_rows,
+                            summary.rules_rows
+                        )],
+                        succeeded: true,
+                    },
+                    Err(training_export::ExportError::RelativePath) => Status {
+                        lines: vec!["Enter an absolute folder path.".into()],
+                        succeeded: false,
+                    },
+                    Err(training_export::ExportError::PathInRepo) => Status {
+                        lines: vec!["Choose a folder outside the repository.".into()],
+                        succeeded: false,
+                    },
+                    Err(training_export::ExportError::Io(error)) => Status {
+                        lines: vec![format!("Could not write to {folder} ({}).", error.kind())],
+                        succeeded: false,
+                    },
+                };
                 model_ref.training_export_armed = ExportArmed::No;
             } else {
                 model_ref.training_export_armed = ExportArmed::Yes;

@@ -142,6 +142,56 @@ pub struct LoopItem {
     pub from_call_summary: bool,
     pub meeting_time: Option<i64>,
     pub meeting_time_approx: bool,
+    pub mentions: Vec<Mention>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MentionOrigin {
+    Restated,
+    OwnerLink,
+    Duplicate,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mention {
+    pub message: String,
+    pub block: usize,
+    pub quote: String,
+    pub timestamp: i64,
+    pub origin: MentionOrigin,
+}
+
+pub(crate) fn fold_into(
+    survivor: &mut LoopItem,
+    dropped: LoopItem,
+    origin: MentionOrigin,
+    timestamp: i64,
+) {
+    let mention = Mention {
+        message: dropped.evidence.message.clone(),
+        block: dropped.evidence.block,
+        quote: dropped.evidence.quote.clone(),
+        timestamp,
+        origin,
+    };
+    if (mention.message != survivor.evidence.message || mention.block != survivor.evidence.block)
+        && !survivor
+            .mentions
+            .iter()
+            .any(|existing| existing.message == mention.message && existing.block == mention.block)
+    {
+        survivor.mentions.push(mention);
+    }
+    for mention in dropped.mentions {
+        if (mention.message != survivor.evidence.message
+            || mention.block != survivor.evidence.block)
+            && !survivor.mentions.iter().any(|existing| {
+                existing.message == mention.message && existing.block == mention.block
+            })
+        {
+            survivor.mentions.push(mention);
+        }
+    }
 }
 
 pub struct LoopItems {

@@ -1,6 +1,7 @@
 //! Review-screen projection and callback wiring for the Slint adapter.
 use std::{cell::RefCell, rc::Rc, sync::atomic::Ordering};
 
+use crate::link_state::LinkKind;
 use crate::{
     app_model::{self, AppModel, Outcome, Service, Status},
     claim_view::{
@@ -313,6 +314,20 @@ fn evidence_cards(
             messages,
         ));
     }
+    for mention in &item.mentions {
+        let message = messages
+            .iter()
+            .find(|message| message.input.handle == mention.message);
+        cards.push(EvidenceView {
+            label: "Asked again".into(),
+            sender: message.map_or_else(String::new, sender_label),
+            time: meeting_time_label(mention.timestamp, false),
+            quote: typographic_quote(&mention.quote),
+            context: String::new(),
+            subject_note: String::new(),
+            url: message.map_or_else(String::new, |message| gated_outlook_url(&message.web_link)),
+        });
+    }
     cards
 }
 
@@ -519,6 +534,7 @@ struct ProjectionCache {
 
 struct ReviewUiState {
     selected: Option<[u8; 32]>,
+    linking: Option<(LinkKind, [u8; 32])>,
     filter: Filter,
     coverage_open: bool,
     cache: ProjectionCache,
@@ -528,6 +544,7 @@ impl Default for ReviewUiState {
     fn default() -> Self {
         Self {
             selected: None,
+            linking: None,
             filter: Filter::All,
             coverage_open: false,
             cache: ProjectionCache::default(),
@@ -692,6 +709,13 @@ fn pills_for(item: &LoopItem, card: &CardContext) -> Vec<PillView> {
             text: "Call summary".into(),
             kind: "neutral",
             hint: String::new(),
+        });
+    }
+    if !item.mentions.is_empty() {
+        pills.push(PillView {
+            text: format!("Asked {}x", item.mentions.len() + 1),
+            kind: "neutral",
+            hint: "The same ask appeared again in a later message.".into(),
         });
     }
     if let Some(deadline) = &card.deadline {
@@ -959,6 +983,10 @@ fn selected_view(
         ("Deadline stated in email".into(), deadline),
         ("Source".into(), source.source.clone()),
     ];
+    let linked_titles = linked_titles(review, selected, cards, &analysis.items);
+    if !linked_titles.is_empty() {
+        meta.push(("Linked to".into(), linked_titles.join("; ")));
+    }
     if let Some(meeting_time) = item.meeting_time {
         meta.push((
             "Meeting time".into(),
@@ -1017,6 +1045,30 @@ fn selected_view(
         ),
         conversation: conversation_rows(&review.messages, source),
     })
+}
+
+fn linked_titles(
+    review: &ReviewState,
+    selected: [u8; 32],
+    cards: &[Option<CardContext>],
+    items: &[LoopItem],
+) -> Vec<String> {
+    review
+        .relations
+        .linked_to(&selected, LinkKind::SameLoop)
+        .into_iter()
+        .filter_map(|linked| {
+            cards
+                .iter()
+                .enumerate()
+                .find_map(|(index, card)| {
+                    card.as_ref()
+                        .is_some_and(|card| card.record.key == linked)
+                        .then(|| items[index].action.clone())
+                })
+                .or_else(|| review.linked_card_titles.get(&linked).cloned())
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1245,6 +1297,17 @@ fn sync_review_inner(
     window.set_scan_strip(strip);
     window.set_coverage_open(review_ui.coverage_open);
     window.set_review_has_analysis(model.review.analysis.is_some());
+    if model.review.analysis.is_none() {
+        review_ui.linking = None;
+    }
+    window.set_linking_status(
+        if review_ui.linking.is_some() {
+            "Select the other card. Esc cancels."
+        } else {
+            ""
+        }
+        .into(),
+    );
     let visible = visible_handles(
         &model.review,
         cards,
@@ -1357,6 +1420,36 @@ fn sync_review_inner(
         window.set_can_track(selected.can_track && !busy);
         window.set_can_watch(selected.can_watch && !busy);
         window.set_can_remind(selected.can_remind && !busy);
+        let has_links = review_ui.selected.is_some_and(|selected_key| {
+            let loop_link = !model
+                .review
+                .relations
+                .linked_to(&selected_key, LinkKind::SameLoop)
+                .is_empty();
+            let thread_link = model.review.analysis.as_ref().is_some_and(|analysis| {
+                cards
+                    .iter()
+                    .position(|card| {
+                        card.as_ref()
+                            .is_some_and(|card| card.record.key == selected_key)
+                    })
+                    .and_then(|index| analysis.items.get(index))
+                    .and_then(|item| source_message(&model.review, item))
+                    .is_some_and(|source| {
+                        let key = model
+                            .review
+                            .relations
+                            .thread_key(&source.account, &source.conversation);
+                        !model
+                            .review
+                            .relations
+                            .linked_to(&key, LinkKind::SameThread)
+                            .is_empty()
+                    })
+            });
+            loop_link || thread_link
+        });
+        window.set_has_links(has_links);
         if let Some(draft) = selected.draft {
             window.set_draft_open(true);
             window.set_draft_title(draft.title.into());
@@ -1437,6 +1530,7 @@ fn sync_review_inner(
             window.set_conversation_rows(m);
         });
     } else {
+        window.set_has_links(false);
         window.set_review_has_selection(false);
         window.set_review_title("".into());
         sync_list_cached(&mut review_ui.cache.meta, Vec::new(), |m| {
@@ -1520,8 +1614,13 @@ fn start_mail_load(model: &Rc<RefCell<AppModel>>, mode: ScanMode) -> Result<(), 
     let mut model_ref = model.borrow_mut();
     if mode == ScanMode::Full {
         let decisions = std::mem::take(&mut model_ref.review.decisions);
+        let relations = std::mem::replace(
+            &mut model_ref.review.relations,
+            crate::link_state::Relations::open_with(&decisions),
+        );
         model_ref.review = ReviewState::default();
         model_ref.review.decisions = decisions;
+        model_ref.review.relations = relations;
         model_ref.review_status = Status::default();
     }
     let progress = std::sync::Arc::new(LoadProgress::default());
@@ -1706,6 +1805,53 @@ fn decide_selected(model: &mut AppModel, selected: Option<[u8; 32]>, value: i32)
             || {},
         );
     }
+}
+
+fn begin_link(model: &AppModel, kind: LinkKind) {
+    let selected = REVIEW_UI.with(|state| state.borrow().selected);
+    if let Some(key) = selected {
+        REVIEW_UI.with(|state| state.borrow_mut().linking = Some((kind, key)));
+    } else {
+        let _ = model;
+    }
+}
+
+fn complete_link(model: &mut AppModel, row: usize) {
+    let linking = REVIEW_UI.with(|state| state.borrow().linking);
+    let Some((kind, first_key)) = linking else {
+        return;
+    };
+    let Some(analysis) = &model.review.analysis else {
+        return;
+    };
+    let cards = model.review.card_contexts(&analysis.items);
+    let Some(second_key) = cards
+        .get(row)
+        .and_then(Option::as_ref)
+        .map(|card| card.record.key)
+    else {
+        return;
+    };
+    if first_key == second_key {
+        cancel_link(model);
+        return;
+    }
+    let Some(first) = cards.iter().position(|card| {
+        card.as_ref()
+            .is_some_and(|card| card.record.key == first_key)
+    }) else {
+        return;
+    };
+    if model.review.link_cards(kind, first, row).is_ok()
+        && matches!(kind, LinkKind::SameLoop | LinkKind::NotSameLoop)
+    {
+        model.review.apply_loop_links();
+    }
+    REVIEW_UI.with(|state| state.borrow_mut().linking = None);
+}
+
+fn cancel_link(_model: &AppModel) {
+    REVIEW_UI.with(|state| state.borrow_mut().linking = None);
 }
 
 /// Accepts or rejects the pending suggested update on the selected card.
@@ -1894,8 +2040,13 @@ pub(crate) fn register_callbacks(
             model_ref.scan_progress = None;
             model_ref.clear_mail_cache();
             let decisions = std::mem::take(&mut model_ref.review.decisions);
+            let relations = std::mem::replace(
+                &mut model_ref.review.relations,
+                crate::link_state::Relations::open_with(&decisions),
+            );
             model_ref.review = ReviewState::default();
             model_ref.review.decisions = decisions;
+            model_ref.review.relations = relations;
             model_ref.review.action_status =
                 "Results and mail cleared from memory. Saved decisions and To Do tasks are preserved."
                     .into();
@@ -1991,6 +2142,13 @@ pub(crate) fn register_callbacks(
         let model = Rc::clone(&model);
         let weak = window.as_weak();
         window.on_select_review_row(move |handle| {
+            if REVIEW_UI.with(|state| state.borrow().linking.is_some()) {
+                if let Ok(row) = usize::try_from(handle) {
+                    complete_link(&mut model.borrow_mut(), row);
+                    refresh(&model, &weak);
+                }
+                return;
+            }
             let selected = usize::try_from(handle).ok().and_then(|index| {
                 let model_ref = model.borrow();
                 let analysis = model_ref.review.analysis.as_ref()?;
@@ -2003,6 +2161,49 @@ pub(crate) fn register_callbacks(
             });
             REVIEW_UI.with(|state| state.borrow_mut().selected = selected);
             model.borrow_mut().review.action_status.clear();
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_link_loop(move || {
+            begin_link(&model.borrow(), LinkKind::SameLoop);
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_link_thread(move || {
+            begin_link(&model.borrow(), LinkKind::SameThread);
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_unlink(move || {
+            let selected = REVIEW_UI.with(|state| state.borrow().selected);
+            let mut model_ref = model.borrow_mut();
+            if let (Some(selected), Some(analysis)) = (selected, &model_ref.review.analysis) {
+                let cards = model_ref.review.card_contexts(&analysis.items);
+                if let Some(index) = cards.iter().position(|card| {
+                    card.as_ref()
+                        .is_some_and(|card| card.record.key == selected)
+                }) {
+                    let _ = model_ref.review.unlink_card(index);
+                }
+            }
+            drop(model_ref);
+            refresh(&model, &weak);
+        });
+    }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_cancel_link(move || {
+            cancel_link(&model.borrow());
             refresh(&model, &weak);
         });
     }
@@ -3075,6 +3276,7 @@ mod tests {
                 closed: true,
                 deadline: base.deadline,
                 from_call_summary: false,
+                mentions: 0,
             };
             assert_eq!(status_pill(&item, &card).text, text);
         }
@@ -3236,6 +3438,7 @@ mod tests {
                 closed: true,
                 deadline: None,
                 from_call_summary: false,
+                mentions: 0,
             }),
         ];
         let handles = visible_handles(&review, &cards, Filter::All, true, false, "");
@@ -3883,5 +4086,79 @@ mod tests {
         );
         assert_eq!(suggested_view(&app.review, None), SuggestedView::default());
         assert_eq!(truncated_evidence(&"x".repeat(300)).chars().count(), 241);
+    }
+
+    #[test]
+    fn follow_up_mention_shows_asked_again_card_pill_and_sorts_first() {
+        let mut review = crate::review_model::layout_fixture();
+        let analysis = review.analysis.as_mut().unwrap();
+        analysis.items[0].resolution = None;
+        analysis.items[0].resolution_kind = None;
+        analysis.items[0].cross_thread = false;
+        analysis.items[1].mentions.push(crate::claim_view::Mention {
+            message: "m2".into(),
+            block: 0,
+            quote: "Synthetic repeated request.".into(),
+            timestamp: 1_788_350_400,
+            origin: crate::claim_view::MentionOrigin::Restated,
+        });
+        let cards = review.card_contexts(&review.analysis.as_ref().unwrap().items);
+        assert_eq!(card_order(&cards)[0], 1);
+        let key = cards[1].as_ref().unwrap().record.key;
+        let selected = selected_view(&review, Some(key), &cards).unwrap();
+        assert!(selected.pills.iter().any(|pill| pill.text == "Asked 2x"));
+        let asked_again = selected
+            .evidence
+            .iter()
+            .find(|evidence| evidence.label == "Asked again")
+            .unwrap();
+        assert!(!asked_again.url.is_empty());
+    }
+
+    #[test]
+    fn two_step_link_folds_the_second_card_and_lists_it_under_linked_to() {
+        let mut app = model();
+        app.review = crate::review_model::layout_fixture();
+        let cards = app
+            .review
+            .card_contexts(&app.review.analysis.as_ref().unwrap().items);
+        let first = cards[0].as_ref().unwrap().record.key;
+        REVIEW_UI.with(|state| {
+            let mut state = state.borrow_mut();
+            state.selected = Some(first);
+            state.linking = None;
+        });
+        begin_link(&app, LinkKind::SameLoop);
+        complete_link(&mut app, 1);
+        let items = &app.review.analysis.as_ref().unwrap().items;
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items[0].mentions[0].origin,
+            crate::claim_view::MentionOrigin::OwnerLink
+        );
+        assert_eq!(app.review.relations.pairs(LinkKind::SameLoop).len(), 1);
+        let refreshed = app.review.card_contexts(items);
+        let selected = selected_view(&app.review, Some(first), &refreshed).unwrap();
+        assert!(selected.meta.iter().any(|(label, value)| {
+            label == "Linked to" && value == "Confirm who will send the team budget"
+        }));
+    }
+
+    #[test]
+    fn linking_cancels_on_escape_and_on_the_same_card() {
+        let mut app = model();
+        app.review = crate::review_model::layout_fixture();
+        let cards = app
+            .review
+            .card_contexts(&app.review.analysis.as_ref().unwrap().items);
+        let first = cards[0].as_ref().unwrap().record.key;
+        REVIEW_UI.with(|state| state.borrow_mut().selected = Some(first));
+        begin_link(&app, LinkKind::SameLoop);
+        cancel_link(&app);
+        assert!(REVIEW_UI.with(|state| state.borrow().linking.is_none()));
+        begin_link(&app, LinkKind::SameLoop);
+        complete_link(&mut app, 0);
+        assert!(REVIEW_UI.with(|state| state.borrow().linking.is_none()));
+        assert!(app.review.relations.links.is_empty());
     }
 }
