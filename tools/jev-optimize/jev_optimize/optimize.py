@@ -8,10 +8,13 @@ from pathlib import Path
 from typing import Any
 
 import dspy
+from dspy.experimental import ReAnchor
 
-from .adapter import JevPrograms
+from .adapter import program as make_program
 from .data import DatasetRow, load_jsonl, split_rows
 from .metrics import (
+    ACCEPT_FLOOR,
+    ESCALATE_FLOOR,
     accuracy,
     brier_score,
     choose_thresholds,
@@ -20,6 +23,11 @@ from .metrics import (
 )
 from .proposer import JevProposer
 from .questions import SETS, SPECS
+
+# One wrong automatic decision costs this many right ones: 9 targets ~10% error
+# in the accepted and rejected bands (owner decision 2026-09-27; 19 gave ~5%
+# and sent most rows of the weak rules questions to the chat model).
+WRONG_DECISION_PENALTY = 9.0
 
 
 def _inputs(row: DatasetRow) -> dict[str, Any]:
@@ -41,13 +49,14 @@ def metric_for(question_id: str, *, feedback_includes_text: bool = False):
         if question_id not in example.label:
             raise ValueError(f"example does not carry label for {question_id}")
         label = example.label[question_id]
+        decision = prediction.decision
         if isinstance(label, bool):
-            probability = float(prediction.probability)
-            correct = (probability >= 0.5) == label
+            probability = float(decision.probability)
+            correct = decision.value == label
             feedback = f"label={str(label).lower()}; predicted_probability={probability:.3f}."
         else:
-            correct = prediction.choice == label
-            probability = float(prediction.probabilities.get(label, 0.0))
+            correct = decision.value == label
+            probability = float(decision.probabilities.get(label, 0.0))
             feedback = f"label={label}; predicted_label_probability={probability:.3f}."
         if feedback_includes_text and hasattr(example, "paragraph_text"):
             feedback += f" Synthetic/public context: {example.paragraph_text}"
@@ -83,17 +92,18 @@ def evaluate_question(
         predictions = list(pool.map(lambda row: program(**_inputs(row)), selected))
     for row, prediction in zip(selected, predictions, strict=True):
         label = row.label[question_id]
+        decision = prediction.decision
         if isinstance(label, bool):
             labels.append(label)
-            probabilities.append(float(prediction.probability))
+            probabilities.append(float(decision.probability))
         else:
-            correct = prediction.choice == label
+            correct = decision.value == label
             labels.append(correct)
-            probabilities.append(float(prediction.confidence))
+            probabilities.append(float(decision.confidence))
             multiclass_brier.append(
                 sum(
                     (
-                        float(prediction.probabilities.get(option, 0.0))
+                        float(decision.probabilities.get(option, 0.0))
                         - float(option == label)
                     )
                     ** 2
@@ -149,6 +159,64 @@ def evaluate_question(
     return result
 
 
+class _ReAnchorProgram(dspy.Module):
+    """Give ReAnchor a named predictor while the public factory stays a bare Predict."""
+
+    def __init__(self, predictor: dspy.Predict) -> None:
+        super().__init__()
+        self.predict = predictor
+
+    def forward(self, **kwargs: Any) -> dspy.Prediction:
+        return self.predict(**kwargs)
+
+
+def _reanchor_thresholds(
+    question_id: str,
+    predictor: dspy.Predict,
+    trainset: list[dspy.Example],
+    valset: list[dspy.Example],
+) -> dict[str, float | bool]:
+    labels = [example.label[question_id] for example in [*trainset, *valset]]
+    positives = sum(label is True for label in labels)
+    negatives = sum(label is False for label in labels)
+    if positives < 20 or negatives < 20:
+        return {"accept": 0.7, "escalate": 0.3, "insufficient_data": True}
+
+    def metric(*, false_positive_penalty: bool):
+        def score(example: dspy.Example, prediction: dspy.Prediction) -> float:
+            actual = bool(example.label[question_id])
+            predicted = bool(prediction.decision.value)
+            if predicted == actual:
+                return 1.0
+            penalized = (
+                predicted and not actual
+                if false_positive_penalty
+                else actual and not predicted
+            )
+            return -WRONG_DECISION_PENALTY if penalized else 0.0
+
+        return score
+
+    wrapped = _ReAnchorProgram(predictor)
+    accept_program = ReAnchor(metric(false_positive_penalty=True)).compile(
+        wrapped, trainset=trainset, valset=valset
+    )
+    escalate_program = ReAnchor(metric(false_positive_penalty=False)).compile(
+        wrapped, trainset=trainset, valset=valset
+    )
+    fitted_accept = float(
+        accept_program.predict.fields.get("decision", {}).get("threshold", 0.5)
+    )
+    fitted_escalate = float(
+        escalate_program.predict.fields.get("decision", {}).get("threshold", 0.5)
+    )
+    accept = max(fitted_accept, ACCEPT_FLOOR)
+    escalate = max(fitted_escalate, ESCALATE_FLOOR)
+    if escalate >= accept:
+        escalate = max(ESCALATE_FLOOR, round(accept - 0.1, 2))
+    return {"accept": accept, "escalate": escalate, "insufficient_data": False}
+
+
 def gated_question_update(
     question_id: str,
     *,
@@ -161,11 +229,10 @@ def gated_question_update(
 ) -> dict[str, Any]:
     """Keep tuned wording only when validation and held-out accuracy do not regress.
 
-    Thresholds come from ``calibration`` when supplied: the selected wording
-    evaluated on train plus validation, which holds enough of each class for
-    the chooser where a validation split alone does not (closure outcomes are
-    20% positive). Without it the selected validation sweep is used. The
-    held-out test split never feeds threshold choice.
+    Calibration uses train plus validation, which holds enough of each class
+    where validation alone does not. Noul questions run two ReAnchor passes;
+    Choice questions retain the confidence sweep. The held-out test split
+    never feeds threshold choice.
     """
 
     baseline_validation_score = float(baseline_validation["accuracy"])
@@ -177,7 +244,22 @@ def gated_question_update(
         and tuned_test_accuracy >= baseline_test_accuracy
     )
     selected_validation = tuned_validation if keep_tuned else baseline_validation
-    thresholds = choose_thresholds((calibration or selected_validation)["sweep"])
+    calibration_data = calibration or selected_validation
+    if SPECS[question_id].kind == "choice":
+        thresholds = choose_thresholds(calibration_data["sweep"])
+    else:
+        sweep = calibration_data["sweep"]
+        positives = int(sweep[0].get("positives", 0)) if sweep else 0
+        negatives = int(sweep[0].get("negatives", 0)) if sweep else 0
+        if positives < 20 or negatives < 20:
+            thresholds = {"accept": 0.7, "escalate": 0.3, "insufficient_data": True}
+        else:
+            thresholds = _reanchor_thresholds(
+                question_id,
+                calibration_data["program"],
+                calibration_data["trainset"],
+                calibration_data["valset"],
+            )
     update: dict[str, Any] = {
         "instructions": (
             tuned_instructions
@@ -212,17 +294,18 @@ def optimize_set(
     *,
     budget: str = "light",
     feedback_includes_text: bool = False,
+    reflection_lm: Any | None = None,
 ) -> dict[str, Any]:
     rows = load_jsonl(data_path)
-    reflection_model = os.environ.get("OPENROUTER_REFLECTION_MODEL")
-    if not reflection_model:
-        raise RuntimeError("OPENROUTER_REFLECTION_MODEL is not set")
-    reflection_lm = dspy.LM(
-        f"openrouter/{reflection_model}",
-        api_base="https://openrouter.ai/api/v1",
-        extra_body={"provider": {"zdr": True}},
-    )
-    adapter = JevPrograms(client)
+    if reflection_lm is None:
+        reflection_model = os.environ.get("OPENROUTER_REFLECTION_MODEL")
+        if not reflection_model:
+            raise RuntimeError("OPENROUTER_REFLECTION_MODEL is not set")
+        reflection_lm = dspy.LM(
+            f"openrouter/{reflection_model}",
+            api_base="https://openrouter.ai/api/v1",
+            extra_body={"provider": {"zdr": True}},
+        )
     output: dict[str, Any] = {
         "model": getattr(client, "model", "typesafe/jev-1.13"),
         "dataset_sizes": {},
@@ -235,7 +318,7 @@ def optimize_set(
         output["dataset_sizes"][question_id] = {
             name: len(values) for name, values in parts.items()
         }
-        program = adapter.program(question_id)
+        program = make_program(question_id, client)
         baseline_validation = evaluate_question(program, question_id, parts["validation"])
         baseline_test = evaluate_question(program, question_id, parts["test"])
         spec = SPECS[question_id]
@@ -269,12 +352,22 @@ def optimize_set(
             tuned_validation["accuracy"] >= baseline_validation["accuracy"]
             and tuned_test["accuracy"] >= baseline_test["accuracy"]
         )
+        shipping_program = optimized if keep_tuned else program
         # Thresholds are chosen on train + validation for the wording that
         # will ship, so the sweep holds enough of each class; test stays out.
         calibration = evaluate_question(
-            optimized if keep_tuned else program,
+            shipping_program,
             question_id,
             [*parts["train"], *parts["validation"]],
+        )
+        calibration.update(
+            {
+                # ReAnchor must calibrate the predictor whose wording ships,
+                # using the same keep_tuned gate as the accuracy numbers.
+                "program": shipping_program,
+                "trainset": _examples(parts["train"], question_id),
+                "valset": _examples(parts["validation"], question_id),
+            }
         )
         update = gated_question_update(
             question_id,
@@ -282,7 +375,7 @@ def optimize_set(
             tuned_validation=tuned_validation,
             baseline_test=baseline_test,
             tuned_test=tuned_test,
-            tuned_instructions=optimized.predict.signature.instructions,
+            tuned_instructions=optimized.signature.instructions,
             calibration=calibration,
         )
         update["calibration_rows"] = len(parts["train"]) + len(parts["validation"])

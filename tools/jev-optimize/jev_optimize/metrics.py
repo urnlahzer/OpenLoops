@@ -73,8 +73,8 @@ def threshold_sweep(labels: list[bool], probabilities: list[float]) -> list[dict
     return rows
 
 
-# A noul below 0.5 leans false; accepting it as true would be wrong whatever
-# the sweep says. Escalation covers the band between the floors.
+# Choice confidence below 0.5 is not accepted even if a small calibration
+# sample looks clean. Escalation covers the band between the floors.
 ACCEPT_FLOOR = 0.5
 ESCALATE_FLOOR = 0.2
 
@@ -88,8 +88,9 @@ def choose_thresholds(
     defaults (0.70, 0.30) are returned with ``insufficient_data``. The accept threshold is
     the smallest threshold of at least ``ACCEPT_FLOOR`` whose selective risk is within the
     limit and whose positive recall is at least 0.5: a probability below 0.5 means the
-    model leans false, so it can never count as acceptance however clean a validation
-    sweep looks. Escalate is the largest lower threshold of at least ``ESCALATE_FLOOR``
+    selected label lacks majority probability, so it can never count as acceptance
+    however clean a validation sweep looks. Escalate is the largest lower threshold
+    of at least ``ESCALATE_FLOOR``
     with at most 0.1 of all positives below it. Fallbacks preserve ``escalate < accept``.
     """
 

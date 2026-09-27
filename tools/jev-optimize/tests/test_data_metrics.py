@@ -76,7 +76,7 @@ def test_evaluate_reports_confusion_at_registry_thresholds():
     probabilities = iter((0.9, 0.6, 0.4, 0.1))
 
     def program(**_inputs):
-        return SimpleNamespace(probability=next(probabilities))
+        return SimpleNamespace(decision=SimpleNamespace(probability=next(probabilities)))
 
     rows = [
         DatasetRow(
@@ -117,7 +117,7 @@ def test_evaluate_skips_rows_without_the_question_label():
 
     def program(**inputs):
         calls.append(inputs)
-        return SimpleNamespace(probability=0.9)
+        return SimpleNamespace(decision=SimpleNamespace(probability=0.9))
 
     result = evaluate_question(program, "triage.asks_recipient", rows)
     assert result["accuracy"] == 1.0

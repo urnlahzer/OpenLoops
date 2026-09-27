@@ -24,6 +24,12 @@ the model that authors synthetic rows. The Decisions endpoint receives
 `provider: {"zdr": true}` unless a content-free probe shows that the alpha
 endpoint rejects that member. The reflection endpoint always requests ZDR.
 
+`JevLM` sends the production wire shape: flat state fields, the registry question
+ID as the question key, and the DSPy signature docstring in that question's
+`instructions`. `tests/test_offline_end_to_end.py` runs the real GEPA and
+ReAnchor path against a fake Decisions endpoint and is the required offline gate
+before any paid optimization run.
+
 ## Commands
 
 ```powershell
@@ -87,9 +93,12 @@ possible among `event_tied`, `soft`, and `unknown` (34/33/33 at 100 rows).
 For every applicable binary label, `from_user` differs by at most 0.1 between
 positive and negative rows and the `days_later` means differ by at most 2 days.
 Each corpus has at least 300 distinct paragraph texts, and closure has at least
-40 distinct obligation texts. The threshold tuner requires at least 20 positives
-and 20 negatives in its sweep;
-smaller samples retain the registry defaults.
+40 distinct obligation texts. Calibration requires at least 20 positives and
+20 negatives; smaller samples retain the registry defaults. For Noul questions,
+DSPy's ReAnchor runs twice on train plus validation after GEPA: one metric heavily
+penalizes false positives to fit the accept threshold, and the mirrored metric
+heavily penalizes false negatives to fit the escalation threshold. Choice
+questions continue to use the confidence-based selective-classification sweep.
 
 LLM generation uses a fixed matrix of at least 30 scenario seeds per question,
 sends a separate prompt and strict schema for each question batch, assigns
@@ -138,9 +147,16 @@ already outside this repository by construction (the exporter refuses to
 write inside it), so no extra step is needed to keep them out of `git`.
 
 The registry hash printed by `write-registry` is SHA-256 over
-`json.dumps(obj, separators=(",", ":"), ensure_ascii=False)`. The registry is
-written with sorted keys, so PowerShell's `ConvertTo-Json -Depth 100 -Compress`
-preserves the same member order. On the hand-written bootstrap file the hashes
-do differ: PowerShell preserves the decimal scale (`0.70`) while Python emits
-`0.7`. After `write-registry` normalizes the file through Python, the two
-recipes serialize parsed numeric values identically.
+`json.dumps(obj, separators=(",", ":"), ensure_ascii=False)`. It is not the
+value to pin in `tools/check-model-boundary.ps1`. That checker hashes
+`ConvertTo-Json -Depth 100 -Compress` of the parsed file, and PowerShell parses
+`tuned_at` into a DateTime and re-emits it in the machine's local offset, so the
+two recipes differ in that one member (and the checker's value depends on the
+timezone of the machine that computes it). Pin the checker's own value:
+
+```powershell
+$c = Get-Content -Raw contracts/model/decision-questions.json | ConvertFrom-Json
+$json = $c | ConvertTo-Json -Depth 100 -Compress
+$sha = [System.Security.Cryptography.SHA256]::Create()
+($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json)) | ForEach-Object { $_.ToString('x2') }) -join ''
+```
