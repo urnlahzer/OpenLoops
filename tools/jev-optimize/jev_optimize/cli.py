@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .adapter import JevPrograms
+from .adapter import program
 from .client import DecisionsClient, ReplayClient
 from .data import fetch_enron, load_jsonl, split_rows
 from .optimize import evaluate_question, optimize_set
@@ -101,11 +101,11 @@ def main() -> None:
         print(f"zdr_member={str(DecisionsClient().probe()).lower()}")
     elif args.command == "evaluate":
         rows = load_jsonl(args.data)
-        adapter = JevPrograms(_client(args.replay))
+        client = _client(args.replay)
         registry = json.loads(DEFAULT_REGISTRY.read_text(encoding="utf-8"))
         result = {
             question_id: evaluate_question(
-                adapter.program(question_id),
+                program(question_id, client),
                 question_id,
                 split_rows(rows, question_id=question_id)["test"],
                 registry_thresholds={

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Offline-first DSPy harness for OpenLoops Jev question optimization"
 requires-python = ">=3.11"
 dependencies = [
-  "dspy==3.3.1",
+  "dspy==3.4.0",
   "httpx",
   "numpy",
   "pydantic",

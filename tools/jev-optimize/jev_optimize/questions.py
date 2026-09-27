@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import dspy
+from dspy.experimental import Choice, Noul
 
 
 @dataclass(frozen=True)
@@ -24,7 +25,7 @@ class ClosureFulfilled(dspy.Signature):
 
     obligation: dict[str, str] = dspy.InputField()
     later: dict[str, Any] = dspy.InputField()
-    probability: float = dspy.OutputField(desc="Probability that the obligation is fulfilled.")
+    decision: Noul = dspy.OutputField(desc="Probability that the obligation is fulfilled.")
 
 
 class ClosureWithdrawn(dspy.Signature):
@@ -32,7 +33,7 @@ class ClosureWithdrawn(dspy.Signature):
 
     obligation: dict[str, str] = dspy.InputField()
     later: dict[str, Any] = dspy.InputField()
-    probability: float = dspy.OutputField(desc="Probability that the obligation is withdrawn.")
+    decision: Noul = dspy.OutputField(desc="Probability that the obligation is withdrawn.")
 
 
 class ClosureDeadlineChanged(dspy.Signature):
@@ -40,7 +41,7 @@ class ClosureDeadlineChanged(dspy.Signature):
 
     obligation: dict[str, str] = dspy.InputField()
     later: dict[str, Any] = dspy.InputField()
-    probability: float = dspy.OutputField(desc="Probability that the deadline changed.")
+    decision: Noul = dspy.OutputField(desc="Probability that the deadline changed.")
 
 
 class ClosureModified(dspy.Signature):
@@ -48,7 +49,17 @@ class ClosureModified(dspy.Signature):
 
     obligation: dict[str, str] = dspy.InputField()
     later: dict[str, Any] = dspy.InputField()
-    probability: float = dspy.OutputField(desc="Probability that the obligation was modified.")
+    decision: Noul = dspy.OutputField(desc="Probability that the obligation was modified.")
+
+
+_CLOSURE_OUTCOME_OPTIONS = {
+    "fulfilled": "The later paragraph says the obligation was carried out.",
+    "withdrawn": "The later paragraph cancels or withdraws the obligation.",
+    "deadline_changed": "The later paragraph sets a different deadline for the obligation.",
+    "modified": "The later paragraph changes what the obligation requires.",
+    "none": "The later paragraph expresses none of the listed outcomes for the obligation.",
+}
+ClosureOutcomeDecision = Choice[tuple(_CLOSURE_OUTCOME_OPTIONS.items())]
 
 
 class ClosureOutcome(dspy.Signature):
@@ -56,11 +67,9 @@ class ClosureOutcome(dspy.Signature):
 
     obligation: dict[str, str] = dspy.InputField()
     later: dict[str, Any] = dspy.InputField()
-    choice: str = dspy.OutputField(desc="The single expressed obligation outcome, or none.")
-    probabilities: dict[str, float] = dspy.OutputField(
-        desc="Probability for each issued obligation-outcome option."
+    decision: ClosureOutcomeDecision = dspy.OutputField(
+        desc="The single expressed obligation outcome, or none."
     )
-    confidence: float = dspy.OutputField(desc="Confidence in the selected obligation outcome.")
 
 
 class TriageBase(dspy.Signature):
@@ -72,47 +81,56 @@ class TriageBase(dspy.Signature):
 class TriageAsksRecipient(TriageBase):
     """The paragraph asks its recipient to do something."""
 
-    probability: float = dspy.OutputField(desc="Probability of a request to the recipient.")
+    decision: Noul = dspy.OutputField(desc="Probability of a request to the recipient.")
 
 
 class TriageCommitsSender(TriageBase):
     """The paragraph commits its sender to doing something."""
 
-    probability: float = dspy.OutputField(desc="Probability of a commitment by the sender.")
+    decision: Noul = dspy.OutputField(desc="Probability of a commitment by the sender.")
 
 
 class TriageAsksQuestion(TriageBase):
     """The paragraph asks a genuine question that seeks an answer."""
 
-    probability: float = dspy.OutputField(desc="Probability of a genuine question.")
+    decision: Noul = dspy.OutputField(desc="Probability of a genuine question.")
 
 
 class TriageNamesTime(TriageBase):
     """The paragraph names a time, date, deadline, or event-relative time."""
 
-    probability: float = dspy.OutputField(desc="Probability that a time is named.")
+    decision: Noul = dspy.OutputField(desc="Probability that a time is named.")
 
 
 class TriageBoilerplate(TriageBase):
     """The paragraph is a signature, legal footer, unsubscribe notice, or disclaimer."""
 
-    probability: float = dspy.OutputField(desc="Probability that the paragraph is boilerplate.")
+    decision: Noul = dspy.OutputField(desc="Probability that the paragraph is boilerplate.")
 
 
 class TriageAutomatedNotification(TriageBase):
     """The paragraph is an automatically generated notification."""
 
-    probability: float = dspy.OutputField(desc="Probability of an automated notification.")
+    decision: Noul = dspy.OutputField(desc="Probability of an automated notification.")
+
+
+_EXTRACT_CLAIM_TYPE_OPTIONS = {
+    "request": "The paragraph asks its recipient to do something.",
+    "promise": "The paragraph commits its sender to doing something.",
+    "question": "The paragraph asks a genuine question that seeks an answer.",
+    "attribution": "The paragraph attributes an obligation or commitment to another party.",
+    "delegation": "The paragraph delegates an obligation from one party to another.",
+    "none": "The paragraph expresses none of the listed claim types.",
+}
+ExtractClaimTypeDecision = Choice[tuple(_EXTRACT_CLAIM_TYPE_OPTIONS.items())]
 
 
 class ExtractClaimType(TriageBase):
     """Which single claim type, if any, does the paragraph express?"""
 
-    choice: str = dspy.OutputField(desc="The single expressed claim type, or none.")
-    probabilities: dict[str, float] = dspy.OutputField(
-        desc="Probability for each issued claim-type option."
+    decision: ExtractClaimTypeDecision = dspy.OutputField(
+        desc="The single expressed claim type, or none."
     )
-    confidence: float = dspy.OutputField(desc="Confidence in the selected claim type.")
 
 
 # `extract.waiting_party` and `extract.temporal` (P5) are dynamic-option
@@ -129,34 +147,40 @@ class ExtractClaimType(TriageBase):
 # this bootstrap text, but this harness has no labeled corpus for either
 # question yet -- see the design doc's P5 section for what a corpus would
 # need.
+_EXTRACT_WAITING_PARTY_OPTIONS = {
+    "none": "No participant is waiting on the signed-in user for this paragraph."
+}
+ExtractWaitingPartyDecision = Choice[tuple(_EXTRACT_WAITING_PARTY_OPTIONS.items())]
+
+
 class ExtractWaitingParty(TriageBase):
     """Which participant is waiting on the signed-in user for this paragraph?"""
 
     participants: list[dict[str, str]] = dspy.InputField()
-    choice: str = dspy.OutputField(desc="The waiting participant's issued handle, or none.")
-    probabilities: dict[str, float] = dspy.OutputField(
-        desc="Probability for each issued participant-handle option, plus none."
+    decision: ExtractWaitingPartyDecision = dspy.OutputField(
+        desc="The waiting participant's issued handle, or none."
     )
-    confidence: float = dspy.OutputField(desc="Confidence in the selected waiting party.")
+
+
+_EXTRACT_TEMPORAL_OPTIONS = {
+    "none": "No temporal candidate applies to this paragraph."
+}
+ExtractTemporalDecision = Choice[tuple(_EXTRACT_TEMPORAL_OPTIONS.items())]
 
 
 class ExtractTemporal(TriageBase):
     """Which named time, date, or deadline candidate, if any, does this paragraph express?"""
 
-    choice: str = dspy.OutputField(
+    decision: ExtractTemporalDecision = dspy.OutputField(
         desc="The chosen normalized temporal candidate's issued handle, or none."
     )
-    probabilities: dict[str, float] = dspy.OutputField(
-        desc="Probability for each issued temporal-candidate option, plus none."
-    )
-    confidence: float = dspy.OutputField(desc="Confidence in the selected temporal candidate.")
 
 
 def _rule_signature(name: str, instructions: str, fields: tuple[str, ...]) -> type[dspy.Signature]:
-    annotations = {field: str for field in fields} | {"probability": float}
+    annotations = {field: str for field in fields} | {"decision": Noul}
     namespace = {"__annotations__": annotations, "__doc__": instructions}
     namespace.update({field: dspy.InputField() for field in fields})
-    namespace["probability"] = dspy.OutputField(desc=f"Probability that {instructions.lower()}")
+    namespace["decision"] = dspy.OutputField(desc=f"Probability that {instructions.lower()}")
     return type(name, (dspy.Signature,), namespace)
 
 
@@ -183,17 +207,21 @@ RulesThreadMerge = _rule_signature(
 )
 
 
+_RULES_DEADLINE_KIND_OPTIONS = {
+    "event_tied": "The deadline is tied to a named event.",
+    "soft": "The timing is flexible or aspirational.",
+    "unknown": "The phrase has no supported deadline classification.",
+}
+RulesDeadlineKindDecision = Choice[tuple(_RULES_DEADLINE_KIND_OPTIONS.items())]
+
+
 class RulesDeadlineKind(dspy.Signature):
     """Classify how the phrase expresses a deadline."""
 
     phrase: str = dspy.InputField()
-    choice: str = dspy.OutputField(
+    decision: RulesDeadlineKindDecision = dspy.OutputField(
         desc="event_tied: tied to an event; soft: flexible timing; unknown: neither classification."
     )
-    probabilities: dict[str, float] = dspy.OutputField(
-        desc="Probability for each issued deadline-kind option."
-    )
-    confidence: float = dspy.OutputField(desc="Confidence in the selected deadline kind.")
 
 
 _CLOSURE_FIELDS = (
@@ -234,13 +262,7 @@ SPECS: dict[str, QuestionSpec] = {
         ("later.paragraph_text",),
         _CLOSURE_FIELDS,
         "choice",
-        {
-            "fulfilled": "The later paragraph says the obligation was carried out.",
-            "withdrawn": "The later paragraph cancels or withdraws the obligation.",
-            "deadline_changed": "The later paragraph sets a different deadline for the obligation.",
-            "modified": "The later paragraph changes what the obligation requires.",
-            "none": "The later paragraph expresses none of the listed outcomes for the obligation.",
-        },
+        _CLOSURE_OUTCOME_OPTIONS,
     ),
     "triage.asks_recipient": QuestionSpec(
         "triage", TriageAsksRecipient,
@@ -279,14 +301,7 @@ SPECS: dict[str, QuestionSpec] = {
         ("paragraph_text",),
         _TRIAGE_FIELDS,
         "choice",
-        {
-            "request": "The paragraph asks its recipient to do something.",
-            "promise": "The paragraph commits its sender to doing something.",
-            "question": "The paragraph asks a genuine question that seeks an answer.",
-            "attribution": "The paragraph attributes an obligation or commitment to another party.",
-            "delegation": "The paragraph delegates an obligation from one party to another.",
-            "none": "The paragraph expresses none of the listed claim types.",
-        },
+        _EXTRACT_CLAIM_TYPE_OPTIONS,
     ),
     "extract.waiting_party": QuestionSpec(
         "extract",
@@ -295,7 +310,7 @@ SPECS: dict[str, QuestionSpec] = {
         ("paragraph_text", "participants"),
         (*_TRIAGE_FIELDS, "participants"),
         "choice",
-        {"none": "No participant is waiting on the signed-in user for this paragraph."},
+        _EXTRACT_WAITING_PARTY_OPTIONS,
     ),
     "extract.temporal": QuestionSpec(
         "extract",
@@ -304,7 +319,7 @@ SPECS: dict[str, QuestionSpec] = {
         ("paragraph_text",),
         _TRIAGE_FIELDS,
         "choice",
-        {"none": "No temporal candidate applies to this paragraph."},
+        _EXTRACT_TEMPORAL_OPTIONS,
     ),
     "rules.recap": QuestionSpec(
         "rules", RulesRecap,
@@ -339,11 +354,7 @@ SPECS: dict[str, QuestionSpec] = {
         ("phrase",),
         ("phrase",),
         "choice",
-        {
-            "event_tied": "The deadline is tied to a named event.",
-            "soft": "The timing is flexible or aspirational.",
-            "unknown": "The phrase has no supported deadline classification.",
-        },
+        _RULES_DEADLINE_KIND_OPTIONS,
     ),
 }
 
@@ -352,14 +363,3 @@ SETS = {
     name: tuple(key for key, spec in SPECS.items() if spec.set_name == name)
     for name in ("closure", "triage", "rules", "extract")
 }
-
-
-def jev_question(question_id: str) -> dict[str, Any]:
-    spec = SPECS[question_id]
-    question: dict[str, Any] = {
-        "type": spec.kind,
-        "instructions": (spec.signature.__doc__ or "").strip(),
-    }
-    if spec.options:
-        question["criteria"] = spec.options
-    return question

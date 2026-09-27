@@ -1,4 +1,4 @@
-"""DSPy adapter that executes one typed Jev request per signature call."""
+"""Thin DSPy system-one LM for OpenRouter Decisions."""
 
 from __future__ import annotations
 
@@ -6,77 +6,54 @@ from typing import Any
 
 import dspy
 
-from .questions import SPECS, jev_question
+from .questions import SPECS
 
 
-class JevLM(dspy.BaseLM):
-    """Marker LM; typed execution is handled by :class:`JevAdapter`."""
+class JevLM:
+    """Expose the Decisions transport through DSPy's decision-request protocol."""
 
-    def __init__(self) -> None:
-        super().__init__(model="typesafe/jev", model_type="chat", cache=False)
-
-    def forward(self, *_args: Any, **_kwargs: Any) -> Any:
-        raise RuntimeError("JevLM requires JevAdapter")
-
-
-class JevAdapter(dspy.Adapter):
-    """Translate a DSPy signature directly to Jev state and typed questions."""
+    supports_decision_requests = True
+    cache = True
 
     def __init__(self, client: Any, question_id: str) -> None:
-        super().__init__()
         self.client = client
         self.question_id = question_id
 
-    def __deepcopy__(self, memo: dict[int, Any]) -> JevAdapter:
-        """Copy adapter metadata while deliberately sharing the transport client."""
+    def __deepcopy__(self, memo: dict[int, Any]) -> JevLM:
+        """Copy LM metadata while deliberately sharing the transport client."""
 
         copied = type(self)(self.client, self.question_id)
         memo[id(self)] = copied
         return copied
 
     def __call__(
-        self,
-        lm: Any,
-        lm_kwargs: dict[str, Any],
-        signature: type[dspy.Signature],
-        demos: list[dict[str, Any]],
-        inputs: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        del lm, lm_kwargs, demos
-        question = jev_question(self.question_id)
-        question["instructions"] = signature.instructions
-        answer = self.client.decide(inputs, {self.question_id: question})[self.question_id]
-        if answer["type"] == "noul":
-            return [{"probability": float(answer["noul"])}]
-        return [
-            {
-                "choice": answer["choice"],
-                "probabilities": answer["probabilities"],
-                "confidence": answer["confidence"],
+        self, state: dict[str, Any], questions: dict[str, Any]
+    ) -> dict[str, Any]:
+        if set(questions) != {"decision"}:
+            raise ValueError("JevLM requires exactly one 'decision' question")
+        flat_state = state["inputs"]
+        production_questions = {
+            self.question_id: {
+                **questions["decision"],
+                "instructions": state["instructions"],
             }
-        ]
+        }
+        request = {
+            "provider": "jev",
+            "state": flat_state,
+            "questions": production_questions,
+        }
+        response = dspy.cache.get(request) if self.cache else None
+        if response is None:
+            response = self.client.decide(flat_state, production_questions)
+            if self.cache:
+                dspy.cache.put(request, response)
+        return {"decision": response[self.question_id]}
 
 
-class JevPredict(dspy.Module):
-    """A GEPA-optimizable predictor backed by Jev rather than a chat model."""
+def program(question_id: str, client: Any) -> dspy.Predict:
+    """Build one native decision predictor and bind it to the shared transport."""
 
-    def __init__(self, question_id: str, client: Any) -> None:
-        super().__init__()
-        self.predict = dspy.Predict(SPECS[question_id].signature)
-        self.adapter = JevAdapter(client, question_id)
-        self.lm = JevLM()
-
-    def forward(self, **kwargs: Any) -> dspy.Prediction:
-        inputs = {name: kwargs[name] for name in self.predict.signature.input_fields}
-        with dspy.context(adapter=self.adapter, lm=self.lm):
-            return self.predict(**inputs)
-
-
-class JevPrograms:
-    """Factory for per-question GEPA programs sharing one Decisions client."""
-
-    def __init__(self, client: Any) -> None:
-        self.client = client
-
-    def program(self, question_id: str) -> JevPredict:
-        return JevPredict(question_id, self.client)
+    predictor = dspy.Predict(SPECS[question_id].signature)
+    predictor.set_lm(JevLM(client, question_id))
+    return predictor
