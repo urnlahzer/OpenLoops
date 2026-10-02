@@ -199,6 +199,11 @@ list (line 154), status literals (71-73), governance capability
 
 ## PR-2: Google OAuth + Gmail loader + review (`feat/google-gmail-provider`)
 
+Carried over from the PR-1b review: make `Service::Mailbox` carry the provider
+(`Service::Mailbox(MailProvider)`) so a worker panic during a Google check is reported on
+the Google status, not the Microsoft one (`app_model.rs` `pending_disconnected`); rename
+`microsoft_status()` to a provider-neutral name now that it formats Google reports too.
+
 Files: `live/google/mod.rs` (`GoogleConfig`, endpoints, scopes, `with_google_session`,
 `check_connection`), `live/google/gmail.rs` (identity, listing, hydration, `load_*`),
 `live/google/mime.rs`, `live/test_support.rs` (`#[cfg(test)]`, fake servers moved from

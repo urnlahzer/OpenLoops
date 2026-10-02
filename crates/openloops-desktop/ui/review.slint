@@ -18,9 +18,9 @@ export struct ReviewRow {
 
 export struct MetaCell { label: string, value: string }
 export struct ReviewPill { text: string, kind: string, hint: string }
-export struct EvidenceCard { label: string, sender: string, time: string, quote: string, context: string, subject-note: string, url: string }
-export struct CompletionCard { state: string, label: string, sender: string, time: string, quote: string, cross-thread: bool, url: string }
-export struct SuggestedUpdateCard { state: string, label: string, evidence: string, deadline: string, sender: string, time: string, url: string, can-accept: bool, reject-label: string }
+export struct EvidenceCard { label: string, sender: string, time: string, quote: string, context: string, subject-note: string, url: string, url-label: string }
+export struct CompletionCard { state: string, label: string, sender: string, time: string, quote: string, cross-thread: bool, url: string, url-label: string }
+export struct SuggestedUpdateCard { state: string, label: string, evidence: string, deadline: string, sender: string, time: string, url: string, url-label: string, can-accept: bool, reject-label: string }
 export struct ConversationRow { initials: string, sender: string, meta: string, body: string, sent: bool, quoted-history: string }
 export struct ReminderStateView { state: string, text: string, marker: string }
 export struct ScanStripModel {
@@ -390,7 +390,7 @@ export component ReviewScreen {
                                         HorizontalLayout { spacing: Tokens.space-2; alignment: start;
                                             if root.suggested-update.can-accept: PrimaryButton { text: "Accept"; enabled: !root.busy; clicked => { root.suggested-update-resolved(true); } }
                                             SecondaryButton { text: root.suggested-update.reject-label; enabled: !root.busy; clicked => { root.suggested-update-resolved(false); } }
-                                            if !root.suggested-update.url.is-empty: LinkButton { text: "Open message in Outlook"; enabled: !root.busy; clicked => { root.open-external(root.suggested-update.url); } }
+                                            if !root.suggested-update.url.is-empty: LinkButton { text: root.suggested-update.url-label; enabled: !root.busy; clicked => { root.open-external(root.suggested-update.url); } }
                                         }
                                     }
                                     VerticalLayout { width: 100%; spacing: Tokens.space-2; alignment: start;
@@ -559,7 +559,7 @@ export component ReviewScreen {
                                                                 text: "· " + evidence.sender + " · " + evidence.time; color: Tokens.text-2; font-size: Tokens.font-13; wrap: word-wrap;
                                                             }
                                                         }
-                                                        if !evidence.url.is-empty: HorizontalLayout { Rectangle { horizontal-stretch: 1; } LinkButton { text: "Open message in Outlook"; enabled: !root.busy; clicked => { root.open-external(evidence.url); } } }
+                                                        if !evidence.url.is-empty: HorizontalLayout { Rectangle { horizontal-stretch: 1; } LinkButton { text: evidence.url-label; enabled: !root.busy; clicked => { root.open-external(evidence.url); } } }
                                                     }
                                                 }
                                                 Rectangle { height: Tokens.hairline; background: Tokens.stroke-1; }
@@ -623,7 +623,7 @@ export component ReviewScreen {
                                                         HorizontalLayout { spacing: Tokens.space-2;
                                                             Rectangle { horizontal-stretch: 1; }
                                                             if root.completion-card.cross-thread: Pill { text: "evidence in another conversation"; kind: "success"; }
-                                                            if !root.completion-card.url.is-empty: LinkButton { text: "Open message in Outlook"; enabled: !root.busy; clicked => { root.open-external(root.completion-card.url); } }
+                                                            if !root.completion-card.url.is-empty: LinkButton { text: root.completion-card.url-label; enabled: !root.busy; clicked => { root.open-external(root.completion-card.url); } }
                                                         }
                                                     }
                                                 }

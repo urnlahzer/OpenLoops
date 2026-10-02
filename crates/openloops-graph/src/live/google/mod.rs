@@ -23,8 +23,12 @@ impl GoogleConfig {
         })
     }
 
-    pub(super) fn registration_is_present(&self) -> bool {
-        !self.client_id.is_empty() && !self.client_secret.as_str().is_empty()
+    pub(super) fn client_id(&self) -> &str {
+        &self.client_id
+    }
+
+    pub(super) fn client_secret(&self) -> &Secret {
+        &self.client_secret
     }
 }
 

@@ -1,5 +1,6 @@
 //! Bounded native-preview decision projection. Never stores readable source text.
 use hmac::{Hmac, KeyInit, Mac};
+use openloops_graph::live::MailProvider;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
@@ -58,6 +59,7 @@ pub enum Reminder {
     /// Each id is bounded to `MAX_REMINDER_ID_LEN` bytes for storage; see
     /// that constant for why.
     Created {
+        provider: MailProvider,
         list_id: String,
         task_id: String,
     },
@@ -70,6 +72,7 @@ pub enum Reminder {
     /// `status_pill_hint`, since the decision alone (`Done` either way)
     /// can't say which.
     Completed {
+        provider: MailProvider,
         list_id: String,
         task_id: String,
     },
@@ -432,12 +435,31 @@ fn encode(secret: &[u8; 32], records: &[Record]) -> Result<Zeroizing<Vec<u8>>, (
         bytes.push(match r.reminder {
             Reminder::None => 0,
             Reminder::Attempted => 1,
-            Reminder::Created { .. } => 2,
-            Reminder::Completed { .. } => 3,
+            Reminder::Created {
+                provider: MailProvider::Microsoft,
+                ..
+            } => 2,
+            Reminder::Completed {
+                provider: MailProvider::Microsoft,
+                ..
+            } => 3,
+            Reminder::Created {
+                provider: MailProvider::Google,
+                ..
+            } => 4,
+            Reminder::Completed {
+                provider: MailProvider::Google,
+                ..
+            } => 5,
         });
         bytes.extend_from_slice(&r.updated.to_le_bytes());
         match &r.reminder {
-            Reminder::Created { list_id, task_id } | Reminder::Completed { list_id, task_id } => {
+            Reminder::Created {
+                list_id, task_id, ..
+            }
+            | Reminder::Completed {
+                list_id, task_id, ..
+            } => {
                 push_id(&mut bytes, list_id)?;
                 push_id(&mut bytes, task_id)?;
             }
@@ -479,14 +501,27 @@ fn decode(bytes: &[u8]) -> Result<([u8; 32], Vec<Record>), ()> {
         let reminder = match reminder_tag {
             0 => Reminder::None,
             1 => Reminder::Attempted,
-            2 | 3 => {
+            2..=5 => {
                 let (list_id, remaining) = read_id(rest)?;
                 let (task_id, remaining) = read_id(remaining)?;
                 rest = remaining;
-                if reminder_tag == 2 {
-                    Reminder::Created { list_id, task_id }
+                let provider = if reminder_tag <= 3 {
+                    MailProvider::Microsoft
                 } else {
-                    Reminder::Completed { list_id, task_id }
+                    MailProvider::Google
+                };
+                if reminder_tag == 2 || reminder_tag == 4 {
+                    Reminder::Created {
+                        provider,
+                        list_id,
+                        task_id,
+                    }
+                } else {
+                    Reminder::Completed {
+                        provider,
+                        list_id,
+                        task_id,
+                    }
                 }
             }
             _ => return Err(()),
@@ -515,6 +550,7 @@ mod tests {
                 Reminder::None,
                 Reminder::Attempted,
                 Reminder::Created {
+                    provider: MailProvider::Microsoft,
                     list_id: "list".into(),
                     task_id: "task".into(),
                 },
@@ -557,6 +593,7 @@ mod tests {
                 key: [7; 32],
                 decision,
                 reminder: Reminder::Created {
+                    provider: MailProvider::Microsoft,
                     list_id: "list".into(),
                     task_id: "task".into(),
                 },
@@ -570,6 +607,62 @@ mod tests {
             assert_eq!(records[0].decision, record.decision);
             assert_eq!(records[0].reminder, record.reminder);
             assert_eq!(records[0].updated, record.updated);
+        }
+    }
+
+    #[test]
+    fn legacy_reminder_bytes_decode_as_microsoft_and_google_tags_round_trip() {
+        let mut legacy = MAGIC.to_vec();
+        legacy.extend_from_slice(&[0; 32]);
+        legacy.push(1);
+        legacy.extend_from_slice(&[7; 32]);
+        legacy.push(1);
+        legacy.push(2);
+        legacy.extend_from_slice(&1_i64.to_le_bytes());
+        legacy.extend_from_slice(&[4, b'l', b'i', b's', b't']);
+        legacy.extend_from_slice(&[4, b't', b'a', b's', b'k']);
+        let (_, records) = decode(&legacy).unwrap();
+        assert_eq!(
+            records[0].reminder,
+            Reminder::Created {
+                provider: MailProvider::Microsoft,
+                list_id: "list".into(),
+                task_id: "task".into(),
+            }
+        );
+
+        for (expected_tag, reminder) in [
+            (
+                4,
+                Reminder::Created {
+                    provider: MailProvider::Google,
+                    list_id: "list".into(),
+                    task_id: "task".into(),
+                },
+            ),
+            (
+                5,
+                Reminder::Completed {
+                    provider: MailProvider::Google,
+                    list_id: "list".into(),
+                    task_id: "task".into(),
+                },
+            ),
+        ] {
+            let record = Record {
+                key: [8; 32],
+                decision: Decision::Mine,
+                reminder,
+                updated: 2,
+            };
+            let bytes = encode(&[0; 32], std::slice::from_ref(&record)).unwrap();
+            assert_eq!(bytes[MAGIC.len() + 33 + 33], expected_tag);
+            assert_eq!(decode(&bytes).unwrap().1[0].reminder, record.reminder);
+        }
+
+        for invalid in [6, u8::MAX] {
+            legacy[MAGIC.len() + 33 + 33] = invalid;
+            assert!(decode(&legacy).is_err());
         }
     }
     #[test]

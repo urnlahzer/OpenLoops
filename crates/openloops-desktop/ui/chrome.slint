@@ -5,6 +5,7 @@ export component TitleBar inherits Rectangle {
     in property <bool> scanning;
     in property <string> scan-text;
     in property <bool> account-signed-in;
+    in property <string> account-text;
     height: Tokens.title-height;
     background: Tokens.brand;
     HorizontalLayout {
@@ -35,7 +36,7 @@ export component TitleBar inherits Rectangle {
         // messages have already loaded, and nothing at all otherwise (never
         // a misleading "Not signed in" while mail is actually being
         // scanned).
-        if root.account-signed-in: Text { text: "Signed in · Microsoft 365"; color: Tokens.bg-surface; font-size: Tokens.font-13; horizontal-alignment: right; vertical-alignment: center; }
+        if root.account-signed-in: Text { text: root.account-text; color: Tokens.bg-surface; font-size: Tokens.font-13; horizontal-alignment: right; vertical-alignment: center; }
     }
     Rectangle { x: 0; y: parent.height - Tokens.hairline; width: 100%; height: Tokens.hairline; background: Tokens.stroke-1; }
 }

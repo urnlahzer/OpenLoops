@@ -6,13 +6,14 @@ use std::sync::{Arc, atomic::Ordering};
 use std::time::Instant;
 
 use crate::claim_view::LoopItem;
-use crate::review_model::{CardContext, ReviewState};
+use crate::review_model::{CardContext, ConversationKey, ReviewState};
 use crate::settings::{
     ExtractionBackend, OllamaPlan, Provider, Settings, SettingsError, SettingsStore, max_parallel,
     production_store,
 };
 use openloops_graph::live::{
-    ConnectionConfig, ConnectionError, ConnectionReport, clear_session,
+    ConnectionConfig, ConnectionError, ConnectionReport, MailProvider, clear_all_sessions,
+    registration,
     review::{LoadProgress, MailCache},
 };
 use openloops_inference::decision::DecisionCheckReport;
@@ -22,7 +23,7 @@ use openloops_inference::provider::ProviderError;
 use zeroize::Zeroizing;
 
 pub(crate) enum Outcome {
-    Microsoft(Result<ConnectionReport, ConnectionError>),
+    Connection(MailProvider, Result<ConnectionReport, ConnectionError>),
     Models(Result<Vec<String>, ProviderError>),
     ZdrModels(Result<Vec<ModelChoice>, ProviderError>),
     Generation(Result<(), ProviderError>),
@@ -38,17 +39,17 @@ pub(crate) enum Outcome {
     RetryMail {
         sources: Result<Vec<openloops_graph::live::review::SourceReview>, ConnectionError>,
         source_keys: BTreeSet<String>,
-        conversations: BTreeSet<String>,
+        conversations: BTreeSet<ConversationKey>,
         attempted: usize,
     },
     RetryScan {
         result: Result<crate::review_model::ScanResult, ProviderError>,
-        conversations: BTreeSet<String>,
+        conversations: BTreeSet<ConversationKey>,
         attempted: usize,
     },
     CheckScan {
         result: Result<crate::review_model::ScanResult, ProviderError>,
-        conversations: BTreeSet<String>,
+        conversations: BTreeSet<ConversationKey>,
         new_messages: usize,
     },
     Reminder([u8; 32], openloops_graph::live::reminders::ReminderOutcome),
@@ -68,7 +69,7 @@ pub(crate) enum Outcome {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Service {
-    Microsoft,
+    Mailbox,
     Model,
     Review,
 }
@@ -98,6 +99,9 @@ pub(crate) enum ExportArmed {
 /// Toolkit-free setup/connection/review model used by the native UI adapter.
 pub struct AppModel {
     pub client_id: String,
+    pub google_client_id: String,
+    pub google_client_secret: Zeroizing<String>,
+    pub mail_providers: BTreeSet<MailProvider>,
     pub groups: String,
     pub shared: String,
     pub key: Zeroizing<String>,
@@ -123,6 +127,7 @@ pub struct AppModel {
     /// any further folder edit or by the write attempt itself.
     pub(crate) training_export_armed: ExportArmed,
     pub(crate) microsoft: Status,
+    pub(crate) google: Status,
     pub(crate) model_status: Status,
     pub(crate) decision_status: Status,
     pub(crate) pending: Option<Receiver<Outcome>>,
@@ -169,6 +174,9 @@ impl AppModel {
     pub fn with_store(store: Result<Option<Box<dyn SettingsStore>>, SettingsError>) -> Self {
         let mut app = Self {
             client_id: String::new(),
+            google_client_id: String::new(),
+            google_client_secret: Zeroizing::new(String::new()),
+            mail_providers: BTreeSet::from([MailProvider::Microsoft]),
             groups: String::new(),
             shared: String::new(),
             key: Zeroizing::new(String::new()),
@@ -186,10 +194,11 @@ impl AppModel {
             training_export_status: Status::default(),
             training_export_armed: ExportArmed::No,
             microsoft: Status::default(),
+            google: Status::default(),
             model_status: Status::default(),
             decision_status: Status::default(),
             pending: None,
-            pending_service: Service::Microsoft,
+            pending_service: Service::Mailbox,
             progress: "",
             started: Instant::now(),
             store: None,
@@ -231,6 +240,9 @@ impl AppModel {
     fn apply_settings(&mut self, settings: Settings) {
         self.clear_mail_cache();
         self.client_id = settings.client_id;
+        self.google_client_id = settings.google_client_id;
+        self.google_client_secret = settings.google_client_secret;
+        self.mail_providers = settings.mail_providers;
         self.groups = settings.groups;
         self.shared = settings.shared;
         self.key = settings.key;
@@ -257,6 +269,7 @@ impl AppModel {
         };
         self.trim_keys();
         self.microsoft = Status::default();
+        self.google = Status::default();
         self.model_status = Status::default();
         self.decision_status = Status::default();
         self.pending_save = false;
@@ -308,6 +321,9 @@ impl AppModel {
         };
         let settings = Settings {
             client_id: self.client_id.clone(),
+            google_client_id: self.google_client_id.clone(),
+            google_client_secret: self.google_client_secret.clone(),
+            mail_providers: self.mail_providers.clone(),
             groups: self.groups.clone(),
             shared: self.shared.clone(),
             key: self.key.clone(),
@@ -346,7 +362,7 @@ impl AppModel {
 
     pub fn forget_settings(&mut self) {
         self.clear_mail_cache();
-        clear_session();
+        clear_all_sessions();
         let Some(store) = &self.store else {
             return;
         };
@@ -403,7 +419,7 @@ impl AppModel {
             succeeded: false,
         };
         match self.pending_service {
-            Service::Microsoft => self.microsoft = status,
+            Service::Mailbox => self.microsoft = status,
             Service::Model => self.model_status = status,
             Service::Review => {
                 self.load_progress = None;
@@ -482,8 +498,8 @@ impl AppModel {
                     succeeded: true,
                 };
             }
-            Outcome::Microsoft(result) => {
-                self.microsoft = microsoft_status(result);
+            Outcome::Connection(provider, result) => {
+                *self.connection_status_mut(provider) = microsoft_status(result);
             }
             Outcome::Mail(Ok(sources)) => {
                 self.load_progress = None;
@@ -733,7 +749,7 @@ impl AppModel {
         use openloops_graph::live::reminders::ReminderOutcome;
         let mut record = self.review.decisions.get(&key);
         let (text, outcome_succeeded)=match outcome {
-            ReminderOutcome::Created{list_id,task_id}=>{record.reminder=Reminder::Created{list_id,task_id}; ("Reminder created in your Microsoft To Do Tasks list.".to_owned(), true)},
+            ReminderOutcome::Created{list_id,task_id}=>{record.reminder=Reminder::Created{provider: MailProvider::Microsoft,list_id,task_id}; ("Reminder created in your Microsoft To Do Tasks list.".to_owned(), true)},
             ReminderOutcome::NotCreated(reason)=>{record.reminder=Reminder::None;(format!("No reminder was created: {reason}"), false)},
             ReminderOutcome::Uncertain=>("Microsoft did not confirm the write. Check To Do before trying again; OpenLoops will not automatically retry.".to_owned(), false),
         };
@@ -797,11 +813,20 @@ impl AppModel {
                 continue;
             }
             let mut record = self.review.decisions.get(&key);
-            let Reminder::Created { list_id, task_id } = record.reminder.clone() else {
+            let Reminder::Created {
+                provider,
+                list_id,
+                task_id,
+            } = record.reminder.clone()
+            else {
                 continue;
             };
             record.decision = Decision::Done;
-            record.reminder = Reminder::Completed { list_id, task_id };
+            record.reminder = Reminder::Completed {
+                provider,
+                list_id,
+                task_id,
+            };
             record.updated = crate::loop_state::now();
             if self.review.decisions.update(record).is_ok() {
                 completed += 1;
@@ -899,9 +924,43 @@ impl AppModel {
     /// the model owning any UI-nav state.
     #[must_use]
     pub fn ready_for_review(&self) -> bool {
-        !self.client_id.is_empty()
+        self.effective_microsoft_client_id().is_some()
             && !self.active_key().is_empty()
             && !self.selected_model().is_empty()
+    }
+
+    #[must_use]
+    pub fn effective_microsoft_client_id(&self) -> Option<String> {
+        registration::effective_client_id(
+            &self.client_id,
+            registration::microsoft().map(|value| value.client_id),
+        )
+    }
+
+    #[must_use]
+    pub fn shared_registration_active(&self) -> bool {
+        self.client_id.trim().is_empty() && registration::microsoft().is_some()
+    }
+
+    #[must_use]
+    pub fn admin_consent_url(&self) -> Option<String> {
+        self.effective_microsoft_client_id()
+            .map(|client_id| registration::microsoft_admin_consent_url(&client_id))
+    }
+
+    #[must_use]
+    pub(crate) const fn connection_status(&self, provider: MailProvider) -> &Status {
+        match provider {
+            MailProvider::Microsoft => &self.microsoft,
+            MailProvider::Google => &self.google,
+        }
+    }
+
+    fn connection_status_mut(&mut self, provider: MailProvider) -> &mut Status {
+        match provider {
+            MailProvider::Microsoft => &mut self.microsoft,
+            MailProvider::Google => &mut self.google,
+        }
     }
 
     pub(crate) fn start_scan(&mut self, on_done: impl FnOnce() + Send + 'static) {
@@ -961,7 +1020,10 @@ impl AppModel {
         if checks.is_empty() {
             return;
         }
-        let Ok(config) = ConnectionConfig::new(self.client_id.trim(), None) else {
+        let Some(client_id) = self.effective_microsoft_client_id() else {
+            return;
+        };
+        let Ok(config) = ConnectionConfig::new(&client_id, None) else {
             return;
         };
         self.start(
@@ -987,7 +1049,7 @@ impl AppModel {
 
     pub(crate) fn start_retry_scan(
         &mut self,
-        conversations: BTreeSet<String>,
+        conversations: BTreeSet<ConversationKey>,
         attempted: usize,
         on_done: impl FnOnce() + Send + 'static,
     ) {
@@ -1036,7 +1098,7 @@ impl AppModel {
 
     pub(crate) fn start_check_scan(
         &mut self,
-        conversations: BTreeSet<String>,
+        conversations: BTreeSet<ConversationKey>,
         new_messages: BTreeSet<String>,
         prior_items: Vec<LoopItem>,
         on_done: impl FnOnce() + Send + 'static,
@@ -1151,30 +1213,21 @@ pub(crate) fn microsoft_status(result: Result<ConnectionReport, ConnectionError>
     }
 }
 
-/// Whether `url` is an Outlook web link `OpenLoops` is willing to draw a
-/// hyperlink to: exactly one of the accepted host prefixes, requiring the
-/// trailing slash (so a bare host with nothing after it does not match) and
-/// `https`. Guards against a host-spoofing attempt such as
-/// `https://example.invalid/outlook.office.com/`, where the accepted text
-/// appears but not as the scheme+host prefix.
+/// Whether `url` is a message link from any supported mail provider.
+/// Keep this UI gate aligned with `provider.rs::is_trusted_message_link`.
 #[must_use]
-pub fn is_outlook_link(url: &str) -> bool {
-    [
-        "https://outlook.office.com/",
-        "https://outlook.office365.com/",
-        "https://outlook.live.com/",
-        "https://outlook.office365.us/",
-    ]
-    .iter()
-    .any(|prefix| url.starts_with(prefix))
+pub fn is_trusted_message_link(url: &str) -> bool {
+    MailProvider::ALL
+        .iter()
+        .any(|provider| provider.is_trusted_message_link(url))
 }
 
-/// How the Microsoft account is shown in the title bar.
+/// How connected mail providers are shown in the title bar.
 ///
 /// Owner feedback item 3: the Graph layer exposes no display name yet, so
-/// there is no avatar and no name to show -- only a connection summary
-/// ("Signed in · Microsoft 365") once the Microsoft connection has succeeded
-/// or review messages have already loaded, and nothing at all otherwise
+/// there is no avatar or account name to show -- only a stable-order,
+/// per-provider connection summary once each provider's connection has
+/// succeeded or its review messages have already loaded, and nothing otherwise
 /// (never a misleading "Not signed in" while mail is actually being
 /// scanned). [`AccountDisplay::connected`] builds that display.
 /// [`AccountDisplay::signed_in`] is kept for when the Graph layer exposes a
@@ -1197,15 +1250,23 @@ impl Default for AccountDisplay {
 }
 
 impl AccountDisplay {
-    /// Builds the title bar's connection-summary display: no name, no
-    /// initials (so no avatar renders), and the summary line shown only
-    /// when `connected`.
+    /// Builds a stable-order summary for exactly the connected providers.
     #[must_use]
-    pub fn connected(connected: bool) -> Self {
+    pub fn connected(providers: &[MailProvider]) -> Self {
+        let services = MailProvider::ALL
+            .iter()
+            .filter(|provider| providers.contains(provider))
+            .map(|provider| provider.service_name())
+            .collect::<Vec<_>>()
+            .join(" + ");
         Self {
-            name: String::new(),
+            name: if services.is_empty() {
+                String::new()
+            } else {
+                format!("Signed in · {services}")
+            },
             initials: String::new(),
-            signed_in: connected,
+            signed_in: !providers.is_empty(),
         }
     }
 
@@ -1472,6 +1533,21 @@ mod tests {
     }
 
     #[test]
+    fn apply_settings_round_trips_google_mail_settings() {
+        let memory = MemoryStore::default();
+        let mut app = AppModel::with_store(Ok(Some(Box::new(memory.clone()))));
+        app.google_client_id = "123-fixture.apps.googleusercontent.com".into();
+        app.google_client_secret = Zeroizing::new("fixture-secret".into());
+        app.mail_providers = BTreeSet::from([MailProvider::Microsoft, MailProvider::Google]);
+        app.save_settings();
+
+        let reopened = AppModel::with_store(Ok(Some(Box::new(memory))));
+        assert_eq!(reopened.google_client_id, app.google_client_id);
+        assert_eq!(reopened.google_client_secret, app.google_client_secret);
+        assert_eq!(reopened.mail_providers, app.mail_providers);
+    }
+
+    #[test]
     fn keys_are_trimmed_once_so_testing_and_scanning_use_the_same_value() {
         let mut app = AppModel::new();
         app.key = Zeroizing::new("  synthetic-ollama-key\n".into());
@@ -1524,7 +1600,7 @@ mod tests {
         let mut app = AppModel::new();
         let (sender, receiver) = mpsc::channel();
         app.pending = Some(receiver);
-        app.pending_service = Service::Microsoft;
+        app.pending_service = Service::Mailbox;
         drop(sender);
         app.poll(|| {});
         assert!(app.pending.is_none());
@@ -1558,6 +1634,54 @@ mod tests {
         drop(sender);
         assert!(app.poll(|| {}), "the worker disconnected");
         assert!(app.pending.is_none());
+    }
+
+    #[test]
+    fn connection_outcome_updates_only_the_named_provider_status() {
+        let mut app = AppModel::with_store(Ok(None));
+        let (sender, receiver) = mpsc::channel();
+        app.pending = Some(receiver);
+        sender
+            .send(Outcome::Connection(
+                MailProvider::Google,
+                Err(ConnectionError::ProviderUnavailable),
+            ))
+            .unwrap();
+
+        assert!(app.poll(|| {}));
+        assert!(!app.connection_status(MailProvider::Google).lines.is_empty());
+        assert!(
+            app.connection_status(MailProvider::Microsoft)
+                .lines
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn microsoft_registration_helpers_prefer_the_typed_id() {
+        let mut app = AppModel::with_store(Ok(None));
+        app.client_id = "00000000-0000-4000-8000-000000000000".into();
+        assert_eq!(
+            app.effective_microsoft_client_id().as_deref(),
+            Some("00000000-0000-4000-8000-000000000000")
+        );
+        assert!(!app.shared_registration_active());
+        assert!(
+            app.admin_consent_url()
+                .is_some_and(|url| url.contains("client_id=00000000-0000-4000-8000-000000000000"))
+        );
+    }
+
+    #[test]
+    fn empty_byo_without_a_shipped_registration_has_no_microsoft_registration() {
+        if registration::microsoft().is_some() {
+            return;
+        }
+        let app = AppModel::with_store(Ok(None));
+        assert!(app.client_id.is_empty());
+        assert!(app.effective_microsoft_client_id().is_none());
+        assert!(app.admin_consent_url().is_none());
+        assert!(!app.shared_registration_active());
     }
 
     #[test]
@@ -1702,7 +1826,7 @@ mod tests {
         sender
             .send(Outcome::CheckScan {
                 result: Ok(check_scan_result(vec![item])),
-                conversations: BTreeSet::from(["synthetic-thread-3".into()]),
+                conversations: BTreeSet::from([("synthetic".into(), "synthetic-thread-3".into())]),
                 new_messages: 2,
             })
             .unwrap();
@@ -1755,6 +1879,7 @@ mod tests {
         app.review.action_status = "Synthetic decision status".into();
         app.review.action_status_succeeded = false;
         app.review.failed_conversations_detail = vec![crate::review_model::ConversationFailure {
+            account: "synthetic-account".into(),
             conversation: "synthetic-timeout".into(),
             subject_short: "Synthetic subject".into(),
             reason: crate::review_model::FailureReason::Timeout,
@@ -1788,30 +1913,44 @@ mod tests {
     }
 
     #[test]
-    fn is_outlook_link_accepts_only_allowlisted_https_hosts_with_paths() {
-        assert!(is_outlook_link("https://outlook.office.com/mail/deeplink"));
-        assert!(is_outlook_link(
+    fn trusted_message_links_accept_only_allowlisted_https_hosts_with_paths() {
+        assert!(is_trusted_message_link(
+            "https://outlook.office.com/mail/deeplink"
+        ));
+        assert!(is_trusted_message_link(
             "https://outlook.office365.com/mail/deeplink"
         ));
-        assert!(is_outlook_link("https://outlook.live.com/mail/deeplink"));
-        assert!(is_outlook_link(
+        assert!(is_trusted_message_link(
+            "https://outlook.live.com/mail/deeplink"
+        ));
+        assert!(is_trusted_message_link(
             "https://outlook.office365.us/mail/deeplink"
         ));
-        assert!(!is_outlook_link("https://outlook.office.com"));
-        assert!(!is_outlook_link("https://outlook.live.com"));
-        assert!(!is_outlook_link(
+        assert!(!is_trusted_message_link("https://outlook.office.com"));
+        assert!(!is_trusted_message_link("https://outlook.live.com"));
+        assert!(!is_trusted_message_link(
             "https://example.invalid/outlook.office.com/"
         ));
-        assert!(!is_outlook_link(
+        assert!(!is_trusted_message_link(
             "https://outlook.office.com.evil.invalid/mail/deeplink"
         ));
-        assert!(!is_outlook_link("http://outlook.office.com/mail/deeplink"));
-        assert!(!is_outlook_link("http://outlook.live.com/mail/deeplink"));
-        assert!(!is_outlook_link(
+        assert!(!is_trusted_message_link(
+            "http://outlook.office.com/mail/deeplink"
+        ));
+        assert!(!is_trusted_message_link(
+            "http://outlook.live.com/mail/deeplink"
+        ));
+        assert!(!is_trusted_message_link(
             "https://outlook.office.com:443/mail/deeplink"
         ));
-        assert!(!is_outlook_link(
+        assert!(!is_trusted_message_link(
             "https://user@outlook.office.com/mail/deeplink"
+        ));
+        assert!(is_trusted_message_link(
+            "https://mail.google.com/mail/u/0/#inbox/synthetic"
+        ));
+        assert!(!is_trusted_message_link(
+            "https://evil.example/mail.google.com/"
         ));
     }
 
@@ -1824,13 +1963,22 @@ mod tests {
     }
 
     #[test]
-    fn account_display_connected_has_no_name_or_initials() {
-        let connected = AccountDisplay::connected(true);
-        assert_eq!(connected.name, "");
-        assert_eq!(connected.initials, "");
-        assert!(connected.signed_in);
+    fn account_display_lists_connected_providers_in_stable_order() {
+        for (providers, expected) in [
+            (vec![MailProvider::Microsoft], "Signed in · Microsoft 365"),
+            (vec![MailProvider::Google], "Signed in · Google"),
+            (
+                vec![MailProvider::Google, MailProvider::Microsoft],
+                "Signed in · Microsoft 365 + Google",
+            ),
+        ] {
+            let connected = AccountDisplay::connected(&providers);
+            assert_eq!(connected.name, expected);
+            assert_eq!(connected.initials, "");
+            assert!(connected.signed_in);
+        }
 
-        let not_connected = AccountDisplay::connected(false);
+        let not_connected = AccountDisplay::connected(&[]);
         assert_eq!(not_connected.name, "");
         assert_eq!(not_connected.initials, "");
         assert!(!not_connected.signed_in);
@@ -1928,6 +2076,7 @@ mod tests {
                     key,
                     decision,
                     reminder: Reminder::Created {
+                        provider: MailProvider::Microsoft,
                         list_id: "list".into(),
                         task_id: "task".into(),
                     },
@@ -2043,6 +2192,7 @@ mod tests {
                 key,
                 decision: Decision::Watching,
                 reminder: Reminder::Created {
+                    provider: MailProvider::Microsoft,
                     list_id: "list-2".into(),
                     task_id: "task-2".into(),
                 },

@@ -490,7 +490,7 @@ pub(super) fn authorize_with(
     webbrowser::open(authorization.as_str()).map_err(|_| ConnectionError::BrowserUnavailable)?;
     let code = listener.wait(&state, Duration::from_mins(5))?;
     let exchange = |request: oauth2::HttpRequest| {
-        exchange_token_request(&token_http, &request, endpoints.token, endpoints.token)
+        exchange_token_request(&token_http, &request, endpoints.token)
     };
     let token = client
         .exchange_code(AuthorizationCode::new(code))
@@ -526,15 +526,14 @@ pub(super) fn authorize_with(
 fn exchange_token_request(
     token_http: &Client,
     request: &oauth2::HttpRequest,
-    expected_token: &str,
-    transport_token: &str,
+    token_uri: &str,
 ) -> Result<oauth2::HttpResponse, ConnectionError> {
     // OAuth constructs the request, but the transport independently confines its destination.
-    if request.uri() != expected_token || expected_token != transport_token {
+    if request.uri() != token_uri {
         return Err(ConnectionError::InvalidConfiguration);
     }
     let response = token_http
-        .post(transport_token)
+        .post(token_uri)
         .headers(request.headers().clone())
         .body(request.body().clone())
         .send()
@@ -945,7 +944,7 @@ mod tests {
             *request.uri_mut() = endpoint.parse().unwrap();
             let http = Client::builder().no_proxy().build().unwrap();
             assert_eq!(
-                exchange_token_request(&http, &request, &endpoint, &endpoint).err(),
+                exchange_token_request(&http, &request, &endpoint).err(),
                 Some(expected)
             );
             server.join().unwrap();
@@ -963,16 +962,10 @@ mod tests {
             normalize_scope: str::to_owned,
         };
         let mut request = oauth2::HttpRequest::new(Vec::new());
-        *request.uri_mut() = endpoints.token.parse().unwrap();
+        *request.uri_mut() = "https://other-token.example.invalid/".parse().unwrap();
         let http = Client::builder().no_proxy().build().unwrap();
         assert_eq!(
-            exchange_token_request(
-                &http,
-                &request,
-                endpoints.token,
-                "https://other-token.example.invalid/",
-            )
-            .err(),
+            exchange_token_request(&http, &request, endpoints.token).err(),
             Some(ConnectionError::InvalidConfiguration)
         );
     }

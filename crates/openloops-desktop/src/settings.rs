@@ -1,5 +1,8 @@
 //! Setup preferences are a single current-user Windows Credential Manager record.
 //! No plaintext files, account identifiers in credential names, or diagnostic payloads.
+use std::collections::BTreeSet;
+
+use openloops_graph::live::MailProvider;
 use zeroize::Zeroizing;
 
 const MAGIC: &[u8] = b"OpenLoopsSetup\x01";
@@ -36,6 +39,29 @@ impl Provider {
             "openrouter" => Ok(Self::OpenRouter),
             _ => Err(SettingsError::Invalid),
         }
+    }
+}
+
+fn mail_providers_tag(providers: &BTreeSet<MailProvider>) -> Result<&'static str, SettingsError> {
+    let microsoft = providers.contains(&MailProvider::Microsoft);
+    let google = providers.contains(&MailProvider::Google);
+    match (microsoft, google) {
+        (true, false) => Ok("ms"),
+        (false, true) => Ok("google"),
+        (true, true) => Ok("ms,google"),
+        (false, false) => Err(SettingsError::Invalid),
+    }
+}
+
+fn parse_mail_providers(tag: &str) -> Result<BTreeSet<MailProvider>, SettingsError> {
+    match tag {
+        "ms" => Ok(BTreeSet::from([MailProvider::Microsoft])),
+        "google" => Ok(BTreeSet::from([MailProvider::Google])),
+        "ms,google" => Ok(BTreeSet::from([
+            MailProvider::Microsoft,
+            MailProvider::Google,
+        ])),
+        _ => Err(SettingsError::Invalid),
     }
 }
 
@@ -133,6 +159,9 @@ impl ExtractionBackend {
 #[derive(Clone)]
 pub struct Settings {
     pub client_id: String,
+    pub google_client_id: String,
+    pub google_client_secret: Zeroizing<String>,
+    pub mail_providers: BTreeSet<MailProvider>,
     pub groups: String,
     pub shared: String,
     pub key: Zeroizing<String>,
@@ -152,6 +181,9 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             client_id: String::new(),
+            google_client_id: String::new(),
+            google_client_secret: Zeroizing::new(String::new()),
+            mail_providers: BTreeSet::from([MailProvider::Microsoft]),
             groups: String::new(),
             shared: String::new(),
             key: Zeroizing::new(String::new()),
@@ -227,6 +259,7 @@ impl Settings {
     fn encode(&self) -> Result<Zeroizing<Vec<u8>>, SettingsError> {
         let parallel = self.openrouter_parallel.to_string();
         let decision = self.use_decision_model.to_string();
+        let mail_providers = mail_providers_tag(&self.mail_providers)?;
         let fields = [
             self.client_id.as_str(),
             self.groups.as_str(),
@@ -240,6 +273,9 @@ impl Settings {
             parallel.as_str(),
             decision.as_str(),
             self.extraction_backend.tag(),
+            self.google_client_id.as_str(),
+            self.google_client_secret.as_str(),
+            mail_providers,
         ];
         let size = fields
             .iter()
@@ -294,6 +330,15 @@ impl Settings {
         }
         if !remaining.is_empty() {
             settings.extraction_backend = ExtractionBackend::parse(&next(&mut remaining)?)?;
+        }
+        if !remaining.is_empty() {
+            settings.google_client_id = next(&mut remaining)?;
+        }
+        if !remaining.is_empty() {
+            settings.google_client_secret = Zeroizing::new(next(&mut remaining)?);
+        }
+        if !remaining.is_empty() {
+            settings.mail_providers = parse_mail_providers(&next(&mut remaining)?)?;
         }
         if !remaining.is_empty() {
             return Err(SettingsError::Invalid);
@@ -403,6 +448,9 @@ mod tests {
     fn synthetic() -> Settings {
         Settings {
             client_id: "00000000-0000-0000-0000-000000000000".into(),
+            google_client_id: "123-fixture.apps.googleusercontent.com".into(),
+            google_client_secret: Zeroizing::new("fixture-secret".into()),
+            mail_providers: BTreeSet::from([MailProvider::Microsoft, MailProvider::Google]),
             groups: "hello@example.invalid\ninvestors@example.invalid\ncareers@example.invalid"
                 .into(),
             shared: "shared@example.invalid".into(),
@@ -442,6 +490,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn versioned_encoding_rejects_truncation_trailing_data_and_unknown_version() {
         let encoded = synthetic().encode().unwrap();
         let settings = synthetic();
@@ -493,6 +542,10 @@ mod tests {
             ]
             .concat(),
         );
+        let extraction_end = decision_end + 4 + settings.extraction_backend.tag().len();
+        let google_client_id_end = extraction_end + 4 + settings.google_client_id.len();
+        let google_client_secret_end =
+            google_client_id_end + 4 + settings.google_client_secret.len();
         for length in 0..encoded.len() {
             if length == legacy_end {
                 // A record truncated exactly at the pre-provider boundary is
@@ -523,6 +576,35 @@ mod tests {
                 assert_eq!(truncated.extraction_backend, ExtractionBackend::ChatModel);
                 continue;
             }
+            if length == extraction_end {
+                let truncated = Settings::decode(&encoded[..length]).unwrap();
+                assert!(truncated.google_client_id.is_empty());
+                assert!(truncated.google_client_secret.is_empty());
+                assert_eq!(
+                    truncated.mail_providers,
+                    BTreeSet::from([MailProvider::Microsoft])
+                );
+                continue;
+            }
+            if length == google_client_id_end {
+                let truncated = Settings::decode(&encoded[..length]).unwrap();
+                assert_eq!(truncated.google_client_id, settings.google_client_id);
+                assert!(truncated.google_client_secret.is_empty());
+                assert_eq!(
+                    truncated.mail_providers,
+                    BTreeSet::from([MailProvider::Microsoft])
+                );
+                continue;
+            }
+            if length == google_client_secret_end {
+                let truncated = Settings::decode(&encoded[..length]).unwrap();
+                assert_eq!(&*truncated.google_client_secret, "fixture-secret");
+                assert_eq!(
+                    truncated.mail_providers,
+                    BTreeSet::from([MailProvider::Microsoft])
+                );
+                continue;
+            }
             assert!(Settings::decode(&encoded[..length]).is_err());
         }
         let mut bad = encoded.to_vec();
@@ -541,6 +623,12 @@ mod tests {
         assert_eq!(decoded.openrouter_parallel, 64);
         assert!(decoded.use_decision_model);
         assert_eq!(decoded.extraction_backend, ExtractionBackend::DecisionModel);
+        assert_eq!(decoded.google_client_id, settings.google_client_id);
+        assert_eq!(&*decoded.google_client_secret, "fixture-secret");
+        assert_eq!(
+            decoded.mail_providers,
+            BTreeSet::from([MailProvider::Microsoft, MailProvider::Google])
+        );
     }
 
     #[test]
@@ -549,7 +637,14 @@ mod tests {
         let encoded = settings.encode().unwrap();
         let extraction_field_bytes = 4 + settings.extraction_backend.tag().len();
         let decision_field_bytes = 4 + settings.use_decision_model.to_string().len();
-        let old_end = encoded.len() - extraction_field_bytes - decision_field_bytes;
+        let new_mail_field_bytes = 4
+            + settings.google_client_id.len()
+            + 4
+            + settings.google_client_secret.len()
+            + 4
+            + mail_providers_tag(&settings.mail_providers).unwrap().len();
+        let old_end =
+            encoded.len() - extraction_field_bytes - decision_field_bytes - new_mail_field_bytes;
         let decoded = Settings::decode(&encoded[..old_end]).unwrap();
         assert!(!decoded.use_decision_model);
         assert_eq!(decoded.extraction_backend, ExtractionBackend::ChatModel);
@@ -568,7 +663,13 @@ mod tests {
         let settings = synthetic();
         let encoded = settings.encode().unwrap();
         let extraction_field_bytes = 4 + settings.extraction_backend.tag().len();
-        let old_end = encoded.len() - extraction_field_bytes;
+        let new_mail_field_bytes = 4
+            + settings.google_client_id.len()
+            + 4
+            + settings.google_client_secret.len()
+            + 4
+            + mail_providers_tag(&settings.mail_providers).unwrap().len();
+        let old_end = encoded.len() - extraction_field_bytes - new_mail_field_bytes;
         let decoded = Settings::decode(&encoded[..old_end]).unwrap();
         assert!(decoded.use_decision_model);
         assert_eq!(decoded.extraction_backend, ExtractionBackend::ChatModel);
@@ -720,8 +821,45 @@ mod tests {
     }
 
     #[test]
+    fn mail_provider_settings_round_trip_and_reject_unknown_tags() {
+        for providers in [
+            BTreeSet::from([MailProvider::Microsoft]),
+            BTreeSet::from([MailProvider::Google]),
+            BTreeSet::from([MailProvider::Microsoft, MailProvider::Google]),
+        ] {
+            let settings = Settings {
+                mail_providers: providers.clone(),
+                ..synthetic()
+            };
+            let decoded = Settings::decode(&settings.encode().unwrap()).unwrap();
+            assert_eq!(decoded.mail_providers, providers);
+            assert_eq!(decoded.google_client_id, settings.google_client_id);
+            assert_eq!(decoded.google_client_secret, settings.google_client_secret);
+        }
+        assert_eq!(
+            parse_mail_providers("synthetic"),
+            Err(SettingsError::Invalid)
+        );
+        let settings = synthetic();
+        let encoded = settings.encode().unwrap();
+        let old_tag_len = mail_providers_tag(&settings.mail_providers).unwrap().len();
+        let mut unknown = encoded[..encoded.len() - 4 - old_tag_len].to_vec();
+        unknown.extend_from_slice(&u32::try_from("synthetic".len()).unwrap().to_le_bytes());
+        unknown.extend_from_slice(b"synthetic");
+        assert_eq!(
+            Settings::decode(&unknown).err(),
+            Some(SettingsError::Invalid)
+        );
+        assert_eq!(
+            mail_providers_tag(&BTreeSet::new()),
+            Err(SettingsError::Invalid)
+        );
+    }
+
+    #[test]
     fn size_is_bounded_before_serializing_private_values() {
         let mut settings = synthetic();
+        assert!(settings.encode().unwrap().len() < MAX_BYTES);
         settings.groups = "x".repeat(MAX_BYTES);
         assert!(matches!(settings.encode(), Err(SettingsError::TooLarge)));
         assert!(Settings::decode(&vec![0; MAX_BYTES + 1]).is_err());

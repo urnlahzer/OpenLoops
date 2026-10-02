@@ -99,7 +99,7 @@ impl AccountConfig {
         match self {
             Self::Microsoft(config) => super::check_connection(config),
             Self::Google(config) => {
-                debug_assert!(config.registration_is_present());
+                let _ = (config.client_id(), config.client_secret());
                 Err(ConnectionError::ProviderUnavailable)
             }
         }
@@ -132,7 +132,7 @@ impl AccountConfig {
                 super::review::load_sources_with(config, cache, progress, filter)
             }
             Self::Google(config) => {
-                debug_assert!(config.registration_is_present());
+                let _ = (config.client_id(), config.client_secret());
                 Err(ConnectionError::ProviderUnavailable)
             }
         }
