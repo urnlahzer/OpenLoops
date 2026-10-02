@@ -11862,6 +11862,23 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         + Sync
         + 'a;
 
+    /// The registry accept threshold for `id`; fixtures read it so a
+    /// re-derived registry does not invalidate them.
+    fn registry_accept(id: &str) -> f64 {
+        Registry::get().question(id).unwrap().accept
+    }
+
+    /// A probability inside `id`'s registry gray band (escalate..accept).
+    fn registry_gray(id: &str) -> f64 {
+        let registered = Registry::get().question(id).unwrap();
+        registered.accept.midpoint(registered.escalate)
+    }
+
+    /// `probability` as the `confidence_micros` a suggested update stores.
+    fn micros(probability: f64) -> u32 {
+        format!("{:.0}", probability * 1_000_000.0).parse().unwrap()
+    }
+
     struct FixedDecisionClient<'a> {
         answer: Box<FixedDecisionAnswer<'a>>,
         calls: AtomicUsize,
@@ -11876,11 +11893,13 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
             + Sync
             + 'a,
         ) -> Self {
+            // A gray `closure.outcome` choice, so the noul answers decide.
+            let gray = registry_gray("closure.outcome");
             Self {
                 answer: Box::new(move |index, state| {
                     answer(index, state).map(|values| FixedDecisionValues {
                         probabilities: values.to_vec(),
-                        choice: Some(("none".into(), 0.5, 0.5)),
+                        choice: Some(("none".into(), 0.5, gray)),
                     })
                 }),
                 calls: AtomicUsize::new(0),
@@ -12369,7 +12388,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         item.evidence.quote = "Please prepare the packet.".into();
         let scoped_state = scoped_event_state(&item);
         assert!(!has_scoped_event_language(&item));
-        let accepted = FixedRuleDecisionClient::noul(0.9);
+        let accepted = FixedRuleDecisionClient::noul(registry_accept(RULE_SCOPED_EVENT));
         let rules = answer_rules(
             RULE_SCOPED_EVENT,
             RuleCategory::Event,
@@ -12396,7 +12415,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
             RULE_EVENT_MATCH,
             RuleCategory::Event,
             vec![state],
-            &FixedRuleDecisionClient::noul(0.9),
+            &FixedRuleDecisionClient::noul(registry_accept(RULE_EVENT_MATCH)),
         );
         assert!(match_event_with_rules("planning request", 0, &[event], Some(&rules)).is_some());
         let text_event = EventRef {
@@ -12415,8 +12434,8 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 .is_some()
         );
 
-        for (id, gray) in [(RULE_SCOPED_EVENT, 0.8), (RULE_EVENT_MATCH, 0.69)] {
-            for probability in [gray, 0.1] {
+        for id in [RULE_SCOPED_EVENT, RULE_EVENT_MATCH] {
+            for probability in [registry_gray(id), 0.1] {
                 let state = if id == RULE_SCOPED_EVENT {
                     scoped_state.clone()
                 } else {
@@ -12440,7 +12459,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         second.action = "Provide the draft".into();
         let states = duplicate_rule_states(&[first.clone(), second.clone()]);
         assert_eq!(states.len(), 1);
-        let client = FixedRuleDecisionClient::noul(0.9);
+        let client = FixedRuleDecisionClient::noul(registry_accept(RULE_DUPLICATE_ACTION));
         let rules = answer_rules(
             RULE_DUPLICATE_ACTION,
             RuleCategory::Duplicate,
@@ -12466,7 +12485,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         assert_eq!(merge_threads(&mut messages.clone()), 0);
         let states = thread_rule_states(&messages);
         assert_eq!(states.len(), 1);
-        let client = FixedRuleDecisionClient::noul(0.9);
+        let client = FixedRuleDecisionClient::noul(registry_accept(RULE_THREAD_MERGE));
         let rules = answer_rules(RULE_THREAD_MERGE, RuleCategory::Thread, states, &client);
         assert_eq!(merge_threads_with_rules(&mut messages, Some(&rules)), 1);
         assert_eq!(
@@ -12487,12 +12506,13 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         });
         let states =
             deadline_rule_states(std::slice::from_ref(&item), std::slice::from_ref(&message));
-        let client = FixedRuleDecisionClient::new(|_, _| {
+        let accept = registry_accept(RULE_DEADLINE_KIND);
+        let client = FixedRuleDecisionClient::new(move |_, _| {
             Ok(serde_json::json!({
                 "type":"choice",
                 "choice":"event_tied",
                 "probabilities":{"event_tied":0.9,"soft":0.05,"unknown":0.05},
-                "confidence":0.9
+                "confidence":accept
             }))
         });
         let rules = answer_rules(RULE_DEADLINE_KIND, RuleCategory::Deadline, states, &client);
@@ -12516,7 +12536,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
             serde_json::to_vec(&client.state(0)).unwrap(),
             br#"{"phrase":"before kickoff"}"#
         );
-        for confidence in [0.69, 0.1] {
+        for confidence in [registry_gray(RULE_DEADLINE_KIND), 0.1] {
             let client = FixedRuleDecisionClient::new(move |_, _| {
                 Ok(serde_json::json!({
                     "type":"choice",
@@ -12638,7 +12658,10 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
     fn triage_all_negative_skips_but_a_gray_band_keeps_the_conversation() {
         let message = triage_message("Synthetic status only.");
         let negative = FixedDecisionClient::triage(|_, _| Ok([0.1; 6]));
-        let gray = FixedDecisionClient::triage(|_, _| Ok([0.47, 0.1, 0.1, 0.1, 0.1, 0.1]));
+        let gray_probability = registry_gray(TRIAGE_IDS[0]);
+        let gray = FixedDecisionClient::triage(move |_, _| {
+            Ok([gray_probability, 0.1, 0.1, 0.1, 0.1, 0.1])
+        });
 
         assert_eq!(
             run_triage(std::slice::from_ref(&message), &negative)
@@ -13369,7 +13392,8 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         old.input.timestamp -= 1;
         all.push(old);
         let new_messages = BTreeSet::from([new_handle.clone()]);
-        let decision = FixedDecisionClient::new(|_, _| Ok([0.9, 0.1, 0.1, 0.1]));
+        let fulfilled = registry_accept("closure.fulfilled");
+        let decision = FixedDecisionClient::new(move |_, _| Ok([fulfilled, 0.1, 0.1, 0.1]));
         let mut result = closure_result(Vec::new());
         let prior_start = super::offer_prior_items(&mut result, vec![item]);
         super::scan_decision_closures(
@@ -13437,7 +13461,8 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
     #[test]
     fn decision_fulfilled_attaches_the_paragraph_confidence_and_tuned_state_shape() {
         let (all, item) = cross_thread_fixture();
-        let decision = FixedDecisionClient::new(|_, _| Ok([0.81, 0.1, 0.1, 0.1]));
+        let fulfilled = registry_accept("closure.fulfilled");
+        let decision = FixedDecisionClient::new(move |_, _| Ok([fulfilled, 0.1, 0.1, 0.1]));
         let chat = empty_chat();
         let result =
             run_decision_closures(&all, vec![item], &decision, &chat, &ScanProgress::default());
@@ -13453,14 +13478,16 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         assert_eq!(update.evidence_text, "Sure, let's do it.");
         assert_eq!(update.source_message, "m1");
         assert_eq!(update.source_block, 0);
-        assert_eq!(update.confidence_micros, 810_000);
+        assert_eq!(update.confidence_micros, micros(fulfilled));
     }
 
     #[test]
     fn accepted_outcome_choice_precedes_the_nouls_and_uses_option_probability() {
         let (all, item) = cross_thread_fixture();
-        let decision = FixedDecisionClient::closure_choice(|_, _| {
-            Ok(([0.1, 0.99, 0.1, 0.1], "fulfilled", 0.42, 0.9))
+        let withdrawn = registry_accept("closure.withdrawn");
+        let accept = registry_accept("closure.outcome");
+        let decision = FixedDecisionClient::closure_choice(move |_, _| {
+            Ok(([0.1, withdrawn, 0.1, 0.1], "fulfilled", 0.42, accept))
         });
         let result = run_decision_closures(
             &all,
@@ -13478,8 +13505,10 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
     #[test]
     fn accepted_none_choice_rejects_the_pair_regardless_of_nouls() {
         let (all, item) = cross_thread_fixture();
-        let decision = FixedDecisionClient::closure_choice(|_, _| {
-            Ok(([0.99, 0.1, 0.1, 0.1], "none", 0.8, 0.9))
+        let fulfilled = registry_accept("closure.fulfilled");
+        let accept = registry_accept("closure.outcome");
+        let decision = FixedDecisionClient::closure_choice(move |_, _| {
+            Ok(([fulfilled, 0.1, 0.1, 0.1], "none", 0.8, accept))
         });
         let chat = empty_chat();
         let result =
@@ -13492,8 +13521,10 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
     #[test]
     fn gray_outcome_choice_falls_back_to_noul_recombination() {
         let (all, item) = cross_thread_fixture();
-        let decision = FixedDecisionClient::closure_choice(|_, _| {
-            Ok(([0.81, 0.1, 0.1, 0.1], "none", 0.5, 0.5))
+        let fulfilled = registry_accept("closure.fulfilled");
+        let gray = registry_gray("closure.outcome");
+        let decision = FixedDecisionClient::closure_choice(move |_, _| {
+            Ok(([fulfilled, 0.1, 0.1, 0.1], "none", 0.5, gray))
         });
         let result = run_decision_closures(
             &all,
@@ -13505,7 +13536,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
 
         let update = result.analysis.items[0].suggested_update.as_ref().unwrap();
         assert_eq!(update.kind, SuggestedUpdateKind::Closure);
-        assert_eq!(update.confidence_micros, 810_000);
+        assert_eq!(update.confidence_micros, micros(fulfilled));
     }
 
     #[test]
@@ -13626,15 +13657,26 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
 
     #[test]
     fn compare_prediction_flags_the_registry_gray_band_for_nouls_and_choices() {
-        let noul_gray = Answer::Noul { probability: 0.47 };
+        // The noul label is the 0.5 cut; the gray flag is the registry band.
+        let gray_probability = registry_gray("triage.asks_recipient");
+        let noul_gray = Answer::Noul {
+            probability: gray_probability,
+        };
         let (value, gray) = compare_prediction("triage.asks_recipient", &noul_gray).unwrap();
-        assert_eq!(value, CompareValue::Bool(false));
+        assert_eq!(value, CompareValue::Bool(gray_probability >= 0.5));
         assert!(
             gray,
-            "0.47 sits inside triage.asks_recipient's 0.45..0.5 band"
+            "the midpoint sits inside triage.asks_recipient's band"
         );
 
-        let noul_accept = Answer::Noul { probability: 0.9 };
+        let noul_negative = Answer::Noul { probability: 0.1 };
+        let (value, gray) = compare_prediction("triage.asks_recipient", &noul_negative).unwrap();
+        assert_eq!(value, CompareValue::Bool(false));
+        assert!(!gray);
+
+        let noul_accept = Answer::Noul {
+            probability: registry_accept("triage.asks_recipient"),
+        };
         let (_, gray) = compare_prediction("triage.asks_recipient", &noul_accept).unwrap();
         assert!(!gray);
 
@@ -13666,13 +13708,17 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
             CanonicalBlock::new("Withdrawn paragraph.").unwrap(),
         ];
         all.push(reply);
+        // Both outcomes accept; the tie value clears both thresholds.
+        let tie = registry_accept("closure.fulfilled").max(registry_accept("closure.withdrawn"));
+        let higher = tie.midpoint(1.0);
+        assert!(higher > tie, "the registry leaves room above the tie");
         for (withdrawn, expected) in [
-            (0.82, "Withdrawn paragraph."),
-            (0.8, "Fulfilled paragraph."),
+            (higher, "Withdrawn paragraph."),
+            (tie, "Fulfilled paragraph."),
         ] {
             let decision = FixedDecisionClient::new(move |_, state| {
                 if state["later"]["paragraph_text"] == "Fulfilled paragraph." {
-                    Ok([0.8, 0.1, 0.1, 0.1])
+                    Ok([tie, 0.1, 0.1, 0.1])
                 } else {
                     Ok([0.1, withdrawn, 0.1, 0.1])
                 }
@@ -13693,7 +13739,8 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
     #[test]
     fn gray_band_escalates_only_that_conversation_and_loop_to_chat() {
         let (all, item) = cross_thread_fixture();
-        let decision = FixedDecisionClient::new(|_, _| Ok([0.66, 0.1, 0.1, 0.1]));
+        let gray = registry_gray("closure.fulfilled");
+        let decision = FixedDecisionClient::new(move |_, _| Ok([gray, 0.1, 0.1, 0.1]));
         let chat = ScriptedClient::new(|_, user| Ok(close_first_loop(user)));
         let result =
             run_decision_closures(&all, vec![item], &decision, &chat, &ScanProgress::default());
@@ -13714,7 +13761,8 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
             let mut reply = prepare(&reply, "Sent", all.len()).unwrap();
             reply.input.message.body_blocks = vec![CanonicalBlock::new(text).unwrap()];
             all.push(reply);
-            let decision = FixedDecisionClient::new(|_, _| Ok([0.1, 0.1, 0.8, 0.1]));
+            let deadline = registry_accept("closure.deadline_changed");
+            let decision = FixedDecisionClient::new(move |_, _| Ok([0.1, 0.1, deadline, 0.1]));
             let chat = ScriptedClient::new(|_, _| Ok(EMPTY_CLAIMS.to_string()));
             let result =
                 run_decision_closures(&all, vec![item], &decision, &chat, &ScanProgress::default());
