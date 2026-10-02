@@ -9,13 +9,30 @@ use super::ConnectionError;
 
 const MAX_HEAD: usize = 16 * 1024;
 
+#[derive(Clone, Copy)]
+pub(crate) enum RedirectHost {
+    Localhost,
+    #[allow(dead_code)]
+    LoopbackIp,
+}
+
+impl RedirectHost {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Localhost => "localhost",
+            Self::LoopbackIp => "127.0.0.1",
+        }
+    }
+}
+
 pub(super) struct Listener {
     socket: TcpListener,
     port: u16,
+    host: RedirectHost,
 }
 
 impl Listener {
-    pub(super) fn bind() -> Result<Self, ConnectionError> {
+    pub(super) fn bind(host: RedirectHost) -> Result<Self, ConnectionError> {
         let socket = TcpListener::bind(("127.0.0.1", 0))
             .map_err(|_| ConnectionError::CallbackUnavailable)?;
         socket
@@ -25,11 +42,11 @@ impl Listener {
             .local_addr()
             .map_err(|_| ConnectionError::CallbackUnavailable)?
             .port();
-        Ok(Self { socket, port })
+        Ok(Self { socket, port, host })
     }
 
     pub(super) fn redirect_uri(&self) -> String {
-        format!("http://localhost:{}/", self.port)
+        format!("http://{}:{}/", self.host.name(), self.port)
     }
 
     pub(super) fn wait(
@@ -46,13 +63,15 @@ impl Listener {
                     }
                     let request_deadline = deadline.min(Instant::now() + Duration::from_secs(3));
                     let outcome = read_head(&mut stream, request_deadline)
-                        .and_then(|head| parse_head(&head, self.port, state));
+                        .and_then(|head| parse_head(&head, self.port, self.host, state));
                     respond(&mut stream, outcome.is_ok());
                     match outcome {
                         Ok(code) => return Ok(code),
-                        Err(ConnectionError::ConsentDenied) => {
-                            return Err(ConnectionError::ConsentDenied);
-                        }
+                        Err(
+                            error @ (ConnectionError::ConsentDenied
+                            | ConnectionError::AdminConsentRequired
+                            | ConnectionError::PublisherNotTrusted),
+                        ) => return Err(error),
                         // An unsolicited request cannot consume the pending sign-in.
                         Err(_) => {}
                     }
@@ -94,7 +113,12 @@ fn read_head(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, Conne
     }
 }
 
-fn parse_head(head: &[u8], port: u16, expected: &CsrfToken) -> Result<String, ConnectionError> {
+fn parse_head(
+    head: &[u8],
+    port: u16,
+    host: RedirectHost,
+    expected: &CsrfToken,
+) -> Result<String, ConnectionError> {
     let reject = ConnectionError::CallbackUnavailable;
     let mut headers = [httparse::EMPTY_HEADER; 32];
     let mut request = httparse::Request::new(&mut headers);
@@ -105,7 +129,7 @@ fn parse_head(head: &[u8], port: u16, expected: &CsrfToken) -> Result<String, Co
     {
         return Err(reject);
     }
-    let expected_host = format!("localhost:{port}");
+    let expected_host = format!("{}:{port}", host.name());
     let hosts: Vec<_> = request
         .headers
         .iter()
@@ -158,7 +182,10 @@ fn parse_head(head: &[u8], port: u16, expected: &CsrfToken) -> Result<String, Co
     }
     match (field("code"), field("error")) {
         (Some(code), None) if !code.is_empty() => Ok(code.to_owned()),
-        (None, Some(error)) if !error.is_empty() => Err(ConnectionError::ConsentDenied),
+        (None, Some(error)) if !error.is_empty() => Err(super::oauth_failure(
+            error,
+            field("error_description").unwrap_or_default(),
+        )),
         _ => Err(reject),
     }
 }
@@ -209,7 +236,15 @@ mod tests {
             "http://localhost:1234/?code=x&state=synthetic-state",
             "/?code=x&state=synthetic-state#fragment",
         ] {
-            assert!(parse_head(&request(target, "localhost:1234"), 1234, &state).is_err());
+            assert!(
+                parse_head(
+                    &request(target, "localhost:1234"),
+                    1234,
+                    RedirectHost::Localhost,
+                    &state
+                )
+                .is_err()
+            );
         }
         for host in [
             "localhost:9999",
@@ -221,6 +256,7 @@ mod tests {
                 parse_head(
                     &request("/?code=x&state=synthetic-state", host),
                     1234,
+                    RedirectHost::Localhost,
                     &state
                 )
                 .is_err()
@@ -233,6 +269,7 @@ mod tests {
                     "localhost:1234"
                 ),
                 1234,
+                RedirectHost::Localhost,
                 &state
             ),
             Ok("x".into())
@@ -249,6 +286,7 @@ mod tests {
                     "localhost:1234"
                 ),
                 1234,
+                RedirectHost::Localhost,
                 &state
             ),
             Err(ConnectionError::ConsentDenied)
@@ -257,6 +295,7 @@ mod tests {
             parse_head(
                 &request("/?error=access_denied&state=wrong", "localhost:1234"),
                 1234,
+                RedirectHost::Localhost,
                 &state
             ),
             Err(ConnectionError::CallbackUnavailable)
@@ -265,7 +304,7 @@ mod tests {
 
     #[test]
     fn listener_times_out_without_any_connection() {
-        let listener = Listener::bind().unwrap();
+        let listener = Listener::bind(RedirectHost::Localhost).unwrap();
         assert_eq!(
             listener.wait(
                 &CsrfToken::new("synthetic".into()),
@@ -277,7 +316,7 @@ mod tests {
 
     #[test]
     fn invalid_request_does_not_consume_real_pending_callback() {
-        let listener = Listener::bind().unwrap();
+        let listener = Listener::bind(RedirectHost::Localhost).unwrap();
         let port = listener.port;
         let worker = std::thread::spawn(move || {
             listener.wait(
@@ -305,5 +344,61 @@ mod tests {
             assert!(!response.contains("synthetic-code"));
         }
         assert_eq!(worker.join().unwrap(), Ok("synthetic-code".into()));
+    }
+
+    #[test]
+    fn loopback_ip_host_accepts_only_the_matching_form() {
+        let state = CsrfToken::new("synthetic-state".into());
+        let target = "/?code=x&state=synthetic-state";
+        assert_eq!(
+            parse_head(
+                &request(target, "127.0.0.1:1234"),
+                1234,
+                RedirectHost::LoopbackIp,
+                &state,
+            ),
+            Ok("x".into())
+        );
+        assert!(
+            parse_head(
+                &request(target, "localhost:1234"),
+                1234,
+                RedirectHost::LoopbackIp,
+                &state,
+            )
+            .is_err()
+        );
+        assert!(
+            parse_head(
+                &request(target, "127.0.0.1:1234"),
+                1234,
+                RedirectHost::Localhost,
+                &state,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn callback_maps_known_microsoft_consent_failures() {
+        let state = CsrfToken::new("synthetic-state".into());
+        for (code, expected) in [
+            ("AADSTS65001", ConnectionError::AdminConsentRequired),
+            ("AADSTS90094", ConnectionError::AdminConsentRequired),
+            ("AADSTS650052", ConnectionError::PublisherNotTrusted),
+            ("AADSTS650056", ConnectionError::PublisherNotTrusted),
+        ] {
+            let target =
+                format!("/?error=access_denied&error_description={code}&state=synthetic-state");
+            assert_eq!(
+                parse_head(
+                    &request(&target, "localhost:1234"),
+                    1234,
+                    RedirectHost::Localhost,
+                    &state,
+                ),
+                Err(expected)
+            );
+        }
     }
 }

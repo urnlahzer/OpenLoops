@@ -2446,6 +2446,7 @@ pub(crate) fn register_callbacks(
                             model_ref.review.pending_reminder = Some((
                                 draft.key,
                                 openloops_graph::live::reminders::ReminderRequest {
+                                    provider: openloops_graph::live::MailProvider::Microsoft,
                                     account: draft.account,
                                     title: draft.title.trim().into(),
                                     at_utc: at,

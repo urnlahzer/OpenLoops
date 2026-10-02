@@ -1,11 +1,13 @@
 //! Explicit personal To Do creation. No automatic retry, email sending or shared task writes.
 use super::{
-    Client, ConnectionConfig, ConnectionError, GRAPH_TIMEOUT_SECONDS, Url, bounded_body,
-    request_error, review, with_scopes,
+    Client, ConnectionConfig, ConnectionError, GRAPH_TIMEOUT_SECONDS, MailProvider, Url,
+    bounded_body, request_error, review, with_scopes,
 };
 use serde_json::{Value, json};
 
+#[derive(Default)]
 pub struct ReminderRequest {
+    pub provider: MailProvider,
     pub account: String,
     pub title: String,
     pub at_utc: i64,
@@ -73,7 +75,7 @@ pub enum ReminderCompletionOutcome {
 
 /// A Graph task-list or task id: non-empty, not `.`/`..`, and bounded, same
 /// as the id check `create()` already applies to the resolved list id.
-fn valid_graph_id(id: &str) -> bool {
+pub(super) fn valid_remote_id(id: &str) -> bool {
     !id.is_empty() && id != "." && id != ".." && id.len() <= 2048
 }
 
@@ -157,7 +159,7 @@ fn create_after_sign_in(
             ReminderFailure::DefaultListNotFound,
         ));
     }
-    let Some(id) = matches[0]["id"].as_str().filter(|id| valid_graph_id(id)) else {
+    let Some(id) = matches[0]["id"].as_str().filter(|id| valid_remote_id(id)) else {
         return Ok(ReminderOutcome::NotCreated(
             ReminderFailure::DefaultListNotFound,
         ));
@@ -192,7 +194,7 @@ fn create_after_sign_in(
     };
     match value["id"]
         .as_str()
-        .filter(|task_id| valid_graph_id(task_id))
+        .filter(|task_id| valid_remote_id(task_id))
     {
         Some(task_id) => Ok(ReminderOutcome::Created {
             list_id: id.to_owned(),
@@ -215,7 +217,7 @@ pub fn complete(
     list_id: &str,
     task_id: &str,
 ) -> ReminderCompletionOutcome {
-    if !valid_graph_id(list_id) || !valid_graph_id(task_id) {
+    if !valid_remote_id(list_id) || !valid_remote_id(task_id) {
         return ReminderCompletionOutcome::NotCompleted(ConnectionError::InvalidConfiguration);
     }
     let mut dispatched = false;
@@ -274,7 +276,7 @@ pub fn check_status(
     list_id: &str,
     task_id: &str,
 ) -> TaskStatusOutcome {
-    if !valid_graph_id(list_id) || !valid_graph_id(task_id) {
+    if !valid_remote_id(list_id) || !valid_remote_id(task_id) {
         return TaskStatusOutcome::Unknown(ConnectionError::InvalidConfiguration);
     }
     let result = with_scopes(config, true, |http, token, _| {
@@ -318,12 +320,9 @@ pub fn check_status(
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::scripted_server;
     use super::*;
-    use std::io::{Read, Write};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::atomic::Ordering;
 
     fn response(status: &str, body: &str) -> Vec<u8> {
         format!(
@@ -333,28 +332,9 @@ mod tests {
         .into_bytes()
     }
 
-    fn scripted_server(
-        responses: Vec<Vec<u8>>,
-    ) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let server_calls = Arc::clone(&calls);
-        let handle = std::thread::spawn(move || {
-            for response in responses {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut buffer = [0_u8; 4096];
-                let _ = stream.read(&mut buffer);
-                server_calls.fetch_add(1, Ordering::Relaxed);
-                stream.write_all(&response).unwrap();
-                stream.flush().unwrap();
-            }
-        });
-        (format!("http://127.0.0.1:{port}/"), calls, handle)
-    }
-
     fn valid_request() -> ReminderRequest {
         ReminderRequest {
+            provider: MailProvider::Microsoft,
             account: "scanned-account".into(),
             title: "Send the draft".into(),
             at_utc: 4_000_000_000,
@@ -499,12 +479,12 @@ mod tests {
     }
     #[test]
     fn valid_graph_id_rejects_empty_dot_and_oversized_ids() {
-        assert!(valid_graph_id("AAMkAGI1AAA="));
-        assert!(!valid_graph_id(""));
-        assert!(!valid_graph_id("."));
-        assert!(!valid_graph_id(".."));
-        assert!(!valid_graph_id(&"a".repeat(2049)));
-        assert!(valid_graph_id(&"a".repeat(2048)));
+        assert!(valid_remote_id("AAMkAGI1AAA="));
+        assert!(!valid_remote_id(""));
+        assert!(!valid_remote_id("."));
+        assert!(!valid_remote_id(".."));
+        assert!(!valid_remote_id(&"a".repeat(2049)));
+        assert!(valid_remote_id(&"a".repeat(2048)));
     }
     #[test]
     fn complete_rejects_invalid_ids_before_any_request() {

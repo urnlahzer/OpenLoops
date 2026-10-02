@@ -1,7 +1,7 @@
 //! Explicit, bounded, read-only review. No following server-provided URLs or storing mail.
 use super::{
-    Client, ConnectionConfig, ConnectionError, GRAPH_TIMEOUT_SECONDS, SharedScope, Url,
-    bounded_body, classify_status, groups, inbox_url, request_error, with_session,
+    Client, ConnectionConfig, ConnectionError, GRAPH_TIMEOUT_SECONDS, MailProvider, SharedScope,
+    Url, bounded_body, classify_status, groups, inbox_url, request_error, with_session,
 };
 use serde_json::Value;
 use std::{
@@ -16,6 +16,7 @@ const OUTLOOK_REQUEST_WORKERS: usize = 4;
 /// Private message content; deliberately no Debug implementation.
 #[derive(Clone, Default)]
 pub struct MailItem {
+    pub provider: MailProvider,
     pub subject: String,
     pub body: String,
     pub body_is_html: bool,
@@ -39,6 +40,7 @@ pub struct MailItem {
 
 /// Process-local signed-in identity. Deliberately no `Debug` implementation.
 pub(super) struct UserIdentity {
+    pub provider: MailProvider,
     pub account: String,
     pub addresses: Vec<String>,
     pub display_name: Option<String>,
@@ -54,6 +56,7 @@ pub struct MailEvent {
 
 #[derive(Clone)]
 pub struct SourceReview {
+    pub provider: MailProvider,
     pub label: String,
     pub messages: Vec<MailItem>,
     pub errors: Vec<ConnectionError>,
@@ -171,6 +174,7 @@ pub fn load_sources_with(
                     continue;
                 }
                 sources.push(SourceReview {
+                    provider: MailProvider::Microsoft,
                     label: address.clone(),
                     messages: vec![],
                     errors: vec![ConnectionError::MissingSharedScope],
@@ -264,7 +268,9 @@ fn ensure_loading(progress: &LoadProgress) -> Result<(), ConnectionError> {
 }
 
 fn stamp_group_messages(source: &mut SourceReview, identity: &UserIdentity) {
+    source.provider = identity.provider;
     for message in &mut source.messages {
+        message.provider = identity.provider;
         identity.account.clone_into(&mut message.account);
         message.own_addresses.clone_from(&identity.addresses);
         message.own_display_name.clone_from(&identity.display_name);
@@ -295,21 +301,65 @@ pub(super) fn fetch_from_origin(
     url: &Url,
     expected_origin: &str,
 ) -> Result<Vec<u8>, ConnectionError> {
-    fetch_from_origin_with_policy(
+    fetch_from_origin_with_headers(
         http,
         token,
         url,
         expected_origin,
-        Duration::from_secs(GRAPH_TIMEOUT_SECONDS),
-        Duration::from_secs(2),
+        &[(
+            "Prefer",
+            "outlook.body-content-type=\"html\", IdType=\"ImmutableId\"",
+        )],
     )
 }
 
+#[cfg(test)]
 fn fetch_from_origin_with_policy(
     http: &Client,
     token: &str,
     url: &Url,
     expected_origin: &str,
+    timeout: Duration,
+    retry_delay: Duration,
+) -> Result<Vec<u8>, ConnectionError> {
+    fetch_from_origin_with_headers_policy(
+        http,
+        token,
+        url,
+        expected_origin,
+        &[(
+            "Prefer",
+            "outlook.body-content-type=\"html\", IdType=\"ImmutableId\"",
+        )],
+        timeout,
+        retry_delay,
+    )
+}
+
+pub(super) fn fetch_from_origin_with_headers(
+    http: &Client,
+    token: &str,
+    url: &Url,
+    expected_origin: &str,
+    headers: &[(&str, &str)],
+) -> Result<Vec<u8>, ConnectionError> {
+    fetch_from_origin_with_headers_policy(
+        http,
+        token,
+        url,
+        expected_origin,
+        headers,
+        Duration::from_secs(GRAPH_TIMEOUT_SECONDS),
+        Duration::from_secs(2),
+    )
+}
+
+fn fetch_from_origin_with_headers_policy(
+    http: &Client,
+    token: &str,
+    url: &Url,
+    expected_origin: &str,
+    headers: &[(&str, &str)],
     timeout: Duration,
     retry_delay: Duration,
 ) -> Result<Vec<u8>, ConnectionError> {
@@ -319,15 +369,11 @@ fn fetch_from_origin_with_policy(
         return Err(ConnectionError::InvalidConfiguration);
     }
     for attempt in 0..2 {
-        let response = http
-            .get(url.clone())
-            .bearer_auth(token)
-            .header(
-                "Prefer",
-                "outlook.body-content-type=\"html\", IdType=\"ImmutableId\"",
-            )
-            .timeout(timeout)
-            .send();
+        let mut request = http.get(url.clone()).bearer_auth(token);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = request.timeout(timeout).send();
         let (result, retryable) = match response {
             Ok(response) if response.status().as_u16() == 200 => {
                 let result = bounded_body(response);
@@ -402,6 +448,7 @@ fn parse_identity(value: &Value) -> Result<UserIdentity, ConnectionError> {
         return Err(ConnectionError::ResourceUnavailable);
     }
     Ok(UserIdentity {
+        provider: MailProvider::Microsoft,
         account: id,
         addresses,
         display_name: optional_text(value, "displayName", 4096)?,
@@ -420,12 +467,12 @@ fn optional_text(
     }
 }
 
-fn cutoff() -> String {
+pub(super) fn cutoff() -> String {
     let now: chrono::DateTime<chrono::Utc> = std::time::SystemTime::now().into();
     (now - chrono::Duration::days(30)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-fn cutoff_timestamp() -> i64 {
+pub(super) fn cutoff_timestamp() -> i64 {
     chrono::DateTime::parse_from_rfc3339(&cutoff()).map_or(0, |value| value.timestamp())
 }
 
@@ -557,6 +604,7 @@ fn item(value: &Value, topic: Option<&str>) -> Result<MailItem, ConnectionError>
         None => String::new(),
     };
     Ok(MailItem {
+        provider: MailProvider::Microsoft,
         subject: match topic {
             Some(topic) => topic.into(),
             None => text(value, "subject", 8192)?,
@@ -890,6 +938,7 @@ fn load_folder(
     progress: &LoadProgress,
 ) -> Result<SourceReview, ConnectionError> {
     let mut source = SourceReview {
+        provider: MailProvider::Microsoft,
         label: format!(
             "{} / {}",
             address.unwrap_or("Personal mailbox"),
@@ -939,7 +988,7 @@ fn load_folder(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn add_hydrated(
+pub(super) fn add_hydrated(
     source: &mut SourceReview,
     collected: &[Value],
     sent: bool,
@@ -996,6 +1045,7 @@ fn add_hydrated(
     for (_, sent_time, result) in results {
         match result {
             Ok((mut message, cached)) => {
+                message.provider = identity.provider;
                 if !cached {
                     identity.account.clone_into(&mut message.account);
                     message.own_addresses.clone_from(&identity.addresses);
@@ -1046,6 +1096,7 @@ fn group_url(id: &str, thread: Option<&str>) -> Result<Url, ConnectionError> {
 
 fn load_group(http: &Client, token: &str, address: &str) -> SourceReview {
     let mut source = SourceReview {
+        provider: MailProvider::Microsoft,
         label: format!("Group: {address}"),
         messages: vec![],
         errors: vec![],
@@ -1107,10 +1158,12 @@ fn source_listing_failed(usable: usize, errors: &[ConnectionError]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{concurrent_server, one_shot_server, scripted_server};
     use super::*;
 
     fn synthetic_identity(addresses: &[&str]) -> UserIdentity {
         UserIdentity {
+            provider: MailProvider::Microsoft,
             account: "synthetic-account".into(),
             addresses: addresses.iter().map(|address| (*address).into()).collect(),
             display_name: Some("Synthetic User".into()),
@@ -1260,7 +1313,7 @@ mod tests {
     fn next_page_rejected_has_a_distinct_message() {
         assert_eq!(
             ConnectionError::NextPageRejected.to_string(),
-            "Microsoft returned a next-page link outside the authorized collection; remaining pages were skipped."
+            "The mail service returned a next-page link outside the authorized collection; remaining pages were skipped."
         );
     }
     #[test]
@@ -1373,108 +1426,6 @@ mod tests {
         assert!(!is_event_message(&body));
     }
 
-    /// Spins a real, one-shot loopback HTTP server (no TLS -- `fetch_event`
-    /// is exercised through [`fetch_from_origin`]'s testable seam, which
-    /// checks the request's origin against a caller-supplied one instead of
-    /// [`fetch`]'s hardcoded [`GRAPH_ORIGIN`]) that reads one request and
-    /// writes back `response` verbatim, then closes. Returns the server's
-    /// own origin (for use as both the request's base and the `expected_origin`
-    /// argument) and a handle the caller joins once the round trip is done.
-    fn one_shot_server(response: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let handle = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = [0u8; 4096];
-            let _ = stream.read(&mut buffer);
-            stream.write_all(&response).unwrap();
-            let _ = stream.flush();
-        });
-        (format!("http://127.0.0.1:{port}/"), handle)
-    }
-
-    fn scripted_server(
-        responses: Vec<(Duration, Vec<u8>)>,
-    ) -> (
-        String,
-        std::sync::Arc<std::sync::atomic::AtomicUsize>,
-        std::thread::JoinHandle<()>,
-    ) {
-        use std::io::{Read, Write};
-        use std::sync::{Arc, atomic::AtomicUsize};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let server_calls = Arc::clone(&calls);
-        let handle = std::thread::spawn(move || {
-            for (delay, response) in responses {
-                let (mut stream, _) = listener.accept().unwrap();
-                server_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let mut buffer = [0u8; 4096];
-                let _ = stream.read(&mut buffer);
-                std::thread::sleep(delay);
-                let _ = stream.write_all(&response);
-                let _ = stream.flush();
-            }
-        });
-        (format!("http://127.0.0.1:{port}/"), calls, handle)
-    }
-
-    fn concurrent_server(
-        requests: usize,
-        delay: Duration,
-    ) -> (
-        String,
-        std::sync::Arc<std::sync::atomic::AtomicUsize>,
-        std::sync::Arc<std::sync::atomic::AtomicUsize>,
-        std::thread::JoinHandle<()>,
-    ) {
-        use std::io::{Read, Write};
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let max_in_flight = Arc::new(AtomicUsize::new(0));
-        let server_calls = Arc::clone(&calls);
-        let server_max = Arc::clone(&max_in_flight);
-        let handle = std::thread::spawn(move || {
-            let in_flight = Arc::new(AtomicUsize::new(0));
-            let mut handlers = Vec::with_capacity(requests);
-            for _ in 0..requests {
-                let (mut stream, _) = listener.accept().unwrap();
-                let in_flight = Arc::clone(&in_flight);
-                let calls = Arc::clone(&server_calls);
-                let max_in_flight = Arc::clone(&server_max);
-                handlers.push(std::thread::spawn(move || {
-                    let mut buffer = [0u8; 4096];
-                    let _ = stream.read(&mut buffer);
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-                    max_in_flight.fetch_max(now, Ordering::SeqCst);
-                    std::thread::sleep(delay);
-                    let _ = stream.write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
-                    );
-                    let _ = stream.flush();
-                    in_flight.fetch_sub(1, Ordering::SeqCst);
-                }));
-            }
-            for handler in handlers {
-                handler.join().unwrap();
-            }
-        });
-        (
-            format!("http://127.0.0.1:{port}/"),
-            calls,
-            max_in_flight,
-            handle,
-        )
-    }
-
     #[test]
     fn timeout_has_distinct_wording_after_one_retry() {
         let response =
@@ -1499,7 +1450,7 @@ mod tests {
         assert_eq!(result, Err(ConnectionError::Timeout(1)));
         assert_eq!(
             result.unwrap_err().to_string(),
-            "Microsoft did not answer within 1 seconds."
+            "The service did not answer within 1 seconds."
         );
         server.join().unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
@@ -1567,6 +1518,7 @@ mod tests {
     #[test]
     fn one_failed_body_fetch_does_not_drop_the_source() {
         let mut source = SourceReview {
+            provider: MailProvider::Microsoft,
             label: "Personal mailbox / Inbox".into(),
             messages: vec![],
             errors: vec![],
@@ -1654,6 +1606,7 @@ mod tests {
             fetch_from_origin(&http, "synthetic-token", &list_url, &origin).unwrap();
             let rows = synthetic_rows(1);
             let mut source = SourceReview {
+                provider: MailProvider::Microsoft,
                 label: label.into(),
                 messages: vec![],
                 errors: vec![],
@@ -1708,6 +1661,7 @@ mod tests {
     fn concurrent_hydration_preserves_listing_order() {
         let rows = synthetic_rows(8);
         let mut source = SourceReview {
+            provider: MailProvider::Microsoft,
             label: "Personal mailbox / Inbox".into(),
             messages: vec![],
             errors: vec![],
@@ -1754,6 +1708,7 @@ mod tests {
     fn load_progress_reaches_the_discovered_row_count() {
         let rows = synthetic_rows(5);
         let mut source = SourceReview {
+            provider: MailProvider::Microsoft,
             label: "Personal mailbox / Inbox".into(),
             messages: vec![],
             errors: vec![],
@@ -1792,6 +1747,7 @@ mod tests {
     fn concurrent_hydration_uses_at_most_four_requests() {
         let rows = synthetic_rows(8);
         let mut source = SourceReview {
+            provider: MailProvider::Microsoft,
             label: "Personal mailbox / Inbox".into(),
             messages: vec![],
             errors: vec![],
@@ -1836,6 +1792,7 @@ mod tests {
     fn cached_hydration_makes_no_request_and_returns_the_item_unchanged() {
         let rows = synthetic_rows(1);
         let cached = MailItem {
+            provider: MailProvider::Microsoft,
             subject: "Cached subject".into(),
             body: "Cached synthetic body".into(),
             body_is_html: true,
@@ -1870,6 +1827,7 @@ mod tests {
             .build()
             .unwrap();
         let mut source = SourceReview {
+            provider: MailProvider::Microsoft,
             label: "Personal mailbox / Inbox".into(),
             messages: vec![],
             errors: vec![],
@@ -1926,6 +1884,7 @@ mod tests {
 
         let rows = synthetic_rows(20);
         let mut source = SourceReview {
+            provider: MailProvider::Microsoft,
             label: "Personal mailbox / Inbox".into(),
             messages: vec![],
             errors: vec![],

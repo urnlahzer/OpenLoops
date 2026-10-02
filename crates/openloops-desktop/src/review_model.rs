@@ -1863,6 +1863,7 @@ mod tests {
         messages: Vec<openloops_graph::live::review::MailItem>,
     ) -> SourceReview {
         SourceReview {
+            provider: openloops_graph::live::MailProvider::Microsoft,
             label: label.into(),
             messages,
             errors: vec![],
@@ -2000,6 +2001,7 @@ mod tests {
     #[test]
     fn appended_source_messages_are_deduplicated_by_account_and_id() {
         let source = SourceReview {
+            provider: openloops_graph::live::MailProvider::Microsoft,
             label: "Personal mailbox / Inbox".into(),
             messages: vec![openloops_graph::live::review::MailItem {
                 id: "synthetic-id".into(),
@@ -3297,6 +3299,7 @@ the scan stopped after a provider error."
         };
         let sources = vec![
             SourceReview {
+                provider: openloops_graph::live::MailProvider::Microsoft,
                 label: "Inbox".into(),
                 messages: vec![
                     mail("i-1", "c1", 1, "Please send the draft."),
@@ -3308,6 +3311,7 @@ the scan stopped after a provider error."
                 failed: false,
             },
             SourceReview {
+                provider: openloops_graph::live::MailProvider::Microsoft,
                 label: "Sent".into(),
                 messages: vec![mail("s-1", "c3", 3, "Here is the draft.")],
                 errors: vec![],

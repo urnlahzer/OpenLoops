@@ -1277,6 +1277,7 @@ mod tests {
 
     fn check_source(messages: Vec<MailItem>) -> SourceReview {
         SourceReview {
+            provider: openloops_graph::live::MailProvider::Microsoft,
             label: "Inbox".into(),
             messages,
             errors: vec![],
@@ -1566,6 +1567,7 @@ mod tests {
         let mut app = AppModel::with_store(Ok(None));
         app.load_progress = Some(Arc::new(LoadProgress::default()));
         let sources = vec![SourceReview {
+            provider: openloops_graph::live::MailProvider::Microsoft,
             label: "Personal mailbox / Inbox".into(),
             messages: vec![
                 MailItem {
@@ -1996,15 +1998,15 @@ mod tests {
             ),
             (
                 ReminderFailure::Rejected(ConnectionError::Transport),
-                "No reminder was created: Microsoft could not be reached over a secure connection.",
+                "No reminder was created: The mail service could not be reached over a secure connection.",
             ),
             (
                 ReminderFailure::Rejected(ConnectionError::AccessDenied),
-                "No reminder was created: Microsoft refused the To Do write. The app registration needs the delegated Tasks.ReadWrite permission and the signed-in account must consent to it. Microsoft Graph returned HTTP 403. Check consent and this signed-in account's access to the selected mailbox or group; an administrator role alone does not grant content access.",
+                "No reminder was created: Microsoft refused the To Do write. The app registration needs the delegated Tasks.ReadWrite permission and the signed-in account must consent to it. The mail service returned HTTP 403. Check consent and this signed-in account's access to the selected mailbox or group; an administrator role alone does not grant content access.",
             ),
             (
                 ReminderFailure::Rejected(ConnectionError::Unauthorized),
-                "No reminder was created: Microsoft refused the To Do write. The app registration needs the delegated Tasks.ReadWrite permission and the signed-in account must consent to it. Microsoft Graph returned HTTP 401. Sign in again; if it persists, check the organization's access policies.",
+                "No reminder was created: Microsoft refused the To Do write. The app registration needs the delegated Tasks.ReadWrite permission and the signed-in account must consent to it. The mail service returned HTTP 401. Sign in again; if it persists, check the organization's access policies.",
             ),
         ];
 
