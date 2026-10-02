@@ -6,10 +6,14 @@ has been passed by compiling it or running its local tests.
 
 ## Registration
 
-Use a Microsoft Entra public-client registration accepting accounts in any
-organizational directory. Register `http://localhost` under Mobile and desktop
-applications. No client secret is used. The browser flow uses authorization code
-with PKCE S256 against the commercial `organizations` authority. Personal
+Microsoft sign-in has two registration modes: a build-provided shared OpenLoops
+registration and a user-provided (BYO) Microsoft Entra public-client
+registration. The shared mode is the default when present; a BYO Application ID
+overrides it for organizations that do not allow the shared application. Both
+modes use the commercial `organizations` authority. Configure a BYO registration
+to accept accounts in any organizational directory and register
+`http://localhost` under Mobile and desktop applications. No client secret is
+used. The browser flow uses authorization code with PKCE S256. Personal
 Microsoft accounts and sovereign clouds are outside this slice.
 
 The connection check requests delegated `User.Read` and `Mail.Read` for a personal inbox, or

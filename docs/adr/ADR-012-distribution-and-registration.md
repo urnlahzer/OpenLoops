@@ -201,3 +201,36 @@ fresh-checker preapproval, and additive documentation contradiction. Fresh
 security, registration-governance, governance, and adversarial judges are
 required for closure; their prompts, transcripts, and output are not
 repository evidence.
+
+## Amendment (2026-10-02): shared-registration mechanism
+
+The owner approved on 2026-09-27 a shared multitenant OpenLoops registration as the
+ordinary-user sign-in path, with BYO registration retained as the fallback for
+organizations that reject the shared application. This amendment records the mechanism;
+it does not change the Phase 0 claims above.
+
+The repository stays placeholder-only. The shared client identifier never appears in
+tracked configuration or source. `crates/openloops-graph/src/live/registration.rs` reads
+`OPENLOOPS_MS_CLIENT_ID` (and, for the Google provider, `OPENLOOPS_GOOGLE_CLIENT_ID` and
+`OPENLOOPS_GOOGLE_CLIENT_SECRET`) through `option_env!` at build time. A source build
+without those variables has no shared registration and behaves exactly as before: the
+user enters their own Application ID. Only the publisher's release build sets them, and
+only after every governance control listed above is complete; the build-time variable is
+the enablement switch, not a successful sign-in, a development convenience, or a passing
+test. A user-entered Application ID always takes precedence over the shipped one.
+
+The application shows the tenant admin-consent URL
+(`https://login.microsoftonline.com/organizations/v2.0/adminconsent?...`) whenever the
+shared registration is active, maps the AADSTS65001/90094 (admin consent required) and
+AADSTS650052/650056 (unverified publisher blocked) failures to fixed content-free
+messages that name the admin-consent path or the BYO fallback, and documents in
+`docs/native-setup.md` that the admin's browser lands on an unreachable localhost page
+after consent is recorded. The Google installed-app client secret that Google issues to
+Desktop clients is a non-confidential registration parameter sent alongside PKCE; it
+authenticates nothing beyond the authorization-code exchange and is governed by ADR-002's
+2026-10 amendment, not by this ADR's secret prohibition, which continues to mean
+confidential-client material.
+
+`contracts/distribution/registration-boundary.json` is unchanged by this amendment: its
+`runtime_boundary.shared_registration_enabled: false` and the Phase 0 capability states
+remain literally true for the tracked configuration and for every source build.
