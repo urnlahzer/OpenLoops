@@ -46,6 +46,7 @@ export component SourcesScreen {
     in property <bool> store-available: true;
     in property <string> settings-status;
     in property <bool> settings-succeeded;
+    in property <bool> shipped-registration-present;
     in property <bool> shared-registration-active;
     in property <string> admin-consent-url;
     in-out property <string> client-id;
@@ -100,6 +101,7 @@ export component SourcesScreen {
     callback provider-selected(int);
     callback key-edited(string);
     callback open-entra;
+    callback open-entra-portal;
     callback open-key-page;
     callback load-models;
     callback model-selected(string);
@@ -143,8 +145,24 @@ export component SourcesScreen {
                             StepHeading { number: "1"; title: "Connect Microsoft";
                                 if root.own-inbox-accessible: Pill { text: "Personal inbox confirmed"; kind: "success"; }
                             }
-                            Field { label: "Application (client) ID"; placeholder: "From your Entra app's Overview"; value <=> root.client-id; monospace: true; enabled: root.controls-enabled; edited(value) => { root.client-id-edited(value); } }
-                            LinkButton { text: "Open Microsoft Entra"; width: 100%; enabled: root.controls-enabled; clicked => { root.open-entra(); } }
+                            if root.shipped-registration-present: VerticalLayout { width: 100%; spacing: Tokens.space-3;
+                                HelperText { text: "This build signs in with the OpenLoops registration. Your organization's administrator may need to approve it once."; width: 100%; }
+                                if root.client-id == "": VerticalLayout { width: 100%; spacing: Tokens.space-3;
+                                    Field { label: "Admin consent link"; helper-text: "Send this to your IT administrator, or open it yourself if you are one. After approving, the browser lands on a page that cannot be reached; the approval is still recorded."; value: root.admin-consent-url; read-only: true; monospace: true; enabled: root.controls-enabled; }
+                                    LinkButton { text: "Open admin consent page"; width: 100%; enabled: root.controls-enabled; clicked => { root.open-entra(); } }
+                                }
+                                Disclosure { title: "Use my organization's own registration (optional)"; expanded: root.client-id != ""; enabled: root.controls-enabled;
+                                    VerticalLayout { spacing: Tokens.space-1;
+                                        Field { label: "Application (client) ID"; placeholder: "From your Entra app's Overview"; value <=> root.client-id; monospace: true; enabled: root.controls-enabled; edited(value) => { root.client-id-edited(value); } }
+                                        HelperText { text: "Only for organizations that do not allow the OpenLoops registration. Leave blank to use the shared one."; width: 100%; }
+                                        LinkButton { text: "Open Microsoft Entra"; width: 100%; enabled: root.controls-enabled; clicked => { root.open-entra-portal(); } }
+                                    }
+                                }
+                            }
+                            if !root.shipped-registration-present: VerticalLayout { width: 100%; spacing: Tokens.space-3;
+                                Field { label: "Application (client) ID"; placeholder: "From your Entra app's Overview"; value <=> root.client-id; monospace: true; enabled: root.controls-enabled; edited(value) => { root.client-id-edited(value); } }
+                                LinkButton { text: "Open Microsoft Entra"; width: 100%; enabled: root.controls-enabled; clicked => { root.open-entra-portal(); } }
+                            }
                             Field { label: "Outlook Groups"; helper-text: "Addresses shown under Groups in Outlook. One per line or comma-separated."; placeholder: "Enter group email addresses"; value <=> root.groups; multiline: true; rows: 3; enabled: root.controls-enabled; edited(value) => { root.groups-edited(value); } }
                             Disclosure { title: "Shared mailboxes (optional)"; enabled: root.controls-enabled;
                                 VerticalLayout { spacing: Tokens.space-1;

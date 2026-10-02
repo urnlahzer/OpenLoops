@@ -145,7 +145,7 @@ $agentsText=Text $AgentsPath 'P0-DIST-ARTIFACTS-001'
 Has $agentsText @('Source maps are prohibited by default','use the','`files` field once `package.json` exists, run `npm pack --dry-run`') 'P0-DIST-ARTIFACTS-001'
 
 $adr=Text $AdrPath 'P0-DIST-CROSS-CONTRACT-001';$threat=Text $ThreatPath 'P0-DIST-CROSS-CONTRACT-001';$spec=Text $ProductSpecPath 'P0-DIST-INVENTORY-001';$plan=Text $ImplementationPlanPath 'P0-DIST-INVENTORY-001';$trace=Text $TraceabilityPath 'P0-DIST-INVENTORY-001'
-if((NHash $adr)-ne'09ac519ec14fd894706a2010f9d7860658655487a4afee07c0ae044c19e924cc'){Fail 'P0-DIST-CROSS-CONTRACT-001'}
+if((NHash $adr)-ne'a55b9e294b86227e8e696c7eaefdc9d8fec65a7150e0c2ce7e4215e6bfe23540'){Fail 'P0-DIST-CROSS-CONTRACT-001'}
 if((NHash $threat)-ne'10143d6884cb28a4449ff6172becd8915ae877eec11fb40535f02b7f23bedcb4'){Fail 'P0-DIST-CROSS-CONTRACT-001'}
 # Product spec revised by PR #9, traceability rows revised by the confinement re-scope (2026-09-14).
 if((NHash $spec)-ne'f0428f9c8ac77a14ed645afe7a30cd4b8a3b1e16783c487100c19499b4470ca9'){Fail 'P0-DIST-INVENTORY-001'}

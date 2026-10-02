@@ -11,7 +11,9 @@ use crate::{
     },
     training_export,
 };
-use openloops_graph::live::{ConnectionConfig, MailProvider, check_connection, clear_session_for};
+use openloops_graph::live::{
+    ConnectionConfig, MailProvider, check_connection, clear_session_for, registration,
+};
 use openloops_inference::{
     decision::{OpenRouterDecisions, registry::Registry},
     ollama::{OllamaCloud, available_models},
@@ -23,6 +25,7 @@ use zeroize::Zeroizing;
 slint::include_modules!();
 
 const ENTRA_URL: &str = "https://entra.microsoft.com/";
+const MICROSOFT_LOGIN_URL_PREFIX: &str = "https://login.microsoftonline.com/";
 const OLLAMA_KEYS_URL: &str = "https://ollama.com/settings/keys";
 const OPENROUTER_KEYS_URL: &str = "https://openrouter.ai/settings/keys";
 
@@ -159,6 +162,18 @@ fn provider_connected(model: &AppModel) -> bool {
     !model.selected_model().is_empty() && model.model_status.succeeded
 }
 
+fn admin_consent_url_allowed(url: &str) -> bool {
+    url.starts_with(MICROSOFT_LOGIN_URL_PREFIX)
+}
+
+fn open_allowed_admin_consent_url(url: &str, open: impl FnOnce(&str)) -> bool {
+    if !admin_consent_url_allowed(url) {
+        return false;
+    }
+    open(url);
+    true
+}
+
 /// Replaces `window`'s list model only when the freshly projected `new`
 /// value differs (by `PartialEq`, item by item) from `cache`, the last value
 /// actually pushed. `ModelRc::new(VecModel::from(..))` always allocates a
@@ -247,6 +262,7 @@ pub(crate) fn sync(model: &AppModel, window: &AppWindow) {
     window.set_review_scan_chip_text(scan_chip.into());
     window.set_account_signed_in(account.signed_in);
     window.set_account_text(account.name.into());
+    window.set_shipped_registration_present(registration::microsoft().is_some());
     window.set_shared_registration_active(model.shared_registration_active());
     window.set_admin_consent_url(model.admin_consent_url().unwrap_or_default().into());
     window.set_review_badge(
@@ -954,7 +970,23 @@ pub fn run() -> Result<(), slint::PlatformError> {
             refresh(&model, &weak);
         });
     }
-    window.on_open_entra(|| {
+    {
+        let model = Rc::clone(&model);
+        window.on_open_entra(move || {
+            let model = model.borrow();
+            if model.shared_registration_active() {
+                if let Some(url) = model.admin_consent_url() {
+                    debug_assert!(admin_consent_url_allowed(&url));
+                    open_allowed_admin_consent_url(&url, |url| {
+                        let _ = opener::open(url);
+                    });
+                }
+            } else {
+                let _ = opener::open(ENTRA_URL);
+            }
+        });
+    }
+    window.on_open_entra_portal(|| {
         let _ = opener::open(ENTRA_URL);
     });
     {
@@ -1239,6 +1271,22 @@ mod tests {
         assert_eq!(value, "unchanged");
         assert!(replace_if_changed(&mut value, "changed".to_owned()));
         assert_eq!(value, "changed");
+    }
+
+    #[test]
+    fn admin_consent_opener_only_accepts_the_microsoft_login_prefix() {
+        let mut opened = Vec::new();
+        assert!(!open_allowed_admin_consent_url(
+            "https://example.invalid/organizations/v2.0/adminconsent",
+            |url| opened.push(url.to_owned())
+        ));
+        assert!(opened.is_empty());
+
+        assert!(open_allowed_admin_consent_url(
+            "https://login.microsoftonline.com/organizations/v2.0/adminconsent",
+            |url| opened.push(url.to_owned())
+        ));
+        assert_eq!(opened.len(), 1);
     }
 
     #[test]

@@ -164,6 +164,10 @@ struct ScanJobInputs {
     progress: Arc<crate::review_model::ScanProgress>,
 }
 
+fn shared_registration_active_for(byo_field: &str, shipped: Option<&str>) -> bool {
+    byo_field.trim().is_empty() && shipped.is_some()
+}
+
 impl AppModel {
     #[must_use]
     pub fn new() -> Self {
@@ -939,7 +943,10 @@ impl AppModel {
 
     #[must_use]
     pub fn shared_registration_active(&self) -> bool {
-        self.client_id.trim().is_empty() && registration::microsoft().is_some()
+        shared_registration_active_for(
+            &self.client_id,
+            registration::microsoft().map(|value| value.client_id),
+        )
     }
 
     #[must_use]
@@ -1670,6 +1677,17 @@ mod tests {
             app.admin_consent_url()
                 .is_some_and(|url| url.contains("client_id=00000000-0000-4000-8000-000000000000"))
         );
+    }
+
+    #[test]
+    fn shared_registration_is_active_only_for_an_empty_byo_field_when_shipped() {
+        assert!(shared_registration_active_for("", Some("synthetic")));
+        assert!(shared_registration_active_for("  \t", Some("synthetic")));
+        assert!(!shared_registration_active_for(
+            "synthetic-byo",
+            Some("synthetic")
+        ));
+        assert!(!shared_registration_active_for("", None));
     }
 
     #[test]

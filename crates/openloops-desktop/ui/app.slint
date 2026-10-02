@@ -36,6 +36,7 @@ export component AppWindow inherits Window {
     in property <bool> store-available;
     in property <string> settings-status;
     in property <bool> settings-succeeded;
+    in property <bool> shipped-registration-present;
     in property <bool> shared-registration-active;
     in property <string> admin-consent-url;
     in-out property <string> client-id;
@@ -134,6 +135,7 @@ export component AppWindow inherits Window {
     callback provider-selected(int);
     callback key-edited(string);
     callback open-entra;
+    callback open-entra-portal;
     callback open-key-page;
     callback load-models;
     callback model-selected(string);
@@ -182,7 +184,7 @@ export component AppWindow inherits Window {
             NavRail { selected-index <=> root.active-screen; review-badge: root.review-badge; provider-name: root.provider-name; provider-connected: root.provider-connected; enabled: !root.busy; selected(index) => { root.navigate(index); } }
             if root.active-screen == 1: SourcesScreen {
                 controls-enabled: !root.busy; store-available: root.store-available; settings-status: root.settings-status; settings-succeeded: root.settings-succeeded;
-                shared-registration-active: root.shared-registration-active; admin-consent-url: root.admin-consent-url;
+                shipped-registration-present: root.shipped-registration-present; shared-registration-active: root.shared-registration-active; admin-consent-url: root.admin-consent-url;
                 client-id <=> root.client-id; groups <=> root.groups; shared-mailboxes <=> root.shared-mailboxes; own-inbox-accessible: root.own-inbox-accessible; microsoft-lines: root.microsoft-lines;
                 microsoft-busy-line: root.microsoft-busy-line;
                 provider-index <=> root.provider-index; api-key <=> root.api-key; show-key <=> root.show-key; models: root.models; model-index <=> root.model-index; model-value <=> root.model-value;
@@ -197,7 +199,7 @@ export component AppWindow inherits Window {
                 save-settings => { root.save-settings(); } reload-settings => { root.reload-settings(); } forget-settings => { root.forget-settings(); }
                 client-id-edited(value) => { root.client-id-edited(value); } groups-edited(value) => { root.groups-edited(value); } shared-edited(value) => { root.shared-edited(value); }
                 check-microsoft => { root.check-microsoft(); } provider-selected(index) => { root.provider-selected(index); } key-edited(value) => { root.key-edited(value); }
-                open-entra => { root.open-entra(); } open-key-page => { root.open-key-page(); }
+                open-entra => { root.open-entra(); } open-entra-portal => { root.open-entra-portal(); } open-key-page => { root.open-key-page(); }
                 load-models => { root.load-models(); } model-selected(value) => { root.model-selected(value); } plan-selected(index) => { root.plan-selected(index); }
                 parallel-committed(value) => { root.parallel-committed(value); } test-model => { root.test-model(); }
                 decision-model-toggled(value) => { root.decision-model-toggled(value); } check-decision-model => { root.check-decision-model(); }

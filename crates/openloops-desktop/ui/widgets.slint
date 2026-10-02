@@ -452,6 +452,7 @@ export component Field inherits Rectangle {
     in property <bool> reveal-password: false;
     in property <bool> multiline: false;
     in property <bool> monospace: false;
+    in property <bool> read-only: false;
     in property <int> rows: 1;
     in property <bool> enabled: true;
     callback edited(string);
@@ -480,6 +481,7 @@ export component Field inherits Rectangle {
             line-input := LineEdit {
                 width: 100%; height: 100%;
                 text <=> root.value; placeholder-text: root.placeholder; enabled: root.enabled;
+                read-only: root.read-only;
                 accessible-label: root.input-accessible-label;
                 font-family: root.monospace ? Tokens.mono-font-family : Tokens.font-family;
                 input-type: root.password && !root.reveal-password ? InputType.password : InputType.text;
@@ -504,6 +506,7 @@ export component Field inherits Rectangle {
             text-input := TextEdit {
                 width: 100%; height: 100%;
                 text <=> root.value; enabled: root.enabled; wrap: word-wrap;
+                read-only: root.read-only;
                 accessible-label: root.input-accessible-label;
                 font-family: root.monospace ? Tokens.mono-font-family : Tokens.font-family;
                 edited => { root.edited(self.text); }

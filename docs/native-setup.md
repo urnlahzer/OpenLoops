@@ -10,7 +10,10 @@ unattended background service remain on the implementation roadmap.
 
 ## Using the window
 
-1. Enter the Application (client) ID from the development app registration.
+1. When present, a build-provided shared OpenLoops registration is selected
+   automatically. Expand **Use my organization's own registration (optional)**
+   and enter its Application (client) ID if your organization requires its own
+   registration. Without a shipped registration, the field is shown directly.
    Enter any Outlook Group primary addresses in the Groups box, one per line or
    separated by commas. Mailboxes opened through **Shared with me** or **Open
    another mailbox** belong in the separate optional shared-mailbox box.
@@ -88,9 +91,14 @@ loaded, and nothing otherwise; the Graph layer exposes no display name yet
 (`ConnectionReport` carries no account identifiers by design), so no name or
 avatar is shown.
 
-The app registration is still a developer setup prerequisite. Ordinary user
-onboarding will need a publisher-owned multitenant registration configured in
-the distributed application; users should not each need to register an app.
+When a build carries the shared OpenLoops registration, it is used by default
+and no Application ID is needed. The first sign-in may show Microsoft's
+**Need admin approval** screen. Open the **Admin consent link** yourself if you
+are an administrator, or send it to your organization's IT administrator.
+After consent, the browser lands on an unreachable localhost page; the consent
+is still recorded, so return to OpenLoops and sign in again. Organizations that
+do not allow the shared application can expand **Use my organization's own
+registration (optional)** and enter their own Application ID instead.
 See [Microsoft connection](live-connection.md), [Ollama Cloud](ollama-cloud.md),
 and [OpenRouter](openrouter.md) for permission and data-flow details.
 
@@ -101,6 +109,10 @@ Build the executable once from a development checkout:
 ```powershell
 cargo build -p openloops-desktop --bin openloops-ui --features native-ui --locked
 ```
+
+Publisher release builds can set `OPENLOOPS_MS_CLIENT_ID`,
+`OPENLOOPS_GOOGLE_CLIENT_ID`, and `OPENLOOPS_GOOGLE_CLIENT_SECRET` at build time.
+Source builds without those environment variables are BYO-only.
 
 The window/taskbar icon is set at runtime from `ui/assets/openloops-256.png` via
 Slint's `icon` property on the window. The icon is embedded as a resource at build
