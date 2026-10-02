@@ -11,7 +11,7 @@ use crate::{
     },
     training_export,
 };
-use openloops_graph::live::{ConnectionConfig, check_connection, clear_session};
+use openloops_graph::live::{ConnectionConfig, MailProvider, check_connection, clear_session_for};
 use openloops_inference::{
     decision::{OpenRouterDecisions, registry::Registry},
     ollama::{OllamaCloud, available_models},
@@ -206,8 +206,19 @@ pub(crate) fn sync(model: &AppModel, window: &AppWindow) {
     // succeeded, or once review messages have already loaded (mail is
     // plainly being scanned even if a rescan's own check has not yet
     // re-run), rather than a misleading "Not signed in".
-    let account =
-        AccountDisplay::connected(model.microsoft.succeeded || !model.review.messages.is_empty());
+    let connected_providers = MailProvider::ALL
+        .iter()
+        .copied()
+        .filter(|provider| {
+            model.connection_status(*provider).succeeded
+                || model
+                    .review
+                    .messages
+                    .iter()
+                    .any(|message| message.provider == *provider)
+        })
+        .collect::<Vec<_>>();
+    let account = AccountDisplay::connected(&connected_providers);
     let cards = model
         .review
         .analysis
@@ -235,6 +246,9 @@ pub(crate) fn sync(model: &AppModel, window: &AppWindow) {
     let (strip_model, scan_chip) = crate::slint_review::scan_strip_view(&strip, model, &cards);
     window.set_review_scan_chip_text(scan_chip.into());
     window.set_account_signed_in(account.signed_in);
+    window.set_account_text(account.name.into());
+    window.set_shared_registration_active(model.shared_registration_active());
+    window.set_admin_consent_url(model.admin_consent_url().unwrap_or_default().into());
     window.set_review_badge(
         i32::try_from(open_badge_count(&cards, model.review.show_call_summaries))
             .unwrap_or(i32::MAX),
@@ -283,7 +297,7 @@ pub(crate) fn sync(model: &AppModel, window: &AppWindow) {
     // these same two properties every tick without touching anything else on
     // this screen.
     window.set_microsoft_busy_line(
-        if model.pending_service == Service::Microsoft {
+        if model.pending_service == Service::Mailbox {
             busy_text.as_deref().unwrap_or_default()
         } else {
             ""
@@ -362,7 +376,7 @@ pub(crate) fn sync(model: &AppModel, window: &AppWindow) {
         Provider::OllamaCloud => "Load cloud models".into(),
         Provider::OpenRouter => "Load ZDR models".into(),
     });
-    window.set_can_check_microsoft(!model.client_id.trim().is_empty());
+    window.set_can_check_microsoft(model.effective_microsoft_client_id().is_some());
     window.set_can_load_models(match model.provider {
         Provider::OllamaCloud => !model.key.is_empty(),
         Provider::OpenRouter => true,
@@ -415,7 +429,7 @@ pub(crate) fn sync_busy(model: &AppModel, window: &AppWindow) {
     }
 
     match model.pending_service {
-        Service::Microsoft => window.set_microsoft_busy_line(busy_text.into()),
+        Service::Mailbox => window.set_microsoft_busy_line(busy_text.into()),
         Service::Model => window.set_model_busy_line(busy_text.into()),
         Service::Review => {}
     }
@@ -650,7 +664,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         let (sender, receiver) = std::sync::mpsc::channel::<Outcome>();
         std::mem::forget(sender);
         initial_model.pending = Some(receiver);
-        initial_model.pending_service = Service::Microsoft;
+        initial_model.pending_service = Service::Mailbox;
         initial_model.progress = "Complete Microsoft sign-in; then downloading recent messages";
         initial_model.started = std::time::Instant::now()
             .checked_sub(Duration::from_secs(82))
@@ -824,7 +838,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
             if !replace_if_changed(&mut model_ref.client_id, value) {
                 return;
             }
-            clear_session();
+            clear_session_for(MailProvider::Microsoft);
             model_ref.clear_mail_cache();
             clear_microsoft_after_edit(&mut model_ref);
             drop(model_ref);
@@ -845,17 +859,24 @@ pub fn run() -> Result<(), slint::PlatformError> {
         window.on_check_microsoft(move || {
             let config = {
                 let model = model.borrow();
-                ConnectionConfig::new(model.client_id.trim(), Some(&model.shared))
-                    .and_then(|config| config.with_groups(Some(&model.groups)))
+                model
+                    .effective_microsoft_client_id()
+                    .ok_or(openloops_graph::live::ConnectionError::InvalidConfiguration)
+                    .and_then(|client_id| {
+                        ConnectionConfig::new(&client_id, Some(&model.shared))
+                            .and_then(|config| config.with_groups(Some(&model.groups)))
+                    })
             };
             match config {
                 Ok(config) => {
                     let mut model_ref = model.borrow_mut();
                     model_ref.microsoft = Status::default();
                     model_ref.start(
-                        Service::Microsoft,
+                        Service::Mailbox,
                         "Complete Microsoft sign-in in your browser",
-                        move || Outcome::Microsoft(check_connection(&config)),
+                        move || {
+                            Outcome::Connection(MailProvider::Microsoft, check_connection(&config))
+                        },
                         || {},
                     );
                     start_timer(&timer);

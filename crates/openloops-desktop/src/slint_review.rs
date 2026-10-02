@@ -23,7 +23,7 @@ use crate::{
     },
 };
 use openloops_graph::live::{
-    ConnectionConfig, ConnectionError,
+    ConnectionConfig, ConnectionError, MailProvider,
     review::{LoadProgress, load_recent_with, load_sources_with},
 };
 use openloops_inference::blocks::CanonicalBlock;
@@ -75,7 +75,7 @@ fn reminder_title(decision: Decision, action: &str) -> String {
 }
 
 const REMINDER_VALIDATION_HINT: &str = "Enter a future local date/time and a title of 3–320 bytes. Ambiguous daylight-saving times need a different time.";
-const TODO_URL: &str = "https://to-do.office.com/tasks/";
+const TODO_URL: &str = MailProvider::Microsoft.tasks_url();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DraftView {
@@ -212,6 +212,7 @@ struct EvidenceView {
     context: String,
     subject_note: String,
     url: String,
+    url_label: String,
 }
 
 pub(crate) fn sender_label(message: &crate::review_model::ReviewMessage) -> String {
@@ -227,12 +228,16 @@ pub(crate) fn sender_label(message: &crate::review_model::ReviewMessage) -> Stri
     }
 }
 
-fn gated_outlook_url(url: &str) -> String {
-    if app_model::is_outlook_link(url) {
+fn gated_message_url(url: &str) -> String {
+    if app_model::is_trusted_message_link(url) {
         url.to_owned()
     } else {
         String::new()
     }
+}
+
+fn message_url_label(message: &crate::review_model::ReviewMessage) -> String {
+    format!("Open message in {}", message.provider.mail_client_name())
 }
 
 /// Wraps a non-empty evidence quote in typographic quotes (Companion §4.4);
@@ -265,7 +270,8 @@ fn evidence_card(
             anchor.context.clone()
         },
         subject_note: String::new(),
-        url: message.map_or_else(String::new, |message| gated_outlook_url(&message.web_link)),
+        url: message.map_or_else(String::new, |message| gated_message_url(&message.web_link)),
+        url_label: message.map_or_else(String::new, message_url_label),
     }
 }
 
@@ -288,7 +294,8 @@ fn event_time_evidence_card(
         } else {
             String::new()
         },
-        url: message.map_or_else(String::new, |message| gated_outlook_url(&message.web_link)),
+        url: message.map_or_else(String::new, |message| gated_message_url(&message.web_link)),
+        url_label: message.map_or_else(String::new, message_url_label),
     }
 }
 
@@ -325,7 +332,8 @@ fn evidence_cards(
             quote: typographic_quote(&mention.quote),
             context: String::new(),
             subject_note: String::new(),
-            url: message.map_or_else(String::new, |message| gated_outlook_url(&message.web_link)),
+            url: message.map_or_else(String::new, |message| gated_message_url(&message.web_link)),
+            url_label: message.map_or_else(String::new, message_url_label),
         });
     }
     cards
@@ -340,6 +348,7 @@ struct CompletionView {
     quote: String,
     cross_thread: bool,
     url: String,
+    url_label: String,
 }
 
 fn completion_card(
@@ -360,6 +369,7 @@ fn completion_card(
             quote: evidence.quote,
             cross_thread: item.cross_thread,
             url: evidence.url,
+            url_label: evidence.url_label,
         }
     } else if item.unverified_resolution {
         CompletionView {
@@ -372,12 +382,13 @@ fn completion_card(
             quote: String::new(),
             cross_thread: false,
             url: String::new(),
+            url_label: String::new(),
         }
     } else {
         CompletionView {
             state: "none",
             label: "No matching completion was identified in the scanned conversation. Work may have happened elsewhere or outside this history window.".into(),
-            sender: String::new(), time: String::new(), quote: String::new(), cross_thread: false, url: String::new(),
+            sender: String::new(), time: String::new(), quote: String::new(), cross_thread: false, url: String::new(), url_label: String::new(),
         }
     }
 }
@@ -396,6 +407,7 @@ struct SuggestedView {
     sender: String,
     time: String,
     url: String,
+    url_label: String,
     can_accept: bool,
     reject_label: &'static str,
 }
@@ -440,7 +452,8 @@ fn suggested_view(review: &ReviewState, update: Option<&SuggestedUpdate>) -> Sug
             .unwrap_or_default(),
         sender: message.map_or_else(String::new, sender_label),
         time: message.map_or_else(String::new, |message| message.date_label.clone()),
-        url: message.map_or_else(String::new, |message| gated_outlook_url(&message.web_link)),
+        url: message.map_or_else(String::new, |message| gated_message_url(&message.web_link)),
+        url_label: message.map_or_else(String::new, message_url_label),
         can_accept,
         reject_label,
     }
@@ -512,7 +525,7 @@ fn conversation_url(
             message.account == source.account && message.conversation == source.conversation
         })
         .max_by_key(|message| message.input.timestamp)
-        .map_or_else(String::new, |message| gated_outlook_url(&message.web_link))
+        .map_or_else(String::new, |message| gated_message_url(&message.web_link))
 }
 
 /// The last projected `Vec<T>`/value actually pushed to each of
@@ -1482,6 +1495,7 @@ fn sync_review_inner(
                 context: evidence.context.into(),
                 subject_note: evidence.subject_note.into(),
                 url: evidence.url.into(),
+                url_label: evidence.url_label.into(),
             })
             .collect::<Vec<_>>();
         sync_list_cached(&mut review_ui.cache.evidence, evidence, |m| {
@@ -1495,6 +1509,7 @@ fn sync_review_inner(
             quote: selected.completion.quote.into(),
             cross_thread: selected.completion.cross_thread,
             url: selected.completion.url.into(),
+            url_label: selected.completion.url_label.into(),
         };
         sync_value_cached(&mut review_ui.cache.completion, completion, |c| {
             window.set_completion_card(c);
@@ -1507,6 +1522,7 @@ fn sync_review_inner(
             sender: selected.suggested.sender.into(),
             time: selected.suggested.time.into(),
             url: selected.suggested.url.into(),
+            url_label: selected.suggested.url_label.into(),
             can_accept: selected.suggested.can_accept,
             reject_label: selected.suggested.reject_label.into(),
         };
@@ -1608,7 +1624,10 @@ pub(crate) fn scan_mode(review: &ReviewState) -> ScanMode {
 fn start_mail_load(model: &Rc<RefCell<AppModel>>, mode: ScanMode) -> Result<(), ConnectionError> {
     let config = {
         let model = model.borrow();
-        ConnectionConfig::new(model.client_id.trim(), Some(&model.shared))
+        let client_id = model
+            .effective_microsoft_client_id()
+            .ok_or(ConnectionError::InvalidConfiguration)?;
+        ConnectionConfig::new(&client_id, Some(&model.shared))
             .and_then(|config| config.with_groups(Some(&model.groups)))?
     };
     let mut model_ref = model.borrow_mut();
@@ -1626,7 +1645,7 @@ fn start_mail_load(model: &Rc<RefCell<AppModel>>, mode: ScanMode) -> Result<(), 
     let progress = std::sync::Arc::new(LoadProgress::default());
     let cache = std::sync::Arc::clone(&model_ref.mail_cache);
     model_ref.load_progress = Some(std::sync::Arc::clone(&progress));
-    let signed_in = openloops_graph::live::has_session();
+    let signed_in = openloops_graph::live::has_session_for(MailProvider::Microsoft);
     match mode {
         ScanMode::Full => model_ref.start(
             Service::Review,
@@ -1693,7 +1712,12 @@ fn apply_reconcile(review: &mut ReviewState, key: [u8; 32], exists: bool) {
         // address and skips silently, exactly as if no reminder existed for
         // that purpose; the reminder still counts as Created for every other
         // purpose (dedup, the pill, the button state).
+        let provider = match record.reminder {
+            Reminder::Created { provider, .. } | Reminder::Completed { provider, .. } => provider,
+            Reminder::None | Reminder::Attempted => MailProvider::Microsoft,
+        };
         Reminder::Created {
+            provider,
             list_id: String::new(),
             task_id: String::new(),
         }
@@ -1707,7 +1731,11 @@ fn dispatch_pending_reminder(model: &mut AppModel) -> bool {
     let Some((key, request)) = model.review.pending_reminder.take() else {
         return false;
     };
-    match ConnectionConfig::new(model.client_id.trim(), None) {
+    match model
+        .effective_microsoft_client_id()
+        .ok_or(ConnectionError::InvalidConfiguration)
+        .and_then(|client_id| ConnectionConfig::new(&client_id, None))
+    {
         Ok(config) => {
             model.start(
                 Service::Review,
@@ -1777,9 +1805,11 @@ fn decide_selected(model: &mut AppModel, selected: Option<[u8; 32]>, value: i32)
     // line, dispatched after the decision is already saved.
     let complete_task = if decision == Decision::Done {
         match &reminder {
-            Reminder::Created { list_id, task_id }
-                if !list_id.is_empty() && !task_id.is_empty() =>
-            {
+            Reminder::Created {
+                provider: MailProvider::Microsoft,
+                list_id,
+                task_id,
+            } if !list_id.is_empty() && !task_id.is_empty() => {
                 Some((list_id.clone(), task_id.clone()))
             }
             _ => None,
@@ -1789,7 +1819,8 @@ fn decide_selected(model: &mut AppModel, selected: Option<[u8; 32]>, value: i32)
     };
     model.review.apply_decision_change(key, decision, reminder);
     if let Some((list_id, task_id)) = complete_task
-        && let Ok(config) = ConnectionConfig::new(model.client_id.trim(), None)
+        && let Some(client_id) = model.effective_microsoft_client_id()
+        && let Ok(config) = ConnectionConfig::new(&client_id, None)
     {
         model.start(
             Service::Review,
@@ -1957,8 +1988,13 @@ pub(crate) fn register_callbacks(
             } else {
                 let config = {
                     let model = model.borrow();
-                    ConnectionConfig::new(model.client_id.trim(), Some(&model.shared))
-                        .and_then(|config| config.with_groups(Some(&model.groups)))
+                    model
+                        .effective_microsoft_client_id()
+                        .ok_or(ConnectionError::InvalidConfiguration)
+                        .and_then(|client_id| {
+                            ConnectionConfig::new(&client_id, Some(&model.shared))
+                                .and_then(|config| config.with_groups(Some(&model.groups)))
+                        })
                 };
                 match config {
                     Ok(config) => {
@@ -1968,7 +2004,7 @@ pub(crate) fn register_callbacks(
                         model_ref.load_progress = Some(std::sync::Arc::clone(&progress));
                         model_ref.start(
                             Service::Review,
-                            if openloops_graph::live::has_session() {
+                            if openloops_graph::live::has_session_for(MailProvider::Microsoft) {
                                 "Downloading recent messages"
                             } else {
                                 "Complete Microsoft sign-in; then downloading recent messages"
@@ -2446,6 +2482,7 @@ pub(crate) fn register_callbacks(
                             model_ref.review.pending_reminder = Some((
                                 draft.key,
                                 openloops_graph::live::reminders::ReminderRequest {
+                                    provider: openloops_graph::live::MailProvider::Microsoft,
                                     account: draft.account,
                                     title: draft.title.trim().into(),
                                     at_utc: at,
@@ -2485,7 +2522,11 @@ pub(crate) fn register_callbacks(
         });
     }
     window.on_open_external(|url| {
-        if url.as_str() == TODO_URL || app_model::is_outlook_link(&url) {
+        if MailProvider::ALL
+            .iter()
+            .any(|provider| url.as_str() == provider.tasks_url())
+            || app_model::is_trusted_message_link(&url)
+        {
             let _ = opener::open(url.as_str());
         }
     });
@@ -2521,16 +2562,19 @@ mod tests {
         app.selected = "synthetic-model".into();
         app.review.failed_conversations_detail = vec![
             ConversationFailure {
+                account: "synthetic-account".into(),
                 conversation: "timeout".into(),
                 subject_short: "Synthetic".into(),
                 reason: FailureReason::Timeout,
             },
             ConversationFailure {
+                account: "synthetic-account".into(),
                 conversation: "rate".into(),
                 subject_short: "Synthetic".into(),
                 reason: FailureReason::RateLimited,
             },
             ConversationFailure {
+                account: "synthetic-account".into(),
                 conversation: "quota".into(),
                 subject_short: "Synthetic".into(),
                 reason: FailureReason::Quota,
@@ -3226,6 +3270,7 @@ mod tests {
             status_pill_hint(
                 Decision::Done,
                 &Reminder::Completed {
+                    provider: openloops_graph::live::MailProvider::Microsoft,
                     list_id: "list".into(),
                     task_id: "task".into()
                 },
@@ -3660,6 +3705,7 @@ mod tests {
             key,
             Decision::Mine,
             Reminder::Created {
+                provider: openloops_graph::live::MailProvider::Microsoft,
                 list_id: "list".into(),
                 task_id: "task".into(),
             },
@@ -3726,6 +3772,7 @@ mod tests {
         };
         assert_eq!(reminder_state_view(&record).state, "none");
         record.reminder = Reminder::Created {
+            provider: openloops_graph::live::MailProvider::Microsoft,
             list_id: "list".into(),
             task_id: "task".into(),
         };
@@ -3781,6 +3828,11 @@ mod tests {
                 .iter()
                 .all(|card| card.url.starts_with("https://outlook.office.com/"))
         );
+        assert!(
+            cards
+                .iter()
+                .all(|card| card.url_label == "Open message in Outlook")
+        );
     }
 
     #[test]
@@ -3817,25 +3869,41 @@ mod tests {
     }
 
     #[test]
-    fn outlook_link_projection_rejects_every_other_url() {
+    fn message_link_projection_accepts_each_provider_and_rejects_every_other_url() {
         assert_eq!(
-            gated_outlook_url("https://outlook.office.com/mail/item"),
+            gated_message_url("https://outlook.office.com/mail/item"),
             "https://outlook.office.com/mail/item"
         );
         assert_eq!(
-            gated_outlook_url("https://outlook.office365.com/mail/item"),
+            gated_message_url("https://outlook.office365.com/mail/item"),
             "https://outlook.office365.com/mail/item"
         );
         assert_eq!(
-            gated_outlook_url("https://outlook.live.com/mail/item"),
+            gated_message_url("https://outlook.live.com/mail/item"),
             "https://outlook.live.com/mail/item"
         );
         assert_eq!(
-            gated_outlook_url("https://outlook.office365.us/mail/item"),
+            gated_message_url("https://outlook.office365.us/mail/item"),
             "https://outlook.office365.us/mail/item"
         );
-        assert!(gated_outlook_url("https://example.invalid/outlook.office.com/").is_empty());
-        assert!(gated_outlook_url("http://outlook.office.com/mail/item").is_empty());
+        assert_eq!(
+            gated_message_url("https://mail.google.com/mail/u/0/#inbox/synthetic"),
+            "https://mail.google.com/mail/u/0/#inbox/synthetic"
+        );
+        assert!(gated_message_url("https://example.invalid/outlook.office.com/").is_empty());
+        assert!(gated_message_url("https://evil.example/mail.google.com/").is_empty());
+        assert!(gated_message_url("http://outlook.office.com/mail/item").is_empty());
+    }
+
+    #[test]
+    fn message_link_label_uses_the_messages_provider() {
+        let mut review = crate::review_model::layout_fixture();
+        review.messages[0].provider = MailProvider::Google;
+        review.messages[0].web_link = "https://mail.google.com/mail/u/0/#inbox/synthetic".into();
+        let item = &review.analysis.as_ref().unwrap().items[0];
+        let card = evidence_card("Synthetic evidence", &item.evidence, &review.messages);
+        assert_eq!(card.url_label, "Open message in Gmail");
+        assert_eq!(card.url, review.messages[0].web_link);
     }
 
     #[test]
@@ -3933,6 +4001,57 @@ mod tests {
             review.decisions.get(&key).reminder,
             Reminder::Created { .. }
         ));
+    }
+
+    #[test]
+    fn reconcile_preserves_the_existing_google_reminder_provider() {
+        let mut review = crate::review_model::layout_fixture();
+        let record = review
+            .decisions
+            .records
+            .iter_mut()
+            .find(|record| matches!(record.reminder, Reminder::Created { .. }))
+            .unwrap();
+        let key = record.key;
+        let Reminder::Created { provider, .. } = &mut record.reminder else {
+            unreachable!();
+        };
+        *provider = MailProvider::Google;
+
+        apply_reconcile(&mut review, key, true);
+
+        assert!(matches!(
+            review.decisions.get(&key).reminder,
+            Reminder::Created {
+                provider: MailProvider::Google,
+                ref list_id,
+                ref task_id,
+            } if list_id.is_empty() && task_id.is_empty()
+        ));
+    }
+
+    #[test]
+    fn handled_google_reminder_does_not_start_microsoft_completion() {
+        let mut app = model();
+        app.client_id = "00000000-0000-4000-8000-000000000000".into();
+        app.review = crate::review_model::layout_fixture();
+        let record = app
+            .review
+            .decisions
+            .records
+            .iter_mut()
+            .find(|record| matches!(record.reminder, Reminder::Created { .. }))
+            .unwrap();
+        let key = record.key;
+        let Reminder::Created { provider, .. } = &mut record.reminder else {
+            unreachable!();
+        };
+        *provider = MailProvider::Google;
+
+        decide_selected(&mut app, Some(key), DECISION_DONE);
+
+        assert_eq!(app.review.decisions.get(&key).decision, Decision::Done);
+        assert!(app.pending.is_none());
     }
 
     fn suggestion(kind: SuggestedUpdateKind, temporal: Option<&str>) -> SuggestedUpdate {

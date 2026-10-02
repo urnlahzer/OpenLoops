@@ -7,6 +7,7 @@ use crate::deadline_view::{DeadlineView, classify, classify_with_hint};
 use crate::link_state::{LinkKind, Relations};
 use crate::loop_state::{Decision, Decisions, Record, Reminder, now};
 use openloops_graph::live::{
+    MailProvider,
     reminders::ReminderRequest,
     review::{LoadProgress, SourceReview},
 };
@@ -15,9 +16,9 @@ use std::sync::atomic::Ordering;
 #[path = "review_scan.rs"]
 mod scanning;
 pub(crate) use scanning::{
-    ConversationFailure, FailureReason, IncrementalScope, PriorUpdate, ReviewMessage, ScanOptions,
-    ScanProgress, ScanResult, ScanScope, closure_candidates, compare_decisions, probe,
-    same_thread_closure_candidates, scan,
+    ConversationFailure, ConversationKey, FailureReason, IncrementalScope, PriorUpdate,
+    ReviewMessage, ScanOptions, ScanProgress, ScanResult, ScanScope, closure_candidates,
+    compare_decisions, probe, same_thread_closure_candidates, scan,
 };
 
 pub(crate) const SHOW_HANDLED_LABEL: &str = "Show resolved, handled, and dismissed";
@@ -189,9 +190,9 @@ pub struct ReviewState {
     pub(crate) scan_failed: bool,
     source_notes: BTreeMap<String, Vec<String>>,
     source_issue_counts: BTreeMap<String, usize>,
-    conversation_quality: BTreeMap<String, (usize, usize)>,
-    conversation_notes_by_id: BTreeMap<String, Vec<String>>,
-    conversation_rejection_reasons: BTreeMap<String, Vec<&'static str>>,
+    conversation_quality: BTreeMap<ConversationKey, (usize, usize)>,
+    conversation_notes_by_id: BTreeMap<ConversationKey, Vec<String>>,
+    conversation_rejection_reasons: BTreeMap<ConversationKey, Vec<&'static str>>,
     closure_pass_failure: Option<String>,
     pub(crate) linked_card_titles: BTreeMap<[u8; 32], String>,
 }
@@ -329,11 +330,16 @@ impl ReviewState {
     /// Returns both appended conversations and existing conversations re-keyed by
     /// `merge_threads`: a bridging message can absorb an old thread, whose stale
     /// scan items must then be replaced by [`ReviewState::merge_scan`].
-    pub fn append_sources(&mut self, sources: Vec<SourceReview>) -> BTreeSet<String> {
-        let previous_conversations: BTreeMap<String, String> = self
+    pub fn append_sources(&mut self, sources: Vec<SourceReview>) -> BTreeSet<ConversationKey> {
+        let previous_conversations: BTreeMap<String, ConversationKey> = self
             .messages
             .iter()
-            .map(|message| (message.input.handle.clone(), message.conversation.clone()))
+            .map(|message| {
+                (
+                    message.input.handle.clone(),
+                    (message.account.clone(), message.conversation.clone()),
+                )
+            })
             .collect();
         let mut appended_handles = BTreeSet::new();
         for source in sources {
@@ -410,17 +416,24 @@ impl ReviewState {
                 appended_handles.contains(&message.input.handle)
                     || previous_conversations
                         .get(&message.input.handle)
-                        .is_some_and(|old| old != &message.conversation)
+                        .is_some_and(|old| {
+                            old.0.as_str() != message.account
+                                || old.1.as_str() != message.conversation
+                        })
             })
-            .map(|message| message.conversation.clone())
+            .map(|message| (message.account.clone(), message.conversation.clone()))
             .collect()
     }
 
-    pub(crate) fn prior_open_items(&self, changed: &BTreeSet<String>) -> Vec<LoopItem> {
+    pub(crate) fn prior_open_items(&self, changed: &BTreeSet<ConversationKey>) -> Vec<LoopItem> {
         let Some(analysis) = &self.analysis else {
             return Vec::new();
         };
         let cards = self.card_contexts(&analysis.items);
+        let changed: BTreeSet<(&str, &str)> = changed
+            .iter()
+            .map(|(account, conversation)| (account.as_str(), conversation.as_str()))
+            .collect();
         analysis
             .items
             .iter()
@@ -433,7 +446,12 @@ impl ReviewState {
                         .messages
                         .iter()
                         .find(|message| message.input.handle == item.evidence.message)
-                        .is_some_and(|message| !changed.contains(&message.conversation))
+                        .is_some_and(|message| {
+                            !changed.contains(&(
+                                message.account.as_str(),
+                                message.conversation.as_str(),
+                            ))
+                        })
             })
             .map(|(item, _)| item.clone())
             .collect()
@@ -443,7 +461,7 @@ impl ReviewState {
         &mut self,
         source_keys: &BTreeSet<String>,
         sources: Vec<SourceReview>,
-    ) -> BTreeSet<String> {
+    ) -> BTreeSet<ConversationKey> {
         for key in source_keys {
             self.failed_sources.remove(key);
             self.source_notes.remove(key);
@@ -531,7 +549,7 @@ impl ReviewState {
     fn merge_conversation_metadata(
         &mut self,
         result: &mut ScanResult,
-        retried: &BTreeSet<String>,
+        retried: &BTreeSet<ConversationKey>,
     ) -> MergedConversationMetadata {
         let keyed_result_notes: Vec<&String> =
             result.conversation_notes_by_id.values().flatten().collect();
@@ -552,17 +570,21 @@ impl ReviewState {
             .append(&mut result.conversation_notes_by_id);
         self.conversation_rejection_reasons
             .append(&mut result.conversation_rejection_reasons);
-        let live: BTreeSet<&str> = self
+        let live: BTreeSet<(&str, &str)> = self
             .messages
             .iter()
-            .map(|message| message.conversation.as_str())
+            .map(|message| (message.account.as_str(), message.conversation.as_str()))
             .collect();
-        self.conversation_quality
-            .retain(|conversation, _| live.contains(conversation.as_str()));
-        self.conversation_notes_by_id
-            .retain(|conversation, _| live.contains(conversation.as_str()));
+        self.conversation_quality.retain(|conversation, _| {
+            live.contains(&(conversation.0.as_str(), conversation.1.as_str()))
+        });
+        self.conversation_notes_by_id.retain(|conversation, _| {
+            live.contains(&(conversation.0.as_str(), conversation.1.as_str()))
+        });
         self.conversation_rejection_reasons
-            .retain(|conversation, _| live.contains(conversation.as_str()));
+            .retain(|conversation, _| {
+                live.contains(&(conversation.0.as_str(), conversation.1.as_str()))
+            });
         let (rejected, degraded) = self
             .conversation_quality
             .values()
@@ -597,13 +619,23 @@ impl ReviewState {
     }
 
     /// Merges a subset scan into the existing analysis without disturbing untouched cards.
-    pub fn merge_scan(&mut self, mut result: ScanResult, retried: &BTreeSet<String>) -> usize {
+    pub fn merge_scan(
+        &mut self,
+        mut result: ScanResult,
+        retried: &BTreeSet<ConversationKey>,
+    ) -> usize {
         self.scan_failed = false;
         let metadata = self.merge_conversation_metadata(&mut result, retried);
+        let retried: BTreeSet<(&str, &str)> = retried
+            .iter()
+            .map(|(account, conversation)| (account.as_str(), conversation.as_str()))
+            .collect();
         let retried_handles: BTreeSet<String> = self
             .messages
             .iter()
-            .filter(|message| retried.contains(&message.conversation))
+            .filter(|message| {
+                retried.contains(&(message.account.as_str(), message.conversation.as_str()))
+            })
             .map(|message| message.input.handle.clone())
             .collect();
         let analysis = self.analysis.get_or_insert_with(|| LoopItems {
@@ -629,7 +661,8 @@ impl ReviewState {
             .collect();
         let mut kept_lines = Vec::new();
         self.failed_conversations_detail.retain(|failure| {
-            let keep = !retried.contains(&failure.conversation);
+            let keep =
+                !retried.contains(&(failure.account.as_str(), failure.conversation.as_str()));
             if keep
                 && let Some((_, line)) =
                     old_lines.iter().find(|(candidate, _)| candidate == failure)
@@ -672,15 +705,17 @@ impl ReviewState {
             not_started_conversations,
             closure_pass_failure: self.closure_pass_failure.clone(),
         };
-        let failed_ids: BTreeSet<&str> = self
+        let failed_ids: BTreeSet<(&str, &str)> = self
             .failed_conversations_detail
             .iter()
-            .map(|failure| failure.conversation.as_str())
+            .map(|failure| (failure.account.as_str(), failure.conversation.as_str()))
             .collect();
         merged.analyzed = self
             .messages
             .iter()
-            .filter(|message| !failed_ids.contains(message.conversation.as_str()))
+            .filter(|message| {
+                !failed_ids.contains(&(message.account.as_str(), message.conversation.as_str()))
+            })
             .count();
         scanning::close_passed_events(&mut merged, &self.messages, chrono::Utc::now().timestamp());
         let model = self.analysis_model.clone();
@@ -705,7 +740,7 @@ impl ReviewState {
     }
 
     #[must_use]
-    pub fn retryable_conversations(&self) -> BTreeSet<String> {
+    pub fn retryable_conversations(&self) -> BTreeSet<ConversationKey> {
         self.failed_conversations_detail
             .iter()
             .filter(|failure| {
@@ -714,7 +749,7 @@ impl ReviewState {
                     FailureReason::RateLimited | FailureReason::Quota
                 )
             })
-            .map(|failure| failure.conversation.clone())
+            .map(|failure| (failure.account.clone(), failure.conversation.clone()))
             .collect()
     }
     /// Reverts the implied-tracking change from opening a reminder draft
@@ -1072,7 +1107,12 @@ impl ReviewState {
                 ) {
                     return None;
                 }
-                let Reminder::Created { list_id, task_id } = &card.record.reminder else {
+                let Reminder::Created {
+                    provider: MailProvider::Microsoft,
+                    list_id,
+                    task_id,
+                } = &card.record.reminder
+                else {
                     return None;
                 };
                 if list_id.is_empty() || task_id.is_empty() {
@@ -1821,6 +1861,7 @@ pub fn layout_fixture() -> ReviewState {
         key: first_key,
         decision: Decision::Mine,
         reminder: Reminder::Created {
+            provider: openloops_graph::live::MailProvider::Microsoft,
             list_id: "list".into(),
             task_id: "task".into(),
         },
@@ -1852,6 +1893,7 @@ mod tests {
 
     fn failure(conversation: &str, reason: FailureReason) -> ConversationFailure {
         ConversationFailure {
+            account: "synthetic-account".into(),
             conversation: conversation.into(),
             subject_short: "Synthetic subject".into(),
             reason,
@@ -1863,6 +1905,7 @@ mod tests {
         messages: Vec<openloops_graph::live::review::MailItem>,
     ) -> SourceReview {
         SourceReview {
+            provider: openloops_graph::live::MailProvider::Microsoft,
             label: label.into(),
             messages,
             errors: vec![],
@@ -1924,7 +1967,10 @@ mod tests {
             vec!["p1@example.invalid", "p2@example.invalid"],
         );
         let changed = state.append_sources(vec![source_review("Inbox", vec![bridge])]);
-        assert_eq!(changed, BTreeSet::from(["cA".into()]));
+        assert_eq!(
+            changed,
+            BTreeSet::from([("synthetic-account".into(), "cA".into())])
+        );
         assert!(
             state
                 .messages
@@ -2000,6 +2046,7 @@ mod tests {
     #[test]
     fn appended_source_messages_are_deduplicated_by_account_and_id() {
         let source = SourceReview {
+            provider: openloops_graph::live::MailProvider::Microsoft,
             label: "Personal mailbox / Inbox".into(),
             messages: vec![openloops_graph::live::review::MailItem {
                 id: "synthetic-id".into(),
@@ -2113,7 +2160,10 @@ mod tests {
         retry.total = 2;
         retry.conversation_count = 1;
         retry.analyzed_conversations = 1;
-        state.merge_scan(retry, &BTreeSet::from(["synthetic-thread".into()]));
+        state.merge_scan(
+            retry,
+            &BTreeSet::from([("synthetic".into(), "synthetic-thread".into())]),
+        );
         let items = &state.analysis.as_ref().unwrap().items;
         assert!(
             items
@@ -2163,7 +2213,10 @@ mod tests {
             reminder: Reminder::None,
             updated: now(),
         });
-        let prior = state.prior_open_items(&BTreeSet::from(["synthetic-thread-3".into()]));
+        let prior = state.prior_open_items(&BTreeSet::from([(
+            "synthetic".into(),
+            "synthetic-thread-3".into(),
+        )]));
         assert_eq!(prior.len(), 1);
         assert_eq!(prior[0].evidence.message, "m1");
     }
@@ -2217,21 +2270,18 @@ mod tests {
     #[test]
     fn merge_scan_drops_metadata_for_absorbed_conversation_ids() {
         let mut state = layout_fixture();
-        state.conversation_quality.insert("absorbed".into(), (1, 1));
+        let absorbed = ("synthetic".into(), "absorbed".into());
+        state.conversation_quality.insert(absorbed.clone(), (1, 1));
         state
             .conversation_notes_by_id
-            .insert("absorbed".into(), vec!["Synthetic note".into()]);
+            .insert(absorbed.clone(), vec!["Synthetic note".into()]);
         state
             .conversation_rejection_reasons
-            .insert("absorbed".into(), vec!["Synthetic reason"]);
+            .insert(absorbed.clone(), vec!["Synthetic reason"]);
         state.merge_scan(empty_scan_result(), &BTreeSet::new());
-        assert!(!state.conversation_quality.contains_key("absorbed"));
-        assert!(!state.conversation_notes_by_id.contains_key("absorbed"));
-        assert!(
-            !state
-                .conversation_rejection_reasons
-                .contains_key("absorbed")
-        );
+        assert!(!state.conversation_quality.contains_key(&absorbed));
+        assert!(!state.conversation_notes_by_id.contains_key(&absorbed));
+        assert!(!state.conversation_rejection_reasons.contains_key(&absorbed));
     }
 
     #[test]
@@ -2267,7 +2317,10 @@ mod tests {
         retry.analyzed = 1;
         retry.conversation_count = 1;
         retry.analyzed_conversations = 1;
-        state.merge_scan(retry, &BTreeSet::from(["failed".into()]));
+        state.merge_scan(
+            retry,
+            &BTreeSet::from([("synthetic-account".into(), "failed".into())]),
+        );
         assert_eq!(
             state.scan_summary,
             "Reviewed 1 of 1 loaded messages (1 of 1 conversations)."
@@ -2306,9 +2359,10 @@ mod tests {
         initial.conversation_count = 1;
         initial.analyzed_conversations = 1;
         initial.analysis.rejected = 1;
-        initial
-            .conversation_quality
-            .insert("conversation-a".into(), (1, 0));
+        initial.conversation_quality.insert(
+            ("synthetic-account".into(), "conversation-a".into()),
+            (1, 0),
+        );
         state.set_scan(initial, "synthetic-model".into());
         assert!(state.scan_incomplete);
 
@@ -2317,10 +2371,14 @@ mod tests {
         retry.analyzed = 1;
         retry.conversation_count = 1;
         retry.analyzed_conversations = 1;
-        retry
-            .conversation_quality
-            .insert("conversation-a".into(), (0, 0));
-        state.merge_scan(retry, &BTreeSet::from(["conversation-a".into()]));
+        retry.conversation_quality.insert(
+            ("synthetic-account".into(), "conversation-a".into()),
+            (0, 0),
+        );
+        state.merge_scan(
+            retry,
+            &BTreeSet::from([("synthetic-account".into(), "conversation-a".into())]),
+        );
 
         assert_eq!(state.analysis.as_ref().unwrap().rejected, 0);
         assert!(!state.scan_incomplete);
@@ -2362,15 +2420,17 @@ mod tests {
         initial.analyzed_conversations = 2;
         initial.analysis.rejected = 1;
         initial.analysis.rejection_reasons = vec![reason];
-        initial
-            .conversation_quality
-            .insert("conversation-b".into(), (1, 0));
-        initial
-            .conversation_rejection_reasons
-            .insert("conversation-b".into(), vec![reason]);
+        initial.conversation_quality.insert(
+            ("synthetic-account".into(), "conversation-b".into()),
+            (1, 0),
+        );
+        initial.conversation_rejection_reasons.insert(
+            ("synthetic-account".into(), "conversation-b".into()),
+            vec![reason],
+        );
         initial.conversation_notes = vec!["Synthetic conversation B note".into()];
         initial.conversation_notes_by_id.insert(
-            "conversation-b".into(),
+            ("synthetic-account".into(), "conversation-b".into()),
             vec!["Synthetic conversation B note".into()],
         );
         state.set_scan(initial, "synthetic-model".into());
@@ -2380,10 +2440,14 @@ mod tests {
         retry.analyzed = 1;
         retry.conversation_count = 1;
         retry.analyzed_conversations = 1;
-        retry
-            .conversation_quality
-            .insert("conversation-a".into(), (0, 0));
-        state.merge_scan(retry, &BTreeSet::from(["conversation-a".into()]));
+        retry.conversation_quality.insert(
+            ("synthetic-account".into(), "conversation-a".into()),
+            (0, 0),
+        );
+        state.merge_scan(
+            retry,
+            &BTreeSet::from([("synthetic-account".into(), "conversation-a".into())]),
+        );
 
         assert_eq!(
             state
@@ -2393,6 +2457,80 @@ mod tests {
                 .filter(|line| line.as_str() == reason)
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn retry_merge_keeps_same_conversation_id_metadata_separate_by_account() {
+        let mut state = ReviewState::default();
+        for (index, account) in ["account-a", "account-b"].into_iter().enumerate() {
+            state.messages.push(
+                scanning::prepare(
+                    &openloops_graph::live::review::MailItem {
+                        id: format!("synthetic-{index}"),
+                        account: account.into(),
+                        conversation: "shared-conversation".into(),
+                        subject: "Synthetic subject".into(),
+                        body: "Synthetic body".into(),
+                        received: "2026-09-01T12:00:00Z".into(),
+                        ..Default::default()
+                    },
+                    "Inbox",
+                    index,
+                )
+                .unwrap(),
+            );
+        }
+        let account_a = ("account-a".into(), "shared-conversation".into());
+        let account_b = ("account-b".into(), "shared-conversation".into());
+        let mut initial = empty_scan_result();
+        initial
+            .conversation_quality
+            .insert(account_a.clone(), (1, 0));
+        initial
+            .conversation_quality
+            .insert(account_b.clone(), (0, 1));
+        initial
+            .conversation_notes_by_id
+            .insert(account_a.clone(), vec!["Account A old note".into()]);
+        initial
+            .conversation_notes_by_id
+            .insert(account_b.clone(), vec!["Account B note".into()]);
+        initial
+            .conversation_rejection_reasons
+            .insert(account_a.clone(), vec!["Account A old reason"]);
+        initial
+            .conversation_rejection_reasons
+            .insert(account_b.clone(), vec!["Account B reason"]);
+        state.set_scan(initial, "synthetic-model".into());
+
+        let mut retry = empty_scan_result();
+        retry.conversation_quality.insert(account_a.clone(), (0, 2));
+        retry
+            .conversation_notes_by_id
+            .insert(account_a.clone(), vec!["Account A new note".into()]);
+        retry
+            .conversation_rejection_reasons
+            .insert(account_a.clone(), vec!["Account A new reason"]);
+        state.merge_scan(retry, &BTreeSet::from([account_a.clone()]));
+
+        assert_eq!(state.conversation_quality[&account_a], (0, 2));
+        assert_eq!(state.conversation_quality[&account_b], (0, 1));
+        assert_eq!(
+            state.conversation_notes_by_id[&account_a],
+            ["Account A new note"]
+        );
+        assert_eq!(
+            state.conversation_notes_by_id[&account_b],
+            ["Account B note"]
+        );
+        assert_eq!(
+            state.conversation_rejection_reasons[&account_a],
+            ["Account A new reason"]
+        );
+        assert_eq!(
+            state.conversation_rejection_reasons[&account_b],
+            ["Account B reason"]
         );
     }
 
@@ -2449,7 +2587,10 @@ mod tests {
         ];
         state.merge_scan(
             retry,
-            &BTreeSet::from(["failed".into(), "not-started".into()]),
+            &BTreeSet::from([
+                ("synthetic-account".into(), "failed".into()),
+                ("synthetic-account".into(), "not-started".into()),
+            ]),
         );
 
         let (analyzed, failed, not_started) =
@@ -2708,6 +2849,7 @@ mod tests {
     #[test]
     fn reminder_button_enabled_without_a_reminder_or_an_open_draft() {
         let created = || Reminder::Created {
+            provider: openloops_graph::live::MailProvider::Microsoft,
             list_id: "list".into(),
             task_id: "task".into(),
         };
@@ -2725,6 +2867,25 @@ mod tests {
                 "reminder={reminder:?} draft_open_here={draft_open_here}"
             );
         }
+    }
+
+    #[test]
+    fn google_reminders_are_not_eligible_for_microsoft_sync() {
+        let mut state = layout_fixture();
+        let record = state
+            .decisions
+            .records
+            .iter_mut()
+            .find(|record| matches!(record.reminder, Reminder::Created { .. }))
+            .unwrap();
+        let Reminder::Created { provider, .. } = &mut record.reminder else {
+            unreachable!();
+        };
+        *provider = MailProvider::Google;
+
+        let items = &state.analysis.as_ref().unwrap().items;
+        let cards = state.card_contexts(items);
+        assert!(state.reminder_sync_checks(items, &cards).is_empty());
     }
 
     #[test]
@@ -3297,6 +3458,7 @@ the scan stopped after a provider error."
         };
         let sources = vec![
             SourceReview {
+                provider: openloops_graph::live::MailProvider::Microsoft,
                 label: "Inbox".into(),
                 messages: vec![
                     mail("i-1", "c1", 1, "Please send the draft."),
@@ -3308,6 +3470,7 @@ the scan stopped after a provider error."
                 failed: false,
             },
             SourceReview {
+                provider: openloops_graph::live::MailProvider::Microsoft,
                 label: "Sent".into(),
                 messages: vec![mail("s-1", "c3", 3, "Here is the draft.")],
                 errors: vec![],

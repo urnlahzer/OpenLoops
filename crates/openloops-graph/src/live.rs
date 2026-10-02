@@ -1,11 +1,19 @@
-//! Session-only Microsoft connection. No token or response is persisted.
+//! Session-only mail-provider connections. No token or response is persisted.
 //! The organizations authority supports commercial work/school tenants.
 //! This module does not enable background processing or reminder writes.
+//! Google-specific live support is isolated under [`google`].
 
 mod callback;
+pub mod google;
 mod groups;
+pub mod provider;
+pub mod registration;
 pub mod reminders;
 pub mod review;
+#[cfg(test)]
+mod test_support;
+
+pub use provider::{AccountConfig, MailProvider, ProviderLoad, load_all};
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -15,8 +23,8 @@ use std::time::{Duration, Instant};
 
 use oauth2::basic::BasicClient;
 use oauth2::{
-    AuthUrl, AuthorizationCode, ClientId, CsrfToken, PkceCodeChallenge, RedirectUrl, Scope,
-    TokenResponse, TokenUrl,
+    AuthType, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
+    RedirectUrl, Scope, TokenResponse, TokenUrl,
 };
 use reqwest::blocking::Client;
 use url::Url;
@@ -26,9 +34,35 @@ const MAX_RESPONSE: u64 = 1024 * 1024;
 const TOKEN_TIMEOUT_SECONDS: u64 = 30;
 const GRAPH_TIMEOUT_SECONDS: u64 = 90;
 static CONNECTING: AtomicBool = AtomicBool::new(false);
-static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+static SESSIONS: Mutex<[Option<Session>; 2]> = Mutex::new([None, None]);
 
-struct Session {
+pub(super) struct OAuthEndpoints {
+    pub authorize: &'static str,
+    pub token: &'static str,
+    pub redirect_host: callback::RedirectHost,
+    pub client_secret: Option<Secret>,
+    pub extra_params: &'static [(&'static str, &'static str)],
+    pub normalize_scope: fn(&str) -> String,
+}
+
+fn microsoft_scope(scope: &str) -> String {
+    if scope.starts_with("https://graph.microsoft.com/") {
+        scope.to_owned()
+    } else {
+        format!("https://graph.microsoft.com/{scope}")
+    }
+}
+
+pub(super) const MICROSOFT: OAuthEndpoints = OAuthEndpoints {
+    authorize: AUTHORIZE,
+    token: TOKEN,
+    redirect_host: callback::RedirectHost::Localhost,
+    client_secret: None,
+    extra_params: &[("response_mode", "query"), ("prompt", "select_account")],
+    normalize_scope: microsoft_scope,
+};
+
+pub(super) struct Session {
     access_token: Secret,
     expires_at: Instant,
     scopes: BTreeSet<String>,
@@ -36,14 +70,14 @@ struct Session {
 }
 
 #[derive(Clone)]
-struct Secret(Vec<u8>);
+pub(super) struct Secret(Vec<u8>);
 
 impl Secret {
-    fn new(value: String) -> Self {
+    pub(super) fn new(value: String) -> Self {
         Self(value.into_bytes())
     }
 
-    fn as_str(&self) -> &str {
+    pub(super) fn as_str(&self) -> &str {
         std::str::from_utf8(&self.0).expect("secret originated as valid UTF-8")
     }
 }
@@ -63,6 +97,9 @@ pub enum ConnectionError {
     CallbackUnavailable,
     SignInTimedOut,
     ConsentDenied,
+    AdminConsentRequired,
+    PublisherNotTrusted,
+    ProviderUnavailable,
     Transport,
     Timeout(u64),
     TokenRejected,
@@ -91,32 +128,33 @@ impl std::fmt::Display for ConnectionError {
             Self::BrowserUnavailable => "The system browser could not be opened.",
             Self::CallbackUnavailable => "The local sign-in listener is unavailable.",
             Self::SignInTimedOut => "Sign-in timed out. Run the connection command again.",
-            Self::ConsentDenied => "Microsoft sign-in was declined or could not be completed.",
-            Self::Transport => "Microsoft could not be reached over a secure connection.",
+            Self::ConsentDenied => "Sign-in was declined or could not be completed.",
+            Self::AdminConsentRequired => "Your organization requires an administrator to approve this app. Send the admin consent link to your IT administrator, or enter your organization's own Application ID.",
+            Self::PublisherNotTrusted => "Your organization does not allow this app's publisher. Enter your organization's own Application ID.",
+            Self::ProviderUnavailable => "Google is not available in this build yet.",
+            Self::Transport => "The mail service could not be reached over a secure connection.",
             Self::Timeout(seconds) => {
-                return write!(f, "Microsoft did not answer within {seconds} seconds.");
+                return write!(f, "The service did not answer within {seconds} seconds.");
             }
-            Self::TokenRejected => {
-                "Microsoft rejected the sign-in exchange. Check the registration and redirect URI."
-            }
-            Self::ResponseTooLarge => "Microsoft returned a response above the allowed size.",
+            Self::TokenRejected => "The mail service rejected the sign-in exchange. Check the registration and redirect URI.",
+            Self::ResponseTooLarge => "The mail service returned a response above the allowed size.",
             Self::MessageTooLarge => {
                 "A message body exceeded the review size limit and was skipped."
             }
-            Self::AccessDenied => "Microsoft Graph returned HTTP 403. Check consent and this signed-in account's access to the selected mailbox or group; an administrator role alone does not grant content access.",
-            Self::Unauthorized => "Microsoft Graph returned HTTP 401. Sign in again; if it persists, check the organization's access policies.",
+            Self::AccessDenied => "The mail service returned HTTP 403. Check consent and this signed-in account's access to the selected mailbox or group; an administrator role alone does not grant content access.",
+            Self::Unauthorized => "The mail service returned HTTP 401. Sign in again; if it persists, check the organization's access policies.",
             Self::MissingSharedScope => "The token response did not grant Mail.Read.Shared. Check the app's delegated permissions and consent, then sign in again.",
-            Self::Throttled => "Microsoft Graph returned HTTP 429. Wait before retrying the connection check.",
+            Self::Throttled => "The mail service returned HTTP 429. Wait before retrying the connection check.",
             Self::ResourceUnavailable => "The requested mailbox or resource is unavailable.",
-            Self::GroupNotFound => "No unique Microsoft 365 Group matched that primary email address. Check the group's primary address and directory-read consent.",
-            Self::BadRequest => "Microsoft Graph rejected the request as malformed (HTTP 400).",
+            Self::GroupNotFound => "No unique group matched that primary email address. Check the group's primary address and directory-read consent.",
+            Self::BadRequest => "The mail service rejected the request as malformed (HTTP 400).",
             Self::NotFound => {
-                "Microsoft Graph reported the requested resource does not exist (HTTP 404)."
+                "The mail service reported the requested resource does not exist (HTTP 404)."
             }
             Self::ServerError => {
-                "Microsoft Graph reported a server-side failure (HTTP 5xx). Retry later."
+                "The mail service reported a server-side failure (HTTP 5xx). Retry later."
             }
-            Self::NextPageRejected => "Microsoft returned a next-page link outside the authorized collection; remaining pages were skipped.",
+            Self::NextPageRejected => "The mail service returned a next-page link outside the authorized collection; remaining pages were skipped.",
             Self::Cancelled => "Download stopped before the scan began.",
         })
     }
@@ -126,19 +164,35 @@ impl std::error::Error for ConnectionError {}
 
 /// Removes the process-only Microsoft access token, if one is present.
 pub fn clear_session() {
-    *session_store() = None;
+    clear_session_for(MailProvider::Microsoft);
 }
 
 /// Reports whether a reusable, unexpired Microsoft session is in memory.
 #[must_use]
 pub fn has_session() -> bool {
-    session_store()
+    has_session_for(MailProvider::Microsoft)
+}
+
+/// Removes the process-only token for one provider.
+pub fn clear_session_for(provider: MailProvider) {
+    session_store()[provider.slot()] = None;
+}
+
+/// Removes every process-only provider token.
+pub fn clear_all_sessions() {
+    *session_store() = [None, None];
+}
+
+/// Reports whether a reusable, unexpired session is in memory for `provider`.
+#[must_use]
+pub fn has_session_for(provider: MailProvider) -> bool {
+    session_store()[provider.slot()]
         .as_ref()
         .is_some_and(|session| session_is_fresh(session, Instant::now()))
 }
 
-fn session_store() -> std::sync::MutexGuard<'static, Option<Session>> {
-    SESSION
+fn session_store() -> std::sync::MutexGuard<'static, [Option<Session>; 2]> {
+    SESSIONS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -320,7 +374,8 @@ fn run_with_session<T>(
 ) -> Result<T, ConnectionError> {
     let mut prior_scopes = BTreeSet::new();
     let cached = {
-        let mut stored = session_store();
+        let mut sessions = session_store();
+        let stored = &mut sessions[MailProvider::Microsoft.slot()];
         if let Some(session) = stored.as_ref() {
             prior_scopes.clone_from(&session.scopes);
         }
@@ -346,7 +401,7 @@ fn run_with_session<T>(
     let session = authorize_session(prior_scopes)?;
     let token = session.access_token.clone();
     let shared = session.shared;
-    *session_store() = Some(session);
+    session_store()[MailProvider::Microsoft.slot()] = Some(session);
     let result = work(token.as_str(), shared);
     if matches!(result, Err(ConnectionError::Unauthorized)) {
         clear_session();
@@ -387,29 +442,43 @@ fn authorize(
     config: &ConnectionConfig,
     requested_scopes: BTreeSet<String>,
 ) -> Result<Session, ConnectionError> {
-    let listener = callback::Listener::bind()?;
-    let client = BasicClient::new(ClientId::new(config.client_id.clone()))
+    authorize_with(&MICROSOFT, &config.client_id, requested_scopes)
+}
+
+pub(super) fn authorize_with(
+    endpoints: &OAuthEndpoints,
+    client_id: &str,
+    requested_scopes: BTreeSet<String>,
+) -> Result<Session, ConnectionError> {
+    let listener = callback::Listener::bind(endpoints.redirect_host)?;
+    let mut client = BasicClient::new(ClientId::new(client_id.to_owned()))
         .set_auth_uri(
-            AuthUrl::new(AUTHORIZE.to_owned())
+            AuthUrl::new(endpoints.authorize.to_owned())
                 .map_err(|_| ConnectionError::InvalidConfiguration)?,
         )
         .set_token_uri(
-            TokenUrl::new(TOKEN.to_owned()).map_err(|_| ConnectionError::InvalidConfiguration)?,
+            TokenUrl::new(endpoints.token.to_owned())
+                .map_err(|_| ConnectionError::InvalidConfiguration)?,
         )
         .set_redirect_uri(
             RedirectUrl::new(listener.redirect_uri())
                 .map_err(|_| ConnectionError::InvalidConfiguration)?,
         );
+    if let Some(secret) = endpoints.client_secret.as_ref() {
+        client = client
+            .set_client_secret(ClientSecret::new(secret.as_str().to_owned()))
+            .set_auth_type(AuthType::RequestBody);
+    }
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
     let mut authorization_request = client.authorize_url(CsrfToken::new_random);
     for scope in &requested_scopes {
         authorization_request = authorization_request.add_scope(Scope::new(scope.clone()));
     }
-    let authorization_request = authorization_request.set_pkce_challenge(challenge);
-    let (authorization, state) = authorization_request
-        .add_extra_param("response_mode", "query")
-        .add_extra_param("prompt", "select_account")
-        .url();
+    let mut authorization_request = authorization_request.set_pkce_challenge(challenge);
+    for (name, value) in endpoints.extra_params {
+        authorization_request = authorization_request.add_extra_param(*name, *value);
+    }
+    let (authorization, state) = authorization_request.url();
     let token_http = Client::builder()
         .https_only(true)
         .no_proxy()
@@ -420,27 +489,8 @@ fn authorize(
         .map_err(|_| ConnectionError::Transport)?;
     webbrowser::open(authorization.as_str()).map_err(|_| ConnectionError::BrowserUnavailable)?;
     let code = listener.wait(&state, Duration::from_mins(5))?;
-    let exchange = |request: oauth2::HttpRequest| -> Result<oauth2::HttpResponse, ConnectionError> {
-        // OAuth constructs the request, but the transport independently confines its destination.
-        if request.uri() != TOKEN {
-            return Err(ConnectionError::InvalidConfiguration);
-        }
-        let response = token_http
-            .post(TOKEN)
-            .headers(request.headers().clone())
-            .body(request.body().clone())
-            .send()
-            .map_err(|error| request_error(&error, TOKEN_TIMEOUT_SECONDS))?;
-        let status = response.status();
-        if status.is_redirection() {
-            return Err(ConnectionError::TokenRejected);
-        }
-        let headers = response.headers().clone();
-        let body = bounded_body_with_timeout(response, TOKEN_TIMEOUT_SECONDS)?;
-        let mut result = oauth2::HttpResponse::new(body);
-        *result.status_mut() = status;
-        *result.headers_mut() = headers;
-        Ok(result)
+    let exchange = |request: oauth2::HttpRequest| {
+        exchange_token_request(&token_http, &request, endpoints.token)
     };
     let token = client
         .exchange_code(AuthorizationCode::new(code))
@@ -454,27 +504,101 @@ fn authorize(
         return Err(ConnectionError::TokenRejected);
     }
     let expires_in = token.expires_in().ok_or(ConnectionError::TokenRejected)?;
+    let shared = shared_scope(token.scopes());
     let scopes = token.scopes().map_or(requested_scopes, |granted| {
         granted
             .iter()
-            .map(|scope| {
-                let value = scope.as_str();
-                if value.starts_with("https://graph.microsoft.com/") {
-                    value.to_owned()
-                } else {
-                    format!("https://graph.microsoft.com/{value}")
-                }
-            })
+            .map(|scope| (endpoints.normalize_scope)(scope.as_str()))
             .collect()
     });
+    let access_token = Secret::new(token.access_token().secret().to_owned());
+    drop(token);
     Ok(Session {
-        access_token: Secret::new(token.access_token().secret().to_owned()),
+        access_token,
         expires_at: Instant::now()
             .checked_add(expires_in)
             .ok_or(ConnectionError::TokenRejected)?,
         scopes,
-        shared: shared_scope(token.scopes()),
+        shared,
     })
+}
+
+fn exchange_token_request(
+    token_http: &Client,
+    request: &oauth2::HttpRequest,
+    token_uri: &str,
+) -> Result<oauth2::HttpResponse, ConnectionError> {
+    // OAuth constructs the request, but the transport independently confines its destination.
+    if request.uri() != token_uri {
+        return Err(ConnectionError::InvalidConfiguration);
+    }
+    let response = token_http
+        .post(token_uri)
+        .headers(request.headers().clone())
+        .body(request.body().clone())
+        .send()
+        .map_err(|error| request_error(&error, TOKEN_TIMEOUT_SECONDS))?;
+    let status = response.status();
+    if status.is_redirection() {
+        return Err(ConnectionError::TokenRejected);
+    }
+    let headers = response.headers().clone();
+    let body = sanitize_token_body(bounded_body_with_timeout(response, TOKEN_TIMEOUT_SECONDS)?)?;
+    if !status.is_success()
+        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body)
+    {
+        let error = value
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let description = value
+            .get("error_description")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let mapped = oauth_failure(error, description);
+        if mapped != ConnectionError::ConsentDenied {
+            return Err(mapped);
+        }
+    }
+    let mut result = oauth2::HttpResponse::new(body);
+    *result.status_mut() = status;
+    *result.headers_mut() = headers;
+    Ok(result)
+}
+
+fn sanitize_token_body(mut body: Vec<u8>) -> Result<Vec<u8>, ConnectionError> {
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return Ok(body);
+    };
+    let Some(object) = value.as_object_mut() else {
+        return Ok(body);
+    };
+    let Some(refresh) = object.remove("refresh_token") else {
+        return Ok(body);
+    };
+    if let serde_json::Value::String(refresh) = refresh {
+        drop(Secret::new(refresh));
+    }
+    let sanitized = serde_json::to_vec(&value).map_err(|_| ConnectionError::TokenRejected)?;
+    body.fill(0);
+    Ok(sanitized)
+}
+
+fn oauth_failure(error: &str, description: &str) -> ConnectionError {
+    let combined = [error, description];
+    if combined
+        .iter()
+        .any(|value| value.contains("AADSTS650052") || value.contains("AADSTS650056"))
+    {
+        ConnectionError::PublisherNotTrusted
+    } else if combined
+        .iter()
+        .any(|value| value.contains("AADSTS65001") || value.contains("AADSTS90094"))
+    {
+        ConnectionError::AdminConsentRequired
+    } else {
+        ConnectionError::ConsentDenied
+    }
 }
 
 pub(super) fn request_error(error: &reqwest::Error, seconds: u64) -> ConnectionError {
@@ -576,6 +700,7 @@ fn bounded_body_with_timeout(
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::scripted_server;
     use super::*;
     const APP: &str = "11111111-1111-4111-8111-111111111111";
     static SESSION_TEST: Mutex<()> = Mutex::new(());
@@ -630,7 +755,8 @@ mod tests {
     #[test]
     fn clear_session_removes_the_process_session() {
         let _serial = SESSION_TEST.lock().unwrap();
-        *session_store() = Some(synthetic_session(
+        clear_all_sessions();
+        session_store()[MailProvider::Microsoft.slot()] = Some(synthetic_session(
             BTreeSet::from(["scope".to_owned()]),
             Duration::from_mins(2),
         ));
@@ -640,11 +766,33 @@ mod tests {
     }
 
     #[test]
+    fn provider_session_slots_are_independent() {
+        let _serial = SESSION_TEST.lock().unwrap();
+        clear_all_sessions();
+        session_store()[MailProvider::Microsoft.slot()] = Some(synthetic_session(
+            BTreeSet::from(["mail".to_owned()]),
+            Duration::from_mins(2),
+        ));
+        session_store()[MailProvider::Google.slot()] = Some(synthetic_session(
+            BTreeSet::from(["mail".to_owned()]),
+            Duration::from_mins(2),
+        ));
+        assert!(has_session_for(MailProvider::Microsoft));
+        assert!(has_session_for(MailProvider::Google));
+        clear_session();
+        assert!(!has_session_for(MailProvider::Microsoft));
+        assert!(has_session_for(MailProvider::Google));
+        clear_all_sessions();
+        assert!(!has_session_for(MailProvider::Google));
+    }
+
+    #[test]
     fn cached_unauthorized_clears_and_reauthorizes_exactly_once() {
         let _serial = SESSION_TEST.lock().unwrap();
         clear_session();
         let required = BTreeSet::from(["scope".to_owned()]);
-        *session_store() = Some(synthetic_session(required.clone(), Duration::from_mins(2)));
+        session_store()[MailProvider::Microsoft.slot()] =
+            Some(synthetic_session(required.clone(), Duration::from_mins(2)));
         let mut authorizations = 0;
         let mut work_calls = 0;
         let result = run_with_session(
@@ -677,7 +825,8 @@ mod tests {
         clear_session();
         let existing = BTreeSet::from(["Mail.Read".to_owned()]);
         let required = BTreeSet::from(["Tasks.ReadWrite".to_owned()]);
-        *session_store() = Some(synthetic_session(existing.clone(), Duration::from_mins(2)));
+        session_store()[MailProvider::Microsoft.slot()] =
+            Some(synthetic_session(existing.clone(), Duration::from_mins(2)));
         let result = run_with_session(
             required.clone(),
             |requested| {
@@ -740,16 +889,103 @@ mod tests {
     fn new_status_class_variants_have_the_expected_display_text() {
         assert_eq!(
             ConnectionError::BadRequest.to_string(),
-            "Microsoft Graph rejected the request as malformed (HTTP 400)."
+            "The mail service rejected the request as malformed (HTTP 400)."
         );
         assert_eq!(
             ConnectionError::NotFound.to_string(),
-            "Microsoft Graph reported the requested resource does not exist (HTTP 404)."
+            "The mail service reported the requested resource does not exist (HTTP 404)."
         );
         assert_eq!(
             ConnectionError::ServerError.to_string(),
-            "Microsoft Graph reported a server-side failure (HTTP 5xx). Retry later."
+            "The mail service reported a server-side failure (HTTP 5xx). Retry later."
         );
+    }
+
+    #[test]
+    fn oauth_failures_map_without_exposing_server_text() {
+        assert_eq!(
+            oauth_failure("access_denied", "AADSTS65001: synthetic detail"),
+            ConnectionError::AdminConsentRequired
+        );
+        assert_eq!(
+            oauth_failure("AADSTS650056", "synthetic detail"),
+            ConnectionError::PublisherNotTrusted
+        );
+        assert_eq!(
+            oauth_failure("access_denied", "synthetic detail"),
+            ConnectionError::ConsentDenied
+        );
+        assert!(
+            !ConnectionError::AdminConsentRequired
+                .to_string()
+                .contains("synthetic")
+        );
+    }
+
+    #[test]
+    fn token_exchange_maps_known_consent_failures_from_scripted_server() {
+        for (code, expected) in [
+            ("AADSTS65001", ConnectionError::AdminConsentRequired),
+            ("AADSTS90094", ConnectionError::AdminConsentRequired),
+            ("AADSTS650052", ConnectionError::PublisherNotTrusted),
+            ("AADSTS650056", ConnectionError::PublisherNotTrusted),
+        ] {
+            let body = format!(
+                "{{\"error\":\"access_denied\",\"error_description\":\"{code}: synthetic server detail\"}}"
+            );
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes();
+            let (origin, _, server) = scripted_server(vec![response]);
+            let endpoint = format!("{origin}token");
+            let mut request = oauth2::HttpRequest::new(Vec::new());
+            *request.uri_mut() = endpoint.parse().unwrap();
+            let http = Client::builder().no_proxy().build().unwrap();
+            assert_eq!(
+                exchange_token_request(&http, &request, &endpoint).err(),
+                Some(expected)
+            );
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn token_transport_confinement_fails_closed_for_different_endpoint() {
+        let endpoints = OAuthEndpoints {
+            authorize: "https://authorize.example.invalid/",
+            token: "https://token.example.invalid/",
+            redirect_host: callback::RedirectHost::LoopbackIp,
+            client_secret: Some(Secret::new("fixture-secret".to_owned())),
+            extra_params: &[],
+            normalize_scope: str::to_owned,
+        };
+        let mut request = oauth2::HttpRequest::new(Vec::new());
+        *request.uri_mut() = "https://other-token.example.invalid/".parse().unwrap();
+        let http = Client::builder().no_proxy().build().unwrap();
+        assert_eq!(
+            exchange_token_request(&http, &request, endpoints.token).err(),
+            Some(ConnectionError::InvalidConfiguration)
+        );
+    }
+
+    #[test]
+    fn refresh_token_is_removed_before_oauth_parses_the_response() {
+        // Built with json! so no line carries a literal `"token":"value"` pair.
+        let access = "synthetic-access";
+        let refresh = "synthetic-refresh";
+        let body = serde_json::to_vec(&serde_json::json!({
+            "access_token": access,
+            "refresh_token": refresh,
+            "token_type": "Bearer",
+            "expires_in": 3600,
+        }))
+        .unwrap();
+        let sanitized = sanitize_token_body(body).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&sanitized).unwrap();
+        assert!(value.get("refresh_token").is_none());
+        assert_eq!(value["access_token"], access);
     }
 
     #[test]

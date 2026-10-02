@@ -16,7 +16,7 @@ use openloops_domain::deadline_parse::{
     DEFAULT_EOD_SECONDS_SINCE_MIDNIGHT, ParseContext, TemporalKind as DeadlineTemporalKind,
     TimezoneContext, Weekday, reparse,
 };
-use openloops_graph::live::{ConnectionError, review::MailItem};
+use openloops_graph::live::{ConnectionError, MailProvider, review::MailItem};
 use openloops_inference::{
     analysis::{
         AcceptedClaim, ClaimAnalysis, ReviewEvidence, analyze_claims, analyze_claims_omitting,
@@ -41,7 +41,7 @@ use openloops_inference::{
     },
     walker::canonicalize_html,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::BufRead;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -50,6 +50,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct ReviewMessage {
+    pub provider: MailProvider,
     pub input: ConversationMessage,
     pub source: String,
     pub id: String,
@@ -1639,11 +1640,11 @@ pub struct ScanResult {
     /// by [`probe`].
     pub conversation_notes: Vec<String>,
     /// Rejected and degraded counts attributable to each analyzed conversation.
-    pub conversation_quality: BTreeMap<String, (usize, usize)>,
+    pub conversation_quality: BTreeMap<ConversationKey, (usize, usize)>,
     /// Display notes attributable to each analyzed conversation.
-    pub conversation_notes_by_id: BTreeMap<String, Vec<String>>,
+    pub conversation_notes_by_id: BTreeMap<ConversationKey, Vec<String>>,
     /// Validator rejection reasons attributable to each analyzed conversation.
-    pub conversation_rejection_reasons: BTreeMap<String, Vec<&'static str>>,
+    pub conversation_rejection_reasons: BTreeMap<ConversationKey, Vec<&'static str>>,
     /// Number of open loops the closure pass (`scan_closures`) attached a
     /// pending [`SuggestedUpdate`] to.
     pub suggested_updates: usize,
@@ -1684,26 +1685,37 @@ pub struct PriorUpdate {
     pub update: SuggestedUpdate,
 }
 
+pub type ConversationKey = (String, String);
+
 pub enum ScanScope<'a> {
     Full,
-    Conversations(&'a BTreeSet<String>),
+    Conversations(&'a BTreeSet<ConversationKey>),
     Incremental(IncrementalScope<'a>),
 }
 
 pub struct IncrementalScope<'a> {
-    pub conversations: &'a BTreeSet<String>,
+    pub conversations: &'a BTreeSet<ConversationKey>,
     pub new_messages: &'a BTreeSet<String>,
     pub prior_items: Vec<LoopItem>,
 }
 
 impl ScanScope<'_> {
-    fn filter(&self) -> Option<&BTreeSet<String>> {
+    fn filter(&self) -> Option<&BTreeSet<ConversationKey>> {
         match self {
             Self::Full => None,
             Self::Conversations(conversations) => Some(conversations),
             Self::Incremental(scope) => Some(scope.conversations),
         }
     }
+}
+
+fn borrowed_filter<'a>(scope: &'a ScanScope<'a>) -> Option<HashSet<(&'a str, &'a str)>> {
+    scope.filter().map(|filter| {
+        filter
+            .iter()
+            .map(|(account, conversation)| (account.as_str(), conversation.as_str()))
+            .collect()
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -1720,6 +1732,7 @@ impl ClosureScope<'_> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConversationFailure {
+    pub account: String,
     pub conversation: String,
     pub subject_short: String,
     pub reason: FailureReason,
@@ -2198,6 +2211,7 @@ pub fn prepare(
     let (from_user, recipient) = user_relation(item);
     let other_addresses = other_addresses(item);
     Ok(ReviewMessage {
+        provider: item.provider,
         input: ConversationMessage {
             handle: format!("m{index}"),
             timestamp,
@@ -3115,13 +3129,15 @@ fn skipped_triage_conversations(
 fn triage_pass(
     messages: &[ReviewMessage],
     progress: &ScanProgress,
-    conversation_filter: Option<&BTreeSet<String>>,
+    conversation_filter: Option<&HashSet<(&str, &str)>>,
     decision_client: &dyn DecisionClient,
 ) -> Result<TriageResult, ProviderError> {
     let selected: Vec<&ReviewMessage> = messages
         .iter()
         .filter(|message| {
-            conversation_filter.is_none_or(|filter| filter.contains(&message.conversation))
+            conversation_filter.is_none_or(|filter| {
+                filter.contains(&(message.account.as_str(), message.conversation.as_str()))
+            })
         })
         .collect();
     let jobs = triage_jobs(&selected);
@@ -3255,11 +3271,14 @@ pub fn scan(
     progress: &ScanProgress,
     scope: ScanScope<'_>,
 ) -> Result<ScanResult, ProviderError> {
-    let conversation_filter = scope.filter();
+    let conversation_filter = borrowed_filter(&scope);
+    let conversation_filter = conversation_filter.as_ref();
     let selected_messages = messages
         .iter()
         .filter(|message| {
-            conversation_filter.is_none_or(|filter| filter.contains(&message.conversation))
+            conversation_filter.is_none_or(|filter| {
+                filter.contains(&(message.account.as_str(), message.conversation.as_str()))
+            })
         })
         .count();
     let decision_key = (options.provider == Provider::OpenRouter && options.use_decision_model)
@@ -3376,7 +3395,7 @@ fn run_primary_pass(
     messages: &[ReviewMessage],
     progress: &ScanProgress,
     pass: &ParallelPass,
-    conversation_filter: Option<&BTreeSet<String>>,
+    conversation_filter: Option<&HashSet<(&str, &str)>>,
     selected_messages: usize,
 ) -> Result<ScanResult, ProviderError> {
     let PrimaryPassClients {
@@ -3392,11 +3411,12 @@ fn run_primary_pass(
         let primary_messages: Vec<ReviewMessage> = messages
             .iter()
             .filter(|message| {
-                conversation_filter.is_none_or(|filter| filter.contains(&message.conversation))
-                    && !extraction
-                        .triage
-                        .skipped
-                        .contains(&(message.account.clone(), message.conversation.clone()))
+                conversation_filter.is_none_or(|filter| {
+                    filter.contains(&(message.account.as_str(), message.conversation.as_str()))
+                }) && !extraction
+                    .triage
+                    .skipped
+                    .contains(&(message.account.clone(), message.conversation.clone()))
             })
             .cloned()
             .collect();
@@ -3431,10 +3451,11 @@ fn run_primary_pass(
         let primary_messages: Vec<ReviewMessage> = messages
             .iter()
             .filter(|message| {
-                conversation_filter.is_none_or(|filter| filter.contains(&message.conversation))
-                    && !triage
-                        .skipped
-                        .contains(&(message.account.clone(), message.conversation.clone()))
+                conversation_filter.is_none_or(|filter| {
+                    filter.contains(&(message.account.as_str(), message.conversation.as_str()))
+                }) && !triage
+                    .skipped
+                    .contains(&(message.account.clone(), message.conversation.clone()))
             })
             .cloned()
             .collect();
@@ -3470,7 +3491,7 @@ fn run_primary_pass(
 fn apply_triage_coverage(
     result: &mut ScanResult,
     messages: &[ReviewMessage],
-    conversation_filter: Option<&BTreeSet<String>>,
+    conversation_filter: Option<&HashSet<(&str, &str)>>,
     triage: &TriageResult,
     selected_messages: usize,
 ) {
@@ -3496,15 +3517,16 @@ fn apply_triage_coverage(
         result.conversation_notes.push(note.clone());
         result
             .conversation_notes_by_id
-            .entry(first.conversation.clone())
+            .entry((first.account.clone(), first.conversation.clone()))
             .or_default()
             .push(note);
         result
             .conversation_quality
-            .insert(first.conversation.clone(), (0, 0));
-        result
-            .conversation_rejection_reasons
-            .insert(first.conversation.clone(), Vec::new());
+            .insert((first.account.clone(), first.conversation.clone()), (0, 0));
+        result.conversation_rejection_reasons.insert(
+            (first.account.clone(), first.conversation.clone()),
+            Vec::new(),
+        );
     }
     let mut note = format!(
         "{} conversations skipped by triage, {} boilerplate paragraphs dropped, {} triage requests skipped (rate limit / errors).",
@@ -4019,13 +4041,15 @@ fn extraction_waiting_party_catalog(selected: &[&ReviewMessage]) -> Vec<Vec<Wait
 fn extraction_pass(
     messages: &[ReviewMessage],
     progress: &ScanProgress,
-    conversation_filter: Option<&BTreeSet<String>>,
+    conversation_filter: Option<&HashSet<(&str, &str)>>,
     decision_client: &dyn DecisionClient,
 ) -> ExtractionOutcome {
     let selected: Vec<&ReviewMessage> = messages
         .iter()
         .filter(|message| {
-            conversation_filter.is_none_or(|filter| filter.contains(&message.conversation))
+            conversation_filter.is_none_or(|filter| {
+                filter.contains(&(message.account.as_str(), message.conversation.as_str()))
+            })
         })
         .collect();
     let jobs = triage_jobs(&selected);
@@ -4316,11 +4340,13 @@ fn conversation_note(
 /// during analysis is the only owned copy that pass actually needs.
 fn conversations_by_size<'a>(
     messages: &'a [ReviewMessage],
-    conversation_filter: Option<&BTreeSet<String>>,
+    conversation_filter: Option<&HashSet<(&str, &str)>>,
 ) -> Vec<Vec<&'a ReviewMessage>> {
     let mut conversations: BTreeMap<(&str, &str), Vec<&ReviewMessage>> = BTreeMap::new();
     for m in messages {
-        if conversation_filter.is_some_and(|filter| !filter.contains(&m.conversation)) {
+        if conversation_filter
+            .is_some_and(|filter| !filter.contains(&(m.account.as_str(), m.conversation.as_str())))
+        {
             continue;
         }
         conversations
@@ -4703,6 +4729,9 @@ fn failure_reason(error: ProviderError) -> FailureReason {
 
 fn failure_detail(conversation: &[&ReviewMessage], reason: FailureReason) -> ConversationFailure {
     ConversationFailure {
+        account: conversation
+            .first()
+            .map_or_else(String::new, |message| message.account.clone()),
         conversation: conversation
             .first()
             .map_or_else(String::new, |message| message.conversation.clone()),
@@ -4754,9 +4783,10 @@ fn merge_conversation(
 ) {
     match outcome {
         JobOutcome::Completed(Ok(mut analysis)) => {
-            let conversation_id = conversation
-                .first()
-                .map_or_else(String::new, |message| message.conversation.clone());
+            let conversation_key = conversation.first().map_or_else(
+                || (String::new(), String::new()),
+                |message| (message.account.clone(), message.conversation.clone()),
+            );
             result.analyzed += conversation.len();
             result.analyzed_conversations += 1;
             correct_recap_attribution(&mut analysis, conversation, None);
@@ -4765,17 +4795,17 @@ fn merge_conversation(
                 result.conversation_notes.push(note.clone());
                 result
                     .conversation_notes_by_id
-                    .entry(conversation_id.clone())
+                    .entry(conversation_key.clone())
                     .or_default()
                     .push(note);
             }
             result.conversation_quality.insert(
-                conversation_id.clone(),
+                conversation_key.clone(),
                 (analysis.rejected, analysis.degraded),
             );
             result
                 .conversation_rejection_reasons
-                .insert(conversation_id, analysis.rejection_reasons.clone());
+                .insert(conversation_key, analysis.rejection_reasons.clone());
             result.analysis.items.extend(analysis.items);
             result.analysis.rejected += analysis.rejected;
             result.analysis.degraded += analysis.degraded;
@@ -4849,7 +4879,7 @@ fn scan_conversations_filtered(
     messages: &[ReviewMessage],
     progress: &ScanProgress,
     pass: &ParallelPass,
-    conversation_filter: Option<&BTreeSet<String>>,
+    conversation_filter: Option<&HashSet<(&str, &str)>>,
     analyze: &(dyn Fn(&[ConversationMessage]) -> Result<LoopItems, ProviderError> + Sync),
 ) -> ScanResult {
     let ordered: Vec<Vec<&ReviewMessage>> = conversations_by_size(messages, conversation_filter)
@@ -5520,7 +5550,7 @@ fn offered_loops<'a>(items: &[LoopItem], messages: &'a [ReviewMessage]) -> Vec<O
 }
 
 /// `(account, conversation)` key of one conversation.
-type ConversationKey<'a> = (&'a str, &'a str);
+type BorrowedConversationKey<'a> = (&'a str, &'a str);
 
 /// For every conversation with messages that could bear on an offered loop,
 /// the indexes (into `loops`) of the loops plausibly reachable from it.
@@ -5534,9 +5564,9 @@ fn loops_by_conversation<'a>(
     items: &[LoopItem],
     messages: &'a [ReviewMessage],
     scope: Option<ClosureScope<'_>>,
-) -> BTreeMap<ConversationKey<'a>, Vec<usize>> {
+) -> BTreeMap<BorrowedConversationKey<'a>, Vec<usize>> {
     let (groups_per_account, address_group_counts) = conversation_group_address_counts(messages);
-    let mut reach: BTreeMap<ConversationKey<'a>, Vec<usize>> = BTreeMap::new();
+    let mut reach: BTreeMap<BorrowedConversationKey<'a>, Vec<usize>> = BTreeMap::new();
     let new_conversations: BTreeSet<(&str, &str)> = scope
         .into_iter()
         .flat_map(|scope| {
@@ -5607,10 +5637,10 @@ struct ClosureJob<'a> {
 /// Turns the reach table into at most [`MAX_CLOSURE_CONVERSATIONS`] jobs,
 /// busiest conversations first, and reports whether the cap dropped any.
 fn closure_jobs<'a>(
-    reach: BTreeMap<ConversationKey<'a>, Vec<usize>>,
+    reach: BTreeMap<BorrowedConversationKey<'a>, Vec<usize>>,
     messages: &'a [ReviewMessage],
 ) -> (Vec<ClosureJob<'a>>, bool) {
-    let mut ranked: Vec<(ConversationKey<'a>, Vec<usize>)> = reach.into_iter().collect();
+    let mut ranked: Vec<(BorrowedConversationKey<'a>, Vec<usize>)> = reach.into_iter().collect();
     ranked.sort_by_key(|(_, loops)| std::cmp::Reverse(loops.len()));
     let capped = ranked.len() > MAX_CLOSURE_CONVERSATIONS;
     ranked.truncate(MAX_CLOSURE_CONVERSATIONS);
@@ -5825,7 +5855,7 @@ struct DecisionParagraphJob {
 }
 
 fn decision_pairs<'a>(
-    reach: &BTreeMap<ConversationKey<'a>, Vec<usize>>,
+    reach: &BTreeMap<BorrowedConversationKey<'a>, Vec<usize>>,
     offered: &[OfferedLoop<'a>],
     messages: &'a [ReviewMessage],
     scope: Option<ClosureScope<'_>>,
@@ -6203,8 +6233,8 @@ fn apply_updates(result: &mut ScanResult, best: BTreeMap<usize, SuggestedUpdate>
 fn escalated_reach<'a>(
     pairs: &[DecisionPair<'a>],
     escalated: &BTreeSet<usize>,
-) -> BTreeMap<ConversationKey<'a>, Vec<usize>> {
-    let mut reach: BTreeMap<ConversationKey<'a>, Vec<usize>> = BTreeMap::new();
+) -> BTreeMap<BorrowedConversationKey<'a>, Vec<usize>> {
+    let mut reach: BTreeMap<BorrowedConversationKey<'a>, Vec<usize>> = BTreeMap::new();
     for &pair_index in escalated {
         let pair = &pairs[pair_index];
         let loops = reach
@@ -6702,6 +6732,9 @@ fn union_find_union(parent: &mut [usize], a: usize, b: usize) {
 
 #[derive(Default)]
 struct ThreadGroup {
+    /// Non-Microsoft providers supply authoritative thread identifiers and
+    /// must never use Exchange's split-thread repair heuristics.
+    authoritative: bool,
     subjects: BTreeSet<String>,
     addresses: BTreeSet<String>,
     indices: Vec<usize>,
@@ -6882,7 +6915,13 @@ fn should_merge_with_rules(
 ) -> bool {
     // Neither group's raw subjects carried a calendar-response prefix, and
     // neither is a group source -- both keep their own thread identity.
-    if a.has_team || b.has_team || a.has_calendar_prefix || b.has_calendar_prefix {
+    if a.authoritative
+        || b.authoritative
+        || a.has_team
+        || b.has_team
+        || a.has_calendar_prefix
+        || b.has_calendar_prefix
+    {
         return false;
     }
     // A shared normalized subject that is non-empty and substantial.
@@ -6936,6 +6975,7 @@ fn thread_rule_states(messages: &[ReviewMessage]) -> Vec<serde_json::Value> {
         }
         group.has_calendar_prefix |= raw_subject_has_calendar_prefix(&raw_subject);
         group.has_team |= message.input.team;
+        group.authoritative |= message.provider != MailProvider::Microsoft;
         group
             .addresses
             .extend(message.other_addresses.iter().cloned());
@@ -6961,6 +7001,8 @@ fn thread_rule_states(messages: &[ReviewMessage]) -> Vec<serde_json::Value> {
             if keys[a].0 != keys[b].0
                 || values[a].has_team
                 || values[b].has_team
+                || values[a].authoritative
+                || values[b].authoritative
                 || values[a].has_calendar_prefix
                 || values[b].has_calendar_prefix
                 || values[a]
@@ -7040,6 +7082,7 @@ fn merge_threads_with_rules(
         if m.input.team {
             entry.has_team = true;
         }
+        entry.authoritative |= m.provider != MailProvider::Microsoft;
         entry.addresses.extend(m.other_addresses.iter().cloned());
         entry.indices.push(i);
     }
@@ -7827,30 +7870,42 @@ mod tests {
     }
 
     #[test]
-    fn conversation_filter_analyzes_only_selected_conversations() {
+    fn incremental_filter_qualifies_identical_conversation_ids_by_account() {
+        let first = synthetic("Synthetic selected body", 0, "shared-thread");
+        let mut second = synthetic("Synthetic untouched body", 1, "shared-thread");
+        second.account = "other-synthetic-account".into();
+        let third = synthetic(
+            "Synthetic same-account untouched body",
+            2,
+            "untouched-thread",
+        );
         let messages = [
-            prepare(
-                &synthetic("Synthetic selected body", 0, "selected"),
-                "Inbox",
-                0,
-            )
-            .unwrap(),
-            prepare(
-                &synthetic("Synthetic untouched body", 1, "untouched"),
-                "Inbox",
-                1,
-            )
-            .unwrap(),
+            prepare(&first, "Inbox", 0).unwrap(),
+            prepare(&second, "Inbox", 1).unwrap(),
+            prepare(&third, "Inbox", 2).unwrap(),
         ];
         let calls = AtomicUsize::new(0);
-        let filter = BTreeSet::from(["selected".to_string()]);
+        let analyzed_handles = Mutex::new(Vec::new());
+        let conversations =
+            BTreeSet::from([("synthetic-account".to_string(), "shared-thread".to_string())]);
+        let new_messages = BTreeSet::new();
+        let scope = ScanScope::Incremental(IncrementalScope {
+            conversations: &conversations,
+            new_messages: &new_messages,
+            prior_items: Vec::new(),
+        });
+        let filter = borrowed_filter(&scope).unwrap();
         let result = super::scan_conversations_filtered(
             &messages,
             &ScanProgress::default(),
             &ParallelPass::new(1),
             Some(&filter),
-            &|_| {
+            &|conversation| {
                 calls.fetch_add(1, Ordering::Relaxed);
+                analyzed_handles
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .extend(conversation.iter().map(|message| message.handle.clone()));
                 Ok(LoopItems {
                     items: vec![],
                     rejected: 0,
@@ -7862,6 +7917,12 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(result.conversation_count, 1);
         assert_eq!(result.total, 1);
+        assert_eq!(
+            *analyzed_handles
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            ["m0"]
+        );
     }
 
     #[test]
@@ -13436,7 +13497,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
 
     #[test]
     fn scan_scope_filter_matches_previous_conversation_filter_behaviour() {
-        let conversations = BTreeSet::from(["selected".into()]);
+        let conversations = BTreeSet::from([("synthetic-account".into(), "selected".into())]);
         let new_messages = BTreeSet::new();
         assert!(ScanScope::Full.filter().is_none());
         assert_eq!(
@@ -14438,6 +14499,45 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         let merged = merge_threads(&mut messages);
         assert_eq!(merged, 1);
         assert!(messages.iter().all(|m| m.conversation == "c1"));
+    }
+
+    #[test]
+    fn only_microsoft_groups_use_exchange_thread_merge_heuristics() {
+        let pair = |provider| {
+            let mut request = request_from(
+                "sam@example.invalid",
+                "req-1",
+                "c1",
+                "acct",
+                "Alex and Sam discuss quarterly planning",
+            );
+            let mut reply = reply_to(
+                "sam@example.invalid",
+                "reply-1",
+                "c2",
+                "acct",
+                "Re: Alex and Sam discuss quarterly planning",
+            );
+            request.provider = provider;
+            reply.provider = provider;
+            vec![
+                prepare(&request, "Inbox", 0).unwrap(),
+                prepare(&reply, "Sent", 1).unwrap(),
+            ]
+        };
+
+        let mut microsoft = pair(MailProvider::Microsoft);
+        assert_eq!(merge_threads(&mut microsoft), 1);
+
+        let mut google = pair(MailProvider::Google);
+        assert!(
+            google
+                .iter()
+                .all(|message| message.provider == MailProvider::Google)
+        );
+        assert_eq!(merge_threads(&mut google), 0);
+        assert_eq!(google[0].conversation, "c1");
+        assert_eq!(google[1].conversation, "c2");
     }
 
     #[test]
