@@ -98,10 +98,7 @@ impl AccountConfig {
     pub fn check_connection(&self) -> Result<ConnectionReport, ConnectionError> {
         match self {
             Self::Microsoft(config) => super::check_connection(config),
-            Self::Google(config) => {
-                let _ = (config.client_id(), config.client_secret());
-                Err(ConnectionError::ProviderUnavailable)
-            }
+            Self::Google(config) => super::google::check_connection(config),
         }
     }
 
@@ -132,8 +129,7 @@ impl AccountConfig {
                 super::review::load_sources_with(config, cache, progress, filter)
             }
             Self::Google(config) => {
-                let _ = (config.client_id(), config.client_secret());
-                Err(ConnectionError::ProviderUnavailable)
+                super::google::gmail::load_sources_with(config, cache, progress, filter)
             }
         }
     }
@@ -185,21 +181,16 @@ mod tests {
     #[test]
     fn load_all_keeps_going_after_provider_error() {
         let accounts = [
-            AccountConfig::Google(
-                GoogleConfig::new("123-fixture.apps.googleusercontent.com", "fixture-secret")
-                    .unwrap(),
-            ),
-            AccountConfig::Google(
-                GoogleConfig::new("456-fixture.apps.googleusercontent.com", "fixture-secret")
-                    .unwrap(),
-            ),
+            AccountConfig::Google(GoogleConfig::invalid_for_test()),
+            AccountConfig::Google(GoogleConfig::invalid_for_test()),
         ];
-        let loads = load_all(&accounts, &MailCache::default(), &LoadProgress::default());
+        let progress = LoadProgress::default();
+        let loads = load_all(&accounts, &MailCache::default(), &progress);
         assert_eq!(loads.len(), 2);
         assert!(
             loads
                 .iter()
-                .all(|load| matches!(load.sources, Err(ConnectionError::ProviderUnavailable)))
+                .all(|load| matches!(load.sources, Err(ConnectionError::InvalidConfiguration)))
         );
     }
 }

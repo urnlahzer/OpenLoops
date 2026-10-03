@@ -170,7 +170,7 @@ $contentRules = @(
     },
     [pscustomobject]@{
         Name = 'personal Unix home-directory path'
-        Pattern = '(?i)/(?:Users|home)/(?!Shared/|runner/|sandbox/)[^/\s"''<>]+/'
+        Pattern = '(?i)/(?:Users|home)/(?!Shared/|runner/|sandbox/|me/|@me/)[^/\s"''<>]+/'
         AllowPlaceholders = $true
     },
     [pscustomobject]@{

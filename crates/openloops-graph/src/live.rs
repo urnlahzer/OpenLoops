@@ -131,7 +131,7 @@ impl std::fmt::Display for ConnectionError {
             Self::ConsentDenied => "Sign-in was declined or could not be completed.",
             Self::AdminConsentRequired => "Your organization requires an administrator to approve this app. Send the admin consent link to your IT administrator, or enter your organization's own Application ID.",
             Self::PublisherNotTrusted => "Your organization does not allow this app's publisher. Enter your organization's own Application ID.",
-            Self::ProviderUnavailable => "Google is not available in this build yet.",
+            Self::ProviderUnavailable => "The selected provider is unavailable.",
             Self::Transport => "The mail service could not be reached over a secure connection.",
             Self::Timeout(seconds) => {
                 return write!(f, "The service did not answer within {seconds} seconds.");
@@ -369,13 +369,22 @@ fn with_scopes<T>(
 
 fn run_with_session<T>(
     required: BTreeSet<String>,
+    authorize_session: impl FnMut(BTreeSet<String>) -> Result<Session, ConnectionError>,
+    work: impl FnMut(&str, SharedScope) -> Result<T, ConnectionError>,
+) -> Result<T, ConnectionError> {
+    run_with_session_for(MailProvider::Microsoft, required, authorize_session, work)
+}
+
+pub(super) fn run_with_session_for<T>(
+    provider: MailProvider,
+    required: BTreeSet<String>,
     mut authorize_session: impl FnMut(BTreeSet<String>) -> Result<Session, ConnectionError>,
     mut work: impl FnMut(&str, SharedScope) -> Result<T, ConnectionError>,
 ) -> Result<T, ConnectionError> {
     let mut prior_scopes = BTreeSet::new();
     let cached = {
         let mut sessions = session_store();
-        let stored = &mut sessions[MailProvider::Microsoft.slot()];
+        let stored = &mut sessions[provider.slot()];
         if let Some(session) = stored.as_ref() {
             prior_scopes.clone_from(&session.scopes);
         }
@@ -393,7 +402,7 @@ fn run_with_session<T>(
     };
     if let Some((token, shared)) = cached {
         match work(token.as_str(), shared) {
-            Err(ConnectionError::Unauthorized) => clear_session(),
+            Err(ConnectionError::Unauthorized) => clear_session_for(provider),
             result => return result,
         }
     }
@@ -401,10 +410,10 @@ fn run_with_session<T>(
     let session = authorize_session(prior_scopes)?;
     let token = session.access_token.clone();
     let shared = session.shared;
-    session_store()[MailProvider::Microsoft.slot()] = Some(session);
+    session_store()[provider.slot()] = Some(session);
     let result = work(token.as_str(), shared);
     if matches!(result, Err(ConnectionError::Unauthorized)) {
-        clear_session();
+        clear_session_for(provider);
     }
     result
 }
@@ -427,7 +436,7 @@ fn required_scopes(config: &ConnectionConfig, reminders: bool) -> BTreeSet<Strin
     scopes
 }
 
-fn graph_client() -> Result<Client, ConnectionError> {
+pub(super) fn graph_client() -> Result<Client, ConnectionError> {
     Client::builder()
         .https_only(true)
         .no_proxy()
@@ -700,7 +709,7 @@ fn bounded_body_with_timeout(
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::scripted_server;
+    use super::test_support::{routed_server, scripted_server};
     use super::*;
     const APP: &str = "11111111-1111-4111-8111-111111111111";
     static SESSION_TEST: Mutex<()> = Mutex::new(());
@@ -787,6 +796,56 @@ mod tests {
     }
 
     #[test]
+    fn google_unauthorized_clears_only_google_session() {
+        let _serial = SESSION_TEST.lock().unwrap();
+        clear_all_sessions();
+        let required = BTreeSet::from(["mail".to_owned()]);
+        session_store()[MailProvider::Microsoft.slot()] =
+            Some(synthetic_session(required.clone(), Duration::from_mins(2)));
+        session_store()[MailProvider::Google.slot()] =
+            Some(synthetic_session(required.clone(), Duration::from_mins(2)));
+        let result: Result<(), ConnectionError> = run_with_session_for(
+            MailProvider::Google,
+            required,
+            |_| Err(ConnectionError::Unauthorized),
+            |_, _| Err(ConnectionError::Unauthorized),
+        );
+        assert_eq!(result, Err(ConnectionError::Unauthorized));
+        assert!(has_session_for(MailProvider::Microsoft));
+        assert!(!has_session_for(MailProvider::Google));
+        clear_all_sessions();
+    }
+
+    #[test]
+    fn google_listing_unauthorized_clears_only_google_session() {
+        let _serial = SESSION_TEST.lock().unwrap();
+        clear_all_sessions();
+        let required = BTreeSet::from(["mail".to_owned()]);
+        session_store()[MailProvider::Microsoft.slot()] =
+            Some(synthetic_session(required.clone(), Duration::from_mins(2)));
+        session_store()[MailProvider::Google.slot()] =
+            Some(synthetic_session(required.clone(), Duration::from_mins(2)));
+        let response =
+            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec();
+        let (origin, _, server) = routed_server(vec![(
+            "/gmail/v1/users/me/messages?labelIds=INBOX",
+            response,
+        )]);
+        let http = Client::builder().no_proxy().build().unwrap();
+        let result = run_with_session_for(
+            MailProvider::Google,
+            required,
+            |_| Err(ConnectionError::Unauthorized),
+            |token, _| google::gmail::list_rows(&http, token, &origin, "INBOX"),
+        );
+        server.join().unwrap();
+        assert_eq!(result, Err(ConnectionError::Unauthorized));
+        assert!(has_session_for(MailProvider::Microsoft));
+        assert!(!has_session_for(MailProvider::Google));
+        clear_all_sessions();
+    }
+
+    #[test]
     fn cached_unauthorized_clears_and_reauthorizes_exactly_once() {
         let _serial = SESSION_TEST.lock().unwrap();
         clear_session();
@@ -817,6 +876,40 @@ mod tests {
         assert_eq!(authorizations, 1);
         assert_eq!(work_calls, 2);
         clear_session();
+    }
+
+    #[test]
+    fn google_cached_unauthorized_clears_and_reauthorizes_exactly_once() {
+        let _serial = SESSION_TEST.lock().unwrap();
+        clear_all_sessions();
+        let required = BTreeSet::from(["scope".to_owned()]);
+        session_store()[MailProvider::Google.slot()] =
+            Some(synthetic_session(required.clone(), Duration::from_mins(2)));
+        let mut authorizations = 0;
+        let mut work_calls = 0;
+        let result = run_with_session_for(
+            MailProvider::Google,
+            required.clone(),
+            |requested| {
+                authorizations += 1;
+                assert_eq!(requested, required);
+                let mut session = synthetic_session(requested, Duration::from_mins(2));
+                session.access_token = Secret::new("replacement-token".to_owned());
+                Ok(session)
+            },
+            |token, _| {
+                work_calls += 1;
+                if token == "synthetic-token" {
+                    Err(ConnectionError::Unauthorized)
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(authorizations, 1);
+        assert_eq!(work_calls, 2);
+        clear_all_sessions();
     }
 
     #[test]

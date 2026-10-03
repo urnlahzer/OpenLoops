@@ -1051,10 +1051,12 @@ pub(super) fn add_hydrated(
                     message.own_addresses.clone_from(&identity.addresses);
                     message.own_display_name.clone_from(&identity.display_name);
                     message.own_given_name.clone_from(&identity.given_name);
-                    message.sent = sent;
                     message.team = team;
-                    if let Some(sent_time) = sent_time {
-                        message.received = sent_time;
+                    if identity.provider == MailProvider::Microsoft {
+                        message.sent = sent;
+                        if let Some(sent_time) = sent_time {
+                            message.received = sent_time;
+                        }
                     }
                 }
                 if message.id.is_empty() || message.conversation.is_empty() {
