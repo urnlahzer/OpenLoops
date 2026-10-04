@@ -23,8 +23,7 @@ use crate::{
     },
 };
 use openloops_graph::live::{
-    ConnectionConfig, ConnectionError, MailProvider,
-    review::{LoadProgress, load_recent_with, load_sources_with},
+    ConnectionConfig, ConnectionError, MailProvider, review::LoadProgress,
 };
 use openloops_inference::blocks::CanonicalBlock;
 use slint::{ComponentHandle, Timer};
@@ -75,6 +74,8 @@ fn reminder_title(decision: Decision, action: &str) -> String {
 }
 
 const REMINDER_VALIDATION_HINT: &str = "Enter a future local date/time and a title of 3–320 bytes. Ambiguous daylight-saving times need a different time.";
+const GOOGLE_REMINDER_UNAVAILABLE: &str =
+    "Reminders for Google accounts arrive in a later release.";
 const TODO_URL: &str = MailProvider::Microsoft.tasks_url();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1401,7 +1402,9 @@ fn sync_review_inner(
             });
     window.set_review_no_usable_items(no_usable);
     window.set_review_no_usable_text(no_usable_text.into());
+    let mut selected_can_remind = false;
     if let Some(selected) = selected_view(&model.review, review_ui.selected, cards) {
+        selected_can_remind = selected.can_remind;
         window.set_review_has_selection(true);
         window.set_review_title(selected.title.into());
         let meta = selected
@@ -1432,7 +1435,9 @@ fn sync_review_inner(
         window.set_selected_terminal(selected.terminal);
         window.set_can_track(selected.can_track && !busy);
         window.set_can_watch(selected.can_watch && !busy);
-        window.set_can_remind(selected.can_remind && !busy);
+        window.set_can_remind(
+            selected.can_remind && !busy && model.active_mail_provider() == MailProvider::Microsoft,
+        );
         let has_links = review_ui.selected.is_some_and(|selected_key| {
             let loop_link = !model
                 .review
@@ -1593,10 +1598,19 @@ fn sync_review_inner(
         });
     }
     let decision_error = model.review.decisions.error.as_deref();
-    window.set_review_action_status(decision_error.unwrap_or(&model.review.action_status).into());
-    window.set_review_action_status_succeeded(
-        decision_error.is_none() && model.review.action_status_succeeded,
-    );
+    if let Some(error) = decision_error {
+        window.set_review_action_status(error.into());
+        window.set_review_action_status_succeeded(false);
+    } else if model.active_mail_provider() == MailProvider::Google
+        && selected_can_remind
+        && model.review.action_status.is_empty()
+    {
+        window.set_review_action_status(GOOGLE_REMINDER_UNAVAILABLE.into());
+        window.set_review_action_status_succeeded(false);
+    } else {
+        window.set_review_action_status(model.review.action_status.clone().into());
+        window.set_review_action_status_succeeded(model.review.action_status_succeeded);
+    }
 }
 
 fn retry_failed_button(model: &AppModel, busy: bool) -> (usize, bool) {
@@ -1621,14 +1635,28 @@ pub(crate) fn scan_mode(review: &ReviewState) -> ScanMode {
     }
 }
 
+fn sign_in_label(provider: MailProvider, mode: ScanMode) -> &'static str {
+    match (provider, mode) {
+        (MailProvider::Microsoft, ScanMode::Full) => {
+            "Complete Microsoft sign-in; then downloading recent messages"
+        }
+        (MailProvider::Google, ScanMode::Full) => {
+            "Complete Google sign-in; then downloading recent messages"
+        }
+        (MailProvider::Microsoft, ScanMode::Incremental) => {
+            "Complete Microsoft sign-in; then checking for new mail"
+        }
+        (MailProvider::Google, ScanMode::Incremental) => {
+            "Complete Google sign-in; then checking for new mail"
+        }
+    }
+}
+
 fn start_mail_load(model: &Rc<RefCell<AppModel>>, mode: ScanMode) -> Result<(), ConnectionError> {
-    let config = {
+    let (provider, config) = {
         let model = model.borrow();
-        let client_id = model
-            .effective_microsoft_client_id()
-            .ok_or(ConnectionError::InvalidConfiguration)?;
-        ConnectionConfig::new(&client_id, Some(&model.shared))
-            .and_then(|config| config.with_groups(Some(&model.groups)))?
+        let provider = model.active_mail_provider();
+        (provider, model.account_config(provider)?)
     };
     let mut model_ref = model.borrow_mut();
     if mode == ScanMode::Full {
@@ -1645,16 +1673,16 @@ fn start_mail_load(model: &Rc<RefCell<AppModel>>, mode: ScanMode) -> Result<(), 
     let progress = std::sync::Arc::new(LoadProgress::default());
     let cache = std::sync::Arc::clone(&model_ref.mail_cache);
     model_ref.load_progress = Some(std::sync::Arc::clone(&progress));
-    let signed_in = openloops_graph::live::has_session_for(MailProvider::Microsoft);
+    let signed_in = openloops_graph::live::has_session_for(provider);
     match mode {
         ScanMode::Full => model_ref.start(
             Service::Review,
             if signed_in {
                 "Downloading recent messages"
             } else {
-                "Complete Microsoft sign-in; then downloading recent messages"
+                sign_in_label(provider, ScanMode::Full)
             },
-            move || Outcome::Mail(load_recent_with(&config, &cache, &progress)),
+            move || Outcome::Mail(config.load_recent_with(&cache, &progress)),
             || {},
         ),
         ScanMode::Incremental => model_ref.start(
@@ -1662,10 +1690,10 @@ fn start_mail_load(model: &Rc<RefCell<AppModel>>, mode: ScanMode) -> Result<(), 
             if signed_in {
                 "Checking for new mail"
             } else {
-                "Complete Microsoft sign-in; then checking for new mail"
+                sign_in_label(provider, ScanMode::Incremental)
             },
             move || Outcome::CheckMail {
-                sources: load_recent_with(&config, &cache, &progress),
+                sources: config.load_recent_with(&cache, &progress),
             },
             || {},
         ),
@@ -1986,15 +2014,10 @@ pub(crate) fn register_callbacks(
                     .borrow_mut()
                     .start_retry_scan(conversations, attempted, || {});
             } else {
-                let config = {
+                let (provider, config) = {
                     let model = model.borrow();
-                    model
-                        .effective_microsoft_client_id()
-                        .ok_or(ConnectionError::InvalidConfiguration)
-                        .and_then(|client_id| {
-                            ConnectionConfig::new(&client_id, Some(&model.shared))
-                                .and_then(|config| config.with_groups(Some(&model.groups)))
-                        })
+                    let provider = model.active_mail_provider();
+                    (provider, model.account_config(provider))
                 };
                 match config {
                     Ok(config) => {
@@ -2004,14 +2027,13 @@ pub(crate) fn register_callbacks(
                         model_ref.load_progress = Some(std::sync::Arc::clone(&progress));
                         model_ref.start(
                             Service::Review,
-                            if openloops_graph::live::has_session_for(MailProvider::Microsoft) {
+                            if openloops_graph::live::has_session_for(provider) {
                                 "Downloading recent messages"
                             } else {
-                                "Complete Microsoft sign-in; then downloading recent messages"
+                                sign_in_label(provider, ScanMode::Full)
                             },
                             move || Outcome::RetryMail {
-                                sources: load_sources_with(
-                                    &config,
+                                sources: config.load_sources_with(
                                     &cache,
                                     &progress,
                                     Some(&sources),
@@ -2472,6 +2494,13 @@ pub(crate) fn register_callbacks(
         let timer = Rc::clone(&timer);
         window.on_create_reminder(move || {
             let mut model_ref = model.borrow_mut();
+            if model_ref.active_mail_provider() == MailProvider::Google {
+                model_ref.review.action_status = GOOGLE_REMINDER_UNAVAILABLE.into();
+                model_ref.review.action_status_succeeded = false;
+                drop(model_ref);
+                refresh(&model, &weak);
+                return;
+            }
             let Some(draft) = model_ref.review.draft.take() else {
                 return;
             };
@@ -2536,6 +2565,7 @@ pub(crate) fn register_callbacks(
 mod tests {
     use super::*;
     use crate::{deadline_view::DeadlineView, loop_state::Record, review_model::scan_strip};
+    use slint::Model;
 
     fn model() -> AppModel {
         AppModel::with_store(Ok(None))
@@ -2935,6 +2965,71 @@ mod tests {
     fn a_single_native_window_covers_busy_guards_projection_cache_and_sync_busy() {
         let window = AppWindow::new().expect("create AppWindow for test");
         let mut model = model();
+        model.client_id = "00000000-0000-4000-8000-000000000000".into();
+        model.microsoft.lines = vec!["Personal inbox: access confirmed.".into()];
+        crate::slint_ui::sync(&model, &window);
+        assert_eq!(window.get_mail_provider_index(), 0);
+        assert!(window.get_can_check_mailbox());
+        assert_eq!(window.get_microsoft_lines().row_count(), 1);
+        assert_eq!(window.get_google_lines().row_count(), 0);
+
+        model.mail_providers = std::collections::BTreeSet::from([MailProvider::Google]);
+        model.google_client_id = "123-synthetic.apps.googleusercontent.com".into();
+        model.google.lines = vec!["Personal inbox: access confirmed.".into()];
+        crate::slint_ui::sync(&model, &window);
+        assert_eq!(window.get_mail_provider_index(), 1);
+        assert!(!window.get_can_check_mailbox());
+        assert!(window.get_own_inbox_accessible());
+        assert_eq!(window.get_microsoft_lines().row_count(), 0);
+        assert_eq!(window.get_google_lines().row_count(), 1);
+
+        model.google_client_secret = zeroize::Zeroizing::new("synthetic-client-parameter".into());
+        crate::slint_ui::sync(&model, &window);
+        assert!(window.get_can_check_mailbox());
+
+        let mailbox_callback_model = Rc::new(RefCell::new(AppModel::with_store(Ok(None))));
+        mailbox_callback_model.borrow_mut().client_id = "malformed-guid".into();
+        let mailbox_timer = Rc::new(Timer::default());
+        crate::slint_ui::register_check_mailbox_callback(
+            &window,
+            &mailbox_callback_model,
+            &mailbox_timer,
+        );
+        crate::slint_ui::register_mail_provider_callback(&window, &mailbox_callback_model);
+        crate::slint_ui::sync(&mailbox_callback_model.borrow(), &window);
+        assert!(window.get_can_check_mailbox());
+        window.invoke_check_mailbox();
+        assert_eq!(
+            mailbox_callback_model.borrow().microsoft.lines,
+            [ConnectionError::InvalidConfiguration.to_string()]
+        );
+
+        {
+            let mut callback_model = mailbox_callback_model.borrow_mut();
+            callback_model.google_client_id = "123-synthetic.apps.googleusercontent.com".into();
+            callback_model.google_client_secret =
+                zeroize::Zeroizing::new("synthetic-client-parameter".into());
+            callback_model.review = crate::review_model::layout_fixture();
+            callback_model.review.action_status = "Synthetic action status".into();
+            callback_model.review_status = Status {
+                lines: vec!["Synthetic review status".into()],
+                succeeded: true,
+            };
+        }
+        window.invoke_mail_provider_selected(1);
+        let callback_model = mailbox_callback_model.borrow();
+        assert_eq!(callback_model.active_mail_provider(), MailProvider::Google);
+        assert!(callback_model.review.analysis.is_none());
+        assert!(callback_model.review.action_status.is_empty());
+        assert!(callback_model.review_status.lines.is_empty());
+        assert_eq!(callback_model.client_id, "malformed-guid");
+        assert_eq!(
+            callback_model.google_client_id,
+            "123-synthetic.apps.googleusercontent.com"
+        );
+        drop(callback_model);
+
+        model.mail_providers = std::collections::BTreeSet::from([MailProvider::Microsoft]);
         model.provider = crate::settings::Provider::OpenRouter;
         model.openrouter_key = zeroize::Zeroizing::new("synthetic-key".into());
         crate::slint_ui::sync(&model, &window);
@@ -2990,6 +3085,37 @@ mod tests {
         );
         assert!(window.get_can_track());
         assert!(!window.get_can_watch());
+
+        model.review.action_status.clear();
+        model.mail_providers = std::collections::BTreeSet::from([MailProvider::Google]);
+        sync_review(
+            &model,
+            &window,
+            &cards,
+            false,
+            false,
+            ScanStripModel::default(),
+        );
+        assert!(!window.get_can_remind());
+        assert_eq!(
+            window.get_review_action_status().as_str(),
+            GOOGLE_REMINDER_UNAVAILABLE
+        );
+        model.review.decisions.error = Some("Synthetic decision error".into());
+        sync_review(
+            &model,
+            &window,
+            &cards,
+            false,
+            false,
+            ScanStripModel::default(),
+        );
+        assert_eq!(
+            window.get_review_action_status().as_str(),
+            "Synthetic decision error"
+        );
+        model.review.decisions.error = None;
+        model.mail_providers = std::collections::BTreeSet::from([MailProvider::Microsoft]);
 
         sync_review(
             &model,
@@ -3146,6 +3272,14 @@ mod tests {
         }
         let timer = Rc::new(Timer::default());
         register_callbacks(&window, &callback_model, &timer);
+        callback_model.borrow_mut().mail_providers =
+            std::collections::BTreeSet::from([MailProvider::Google]);
+        window.invoke_create_reminder();
+        assert_eq!(
+            callback_model.borrow().review.action_status,
+            GOOGLE_REMINDER_UNAVAILABLE
+        );
+        assert!(callback_model.borrow().review.pending_reminder.is_none());
         window.invoke_clear_results();
         let model = callback_model.borrow();
         assert!(cancel.cancel.load(Ordering::Relaxed));

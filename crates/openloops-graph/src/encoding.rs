@@ -47,6 +47,38 @@ pub fn base64url_encode(input: &[u8]) -> String {
     out
 }
 
+/// Decodes unpadded RFC 4648 section 5 base64url data.
+#[must_use]
+pub fn base64url_decode(input: &str) -> Option<Vec<u8>> {
+    if input.len() % 4 == 1 {
+        return None;
+    }
+    let mut values = Vec::with_capacity(input.len());
+    for byte in input.bytes() {
+        values.push(match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            _ => return None,
+        });
+    }
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    for chunk in values.chunks(4) {
+        let first = *chunk.first()?;
+        let second = *chunk.get(1)?;
+        out.push((first << 2) | (second >> 4));
+        if let Some(&third) = chunk.get(2) {
+            out.push((second << 4) | (third >> 2));
+            if let Some(&fourth) = chunk.get(3) {
+                out.push((third << 6) | fourth);
+            }
+        }
+    }
+    Some(out)
+}
+
 fn push_group(out: &mut String, n: u32, chars: usize) {
     let indices = [
         (n >> 18) & 0x3F,
@@ -150,7 +182,10 @@ fn hex_value(byte: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{base32url_encode, base64url_encode, percent_decode, percent_encode_query_value};
+    use super::{
+        base32url_encode, base64url_decode, base64url_encode, percent_decode,
+        percent_encode_query_value,
+    };
 
     #[test]
     fn base64url_of_sha256_is_a_stable_deterministic_regression_anchor() {
@@ -201,6 +236,14 @@ mod tests {
         assert_eq!(base64url_encode(b"foob"), "Zm9vYg");
         assert_eq!(base64url_encode(b"fooba"), "Zm9vYmE");
         assert_eq!(base64url_encode(b"foobar"), "Zm9vYmFy");
+        for value in [b"".as_slice(), b"f", b"fo", b"foo", b"foob", b"foobar"] {
+            assert_eq!(
+                base64url_decode(&base64url_encode(value)).as_deref(),
+                Some(value)
+            );
+        }
+        assert_eq!(base64url_decode("!"), None);
+        assert_eq!(base64url_decode("x"), None);
     }
 
     #[test]

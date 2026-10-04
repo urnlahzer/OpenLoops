@@ -45,6 +45,13 @@ export component AppWindow inherits Window {
     in property <bool> own-inbox-accessible;
     in property <[StatusLine]> microsoft-lines;
     in property <string> microsoft-busy-line;
+    in-out property <int> mail-provider-index;
+    in property <bool> shipped-google-registration-present;
+    in-out property <string> google-client-id;
+    in-out property <string> google-client-secret;
+    in-out property <bool> show-google-secret;
+    in property <[StatusLine]> google-lines;
+    in property <string> google-busy-line;
     in-out property <int> provider-index;
     in-out property <string> api-key;
     in-out property <bool> show-key;
@@ -66,7 +73,7 @@ export component AppWindow inherits Window {
     in property <string> provider-disclosure;
     in property <string> key-placeholder;
     in property <string> load-models-label;
-    in property <bool> can-check-microsoft;
+    in property <bool> can-check-mailbox;
     in property <bool> can-load-models;
     in property <bool> can-test-model;
     in property <bool> can-check-decision-model;
@@ -131,7 +138,11 @@ export component AppWindow inherits Window {
     callback client-id-edited(string);
     callback groups-edited(string);
     callback shared-edited(string);
-    callback check-microsoft;
+    callback mail-provider-selected(int);
+    callback google-client-id-edited(string);
+    callback google-client-secret-edited(string);
+    callback open-google-console;
+    callback check-mailbox;
     callback provider-selected(int);
     callback key-edited(string);
     callback open-entra;
@@ -187,6 +198,9 @@ export component AppWindow inherits Window {
                 shipped-registration-present: root.shipped-registration-present; shared-registration-active: root.shared-registration-active; admin-consent-url: root.admin-consent-url;
                 client-id <=> root.client-id; groups <=> root.groups; shared-mailboxes <=> root.shared-mailboxes; own-inbox-accessible: root.own-inbox-accessible; microsoft-lines: root.microsoft-lines;
                 microsoft-busy-line: root.microsoft-busy-line;
+                mail-provider-index <=> root.mail-provider-index; shipped-google-registration-present: root.shipped-google-registration-present;
+                google-client-id <=> root.google-client-id; google-client-secret <=> root.google-client-secret; show-google-secret <=> root.show-google-secret;
+                google-lines: root.google-lines; google-busy-line: root.google-busy-line;
                 provider-index <=> root.provider-index; api-key <=> root.api-key; show-key <=> root.show-key; models: root.models; model-index <=> root.model-index; model-value <=> root.model-value;
                 ollama-plan-index <=> root.ollama-plan-index; ollama-plan-options: root.ollama-plan-options; openrouter-parallel <=> root.openrouter-parallel;
                 parallel-field-focused <=> root.parallel-field-focused; model-status: root.model-status; model-succeeded: root.model-succeeded; model-busy-line: root.model-busy-line;
@@ -195,10 +209,13 @@ export component AppWindow inherits Window {
                 training-export-folder <=> root.training-export-folder; can-export-training: root.can-export-training;
                 training-export-status: root.training-export-status; training-export-succeeded: root.training-export-succeeded;
                 provider-disclosure: root.provider-disclosure; key-placeholder: root.key-placeholder; load-models-label: root.load-models-label;
-                can-check-microsoft: root.can-check-microsoft; can-load-models: root.can-load-models; can-test-model: root.can-test-model; can-check-decision-model: root.can-check-decision-model;
+                can-check-mailbox: root.can-check-mailbox; can-load-models: root.can-load-models; can-test-model: root.can-test-model; can-check-decision-model: root.can-check-decision-model;
                 save-settings => { root.save-settings(); } reload-settings => { root.reload-settings(); } forget-settings => { root.forget-settings(); }
                 client-id-edited(value) => { root.client-id-edited(value); } groups-edited(value) => { root.groups-edited(value); } shared-edited(value) => { root.shared-edited(value); }
-                check-microsoft => { root.check-microsoft(); } provider-selected(index) => { root.provider-selected(index); } key-edited(value) => { root.key-edited(value); }
+                mail-provider-selected(index) => { root.mail-provider-selected(index); }
+                google-client-id-edited(value) => { root.google-client-id-edited(value); } google-client-secret-edited(value) => { root.google-client-secret-edited(value); }
+                open-google-console => { root.open-google-console(); } check-mailbox => { root.check-mailbox(); }
+                provider-selected(index) => { root.provider-selected(index); } key-edited(value) => { root.key-edited(value); }
                 open-entra => { root.open-entra(); } open-entra-portal => { root.open-entra-portal(); } open-key-page => { root.open-key-page(); }
                 load-models => { root.load-models(); } model-selected(value) => { root.model-selected(value); } plan-selected(index) => { root.plan-selected(index); }
                 parallel-committed(value) => { root.parallel-committed(value); } test-model => { root.test-model(); }

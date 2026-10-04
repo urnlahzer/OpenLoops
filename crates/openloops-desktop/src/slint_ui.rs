@@ -11,9 +11,7 @@ use crate::{
     },
     training_export,
 };
-use openloops_graph::live::{
-    ConnectionConfig, MailProvider, check_connection, clear_session_for, registration,
-};
+use openloops_graph::live::{MailProvider, clear_session_for, registration};
 use openloops_inference::{
     decision::{OpenRouterDecisions, registry::Registry},
     ollama::{OllamaCloud, available_models},
@@ -25,6 +23,7 @@ use zeroize::Zeroizing;
 slint::include_modules!();
 
 const ENTRA_URL: &str = "https://entra.microsoft.com/";
+const GOOGLE_CONSOLE_URL: &str = "https://console.cloud.google.com/apis/credentials";
 const MICROSOFT_LOGIN_URL_PREFIX: &str = "https://login.microsoftonline.com/";
 const OLLAMA_KEYS_URL: &str = "https://ollama.com/settings/keys";
 const OPENROUTER_KEYS_URL: &str = "https://openrouter.ai/settings/keys";
@@ -264,6 +263,7 @@ pub(crate) fn sync(model: &AppModel, window: &AppWindow) {
     window.set_account_text(account.name.into());
     window.set_shipped_registration_present(registration::microsoft().is_some());
     window.set_shared_registration_active(model.shared_registration_active());
+    window.set_shipped_google_registration_present(registration::google().is_some());
     window.set_admin_consent_url(model.admin_consent_url().unwrap_or_default().into());
     window.set_review_badge(
         i32::try_from(open_badge_count(&cards, model.review.show_call_summaries))
@@ -291,7 +291,7 @@ pub(crate) fn sync(model: &AppModel, window: &AppWindow) {
     window.set_shared_mailboxes(model.shared.clone().into());
     window.set_own_inbox_accessible(
         model
-            .microsoft
+            .connection_status(model.active_mail_provider())
             .lines
             .first()
             .is_some_and(|line| line == "Personal inbox: access confirmed."),
@@ -305,7 +305,29 @@ pub(crate) fn sync(model: &AppModel, window: &AppWindow) {
             succeeded: line.ends_with("access confirmed."),
         })
         .collect::<Vec<_>>();
-    window.set_microsoft_lines(ModelRc::new(VecModel::from(microsoft_lines)));
+    window.set_microsoft_lines(ModelRc::new(VecModel::from(
+        if model.active_mail_provider() == MailProvider::Microsoft {
+            microsoft_lines
+        } else {
+            Vec::new()
+        },
+    )));
+    let google_lines = model
+        .google
+        .lines
+        .iter()
+        .map(|line| StatusLine {
+            text: line.clone().into(),
+            succeeded: line.ends_with("access confirmed."),
+        })
+        .collect::<Vec<_>>();
+    window.set_google_lines(ModelRc::new(VecModel::from(
+        if model.active_mail_provider() == MailProvider::Google {
+            google_lines
+        } else {
+            Vec::new()
+        },
+    )));
     // The busy/progress line rides in its own property, always rendered in
     // `Tokens.text-2` (owner nit, perf-fix round: it used to piggyback on
     // `microsoft-lines`/`model-status` with `succeeded: false`, which read as
@@ -313,13 +335,34 @@ pub(crate) fn sync(model: &AppModel, window: &AppWindow) {
     // these same two properties every tick without touching anything else on
     // this screen.
     window.set_microsoft_busy_line(
-        if model.pending_service == Service::Mailbox {
+        if model.pending_service == Service::Mailbox(MailProvider::Microsoft) {
             busy_text.as_deref().unwrap_or_default()
         } else {
             ""
         }
         .into(),
     );
+    window.set_google_busy_line(
+        if model.pending_service == Service::Mailbox(MailProvider::Google) {
+            busy_text.as_deref().unwrap_or_default()
+        } else {
+            ""
+        }
+        .into(),
+    );
+    window.set_mail_provider_index(match model.active_mail_provider() {
+        MailProvider::Microsoft => 0,
+        MailProvider::Google => 1,
+    });
+    window.set_google_client_id(model.google_client_id.clone().into());
+    let desired_google_secret = if window.get_active_screen() == 1 {
+        model.google_client_secret.to_string()
+    } else {
+        String::new()
+    };
+    if window.get_google_client_secret().as_str() != desired_google_secret {
+        window.set_google_client_secret(desired_google_secret.into());
+    }
     window.set_provider_index(match model.provider {
         Provider::OllamaCloud => 0,
         Provider::OpenRouter => 1,
@@ -392,7 +435,10 @@ pub(crate) fn sync(model: &AppModel, window: &AppWindow) {
         Provider::OllamaCloud => "Load cloud models".into(),
         Provider::OpenRouter => "Load ZDR models".into(),
     });
-    window.set_can_check_microsoft(model.effective_microsoft_client_id().is_some());
+    window.set_can_check_mailbox(match model.active_mail_provider() {
+        MailProvider::Microsoft => model.effective_microsoft_client_id().is_some(),
+        MailProvider::Google => model.effective_google_registration().is_some(),
+    });
     window.set_can_load_models(match model.provider {
         Provider::OllamaCloud => !model.key.is_empty(),
         Provider::OpenRouter => true,
@@ -445,7 +491,10 @@ pub(crate) fn sync_busy(model: &AppModel, window: &AppWindow) {
     }
 
     match model.pending_service {
-        Service::Mailbox => window.set_microsoft_busy_line(busy_text.into()),
+        Service::Mailbox(MailProvider::Microsoft) => {
+            window.set_microsoft_busy_line(busy_text.into());
+        }
+        Service::Mailbox(MailProvider::Google) => window.set_google_busy_line(busy_text.into()),
         Service::Model => window.set_model_busy_line(busy_text.into()),
         Service::Review => {}
     }
@@ -466,11 +515,68 @@ fn finish_edit(model: &mut AppModel) {
     let _ = model.persist_changes();
 }
 
-fn clear_microsoft_after_edit(model: &mut AppModel) {
-    model.microsoft = Status::default();
+fn clear_mailbox_after_edit(model: &mut AppModel, provider: MailProvider) {
+    *model.connection_status_mut(provider) = Status::default();
     model.review = ReviewState::default();
     model.review_status = Status::default();
     finish_edit(model);
+}
+
+pub(crate) fn register_check_mailbox_callback(
+    window: &AppWindow,
+    model: &Rc<RefCell<AppModel>>,
+    timer: &Rc<Timer>,
+) {
+    let model = Rc::clone(model);
+    let weak = window.as_weak();
+    let timer = Rc::clone(timer);
+    window.on_check_mailbox(move || {
+        let (provider, config) = {
+            let model = model.borrow();
+            let provider = model.active_mail_provider();
+            (provider, model.account_config(provider))
+        };
+        match config {
+            Ok(config) => {
+                let mut model_ref = model.borrow_mut();
+                *model_ref.connection_status_mut(provider) = Status::default();
+                model_ref.start(
+                    Service::Mailbox(provider),
+                    match provider {
+                        MailProvider::Microsoft => "Complete Microsoft sign-in in your browser",
+                        MailProvider::Google => "Complete Google sign-in in your browser",
+                    },
+                    move || Outcome::Connection(provider, config.check_connection()),
+                    || {},
+                );
+                start_timer(&timer);
+            }
+            Err(error) => {
+                *model.borrow_mut().connection_status_mut(provider) = Status {
+                    lines: vec![error.to_string()],
+                    succeeded: false,
+                };
+            }
+        }
+        refresh(&model, &weak);
+    });
+}
+
+pub(crate) fn register_mail_provider_callback(window: &AppWindow, model: &Rc<RefCell<AppModel>>) {
+    let model = Rc::clone(model);
+    let weak = window.as_weak();
+    window.on_mail_provider_selected(move |index| {
+        let provider = if index == 1 {
+            MailProvider::Google
+        } else {
+            MailProvider::Microsoft
+        };
+        model.borrow_mut().set_active_mail_provider(provider);
+        if let Some(window) = weak.upgrade() {
+            window.set_show_google_secret(false);
+        }
+        refresh(&model, &weak);
+    });
 }
 
 pub(crate) fn refresh(model: &Rc<RefCell<AppModel>>, weak: &slint::Weak<AppWindow>) {
@@ -680,7 +786,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         let (sender, receiver) = std::sync::mpsc::channel::<Outcome>();
         std::mem::forget(sender);
         initial_model.pending = Some(receiver);
-        initial_model.pending_service = Service::Mailbox;
+        initial_model.pending_service = Service::Mailbox(MailProvider::Microsoft);
         initial_model.progress = "Complete Microsoft sign-in; then downloading recent messages";
         initial_model.started = std::time::Instant::now()
             .checked_sub(Duration::from_secs(82))
@@ -716,6 +822,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     };
     window.set_active_screen(initial_screen);
     window.set_show_key(false);
+    window.set_show_google_secret(false);
     // Preview-fixture only: start the reading pane's "Full scanned
     // conversation" disclosure expanded so a `--preview-review` screenshot
     // shows the message rows, the sent tint, and the nested quoted-history
@@ -783,10 +890,12 @@ pub fn run() -> Result<(), slint::PlatformError> {
             };
             if let Some(window) = weak.upgrade() {
                 window.set_show_key(false);
+                window.set_show_google_secret(false);
                 // X6: never let a stale key sit in the Slint text property
                 // across a reload; `sync` below repopulates it only if the
                 // Sources screen is (still) active.
                 window.set_api_key("".into());
+                window.set_google_client_secret("".into());
                 if succeeded {
                     window.set_active_screen(i32::from(!active));
                 }
@@ -801,11 +910,13 @@ pub fn run() -> Result<(), slint::PlatformError> {
             model.borrow_mut().forget_settings();
             if let Some(window) = weak.upgrade() {
                 window.set_show_key(false);
+                window.set_show_google_secret(false);
                 // X6: the key is gone from the model; clear it from the
                 // mirrored property immediately rather than waiting on
                 // `sync`'s diff (which would happen to agree here anyway,
                 // since the forgotten key is now empty).
                 window.set_api_key("".into());
+                window.set_google_client_secret("".into());
                 sync(&model.borrow(), &window);
             }
         });
@@ -825,6 +936,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                     sync(&model.borrow(), &window);
                 } else {
                     window.set_api_key("".into());
+                    window.set_google_client_secret("".into());
                 }
             }
         }
@@ -856,57 +968,55 @@ pub fn run() -> Result<(), slint::PlatformError> {
             }
             clear_session_for(MailProvider::Microsoft);
             model_ref.clear_mail_cache();
-            clear_microsoft_after_edit(&mut model_ref);
+            clear_mailbox_after_edit(&mut model_ref, MailProvider::Microsoft);
             drop(model_ref);
             refresh(&model, &weak);
         });
     }
     text_edit!(on_groups_edited, groups, model_ref, {
-        clear_microsoft_after_edit(&mut model_ref);
+        clear_mailbox_after_edit(&mut model_ref, MailProvider::Microsoft);
     });
     text_edit!(on_shared_edited, shared, model_ref, {
-        clear_microsoft_after_edit(&mut model_ref);
+        clear_mailbox_after_edit(&mut model_ref, MailProvider::Microsoft);
     });
 
+    register_check_mailbox_callback(&window, &model, &timer);
+    register_mail_provider_callback(&window, &model);
     {
         let model = Rc::clone(&model);
         let weak = window.as_weak();
-        let timer = Rc::clone(&timer);
-        window.on_check_microsoft(move || {
-            let config = {
-                let model = model.borrow();
-                model
-                    .effective_microsoft_client_id()
-                    .ok_or(openloops_graph::live::ConnectionError::InvalidConfiguration)
-                    .and_then(|client_id| {
-                        ConnectionConfig::new(&client_id, Some(&model.shared))
-                            .and_then(|config| config.with_groups(Some(&model.groups)))
-                    })
-            };
-            match config {
-                Ok(config) => {
-                    let mut model_ref = model.borrow_mut();
-                    model_ref.microsoft = Status::default();
-                    model_ref.start(
-                        Service::Mailbox,
-                        "Complete Microsoft sign-in in your browser",
-                        move || {
-                            Outcome::Connection(MailProvider::Microsoft, check_connection(&config))
-                        },
-                        || {},
-                    );
-                    start_timer(&timer);
-                }
-                Err(error) => {
-                    model.borrow_mut().microsoft = Status {
-                        lines: vec![error.to_string()],
-                        succeeded: false,
-                    };
-                }
+        window.on_google_client_id_edited(move |value| {
+            let value: String = value.chars().take(256).collect();
+            let mut model_ref = model.borrow_mut();
+            if !replace_if_changed(&mut model_ref.google_client_id, value) {
+                return;
             }
+            clear_session_for(MailProvider::Google);
+            model_ref.clear_mail_cache();
+            clear_mailbox_after_edit(&mut model_ref, MailProvider::Google);
+            drop(model_ref);
             refresh(&model, &weak);
         });
     }
+    {
+        let model = Rc::clone(&model);
+        let weak = window.as_weak();
+        window.on_google_client_secret_edited(move |value| {
+            let value = Zeroizing::new(value.chars().take(4096).collect::<String>());
+            let mut model_ref = model.borrow_mut();
+            if !replace_if_changed(&mut model_ref.google_client_secret, value) {
+                return;
+            }
+            clear_session_for(MailProvider::Google);
+            model_ref.clear_mail_cache();
+            clear_mailbox_after_edit(&mut model_ref, MailProvider::Google);
+            drop(model_ref);
+            refresh(&model, &weak);
+        });
+    }
+    window.on_open_google_console(|| {
+        let _ = opener::open(GOOGLE_CONSOLE_URL);
+    });
     {
         let model = Rc::clone(&model);
         let weak = window.as_weak();
