@@ -59,6 +59,13 @@ export component SourcesScreen {
     // so an in-progress job never reads as a warning (owner nit, perf-fix
     // round: "should be text-2").
     in property <string> microsoft-busy-line;
+    in-out property <int> mail-provider-index;
+    in property <bool> shipped-google-registration-present;
+    in-out property <string> google-client-id;
+    in-out property <string> google-client-secret;
+    in-out property <bool> show-google-secret;
+    in property <[StatusLine]> google-lines;
+    in property <string> google-busy-line;
     in-out property <int> provider-index;
     in-out property <string> api-key;
     in-out property <bool> show-key;
@@ -86,7 +93,7 @@ export component SourcesScreen {
     in property <string> provider-disclosure;
     in property <string> key-placeholder;
     in property <string> load-models-label;
-    in property <bool> can-check-microsoft;
+    in property <bool> can-check-mailbox;
     in property <bool> can-load-models;
     in property <bool> can-test-model;
     in property <bool> can-check-decision-model;
@@ -97,7 +104,11 @@ export component SourcesScreen {
     callback client-id-edited(string);
     callback groups-edited(string);
     callback shared-edited(string);
-    callback check-microsoft;
+    callback mail-provider-selected(int);
+    callback google-client-id-edited(string);
+    callback google-client-secret-edited(string);
+    callback open-google-console;
+    callback check-mailbox;
     callback provider-selected(int);
     callback key-edited(string);
     callback open-entra;
@@ -137,14 +148,17 @@ export component SourcesScreen {
             VerticalLayout { width: 100%; padding-top: Tokens.pane-gutter-y; padding-bottom: Tokens.space-3; padding-left: Tokens.pane-gutter-x; padding-right: Tokens.pane-gutter-x; spacing: Tokens.space-2;
                 VerticalLayout { spacing: Tokens.space-1;
                     Text { text: "Sources and model"; color: Tokens.text-1; font-size: Tokens.font-22; font-weight: 600; }
-                    HelperText { text: "Your own Inbox and Sent Items are included automatically. Settings save in Windows Credential Manager on this account."; width: 100%; }
+                    HelperText { text: "Your own Inbox and Sent folders are included automatically. Settings save in Windows Credential Manager on this account."; width: 100%; }
                 }
                 HorizontalLayout { width: 100%; spacing: Tokens.space-5;
                     Card { horizontal-stretch: 1; min-width: Tokens.card-min-width;
                         VerticalLayout { width: 100%; alignment: start; padding-top: Tokens.card-pad-y; padding-bottom: Tokens.card-pad-y; padding-left: Tokens.card-pad-x; padding-right: Tokens.card-pad-x; spacing: Tokens.space-3;
-                            StepHeading { number: "1"; title: "Connect Microsoft";
+                            StepHeading { number: "1"; title: "Connect your mailbox";
                                 if root.own-inbox-accessible: Pill { text: "Personal inbox confirmed"; kind: "success"; }
                             }
+                            Text { text: "Mail provider"; color: Tokens.text-1; font-size: Tokens.font-14; font-weight: 600; width: 100%; horizontal-alignment: left; horizontal-stretch: 1; }
+                            Segmented { options: ["Microsoft 365", "Google"]; selected-index <=> root.mail-provider-index; accessible-name: "Mail provider"; enabled: root.controls-enabled; selected(index) => { root.mail-provider-selected(index); } }
+                            if root.mail-provider-index == 0: VerticalLayout { width: 100%; spacing: Tokens.space-3;
                             if root.shipped-registration-present: VerticalLayout { width: 100%; spacing: Tokens.space-3;
                                 HelperText { text: "This build signs in with the OpenLoops registration. Your organization's administrator may need to approve it once."; width: 100%; }
                                 if root.client-id == "": VerticalLayout { width: 100%; spacing: Tokens.space-3;
@@ -171,12 +185,42 @@ export component SourcesScreen {
                                 }
                             }
                             VerticalLayout { width: 100%; spacing: Tokens.space-1;
-                                PrimaryButton { text: "Sign in & check inboxes"; enabled: root.controls-enabled && root.can-check-microsoft; clicked => { root.check-microsoft(); } }
+                                PrimaryButton { text: "Sign in & check inboxes"; enabled: root.controls-enabled && root.can-check-mailbox; clicked => { root.check-mailbox(); } }
                                 HelperText { text: "Opens Microsoft sign-in in your browser. Checks access only; stores no mail."; width: 100%; }
                             }
                             VerticalLayout { width: 100%; spacing: Tokens.space-1;
                                 for line in root.microsoft-lines: WrappedText { text: line.text; text-color: line.succeeded ? Tokens.success : Tokens.warning; horizontal-stretch: 1; }
                                 if !root.microsoft-busy-line.is-empty: WrappedText { text: root.microsoft-busy-line; text-color: Tokens.text-2; horizontal-stretch: 1; }
+                            }
+                            }
+                            if root.mail-provider-index == 1: VerticalLayout { width: 100%; spacing: Tokens.space-3;
+                                if root.shipped-google-registration-present: VerticalLayout { width: 100%; spacing: Tokens.space-3;
+                                    HelperText { text: "This build signs in with the OpenLoops Google client. Google shows an \"unverified app\" notice once; continue past it. Your address must be on the OpenLoops test-user list while the app is in Google's testing mode."; width: 100%; }
+                                    Disclosure { title: "Use my own Google Cloud client (optional)"; expanded: root.google-client-id != "" || root.google-client-secret != ""; enabled: root.controls-enabled;
+                                        VerticalLayout { spacing: Tokens.space-1;
+                                            Field { label: "Google client ID"; placeholder: "…apps.googleusercontent.com"; value <=> root.google-client-id; monospace: true; enabled: root.controls-enabled; edited(value) => { root.google-client-id-edited(value); } }
+                                            Field { label: "Google client secret"; value <=> root.google-client-secret; password: true; reveal-password: root.show-google-secret; monospace: true; enabled: root.controls-enabled; edited(value) => { root.google-client-secret-edited(value); } }
+                                            Checkbox { text: "Show secret"; checked <=> root.show-google-secret; enabled: root.controls-enabled; }
+                                            LinkButton { text: "Open Google Cloud console"; width: 100%; enabled: root.controls-enabled; clicked => { root.open-google-console(); } }
+                                            HelperText { text: "Only if you created your own Google Cloud project. Leave blank to use the OpenLoops client."; width: 100%; }
+                                        }
+                                    }
+                                }
+                                if !root.shipped-google-registration-present: VerticalLayout { width: 100%; spacing: Tokens.space-3;
+                                    Field { label: "Google client ID"; placeholder: "…apps.googleusercontent.com"; value <=> root.google-client-id; monospace: true; enabled: root.controls-enabled; edited(value) => { root.google-client-id-edited(value); } }
+                                    Field { label: "Google client secret"; value <=> root.google-client-secret; password: true; reveal-password: root.show-google-secret; monospace: true; enabled: root.controls-enabled; edited(value) => { root.google-client-secret-edited(value); } }
+                                    Checkbox { text: "Show secret"; checked <=> root.show-google-secret; enabled: root.controls-enabled; }
+                                    LinkButton { text: "Open Google Cloud console"; width: 100%; enabled: root.controls-enabled; clicked => { root.open-google-console(); } }
+                                    HelperText { text: "Create a Desktop OAuth client in Google Cloud and enable the Gmail API, then paste both values."; width: 100%; }
+                                }
+                                VerticalLayout { width: 100%; spacing: Tokens.space-1;
+                                    PrimaryButton { text: "Sign in & check inbox"; enabled: root.controls-enabled && root.can-check-mailbox; clicked => { root.check-mailbox(); } }
+                                    HelperText { text: "Opens Google sign-in in your browser. Checks access only; stores no mail."; width: 100%; }
+                                }
+                                VerticalLayout { width: 100%; spacing: Tokens.space-1;
+                                    for line in root.google-lines: WrappedText { text: line.text; text-color: line.succeeded ? Tokens.success : Tokens.warning; horizontal-stretch: 1; }
+                                    if !root.google-busy-line.is-empty: WrappedText { text: root.google-busy-line; text-color: Tokens.text-2; horizontal-stretch: 1; }
+                                }
                             }
                         }
                     }
@@ -249,8 +293,8 @@ export component SourcesScreen {
                         Text { text: "Scan scope and data sent to the model provider"; color: Tokens.text-1; font-size: Tokens.font-15; font-weight: 600; width: 100%; horizontal-alignment: left; horizontal-stretch: 1; }
                         HorizontalLayout { width: 100%; spacing: Tokens.space-6;
                             VerticalLayout { horizontal-stretch: 1; Text { text: "Window"; color: Tokens.text-2; font-size: Tokens.font-13; } WrappedText { text: "Last 30 days"; text-color: Tokens.text-1; weight: 600; } }
-                            VerticalLayout { horizontal-stretch: 1; Text { text: "Inbox / Sent Items"; color: Tokens.text-2; font-size: Tokens.font-13; } WrappedText { text: "Up to 100 messages per folder"; text-color: Tokens.text-1; weight: 600; } }
-                            VerticalLayout { horizontal-stretch: 1; Text { text: "Groups"; color: Tokens.text-2; font-size: Tokens.font-13; } WrappedText { text: "20 recent threads · 40 posts each"; text-color: Tokens.text-1; weight: 600; } }
+                            VerticalLayout { horizontal-stretch: 1; Text { text: root.mail-provider-index == 1 ? "Inbox / Sent" : "Inbox / Sent Items"; color: Tokens.text-2; font-size: Tokens.font-13; } WrappedText { text: "Up to 100 messages per folder"; text-color: Tokens.text-1; weight: 600; } }
+                            VerticalLayout { horizontal-stretch: 1; Text { text: "Groups"; color: Tokens.text-2; font-size: Tokens.font-13; } WrappedText { text: root.mail-provider-index == 1 ? "Microsoft only" : "20 recent threads · 40 posts each"; text-color: Tokens.text-1; weight: 600; } }
                             VerticalLayout { horizontal-stretch: 1; Text { text: "Sources"; color: Tokens.text-2; font-size: Tokens.font-13; } WrappedText { text: "At most 10 configured"; text-color: Tokens.text-1; weight: 600; } }
                         }
                         // B2: both sentences are the old egui build's wording verbatim

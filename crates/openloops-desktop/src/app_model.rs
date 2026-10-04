@@ -12,7 +12,9 @@ use crate::settings::{
     production_store,
 };
 use openloops_graph::live::{
-    ConnectionConfig, ConnectionError, ConnectionReport, MailProvider, clear_all_sessions,
+    AccountConfig, ConnectionConfig, ConnectionError, ConnectionReport, MailProvider,
+    clear_all_sessions,
+    google::GoogleConfig,
     registration,
     review::{LoadProgress, MailCache},
 };
@@ -69,7 +71,7 @@ pub(crate) enum Outcome {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Service {
-    Mailbox,
+    Mailbox(MailProvider),
     Model,
     Review,
 }
@@ -168,6 +170,30 @@ fn shared_registration_active_for(byo_field: &str, shipped: Option<&str>) -> boo
     byo_field.trim().is_empty() && shipped.is_some()
 }
 
+fn effective_google_registration_for(
+    byo_client_id: &str,
+    byo_client_secret: &str,
+    shipped: Option<(&str, &str)>,
+) -> Option<(String, Zeroizing<String>)> {
+    let client_id = byo_client_id.trim();
+    let client_secret = byo_client_secret.trim();
+    if !client_id.is_empty() && !client_secret.is_empty() {
+        Some((
+            client_id.to_owned(),
+            Zeroizing::new(client_secret.to_owned()),
+        ))
+    } else if client_id.is_empty() && client_secret.is_empty() {
+        shipped.map(|(client_id, client_secret)| {
+            (
+                client_id.to_owned(),
+                Zeroizing::new(client_secret.to_owned()),
+            )
+        })
+    } else {
+        None
+    }
+}
+
 impl AppModel {
     #[must_use]
     pub fn new() -> Self {
@@ -202,7 +228,7 @@ impl AppModel {
             model_status: Status::default(),
             decision_status: Status::default(),
             pending: None,
-            pending_service: Service::Mailbox,
+            pending_service: Service::Mailbox(MailProvider::Microsoft),
             progress: "",
             started: Instant::now(),
             store: None,
@@ -299,7 +325,7 @@ impl AppModel {
                 self.settings_status = Status {
                     lines: vec![
                         if existed {
-                            "Saved settings restored. Microsoft sign-in is still required."
+                            "Saved settings restored. Sign in again to load mail."
                         } else {
                             "Settings will save automatically on this Windows account."
                         }
@@ -423,7 +449,7 @@ impl AppModel {
             succeeded: false,
         };
         match self.pending_service {
-            Service::Mailbox => self.microsoft = status,
+            Service::Mailbox(provider) => *self.connection_status_mut(provider) = status,
             Service::Model => self.model_status = status,
             Service::Review => {
                 self.load_progress = None;
@@ -503,7 +529,7 @@ impl AppModel {
                 };
             }
             Outcome::Connection(provider, result) => {
-                *self.connection_status_mut(provider) = microsoft_status(result);
+                *self.connection_status_mut(provider) = connection_report_status(provider, result);
             }
             Outcome::Mail(Ok(sources)) => {
                 self.load_progress = None;
@@ -928,9 +954,40 @@ impl AppModel {
     /// the model owning any UI-nav state.
     #[must_use]
     pub fn ready_for_review(&self) -> bool {
-        self.effective_microsoft_client_id().is_some()
+        self.registration_present(self.active_mail_provider())
             && !self.active_key().is_empty()
             && !self.selected_model().is_empty()
+    }
+
+    fn registration_present(&self, provider: MailProvider) -> bool {
+        match provider {
+            MailProvider::Microsoft => self.effective_microsoft_client_id().is_some(),
+            MailProvider::Google => self.effective_google_registration().is_some(),
+        }
+    }
+
+    #[must_use]
+    pub fn active_mail_provider(&self) -> MailProvider {
+        self.mail_providers
+            .iter()
+            .next()
+            .copied()
+            .unwrap_or(MailProvider::Microsoft)
+    }
+
+    pub fn set_active_mail_provider(&mut self, provider: MailProvider) {
+        if self.mail_providers == BTreeSet::from([provider]) {
+            return;
+        }
+        self.mail_providers = BTreeSet::from([provider]);
+        clear_all_sessions();
+        self.clear_mail_cache();
+        self.microsoft = Status::default();
+        self.google = Status::default();
+        self.review = ReviewState::default();
+        self.review_status = Status::default();
+        self.pending_save = true;
+        let _ = self.persist_changes();
     }
 
     #[must_use]
@@ -950,6 +1007,39 @@ impl AppModel {
     }
 
     #[must_use]
+    pub fn effective_google_registration(&self) -> Option<(String, Zeroizing<String>)> {
+        effective_google_registration_for(
+            &self.google_client_id,
+            &self.google_client_secret,
+            registration::google().map(|value| (value.client_id, value.client_secret)),
+        )
+    }
+
+    /// Builds the selected provider's validated runtime configuration.
+    ///
+    /// # Errors
+    /// Returns [`ConnectionError::InvalidConfiguration`] when required
+    /// registration values are missing or malformed.
+    pub fn account_config(&self, provider: MailProvider) -> Result<AccountConfig, ConnectionError> {
+        match provider {
+            MailProvider::Microsoft => {
+                let client_id = self
+                    .effective_microsoft_client_id()
+                    .ok_or(ConnectionError::InvalidConfiguration)?;
+                ConnectionConfig::new(&client_id, Some(&self.shared))
+                    .and_then(|config| config.with_groups(Some(&self.groups)))
+                    .map(AccountConfig::Microsoft)
+            }
+            MailProvider::Google => {
+                let (client_id, client_secret) = self
+                    .effective_google_registration()
+                    .ok_or(ConnectionError::InvalidConfiguration)?;
+                GoogleConfig::new(&client_id, &client_secret).map(AccountConfig::Google)
+            }
+        }
+    }
+
+    #[must_use]
     pub fn admin_consent_url(&self) -> Option<String> {
         self.effective_microsoft_client_id()
             .map(|client_id| registration::microsoft_admin_consent_url(&client_id))
@@ -963,7 +1053,7 @@ impl AppModel {
         }
     }
 
-    fn connection_status_mut(&mut self, provider: MailProvider) -> &mut Status {
+    pub(crate) fn connection_status_mut(&mut self, provider: MailProvider) -> &mut Status {
         match provider {
             MailProvider::Microsoft => &mut self.microsoft,
             MailProvider::Google => &mut self.google,
@@ -1018,6 +1108,9 @@ impl AppModel {
     /// record carrying real (non-empty) ids has anything left to learn from
     /// Graph.
     pub(crate) fn dispatch_reminder_sync(&mut self) {
+        if self.active_mail_provider() != MailProvider::Microsoft {
+            return;
+        }
         let Some(analysis) = &self.review.analysis else {
             return;
         };
@@ -1188,7 +1281,10 @@ impl Default for AppModel {
     }
 }
 
-pub(crate) fn microsoft_status(result: Result<ConnectionReport, ConnectionError>) -> Status {
+pub(crate) fn connection_report_status(
+    provider: MailProvider,
+    result: Result<ConnectionReport, ConnectionError>,
+) -> Status {
     match result {
         Err(error) => Status {
             lines: vec![error.to_string()],
@@ -1201,16 +1297,20 @@ pub(crate) fn microsoft_status(result: Result<ConnectionReport, ConnectionError>
                 "Personal inbox: access not confirmed.".into()
             }];
             let mut succeeded = report.own_inbox_accessible;
-            for (kind, results) in [
-                ("Group inbox", report.group_inbox_results),
-                ("Shared mailbox", report.shared_inbox_results),
-            ] {
-                for (index, result) in results.into_iter().enumerate() {
-                    match result {
-                        Ok(()) => lines.push(format!("{kind} {}: access confirmed.", index + 1)),
-                        Err(error) => {
-                            lines.push(format!("{kind} {}: {error}", index + 1));
-                            succeeded = false;
+            if provider == MailProvider::Microsoft {
+                for (kind, results) in [
+                    ("Group inbox", report.group_inbox_results),
+                    ("Shared mailbox", report.shared_inbox_results),
+                ] {
+                    for (index, result) in results.into_iter().enumerate() {
+                        match result {
+                            Ok(()) => {
+                                lines.push(format!("{kind} {}: access confirmed.", index + 1));
+                            }
+                            Err(error) => {
+                                lines.push(format!("{kind} {}: {error}", index + 1));
+                                succeeded = false;
+                            }
                         }
                     }
                 }
@@ -1313,6 +1413,7 @@ mod tests {
     use openloops_inference::decision::DecisionCheckReport;
     use std::{
         cell::{Cell, RefCell},
+        collections::HashMap,
         rc::Rc,
     };
 
@@ -1607,12 +1708,28 @@ mod tests {
         let mut app = AppModel::new();
         let (sender, receiver) = mpsc::channel();
         app.pending = Some(receiver);
-        app.pending_service = Service::Mailbox;
+        app.pending_service = Service::Mailbox(MailProvider::Microsoft);
         drop(sender);
         app.poll(|| {});
         assert!(app.pending.is_none());
         assert!(!app.microsoft.lines.is_empty());
         assert!(app.model_status.lines.is_empty());
+    }
+
+    #[test]
+    fn disconnected_google_mailbox_worker_reports_on_google_status() {
+        let mut app = AppModel::with_store(Ok(None));
+        let (sender, receiver) = mpsc::channel();
+        app.pending = Some(receiver);
+        app.pending_service = Service::Mailbox(MailProvider::Google);
+        drop(sender);
+
+        assert!(app.poll(|| {}));
+        assert!(app.microsoft.lines.is_empty());
+        assert_eq!(
+            app.google.lines,
+            ["The operation stopped unexpectedly. Please try again."]
+        );
     }
 
     // Regression guard for the perf fix: the native adapter's busy-tick
@@ -1677,6 +1794,90 @@ mod tests {
             app.admin_consent_url()
                 .is_some_and(|url| url.contains("client_id=00000000-0000-4000-8000-000000000000"))
         );
+    }
+
+    #[test]
+    fn active_mail_provider_defaults_and_switch_persists_a_single_provider() {
+        let memory = MemoryStore::default();
+        let mut app = AppModel::with_store(Ok(Some(Box::new(memory.clone()))));
+        assert_eq!(app.active_mail_provider(), MailProvider::Microsoft);
+        app.client_id = "00000000-0000-4000-8000-000000000000".into();
+        app.groups = "group@example.invalid".into();
+        app.shared = "shared@example.invalid".into();
+        app.google_client_id = "123-synthetic.apps.googleusercontent.com".into();
+        app.google_client_secret = Zeroizing::new("synthetic-client-parameter".into());
+        app.review = crate::review_model::layout_fixture();
+        app.review.action_status = "Synthetic action status".into();
+        app.review_status = Status {
+            lines: vec!["Synthetic review status".into()],
+            succeeded: true,
+        };
+        app.mail_cache = Arc::new(HashMap::from([(
+            ("synthetic-account".into(), "synthetic-message".into()),
+            MailItem::default(),
+        )]));
+
+        app.set_active_mail_provider(MailProvider::Google);
+
+        assert_eq!(app.active_mail_provider(), MailProvider::Google);
+        assert_eq!(app.mail_providers, BTreeSet::from([MailProvider::Google]));
+        assert!(app.mail_cache.is_empty());
+        assert!(app.review.analysis.is_none());
+        assert!(app.review.action_status.is_empty());
+        assert!(app.review_status.lines.is_empty());
+        assert_eq!(app.client_id, "00000000-0000-4000-8000-000000000000");
+        assert_eq!(app.groups, "group@example.invalid");
+        assert_eq!(app.shared, "shared@example.invalid");
+        assert_eq!(
+            app.google_client_id,
+            "123-synthetic.apps.googleusercontent.com"
+        );
+        assert_eq!(&*app.google_client_secret, "synthetic-client-parameter");
+        assert_eq!(
+            memory.saved.borrow().as_ref().unwrap().mail_providers,
+            BTreeSet::from([MailProvider::Google])
+        );
+    }
+
+    #[test]
+    fn effective_google_registration_precedence_is_pure() {
+        let shipped = Some((
+            "123-shipped.apps.googleusercontent.com",
+            "synthetic-shipped-parameter",
+        ));
+        let byo = effective_google_registration_for(
+            " 456-byo.apps.googleusercontent.com ",
+            " synthetic-byo-parameter ",
+            shipped,
+        )
+        .unwrap();
+        assert_eq!(byo.0, "456-byo.apps.googleusercontent.com");
+        assert_eq!(&*byo.1, "synthetic-byo-parameter");
+
+        let shared = effective_google_registration_for("", " ", shipped).unwrap();
+        assert_eq!(shared.0, "123-shipped.apps.googleusercontent.com");
+        assert_eq!(&*shared.1, "synthetic-shipped-parameter");
+        assert!(effective_google_registration_for("", "", None).is_none());
+        assert!(
+            effective_google_registration_for("456-byo.apps.googleusercontent.com", "", shipped)
+                .is_none()
+        );
+        assert!(effective_google_registration_for("", "synthetic", shipped).is_none());
+    }
+
+    #[test]
+    fn google_account_config_requires_both_valid_synthetic_fields() {
+        let mut app = AppModel::with_store(Ok(None));
+        app.google_client_id = "123-synthetic.apps.googleusercontent.com".into();
+        assert!(matches!(
+            app.account_config(MailProvider::Google),
+            Err(ConnectionError::InvalidConfiguration)
+        ));
+        app.google_client_secret = Zeroizing::new("synthetic-client-parameter".into());
+        assert!(matches!(
+            app.account_config(MailProvider::Google),
+            Ok(AccountConfig::Google(_))
+        ));
     }
 
     #[test]
@@ -1919,15 +2120,33 @@ mod tests {
 
     #[test]
     fn group_failure_is_visible_and_does_not_mark_microsoft_ready() {
-        let status = microsoft_status(Ok(ConnectionReport {
-            own_inbox_accessible: true,
-            shared_scope: SharedScope::NotReported,
-            shared_inbox_results: vec![],
-            group_inbox_results: vec![Ok(()), Err(ConnectionError::AccessDenied), Ok(())],
-        }));
+        let status = connection_report_status(
+            MailProvider::Microsoft,
+            Ok(ConnectionReport {
+                own_inbox_accessible: true,
+                shared_scope: SharedScope::NotReported,
+                shared_inbox_results: vec![],
+                group_inbox_results: vec![Ok(()), Err(ConnectionError::AccessDenied), Ok(())],
+            }),
+        );
         assert!(!status.succeeded);
         assert_eq!(status.lines.len(), 4);
         assert!(status.lines[2].contains("HTTP 403"));
+    }
+
+    #[test]
+    fn google_connection_report_has_only_the_personal_inbox_line() {
+        let status = connection_report_status(
+            MailProvider::Google,
+            Ok(ConnectionReport {
+                own_inbox_accessible: true,
+                shared_scope: SharedScope::Granted,
+                shared_inbox_results: vec![Err(ConnectionError::AccessDenied)],
+                group_inbox_results: vec![Err(ConnectionError::AccessDenied)],
+            }),
+        );
+        assert!(status.succeeded);
+        assert_eq!(status.lines, ["Personal inbox: access confirmed."]);
     }
 
     #[test]
@@ -2143,6 +2362,17 @@ mod tests {
         let mut app = AppModel::new();
         // No analysis at all: nothing to check.
         app.dispatch_reminder_sync();
+        assert!(app.pending.is_none());
+    }
+
+    #[test]
+    fn dispatch_reminder_sync_is_a_noop_for_google() {
+        let mut app = AppModel::with_store(Ok(None));
+        app.review = crate::review_model::layout_fixture();
+        app.mail_providers = BTreeSet::from([MailProvider::Google]);
+
+        app.dispatch_reminder_sync();
+
         assert!(app.pending.is_none());
     }
 
