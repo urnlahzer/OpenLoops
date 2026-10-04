@@ -35,6 +35,8 @@ const TOKEN_TIMEOUT_SECONDS: u64 = 30;
 const GRAPH_TIMEOUT_SECONDS: u64 = 90;
 static CONNECTING: AtomicBool = AtomicBool::new(false);
 static SESSIONS: Mutex<[Option<Session>; 2]> = Mutex::new([None, None]);
+#[cfg(test)]
+static SESSION_TEST: Mutex<()> = Mutex::new(());
 
 pub(super) struct OAuthEndpoints {
     pub authorize: &'static str,
@@ -712,8 +714,6 @@ mod tests {
     use super::test_support::{routed_server, scripted_server};
     use super::*;
     const APP: &str = "11111111-1111-4111-8111-111111111111";
-    static SESSION_TEST: Mutex<()> = Mutex::new(());
-
     fn synthetic_session(scopes: BTreeSet<String>, lifetime: Duration) -> Session {
         Session {
             access_token: Secret::new("synthetic-token".to_owned()),

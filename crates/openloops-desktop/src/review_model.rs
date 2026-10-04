@@ -46,6 +46,7 @@ pub(crate) fn reset_card_contexts_call_count() {
 
 pub(crate) struct ReminderDraft {
     pub(crate) key: [u8; 32],
+    pub(crate) provider: MailProvider,
     pub(crate) account: String,
     pub(crate) title: String,
     pub(crate) when: String,
@@ -1079,7 +1080,7 @@ impl ReviewState {
         )
     }
 
-    /// Still-open, reminder-bearing decisions eligible for a To Do sync
+    /// Still-open, reminder-bearing decisions eligible for a reminder sync
     /// right now: a `Mine`/`Watching`/`Review` decision with a
     /// `Reminder::Created` record carrying real (non-empty) ids, matched
     /// back to the account that carries evidence for it. `cards` is the
@@ -1087,15 +1088,15 @@ impl ReviewState {
     /// recomputed here so a caller that already has it (every `sync`/
     /// `sync_review` pass) never pays for a second HMAC fingerprint pass
     /// just to learn how many cards are eligible. Shared by
-    /// `AppModel::dispatch_reminder_sync` (the actual Graph call) and
-    /// `AppModel::reminder_sync_eligible_count` (the Review toolbar's "Sync
-    /// To Do" button), so the two can never disagree about what counts as
+    /// `AppModel::dispatch_reminder_sync` (the actual provider calls) and
+    /// `AppModel::reminder_sync_eligible_count` (the Review toolbar's sync
+    /// button), so the two can never disagree about what counts as
     /// eligible.
     pub(crate) fn reminder_sync_checks(
         &self,
         items: &[LoopItem],
         cards: &[Option<CardContext>],
-    ) -> Vec<(String, [u8; 32], String, String)> {
+    ) -> Vec<(MailProvider, String, [u8; 32], String, String)> {
         items
             .iter()
             .zip(cards.iter())
@@ -1108,7 +1109,7 @@ impl ReviewState {
                     return None;
                 }
                 let Reminder::Created {
-                    provider: MailProvider::Microsoft,
+                    provider,
                     list_id,
                     task_id,
                 } = &card.record.reminder
@@ -1123,6 +1124,7 @@ impl ReviewState {
                     .iter()
                     .find(|m| m.input.handle == item.evidence.message)?;
                 Some((
+                    *provider,
                     source.account.clone(),
                     card.record.key,
                     list_id.clone(),
@@ -1875,6 +1877,7 @@ pub fn layout_fixture() -> ReviewState {
     });
     state.draft = Some(ReminderDraft {
         key: second_key,
+        provider: MailProvider::Microsoft,
         account: "synthetic".into(),
         title: "Confirm who will send the team budget".into(),
         when: default_reminder(),
@@ -2870,7 +2873,7 @@ mod tests {
     }
 
     #[test]
-    fn google_reminders_are_not_eligible_for_microsoft_sync() {
+    fn reminder_sync_checks_keep_and_group_provider_provenance() {
         let mut state = layout_fixture();
         let record = state
             .decisions
@@ -2885,7 +2888,42 @@ mod tests {
 
         let items = &state.analysis.as_ref().unwrap().items;
         let cards = state.card_contexts(items);
-        assert!(state.reminder_sync_checks(items, &cards).is_empty());
+        let checks = state.reminder_sync_checks(items, &cards);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].0, MailProvider::Google);
+    }
+
+    #[test]
+    fn reminder_sync_checks_carry_each_provider_when_both_have_records() {
+        let mut state = layout_fixture();
+        let items = state.analysis.as_ref().unwrap().items.clone();
+        let cards = state.card_contexts(&items);
+        let second = cards[1].as_ref().unwrap().record.key;
+        state.apply_decision_change(
+            second,
+            Decision::Mine,
+            Reminder::Created {
+                provider: MailProvider::Google,
+                list_id: "synthetic-list".into(),
+                task_id: "synthetic-task".into(),
+            },
+        );
+        let cards = state.card_contexts(&items);
+        let checks = state.reminder_sync_checks(&items, &cards);
+        let mut providers = checks
+            .iter()
+            .map(|(provider, _, key, list_id, _)| (*provider, *key, list_id.clone()))
+            .collect::<Vec<_>>();
+        providers.sort();
+        assert_eq!(providers.len(), 2);
+        assert!(
+            providers
+                .iter()
+                .any(|(provider, _, _)| *provider == MailProvider::Microsoft)
+        );
+        assert!(providers.iter().any(|(provider, key, list_id)| {
+            *provider == MailProvider::Google && *key == second && list_id == "synthetic-list"
+        }));
     }
 
     #[test]
@@ -2955,6 +2993,7 @@ mod tests {
         state.decisions.records = vec![record];
         state.draft = Some(ReminderDraft {
             key,
+            provider: source.provider,
             account: source.account.clone(),
             title: item.action.clone(),
             when: default_reminder(),
@@ -3347,6 +3386,7 @@ mod tests {
         let mut state = ReviewState {
             draft: Some(ReminderDraft {
                 key: [7; 32],
+                provider: MailProvider::Microsoft,
                 account: "acct".into(),
                 title: "Send the draft".into(),
                 when: "2026-09-08 09:00".into(),

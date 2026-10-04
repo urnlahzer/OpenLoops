@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
 use super::google::GoogleConfig;
+use super::reminders::{
+    ReminderCompletionOutcome, ReminderOutcome, ReminderRequest, TaskStatusOutcome,
+};
 use super::review::{LoadProgress, MailCache, SourceReview};
 use super::{ConnectionConfig, ConnectionError, ConnectionReport};
 
@@ -80,6 +83,51 @@ impl MailProvider {
 pub enum AccountConfig {
     Microsoft(ConnectionConfig),
     Google(GoogleConfig),
+}
+
+#[must_use]
+pub fn create_reminder(account: &AccountConfig, request: &ReminderRequest) -> ReminderOutcome {
+    if account.provider() != request.provider {
+        return ReminderOutcome::NotCreated(super::reminders::ReminderFailure::InvalidDraft);
+    }
+    match account {
+        AccountConfig::Microsoft(config) => super::reminders::create(config, request),
+        AccountConfig::Google(config) => super::google::tasks::create(config, request),
+    }
+}
+
+#[must_use]
+pub fn complete_reminder(
+    account: &AccountConfig,
+    identity: &str,
+    list_id: &str,
+    task_id: &str,
+) -> ReminderCompletionOutcome {
+    match account {
+        AccountConfig::Microsoft(config) => {
+            super::reminders::complete(config, identity, list_id, task_id)
+        }
+        AccountConfig::Google(config) => {
+            super::google::tasks::complete(config, identity, list_id, task_id)
+        }
+    }
+}
+
+#[must_use]
+pub fn reminder_status(
+    account: &AccountConfig,
+    identity: &str,
+    list_id: &str,
+    task_id: &str,
+) -> TaskStatusOutcome {
+    match account {
+        AccountConfig::Microsoft(config) => {
+            super::reminders::check_status(config, identity, list_id, task_id)
+        }
+        AccountConfig::Google(config) => {
+            super::google::tasks::check_status(config, identity, list_id, task_id)
+        }
+    }
 }
 
 impl AccountConfig {
@@ -175,6 +223,46 @@ mod tests {
         );
         assert!(
             !MailProvider::Google.is_trusted_message_link("https://mail.google.com.evil.example/")
+        );
+    }
+
+    #[test]
+    fn reminder_requests_for_the_other_provider_are_rejected_without_network() {
+        use super::super::reminders::{ReminderFailure, ReminderRequest};
+        let request = |provider| ReminderRequest {
+            provider,
+            account: "synthetic-account".into(),
+            title: "Review the draft".into(),
+            at_utc: 4_000_000_000,
+            marker: "a".repeat(64),
+        };
+        let microsoft =
+            || ConnectionConfig::new("11111111-1111-4111-8111-111111111111", None).unwrap();
+        let google = || {
+            GoogleConfig::new("123-synthetic.apps.googleusercontent.com", "fixture-secret").unwrap()
+        };
+        let rejected = ReminderOutcome::NotCreated(ReminderFailure::InvalidDraft);
+        assert_eq!(
+            create_reminder(
+                &AccountConfig::Google(google()),
+                &request(MailProvider::Microsoft)
+            ),
+            rejected
+        );
+        assert_eq!(
+            create_reminder(
+                &AccountConfig::Microsoft(microsoft()),
+                &request(MailProvider::Google)
+            ),
+            rejected
+        );
+        assert_eq!(
+            super::super::google::tasks::create(&google(), &request(MailProvider::Microsoft)),
+            rejected
+        );
+        assert_eq!(
+            super::super::reminders::create(&microsoft(), &request(MailProvider::Google)),
+            rejected
         );
     }
 

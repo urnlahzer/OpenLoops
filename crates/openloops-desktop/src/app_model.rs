@@ -1,11 +1,12 @@
 //! Toolkit-free setup/connection state: job start/poll machinery, saved
 //! settings, and provider/account pure logic used by the native adapter.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, atomic::Ordering};
 use std::time::Instant;
 
 use crate::claim_view::LoopItem;
+use crate::loop_state::Reminder;
 use crate::review_model::{CardContext, ConversationKey, ReviewState};
 use crate::settings::{
     ExtractionBackend, OllamaPlan, Provider, Settings, SettingsError, SettingsStore, max_parallel,
@@ -54,7 +55,11 @@ pub(crate) enum Outcome {
         conversations: BTreeSet<ConversationKey>,
         new_messages: usize,
     },
-    Reminder([u8; 32], openloops_graph::live::reminders::ReminderOutcome),
+    Reminder(
+        [u8; 32],
+        MailProvider,
+        openloops_graph::live::reminders::ReminderOutcome,
+    ),
     ReminderCompletion(
         [u8; 32],
         openloops_graph::live::reminders::ReminderCompletionOutcome,
@@ -480,8 +485,8 @@ impl AppModel {
         };
         self.pending = None;
         match outcome {
-            Outcome::Reminder(key, outcome) => {
-                self.reminder_outcome(key, outcome);
+            Outcome::Reminder(key, provider, outcome) => {
+                self.reminder_outcome(key, provider, outcome);
             }
             Outcome::ReminderCompletion(key, outcome) => {
                 self.reminder_completion_outcome(key, outcome);
@@ -773,15 +778,16 @@ impl AppModel {
     fn reminder_outcome(
         &mut self,
         key: [u8; 32],
+        provider: MailProvider,
         outcome: openloops_graph::live::reminders::ReminderOutcome,
     ) {
         use crate::loop_state::{Reminder, now};
         use openloops_graph::live::reminders::ReminderOutcome;
         let mut record = self.review.decisions.get(&key);
         let (text, outcome_succeeded)=match outcome {
-            ReminderOutcome::Created{list_id,task_id}=>{record.reminder=Reminder::Created{provider: MailProvider::Microsoft,list_id,task_id}; ("Reminder created in your Microsoft To Do Tasks list.".to_owned(), true)},
-            ReminderOutcome::NotCreated(reason)=>{record.reminder=Reminder::None;(format!("No reminder was created: {reason}"), false)},
-            ReminderOutcome::Uncertain=>("Microsoft did not confirm the write. Check To Do before trying again; OpenLoops will not automatically retry.".to_owned(), false),
+            ReminderOutcome::Created{provider,list_id,task_id}=>{record.reminder=Reminder::Created{provider,list_id,task_id}; (match provider { MailProvider::Microsoft => "Reminder created in your Microsoft To Do Tasks list.".to_owned(), MailProvider::Google => "Reminder created in your Google Tasks default list.".to_owned() }, true)},
+            ReminderOutcome::NotCreated(reason)=>{record.reminder=Reminder::None;(format!("No reminder was created: {}", reason.describe(provider)), false)},
+            ReminderOutcome::Uncertain=>(match provider { MailProvider::Microsoft => "Microsoft did not confirm the write. Check To Do before trying again; OpenLoops will not automatically retry.".to_owned(), MailProvider::Google => "Google did not confirm the write. Check Google Tasks before trying again; OpenLoops will not automatically retry.".to_owned() }, false),
         };
         record.updated = now();
         let saved = self.review.decisions.update(record);
@@ -792,42 +798,56 @@ impl AppModel {
         };
     }
 
-    /// Reports whether the already-Handled card's linked To Do task was also
+    /// Reports whether the already-Handled card's linked task was also
     /// marked complete. Never reverts the local `Done` decision or the
     /// `Reminder::Created` record on failure -- see `reminders::complete()`'s
     /// doc comment -- so this only ever updates the status line, distinct
     /// from `reminder_outcome`, which can revert a reminder to `None`.
     fn reminder_completion_outcome(
         &mut self,
-        _key: [u8; 32],
+        key: [u8; 32],
         outcome: openloops_graph::live::reminders::ReminderCompletionOutcome,
     ) {
         use openloops_graph::live::reminders::ReminderCompletionOutcome;
+        let provider = match self.review.decisions.get(&key).reminder {
+            Reminder::Created { provider, .. } | Reminder::Completed { provider, .. } => provider,
+            Reminder::None | Reminder::Attempted => MailProvider::Microsoft,
+        };
         self.review.action_status = match outcome {
             ReminderCompletionOutcome::Completed => {
-                "Decision saved on this Windows account. The linked Microsoft To Do task was also marked complete.".to_owned()
+                format!(
+                    "Decision saved on this Windows account. The linked {} task was also marked complete.",
+                    provider.tasks_name()
+                )
             }
             ReminderCompletionOutcome::NotCompleted(error) => {
                 format!(
-                    "Decision saved on this Windows account. The linked Microsoft To Do task was not marked complete: {error}"
+                    "Decision saved on this Windows account. The linked {} task was not marked complete: {error}",
+                    provider.tasks_name()
                 )
             }
-            ReminderCompletionOutcome::Uncertain => {
-                "Decision saved on this Windows account. Microsoft did not confirm the To Do task was marked complete; check it there.".to_owned()
-            }
+            ReminderCompletionOutcome::Uncertain => match provider {
+                MailProvider::Microsoft => {
+                    "Decision saved on this Windows account. Microsoft did not confirm the To Do task was marked complete; check it there.".to_owned()
+                }
+                MailProvider::Google => {
+                    "Decision saved on this Windows account. Google did not confirm the Google Tasks task was marked complete; check it there.".to_owned()
+                }
+            },
         };
         self.review.action_status_succeeded =
             matches!(outcome, ReminderCompletionOutcome::Completed);
     }
 
     /// Applies the reverse direction of `reminder_completion_outcome`: a
-    /// task the user completed directly in Microsoft To Do, discovered by
+    /// task the user completed directly in Microsoft To Do or Google Tasks,
+    /// discovered by
     /// `dispatch_reminder_sync`, marks its loop Handled in `OpenLoops`.
     /// `NotCompleted`/`Unknown` results change nothing -- a task that's
     /// still open, or one `OpenLoops` simply couldn't check this time, is not
     /// evidence of anything; `Reminder::Completed` (rather than leaving it
     /// `Created`) is what lets `status_pill_hint` say this loop was closed
-    /// by the To Do task specifically, not by the user clicking Handled.
+    /// by the linked task specifically, not by the user clicking Handled.
     fn reminder_sync_outcome(
         &mut self,
         results: Vec<(
@@ -838,6 +858,7 @@ impl AppModel {
         use crate::loop_state::{Decision, Reminder};
         use openloops_graph::live::reminders::TaskStatusOutcome;
         let mut completed = 0usize;
+        let mut providers = BTreeSet::new();
         for (key, outcome) in results {
             if !matches!(outcome, TaskStatusOutcome::Completed) {
                 continue;
@@ -860,11 +881,16 @@ impl AppModel {
             record.updated = crate::loop_state::now();
             if self.review.decisions.update(record).is_ok() {
                 completed += 1;
+                providers.insert(provider);
             }
         }
         if completed > 0 {
+            let linked = match (providers.len(), providers.first()) {
+                (1, Some(provider)) => format!("linked {} task", provider.tasks_name()),
+                _ => "linked task".to_owned(),
+            };
             self.review.scan_errors.push(format!(
-                "{completed} loop(s) marked handled because their linked Microsoft To Do task was already completed."
+                "{completed} loop(s) marked handled because their {linked} was already completed."
             ));
         }
     }
@@ -1039,6 +1065,28 @@ impl AppModel {
         }
     }
 
+    /// Builds the configuration for a reminder write or check. Microsoft
+    /// reminders use the personal To Do list only, so the configuration has
+    /// no shared mailbox and no groups (those inputs are for mail loading).
+    ///
+    /// # Errors
+    /// Returns [`ConnectionError::InvalidConfiguration`] when required
+    /// registration values are missing or malformed.
+    pub fn reminder_account_config(
+        &self,
+        provider: MailProvider,
+    ) -> Result<AccountConfig, ConnectionError> {
+        match provider {
+            MailProvider::Microsoft => {
+                let client_id = self
+                    .effective_microsoft_client_id()
+                    .ok_or(ConnectionError::InvalidConfiguration)?;
+                ConnectionConfig::new(&client_id, None).map(AccountConfig::Microsoft)
+            }
+            MailProvider::Google => self.account_config(MailProvider::Google),
+        }
+    }
+
     #[must_use]
     pub fn admin_consent_url(&self) -> Option<String> {
         self.effective_microsoft_client_id()
@@ -1095,7 +1143,7 @@ impl AppModel {
     }
 
     /// After a scan, checks whether any still-open, reminder-bearing
-    /// decision's linked Microsoft To Do task was completed outside
+    /// decision's linked Microsoft To Do or Google Tasks task was completed outside
     /// `OpenLoops` -- the reverse direction of `on_review_decision`'s
     /// complete-on-Handled hook (`slint_review.rs`). Runs after
     /// `Outcome::Scan` rather than before the mail download, because
@@ -1106,39 +1154,33 @@ impl AppModel {
     /// way to recover it. A no-op when nothing is eligible: only a
     /// `Mine`/`Watching`/`Review` decision with a `Reminder::Created`
     /// record carrying real (non-empty) ids has anything left to learn from
-    /// Graph.
+    /// its provider.
     pub(crate) fn dispatch_reminder_sync(&mut self) {
-        if self.active_mail_provider() != MailProvider::Microsoft {
+        let jobs = self.reminder_sync_jobs();
+        if jobs.is_empty() {
             return;
         }
-        let Some(analysis) = &self.review.analysis else {
-            return;
-        };
-        let items = analysis.items.clone();
-        let cards = self.review.card_contexts(&items);
-        let checks = self.review.reminder_sync_checks(&items, &cards);
-        if checks.is_empty() {
-            return;
-        }
-        let Some(client_id) = self.effective_microsoft_client_id() else {
-            return;
-        };
-        let Ok(config) = ConnectionConfig::new(&client_id, None) else {
-            return;
-        };
+        let providers = jobs
+            .iter()
+            .map(|(config, _)| config.provider())
+            .collect::<BTreeSet<_>>();
         self.start(
             Service::Review,
-            "Checking Microsoft To Do for completed reminders",
+            reminder_sync_job_label(&providers),
             move || {
-                let results = checks
+                let results = jobs
                     .into_iter()
-                    .map(|(account, key, list_id, task_id)| {
-                        (
-                            key,
-                            openloops_graph::live::reminders::check_status(
-                                &config, &account, &list_id, &task_id,
-                            ),
-                        )
+                    .flat_map(|(config, checks)| {
+                        checks
+                            .into_iter()
+                            .map(move |(account, key, list_id, task_id)| {
+                                (
+                                    key,
+                                    openloops_graph::live::provider::reminder_status(
+                                        &config, &account, &list_id, &task_id,
+                                    ),
+                                )
+                            })
                     })
                     .collect();
                 Outcome::ReminderSync(results)
@@ -1259,12 +1301,58 @@ impl AppModel {
         };
     }
 
-    /// How many still-open, reminder-bearing decisions a "Sync To Do" click
+    /// The reminder status checks `dispatch_reminder_sync` would run, grouped
+    /// by provider (Microsoft first), each with its reminder configuration.
+    /// A provider whose configuration is missing or invalid is left out.
+    pub(crate) fn reminder_sync_jobs(&self) -> Vec<(AccountConfig, Vec<ReminderSyncCheck>)> {
+        let Some(analysis) = &self.review.analysis else {
+            return Vec::new();
+        };
+        let items = &analysis.items;
+        let cards = self.review.card_contexts(items);
+        let mut grouped = BTreeMap::<MailProvider, Vec<_>>::new();
+        for (provider, account, key, list_id, task_id) in
+            self.review.reminder_sync_checks(items, &cards)
+        {
+            grouped
+                .entry(provider)
+                .or_default()
+                .push((account, key, list_id, task_id));
+        }
+        grouped
+            .into_iter()
+            .filter_map(|(provider, checks)| {
+                self.reminder_account_config(provider)
+                    .ok()
+                    .map(|config| (config, checks))
+            })
+            .collect()
+    }
+
+    /// The providers of the reminder records a sync-button click would check.
+    #[must_use]
+    pub(crate) fn reminder_sync_providers(
+        &self,
+        cards: &[Option<CardContext>],
+    ) -> BTreeSet<MailProvider> {
+        self.review
+            .analysis
+            .as_ref()
+            .map_or_else(BTreeSet::new, |analysis| {
+                self.review
+                    .reminder_sync_checks(&analysis.items, cards)
+                    .into_iter()
+                    .map(|(provider, ..)| provider)
+                    .collect()
+            })
+    }
+
+    /// How many still-open, reminder-bearing decisions a sync-button click
     /// would check right now, given `cards` the caller already computed
     /// (typically the same `card_contexts` result a `sync`/`sync_review`
     /// pass already built) -- see `ReviewState::reminder_sync_checks`.
     /// Drives the Review toolbar button's enabled state and its "Checking N
-    /// To Do task(s)..." status line. Never calls `card_contexts` itself.
+    /// ... task(s)..." status line. Never calls `card_contexts` itself.
     #[must_use]
     pub(crate) fn reminder_sync_eligible_count(&self, cards: &[Option<CardContext>]) -> usize {
         self.review.analysis.as_ref().map_or(0, |analysis| {
@@ -1278,6 +1366,21 @@ impl AppModel {
 impl Default for AppModel {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// One reminder status check: account, decision key, list id, task id.
+pub(crate) type ReminderSyncCheck = (String, [u8; 32], String, String);
+
+/// The progress label for a reminder sync over `providers`.
+pub(crate) fn reminder_sync_job_label(providers: &BTreeSet<MailProvider>) -> &'static str {
+    match (
+        providers.contains(&MailProvider::Microsoft),
+        providers.contains(&MailProvider::Google),
+    ) {
+        (true, true) => "Checking reminders for completed tasks",
+        (false, true) => "Checking Google Tasks for completed reminders",
+        _ => "Checking Microsoft To Do for completed reminders",
     }
 }
 
@@ -2365,15 +2468,226 @@ mod tests {
         assert!(app.pending.is_none());
     }
 
+    fn set_fixture_reminder(app: &mut AppModel, card: usize, provider: MailProvider) {
+        use crate::loop_state::{Decision, Record, now};
+        let items = app.review.analysis.as_ref().unwrap().items.clone();
+        let cards = app.review.card_contexts(&items);
+        let key = cards[card].as_ref().unwrap().record.key;
+        app.review
+            .decisions
+            .update(Record {
+                key,
+                decision: Decision::Mine,
+                reminder: Reminder::Created {
+                    provider,
+                    list_id: format!("synthetic-list-{card}"),
+                    task_id: format!("synthetic-task-{card}"),
+                },
+                updated: now(),
+            })
+            .unwrap();
+    }
+
+    fn reminder_registrations(app: &mut AppModel) {
+        app.client_id = "00000000-0000-4000-8000-000000000000".into();
+        app.google_client_id = "123-synthetic.apps.googleusercontent.com".into();
+        app.google_client_secret = Zeroizing::new("synthetic-client-parameter".into());
+    }
+
+    // The planner is tested rather than `dispatch_reminder_sync` itself:
+    // starting the job would run a real browser sign-in on a worker thread.
     #[test]
-    fn dispatch_reminder_sync_is_a_noop_for_google() {
+    fn google_reminder_with_valid_google_config_plans_one_sync_job() {
+        let mut app = AppModel::with_store(Ok(None));
+        reminder_registrations(&mut app);
+        app.review = crate::review_model::layout_fixture();
+        set_fixture_reminder(&mut app, 0, MailProvider::Google);
+
+        let jobs = app.reminder_sync_jobs();
+
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].0.provider(), MailProvider::Google);
+        assert_eq!(jobs[0].1.len(), 1);
+        assert_eq!(
+            reminder_sync_job_label(&BTreeSet::from([MailProvider::Google])),
+            "Checking Google Tasks for completed reminders"
+        );
+    }
+
+    #[test]
+    fn microsoft_and_google_reminders_plan_two_sync_groups() {
+        let mut app = AppModel::with_store(Ok(None));
+        reminder_registrations(&mut app);
+        app.review = crate::review_model::layout_fixture();
+        set_fixture_reminder(&mut app, 0, MailProvider::Microsoft);
+        set_fixture_reminder(&mut app, 1, MailProvider::Google);
+
+        let jobs = app.reminder_sync_jobs();
+
+        let providers = jobs
+            .iter()
+            .map(|(config, checks)| (config.provider(), checks.len()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            providers,
+            vec![(MailProvider::Microsoft, 1), (MailProvider::Google, 1)]
+        );
+    }
+
+    #[test]
+    fn reminder_sync_job_label_names_the_providers_checked() {
+        assert_eq!(
+            reminder_sync_job_label(&BTreeSet::from([MailProvider::Microsoft])),
+            "Checking Microsoft To Do for completed reminders"
+        );
+        assert_eq!(
+            reminder_sync_job_label(&BTreeSet::from([MailProvider::Google])),
+            "Checking Google Tasks for completed reminders"
+        );
+        assert_eq!(
+            reminder_sync_job_label(&BTreeSet::from([
+                MailProvider::Microsoft,
+                MailProvider::Google
+            ])),
+            "Checking reminders for completed tasks"
+        );
+    }
+
+    #[test]
+    fn microsoft_reminder_config_ignores_mail_loading_shared_and_group_inputs() {
+        let mut app = AppModel::with_store(Ok(None));
+        reminder_registrations(&mut app);
+        app.shared = "not a mailbox".into();
+        app.groups = "not a group".into();
+        assert!(app.account_config(MailProvider::Microsoft).is_err());
+        assert!(app.reminder_account_config(MailProvider::Microsoft).is_ok());
+        assert!(app.reminder_account_config(MailProvider::Google).is_ok());
+    }
+
+    #[test]
+    fn reminder_completion_copy_is_per_provider() {
+        use openloops_graph::live::reminders::ReminderCompletionOutcome;
         let mut app = AppModel::with_store(Ok(None));
         app.review = crate::review_model::layout_fixture();
-        app.mail_providers = BTreeSet::from([MailProvider::Google]);
+        set_fixture_reminder(&mut app, 0, MailProvider::Microsoft);
+        set_fixture_reminder(&mut app, 1, MailProvider::Google);
+        let items = app.review.analysis.as_ref().unwrap().items.clone();
+        let cards = app.review.card_contexts(&items);
+        let microsoft = cards[0].as_ref().unwrap().record.key;
+        let google = cards[1].as_ref().unwrap().record.key;
+        let cases = [
+            (
+                microsoft,
+                ReminderCompletionOutcome::Completed,
+                "Decision saved on this Windows account. The linked Microsoft To Do task was also marked complete.".to_owned(),
+            ),
+            (
+                microsoft,
+                ReminderCompletionOutcome::NotCompleted(ConnectionError::NotFound),
+                format!(
+                    "Decision saved on this Windows account. The linked Microsoft To Do task was not marked complete: {}",
+                    ConnectionError::NotFound
+                ),
+            ),
+            (
+                microsoft,
+                ReminderCompletionOutcome::Uncertain,
+                "Decision saved on this Windows account. Microsoft did not confirm the To Do task was marked complete; check it there.".to_owned(),
+            ),
+            (
+                google,
+                ReminderCompletionOutcome::Completed,
+                "Decision saved on this Windows account. The linked Google Tasks task was also marked complete.".to_owned(),
+            ),
+            (
+                google,
+                ReminderCompletionOutcome::NotCompleted(ConnectionError::NotFound),
+                format!(
+                    "Decision saved on this Windows account. The linked Google Tasks task was not marked complete: {}",
+                    ConnectionError::NotFound
+                ),
+            ),
+            (
+                google,
+                ReminderCompletionOutcome::Uncertain,
+                "Decision saved on this Windows account. Google did not confirm the Google Tasks task was marked complete; check it there.".to_owned(),
+            ),
+        ];
+        for (key, outcome, expected) in cases {
+            app.reminder_completion_outcome(key, outcome);
+            assert_eq!(app.review.action_status, expected);
+        }
+    }
 
-        app.dispatch_reminder_sync();
+    #[test]
+    fn reminder_create_success_and_uncertain_copy_is_per_provider() {
+        use openloops_graph::live::reminders::ReminderOutcome;
+        let mut app = AppModel::with_store(Ok(None));
+        app.reminder_outcome(
+            [9_u8; 32],
+            MailProvider::Microsoft,
+            ReminderOutcome::Created {
+                provider: MailProvider::Microsoft,
+                list_id: "synthetic-list".into(),
+                task_id: "synthetic-task".into(),
+            },
+        );
+        assert_eq!(
+            app.review.action_status,
+            "Reminder created in your Microsoft To Do Tasks list."
+        );
+        app.reminder_outcome(
+            [10_u8; 32],
+            MailProvider::Microsoft,
+            ReminderOutcome::Uncertain,
+        );
+        assert_eq!(
+            app.review.action_status,
+            "Microsoft did not confirm the write. Check To Do before trying again; OpenLoops will not automatically retry."
+        );
+        app.reminder_outcome(
+            [11_u8; 32],
+            MailProvider::Google,
+            ReminderOutcome::Uncertain,
+        );
+        assert_eq!(
+            app.review.action_status,
+            "Google did not confirm the write. Check Google Tasks before trying again; OpenLoops will not automatically retry."
+        );
+    }
 
-        assert!(app.pending.is_none());
+    #[test]
+    fn reminder_sync_outcome_copy_is_per_provider() {
+        use openloops_graph::live::reminders::TaskStatusOutcome;
+        for (providers, expected) in [
+            (
+                vec![MailProvider::Microsoft],
+                "1 loop(s) marked handled because their linked Microsoft To Do task was already completed.",
+            ),
+            (
+                vec![MailProvider::Google],
+                "1 loop(s) marked handled because their linked Google Tasks task was already completed.",
+            ),
+            (
+                vec![MailProvider::Microsoft, MailProvider::Google],
+                "2 loop(s) marked handled because their linked task was already completed.",
+            ),
+        ] {
+            let mut app = AppModel::with_store(Ok(None));
+            app.review = crate::review_model::layout_fixture();
+            let items = app.review.analysis.as_ref().unwrap().items.clone();
+            let mut results = Vec::new();
+            for (card, provider) in providers.iter().enumerate() {
+                set_fixture_reminder(&mut app, card, *provider);
+                let cards = app.review.card_contexts(&items);
+                results.push((
+                    cards[card].as_ref().unwrap().record.key,
+                    TaskStatusOutcome::Completed,
+                ));
+            }
+            app.reminder_sync_outcome(results);
+            assert_eq!(app.review.scan_errors.last().unwrap(), expected);
+        }
     }
 
     #[test]
@@ -2411,10 +2725,51 @@ mod tests {
             let mut app = AppModel::with_store(Ok(None));
             let mut key = [0_u8; 32];
             key[0] = u8::try_from(index).unwrap();
-            app.reminder_outcome(key, ReminderOutcome::NotCreated(reason));
+            app.reminder_outcome(
+                key,
+                MailProvider::Microsoft,
+                ReminderOutcome::NotCreated(reason),
+            );
             assert_eq!(app.review.action_status, expected);
             assert!(!app.review.action_status_succeeded);
         }
+    }
+
+    #[test]
+    fn google_reminder_outcomes_use_google_copy_and_preserve_provider() {
+        use openloops_graph::live::reminders::{ReminderFailure, ReminderOutcome};
+        let mut app = AppModel::with_store(Ok(None));
+        let created_key = [7_u8; 32];
+        app.reminder_outcome(
+            created_key,
+            MailProvider::Google,
+            ReminderOutcome::Created {
+                provider: MailProvider::Google,
+                list_id: "synthetic-list".into(),
+                task_id: "synthetic-task".into(),
+            },
+        );
+        assert_eq!(
+            app.review.action_status,
+            "Reminder created in your Google Tasks default list."
+        );
+        assert!(matches!(
+            app.review.decisions.get(&created_key).reminder,
+            Reminder::Created {
+                provider: MailProvider::Google,
+                ..
+            }
+        ));
+
+        app.reminder_outcome(
+            [8_u8; 32],
+            MailProvider::Google,
+            ReminderOutcome::NotCreated(ReminderFailure::DefaultListNotFound),
+        );
+        assert_eq!(
+            app.review.action_status,
+            "No reminder was created: Google Tasks did not return a default list for this account. Open Google Tasks once, then try again."
+        );
     }
 
     #[test]

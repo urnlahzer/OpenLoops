@@ -2,6 +2,7 @@
 
 pub mod gmail;
 mod mime;
+pub mod tasks;
 
 use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
