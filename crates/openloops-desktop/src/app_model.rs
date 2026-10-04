@@ -13,11 +13,11 @@ use crate::settings::{
     production_store,
 };
 use openloops_graph::live::{
-    AccountConfig, ConnectionConfig, ConnectionError, ConnectionReport, MailProvider,
-    clear_all_sessions,
+    AccountConfig, ConnectionConfig, ConnectionError, ConnectionReport, MailProvider, ProviderLoad,
+    clear_all_sessions, clear_session_for,
     google::GoogleConfig,
     registration,
-    review::{LoadProgress, MailCache},
+    review::{LoadProgress, MailCache, SourceReview},
 };
 use openloops_inference::decision::DecisionCheckReport;
 use openloops_inference::ollama::suggested_model;
@@ -31,17 +31,17 @@ pub(crate) enum Outcome {
     ZdrModels(Result<Vec<ModelChoice>, ProviderError>),
     Generation(Result<(), ProviderError>),
     DecisionCheck(Result<DecisionCheckReport, ProviderError>),
-    Mail(Result<Vec<openloops_graph::live::review::SourceReview>, ConnectionError>),
+    Mail(Vec<ProviderLoad>),
     CheckMail {
-        sources: Result<Vec<openloops_graph::live::review::SourceReview>, ConnectionError>,
+        loads: Vec<ProviderLoad>,
     },
     Scan(
         Result<crate::review_model::ScanResult, ProviderError>,
         String,
     ),
     RetryMail {
-        sources: Result<Vec<openloops_graph::live::review::SourceReview>, ConnectionError>,
-        source_keys: BTreeSet<String>,
+        loads: Vec<ProviderLoad>,
+        source_keys: BTreeSet<(MailProvider, String)>,
         conversations: BTreeSet<ConversationKey>,
         attempted: usize,
     },
@@ -108,7 +108,11 @@ pub struct AppModel {
     pub client_id: String,
     pub google_client_id: String,
     pub google_client_secret: Zeroizing<String>,
+    /// Providers included in scans (saved).
     pub mail_providers: BTreeSet<MailProvider>,
+    /// The provider whose fields the Sources card shows. UI-only, never
+    /// saved; `None` follows the first enabled provider.
+    pub(crate) viewed_mail_provider: Option<MailProvider>,
     pub groups: String,
     pub shared: String,
     pub key: Zeroizing<String>,
@@ -171,6 +175,30 @@ struct ScanJobInputs {
     progress: Arc<crate::review_model::ScanProgress>,
 }
 
+/// Per-provider loads reduced to what a mail outcome handler acts on.
+enum LoadSplit {
+    /// The single provider's error, or a stop by the user.
+    Failed(ConnectionError),
+    /// Every one of several providers failed; one prefixed line each.
+    AllFailed(Vec<String>),
+    /// Sources from every provider that loaded.
+    Loaded(Vec<SourceReview>),
+}
+
+fn cache_entries(
+    sources: &[SourceReview],
+) -> impl Iterator<Item = ((String, String), openloops_graph::live::review::MailItem)> + '_ {
+    sources
+        .iter()
+        .flat_map(|source| &source.messages)
+        .map(|message| {
+            (
+                (message.account.clone(), message.id.clone()),
+                message.clone(),
+            )
+        })
+}
+
 fn shared_registration_active_for(byo_field: &str, shipped: Option<&str>) -> bool {
     byo_field.trim().is_empty() && shipped.is_some()
 }
@@ -212,6 +240,7 @@ impl AppModel {
             google_client_id: String::new(),
             google_client_secret: Zeroizing::new(String::new()),
             mail_providers: BTreeSet::from([MailProvider::Microsoft]),
+            viewed_mail_provider: None,
             groups: String::new(),
             shared: String::new(),
             key: Zeroizing::new(String::new()),
@@ -278,6 +307,7 @@ impl AppModel {
         self.google_client_id = settings.google_client_id;
         self.google_client_secret = settings.google_client_secret;
         self.mail_providers = settings.mail_providers;
+        self.viewed_mail_provider = None;
         self.groups = settings.groups;
         self.shared = settings.shared;
         self.key = settings.key;
@@ -536,66 +566,61 @@ impl AppModel {
             Outcome::Connection(provider, result) => {
                 *self.connection_status_mut(provider) = connection_report_status(provider, result);
             }
-            Outcome::Mail(Ok(sources)) => {
-                self.load_progress = None;
-                self.last_mail_check = Some(chrono::Utc::now().timestamp());
-                self.mail_cache = Arc::new(
-                    sources
-                        .iter()
-                        .flat_map(|source| &source.messages)
-                        .map(|message| {
-                            (
-                                (message.account.clone(), message.id.clone()),
-                                message.clone(),
-                            )
-                        })
-                        .collect(),
-                );
-                self.review = ReviewState::loaded(sources);
-                if self.review.messages.is_empty() {
-                    self.review_status = Status { lines: vec!["No messages could be loaded for analysis. Check scan coverage and errors.".into()], succeeded: false };
-                } else {
-                    self.start_scan(respawn.clone());
+            Outcome::Mail(loads) => match self.split_loads(loads) {
+                LoadSplit::Failed(error) => {
+                    self.load_progress = None;
+                    self.review.scan_failed = error != ConnectionError::Cancelled;
+                    self.review_status = Status {
+                        lines: vec![error.to_string()],
+                        succeeded: false,
+                    };
                 }
-            }
-            Outcome::Mail(Err(error)) => {
-                self.load_progress = None;
-                self.review.scan_failed = error != ConnectionError::Cancelled;
-                self.review_status = Status {
-                    lines: vec![error.to_string()],
-                    succeeded: false,
-                };
-            }
-            Outcome::CheckMail { sources } => {
-                self.check_mail_outcome(sources, respawn.clone());
+                LoadSplit::AllFailed(lines) => {
+                    self.load_progress = None;
+                    self.review.scan_failed = true;
+                    self.review_status = Status {
+                        lines,
+                        succeeded: false,
+                    };
+                }
+                LoadSplit::Loaded(sources) => {
+                    self.load_progress = None;
+                    self.last_mail_check = Some(chrono::Utc::now().timestamp());
+                    self.mail_cache = Arc::new(cache_entries(&sources).collect());
+                    self.review = ReviewState::loaded(sources);
+                    if self.review.messages.is_empty() {
+                        self.review_status = Status { lines: vec!["No messages could be loaded for analysis. Check scan coverage and errors.".into()], succeeded: false };
+                    } else {
+                        self.start_scan(respawn.clone());
+                    }
+                }
+            },
+            Outcome::CheckMail { loads } => {
+                self.check_mail_outcome(loads, respawn.clone());
             }
             Outcome::RetryMail {
-                sources,
-                source_keys,
+                loads,
+                mut source_keys,
                 mut conversations,
                 attempted,
             } => {
                 self.load_progress = None;
-                match sources {
-                    Ok(sources) => {
-                        Arc::make_mut(&mut self.mail_cache).extend(
-                            sources
-                                .iter()
-                                .flat_map(|source| &source.messages)
-                                .map(|message| {
-                                    (
-                                        (message.account.clone(), message.id.clone()),
-                                        message.clone(),
-                                    )
-                                }),
-                        );
-                        conversations.extend(self.review.replace_sources(&source_keys, sources));
-                    }
-                    Err(ConnectionError::Cancelled) => {
+                let loaded: BTreeSet<MailProvider> = loads
+                    .iter()
+                    .filter(|load| load.sources.is_ok())
+                    .map(|load| load.provider)
+                    .collect();
+                match self.split_loads(loads) {
+                    LoadSplit::Failed(ConnectionError::Cancelled) => {
                         self.finish_retry_status(attempted);
                         return true;
                     }
-                    Err(_) => {}
+                    LoadSplit::Failed(_) | LoadSplit::AllFailed(_) => {}
+                    LoadSplit::Loaded(sources) => {
+                        Arc::make_mut(&mut self.mail_cache).extend(cache_entries(&sources));
+                        source_keys.retain(|(provider, _)| loaded.contains(provider));
+                        conversations.extend(self.review.replace_sources(&source_keys, sources));
+                    }
                 }
                 if conversations.is_empty() {
                     self.finish_retry_status(attempted);
@@ -657,27 +682,69 @@ impl AppModel {
         true
     }
 
+    /// Splits per-provider loads. One load keeps today's single-provider
+    /// handling. With several, each failed provider gets one status line
+    /// prefixed with its service name, and the other providers' sources are
+    /// kept. A stop by the user cancels the whole job.
+    fn split_loads(&mut self, loads: Vec<ProviderLoad>) -> LoadSplit {
+        if loads
+            .iter()
+            .any(|load| matches!(load.sources, Err(ConnectionError::Cancelled)))
+        {
+            return LoadSplit::Failed(ConnectionError::Cancelled);
+        }
+        for load in &loads {
+            if load.sources.is_ok() {
+                let prefix = format!("{}: ", load.provider.service_name());
+                self.connection_status_mut(load.provider)
+                    .lines
+                    .retain(|line| !line.starts_with(&prefix));
+            }
+        }
+        if loads.len() == 1 {
+            return match loads.into_iter().next().map(|load| load.sources) {
+                Some(Err(error)) => LoadSplit::Failed(error),
+                Some(Ok(sources)) => LoadSplit::Loaded(sources),
+                None => LoadSplit::Loaded(Vec::new()),
+            };
+        }
+        let mut sources = Vec::new();
+        let mut lines = Vec::new();
+        let mut any_loaded = loads.is_empty();
+        for load in loads {
+            match load.sources {
+                Ok(loaded) => {
+                    any_loaded = true;
+                    sources.extend(loaded);
+                }
+                Err(error) => {
+                    let line = format!("{}: {error}", load.provider.service_name());
+                    *self.connection_status_mut(load.provider) = Status {
+                        lines: vec![line.clone()],
+                        succeeded: false,
+                    };
+                    lines.push(line);
+                }
+            }
+        }
+        if any_loaded {
+            LoadSplit::Loaded(sources)
+        } else {
+            LoadSplit::AllFailed(lines)
+        }
+    }
+
     fn check_mail_outcome(
         &mut self,
-        sources: Result<Vec<openloops_graph::live::review::SourceReview>, ConnectionError>,
+        loads: Vec<ProviderLoad>,
         respawn: impl FnOnce() + Send + 'static,
     ) {
         self.load_progress = None;
         let previous_check = self.last_mail_check;
         self.last_mail_check = Some(chrono::Utc::now().timestamp());
-        match sources {
-            Ok(sources) => {
-                Arc::make_mut(&mut self.mail_cache).extend(
-                    sources
-                        .iter()
-                        .flat_map(|source| &source.messages)
-                        .map(|message| {
-                            (
-                                (message.account.clone(), message.id.clone()),
-                                message.clone(),
-                            )
-                        }),
-                );
+        match self.split_loads(loads) {
+            LoadSplit::Loaded(sources) => {
+                Arc::make_mut(&mut self.mail_cache).extend(cache_entries(&sources));
                 let known: BTreeSet<String> = self
                     .review
                     .messages
@@ -708,15 +775,21 @@ impl AppModel {
                     self.start_check_scan(changed, new_messages, prior, respawn);
                 }
             }
-            Err(ConnectionError::Cancelled) => {
+            LoadSplit::Failed(ConnectionError::Cancelled) => {
                 self.review_status = Status {
                     lines: vec!["Check stopped; no new mail was added.".into()],
                     succeeded: false,
                 };
             }
-            Err(error) => {
+            LoadSplit::Failed(error) => {
                 self.review_status = Status {
                     lines: vec![error.to_string()],
+                    succeeded: false,
+                };
+            }
+            LoadSplit::AllFailed(lines) => {
+                self.review_status = Status {
+                    lines,
                     succeeded: false,
                 };
             }
@@ -980,7 +1053,9 @@ impl AppModel {
     /// the model owning any UI-nav state.
     #[must_use]
     pub fn ready_for_review(&self) -> bool {
-        self.registration_present(self.active_mail_provider())
+        self.enabled_mail_providers()
+            .into_iter()
+            .any(|provider| self.registration_present(provider))
             && !self.active_key().is_empty()
             && !self.selected_model().is_empty()
     }
@@ -992,28 +1067,140 @@ impl AppModel {
         }
     }
 
+    /// The providers included in scans, in [`MailProvider::ALL`] order.
+    #[must_use]
+    pub fn enabled_mail_providers(&self) -> Vec<MailProvider> {
+        MailProvider::ALL
+            .into_iter()
+            .filter(|provider| self.mail_providers.contains(provider))
+            .collect()
+    }
+
+    /// Includes or excludes `provider` from scans and saves the choice.
+    /// Disabling clears that provider's session, status and mail only.
+    /// Refuses to disable the last enabled provider; returns whether the
+    /// change was applied.
+    pub fn set_provider_enabled(&mut self, provider: MailProvider, enabled: bool) -> bool {
+        if enabled {
+            self.settings_status = Status::default();
+            if self.mail_providers.insert(provider) {
+                self.pending_save = true;
+                let _ = self.persist_changes();
+            }
+            return true;
+        }
+        if !self.mail_providers.contains(&provider) {
+            return true;
+        }
+        if self.mail_providers.len() == 1 {
+            self.settings_status = Status {
+                lines: vec!["Keep at least one mail provider enabled.".into()],
+                succeeded: false,
+            };
+            return false;
+        }
+        self.settings_status = Status::default();
+        self.mail_providers.remove(&provider);
+        clear_session_for(provider);
+        *self.connection_status_mut(provider) = Status::default();
+        self.review.remove_provider(provider);
+        Arc::make_mut(&mut self.mail_cache).retain(|_, message| message.provider != provider);
+        self.pending_save = true;
+        let _ = self.persist_changes();
+        true
+    }
+
+    /// The provider whose fields the Sources card shows: the user's pick,
+    /// else the first enabled provider. Sources card only; the Review pane
+    /// uses [`AppModel::primary_mail_provider`].
     #[must_use]
     pub fn active_mail_provider(&self) -> MailProvider {
-        self.mail_providers
-            .iter()
-            .next()
+        self.viewed_mail_provider
+            .unwrap_or_else(|| self.primary_mail_provider())
+    }
+
+    /// The first enabled provider. The Review pane's default when no card
+    /// names a provider.
+    #[must_use]
+    pub fn primary_mail_provider(&self) -> MailProvider {
+        self.enabled_mail_providers()
+            .first()
             .copied()
             .unwrap_or(MailProvider::Microsoft)
     }
 
+    /// Shows `provider`'s fields on the Sources card. Changes no enablement.
     pub fn set_active_mail_provider(&mut self, provider: MailProvider) {
-        if self.mail_providers == BTreeSet::from([provider]) {
-            return;
+        self.viewed_mail_provider = Some(provider);
+    }
+
+    /// One configuration per enabled provider. A provider with a missing or
+    /// invalid registration is skipped and gets a status line, unless no
+    /// provider is usable.
+    ///
+    /// # Errors
+    /// Returns the first provider's error when no enabled provider is usable.
+    pub fn enabled_accounts(&mut self) -> Result<Vec<AccountConfig>, ConnectionError> {
+        let mut accounts = Vec::new();
+        let mut failures = Vec::new();
+        for provider in self.enabled_mail_providers() {
+            match self.account_config(provider) {
+                Ok(account) => accounts.push(account),
+                Err(error) => failures.push((provider, error)),
+            }
         }
-        self.mail_providers = BTreeSet::from([provider]);
-        clear_all_sessions();
-        self.clear_mail_cache();
-        self.microsoft = Status::default();
-        self.google = Status::default();
-        self.review = ReviewState::default();
-        self.review_status = Status::default();
-        self.pending_save = true;
-        let _ = self.persist_changes();
+        if accounts.is_empty() {
+            return Err(failures
+                .into_iter()
+                .next()
+                .map_or(ConnectionError::InvalidConfiguration, |(_, error)| error));
+        }
+        for (provider, error) in failures {
+            *self.connection_status_mut(provider) = Status {
+                lines: vec![format!("{}: {error}", provider.service_name())],
+                succeeded: false,
+            };
+        }
+        Ok(accounts)
+    }
+
+    /// The retry job for each provider with failed sources: its
+    /// configuration and the labels to load again. A provider with a missing
+    /// or invalid registration is skipped and gets a status line, unless no
+    /// provider is usable.
+    ///
+    /// # Errors
+    /// Returns the first provider's configuration error when no provider is
+    /// usable.
+    pub fn retry_jobs(
+        &mut self,
+        failed_sources: &BTreeSet<(MailProvider, String)>,
+    ) -> Result<Vec<(AccountConfig, BTreeSet<String>)>, ConnectionError> {
+        let mut grouped = BTreeMap::<MailProvider, BTreeSet<String>>::new();
+        for (provider, label) in failed_sources {
+            grouped.entry(*provider).or_default().insert(label.clone());
+        }
+        let mut jobs = Vec::new();
+        let mut failures = Vec::new();
+        for (provider, labels) in grouped {
+            match self.account_config(provider) {
+                Ok(account) => jobs.push((account, labels)),
+                Err(error) => failures.push((provider, error)),
+            }
+        }
+        if jobs.is_empty() && !failures.is_empty() {
+            return Err(failures
+                .into_iter()
+                .next()
+                .map_or(ConnectionError::InvalidConfiguration, |(_, error)| error));
+        }
+        for (provider, error) in failures {
+            *self.connection_status_mut(provider) = Status {
+                lines: vec![format!("{}: {error}", provider.service_name())],
+                succeeded: false,
+            };
+        }
+        Ok(jobs)
     }
 
     #[must_use]
@@ -1509,14 +1696,10 @@ impl AccountDisplay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openloops_graph::live::{
-        SharedScope,
-        review::{MailItem, SourceReview},
-    };
+    use openloops_graph::live::{SharedScope, review::MailItem};
     use openloops_inference::decision::DecisionCheckReport;
     use std::{
         cell::{Cell, RefCell},
-        collections::HashMap,
         rc::Rc,
     };
 
@@ -1899,46 +2082,462 @@ mod tests {
         );
     }
 
+    const SYNTHETIC_MS_ID: &str = "00000000-0000-4000-8000-000000000000";
+    const SYNTHETIC_GOOGLE_ID: &str = "123-synthetic.apps.googleusercontent.com";
+
+    fn mail_item(provider: MailProvider, account: &str, id: &str) -> MailItem {
+        MailItem {
+            provider,
+            id: id.into(),
+            account: account.into(),
+            conversation: format!("thread-{id}"),
+            received: "not-a-timestamp".into(),
+            ..MailItem::default()
+        }
+    }
+
+    fn provider_source(
+        provider: MailProvider,
+        label: &str,
+        messages: Vec<MailItem>,
+    ) -> SourceReview {
+        SourceReview {
+            provider,
+            label: label.into(),
+            messages,
+            errors: vec![],
+            message_errors: vec![],
+            partial: false,
+            failed: false,
+        }
+    }
+
+    fn load(
+        provider: MailProvider,
+        sources: Result<Vec<SourceReview>, ConnectionError>,
+    ) -> openloops_graph::live::ProviderLoad {
+        openloops_graph::live::ProviderLoad { provider, sources }
+    }
+
     #[test]
-    fn active_mail_provider_defaults_and_switch_persists_a_single_provider() {
+    fn enabled_providers_follow_all_order_and_persist() {
         let memory = MemoryStore::default();
         let mut app = AppModel::with_store(Ok(Some(Box::new(memory.clone()))));
-        assert_eq!(app.active_mail_provider(), MailProvider::Microsoft);
-        app.client_id = "00000000-0000-4000-8000-000000000000".into();
-        app.groups = "group@example.invalid".into();
-        app.shared = "shared@example.invalid".into();
-        app.google_client_id = "123-synthetic.apps.googleusercontent.com".into();
-        app.google_client_secret = Zeroizing::new("synthetic-client-parameter".into());
-        app.review = crate::review_model::layout_fixture();
-        app.review.action_status = "Synthetic action status".into();
-        app.review_status = Status {
-            lines: vec!["Synthetic review status".into()],
-            succeeded: true,
+        assert_eq!(app.enabled_mail_providers(), [MailProvider::Microsoft]);
+        assert!(app.set_provider_enabled(MailProvider::Google, true));
+        assert_eq!(
+            app.enabled_mail_providers(),
+            [MailProvider::Microsoft, MailProvider::Google]
+        );
+        assert_eq!(
+            memory.saved.borrow().as_ref().unwrap().mail_providers,
+            BTreeSet::from([MailProvider::Microsoft, MailProvider::Google])
+        );
+        assert!(app.set_provider_enabled(MailProvider::Microsoft, false));
+        assert_eq!(app.enabled_mail_providers(), [MailProvider::Google]);
+        assert_eq!(
+            memory.saved.borrow().as_ref().unwrap().mail_providers,
+            BTreeSet::from([MailProvider::Google])
+        );
+    }
+
+    #[test]
+    fn disabling_the_last_enabled_provider_is_refused() {
+        let mut app = AppModel::with_store(Ok(None));
+        assert!(!app.set_provider_enabled(MailProvider::Microsoft, false));
+        assert_eq!(app.enabled_mail_providers(), [MailProvider::Microsoft]);
+        assert_eq!(
+            app.settings_status.lines,
+            ["Keep at least one mail provider enabled."]
+        );
+        assert!(!app.settings_status.succeeded);
+
+        // A later successful toggle clears the refusal line.
+        assert!(app.set_provider_enabled(MailProvider::Google, true));
+        assert!(app.settings_status.lines.is_empty());
+        app.settings_status = Status {
+            lines: vec!["Keep at least one mail provider enabled.".into()],
+            succeeded: false,
         };
-        app.mail_cache = Arc::new(HashMap::from([(
-            ("synthetic-account".into(), "synthetic-message".into()),
-            MailItem::default(),
-        )]));
+        assert!(app.set_provider_enabled(MailProvider::Google, false));
+        assert!(app.settings_status.lines.is_empty());
+    }
+
+    #[test]
+    fn disabling_a_provider_removes_only_its_mail_and_status() {
+        let mut app = AppModel::with_store(Ok(None));
+        app.mail_providers = BTreeSet::from([MailProvider::Microsoft, MailProvider::Google]);
+        app.microsoft.lines = vec!["Personal inbox: access confirmed.".into()];
+        app.google.lines = vec!["Personal inbox: access confirmed.".into()];
+        app.review = crate::review_model::layout_fixture();
+        let microsoft_messages = app.review.messages.len();
+        Arc::make_mut(&mut app.mail_cache).extend([
+            (
+                ("synthetic".into(), "synthetic-ms".into()),
+                mail_item(MailProvider::Microsoft, "synthetic", "synthetic-ms"),
+            ),
+            (
+                ("google:synthetic-sub".into(), "synthetic-g".into()),
+                mail_item(MailProvider::Google, "google:synthetic-sub", "synthetic-g"),
+            ),
+        ]);
+
+        assert!(app.set_provider_enabled(MailProvider::Google, false));
+
+        assert!(app.google.lines.is_empty());
+        assert_eq!(app.microsoft.lines, ["Personal inbox: access confirmed."]);
+        assert_eq!(app.review.messages.len(), microsoft_messages);
+        assert!(app.review.analysis.is_some());
+        assert_eq!(app.mail_cache.len(), 1);
+        assert!(
+            app.mail_cache
+                .contains_key(&("synthetic".into(), "synthetic-ms".into()))
+        );
+
+        assert!(app.set_provider_enabled(MailProvider::Google, true));
+        assert_eq!(app.microsoft.lines, ["Personal inbox: access confirmed."]);
+        assert_eq!(app.review.messages.len(), microsoft_messages);
+    }
+
+    #[test]
+    fn viewed_mail_provider_is_a_ui_selection_only() {
+        let memory = MemoryStore::default();
+        let mut app = AppModel::with_store(Ok(Some(Box::new(memory.clone()))));
+        app.review = crate::review_model::layout_fixture();
+        assert_eq!(app.active_mail_provider(), MailProvider::Microsoft);
+        app.mail_providers = BTreeSet::from([MailProvider::Google]);
+        assert_eq!(app.active_mail_provider(), MailProvider::Google);
+        app.mail_providers = BTreeSet::from([MailProvider::Microsoft]);
 
         app.set_active_mail_provider(MailProvider::Google);
 
         assert_eq!(app.active_mail_provider(), MailProvider::Google);
-        assert_eq!(app.mail_providers, BTreeSet::from([MailProvider::Google]));
-        assert!(app.mail_cache.is_empty());
-        assert!(app.review.analysis.is_none());
-        assert!(app.review.action_status.is_empty());
-        assert!(app.review_status.lines.is_empty());
-        assert_eq!(app.client_id, "00000000-0000-4000-8000-000000000000");
-        assert_eq!(app.groups, "group@example.invalid");
-        assert_eq!(app.shared, "shared@example.invalid");
+        assert_eq!(app.enabled_mail_providers(), [MailProvider::Microsoft]);
+        assert!(app.review.analysis.is_some());
+        assert!(memory.saved.borrow().is_none());
+    }
+
+    #[test]
+    fn enabled_accounts_skip_a_provider_without_registration() {
+        let mut app = AppModel::with_store(Ok(None));
+        if registration::google().is_some() {
+            return;
+        }
+        app.client_id = SYNTHETIC_MS_ID.into();
+        app.mail_providers = BTreeSet::from([MailProvider::Microsoft, MailProvider::Google]);
+        let accounts = app.enabled_accounts().unwrap();
         assert_eq!(
-            app.google_client_id,
-            "123-synthetic.apps.googleusercontent.com"
+            accounts
+                .iter()
+                .map(AccountConfig::provider)
+                .collect::<Vec<_>>(),
+            [MailProvider::Microsoft]
         );
-        assert_eq!(&*app.google_client_secret, "synthetic-client-parameter");
         assert_eq!(
-            memory.saved.borrow().as_ref().unwrap().mail_providers,
-            BTreeSet::from([MailProvider::Google])
+            app.google.lines,
+            [format!("Google: {}", ConnectionError::InvalidConfiguration)]
+        );
+        assert!(app.microsoft.lines.is_empty());
+
+        app.google_client_id = SYNTHETIC_GOOGLE_ID.into();
+        app.google_client_secret = Zeroizing::new("synthetic-client-parameter".into());
+        assert_eq!(app.enabled_accounts().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn enabled_accounts_without_any_registration_fail_without_status_lines() {
+        let mut app = AppModel::with_store(Ok(None));
+        if registration::microsoft().is_some() {
+            return;
+        }
+        assert!(matches!(
+            app.enabled_accounts(),
+            Err(ConnectionError::InvalidConfiguration)
+        ));
+        assert!(app.microsoft.lines.is_empty());
+    }
+
+    #[test]
+    fn mail_outcome_keeps_the_ok_provider_and_records_the_failed_one() {
+        let mut app = AppModel::with_store(Ok(None));
+        app.load_progress = Some(Arc::new(LoadProgress::default()));
+        app.microsoft.lines = vec!["Personal inbox: access confirmed.".into()];
+        let (sender, receiver) = mpsc::channel();
+        app.pending = Some(receiver);
+        app.pending_service = Service::Review;
+        sender
+            .send(Outcome::Mail(vec![
+                load(
+                    MailProvider::Microsoft,
+                    Ok(vec![provider_source(
+                        MailProvider::Microsoft,
+                        "Personal mailbox / Inbox",
+                        vec![mail_item(
+                            MailProvider::Microsoft,
+                            "synthetic",
+                            "synthetic-a",
+                        )],
+                    )]),
+                ),
+                load(
+                    MailProvider::Google,
+                    Err(ConnectionError::ProviderUnavailable),
+                ),
+            ]))
+            .unwrap();
+        assert!(app.poll(|| {}));
+        assert!(app.load_progress.is_none());
+        assert!(
+            app.mail_cache
+                .contains_key(&("synthetic".into(), "synthetic-a".into()))
+        );
+        assert!(
+            app.review
+                .notices
+                .iter()
+                .any(|note| note.starts_with("Personal mailbox / Inbox"))
+        );
+        assert_eq!(
+            app.google.lines,
+            [format!("Google: {}", ConnectionError::ProviderUnavailable)]
+        );
+        assert!(!app.google.succeeded);
+        assert_eq!(app.microsoft.lines, ["Personal inbox: access confirmed."]);
+    }
+
+    #[test]
+    fn single_provider_mail_error_reports_on_the_review_status_as_before() {
+        let mut app = AppModel::with_store(Ok(None));
+        let (sender, receiver) = mpsc::channel();
+        app.pending = Some(receiver);
+        app.pending_service = Service::Review;
+        sender
+            .send(Outcome::Mail(vec![load(
+                MailProvider::Microsoft,
+                Err(ConnectionError::ProviderUnavailable),
+            )]))
+            .unwrap();
+        assert!(app.poll(|| {}));
+        assert_eq!(
+            app.review_status.lines,
+            [ConnectionError::ProviderUnavailable.to_string()]
+        );
+        assert!(app.review.scan_failed);
+        assert!(app.microsoft.lines.is_empty());
+    }
+
+    #[test]
+    fn both_providers_failing_report_each_prefixed_line() {
+        let mut app = AppModel::with_store(Ok(None));
+        let (sender, receiver) = mpsc::channel();
+        app.pending = Some(receiver);
+        app.pending_service = Service::Review;
+        sender
+            .send(Outcome::Mail(vec![
+                load(MailProvider::Microsoft, Err(ConnectionError::AccessDenied)),
+                load(
+                    MailProvider::Google,
+                    Err(ConnectionError::ProviderUnavailable),
+                ),
+            ]))
+            .unwrap();
+        assert!(app.poll(|| {}));
+        assert_eq!(
+            app.review_status.lines,
+            [
+                format!("Microsoft 365: {}", ConnectionError::AccessDenied),
+                format!("Google: {}", ConnectionError::ProviderUnavailable),
+            ]
+        );
+        assert!(app.review.scan_failed);
+    }
+
+    #[test]
+    fn check_mail_with_mixed_loads_keeps_ok_mail_and_records_the_error() {
+        let mut app = AppModel::with_store(Ok(None));
+        app.review = crate::review_model::layout_fixture();
+        app.last_mail_check = Some(0);
+        let known = MailItem {
+            id: "synthetic-0".into(),
+            account: "synthetic".into(),
+            conversation: "synthetic-thread".into(),
+            subject: "Quarterly planning".into(),
+            body: "Synthetic cached body.".into(),
+            received: "2026-09-06T12:00:00Z".into(),
+            ..MailItem::default()
+        };
+        let (sender, receiver) = mpsc::channel();
+        app.pending = Some(receiver);
+        sender
+            .send(Outcome::CheckMail {
+                loads: vec![
+                    load(MailProvider::Microsoft, Ok(vec![check_source(vec![known])])),
+                    load(MailProvider::Google, Err(ConnectionError::Unauthorized)),
+                ],
+            })
+            .unwrap();
+        assert!(app.poll(|| {}));
+        assert!(
+            app.mail_cache
+                .contains_key(&("synthetic".into(), "synthetic-0".into()))
+        );
+        assert!(app.review_status.lines[0].starts_with("No new mail since "));
+        assert_eq!(
+            app.google.lines,
+            [format!("Google: {}", ConnectionError::Unauthorized)]
+        );
+    }
+
+    #[test]
+    fn a_successful_load_removes_that_providers_earlier_load_error() {
+        let mut app = AppModel::with_store(Ok(None));
+        app.review = crate::review_model::layout_fixture();
+        app.last_mail_check = Some(0);
+        let known = MailItem {
+            id: "synthetic-0".into(),
+            account: "synthetic".into(),
+            conversation: "synthetic-thread".into(),
+            subject: "Quarterly planning".into(),
+            body: "Synthetic cached body.".into(),
+            received: "2026-09-06T12:00:00Z".into(),
+            ..MailItem::default()
+        };
+        for google in [Err(ConnectionError::Unauthorized), Ok(vec![])] {
+            let (sender, receiver) = mpsc::channel();
+            app.pending = Some(receiver);
+            sender
+                .send(Outcome::CheckMail {
+                    loads: vec![
+                        load(
+                            MailProvider::Microsoft,
+                            Ok(vec![check_source(vec![known.clone()])]),
+                        ),
+                        load(MailProvider::Google, google),
+                    ],
+                })
+                .unwrap();
+            assert!(app.poll(|| {}));
+        }
+        assert!(
+            !app.google
+                .lines
+                .iter()
+                .any(|line| line.starts_with("Google: "))
+        );
+    }
+
+    #[test]
+    fn retry_jobs_group_failed_labels_by_provider() {
+        let mut app = AppModel::with_store(Ok(None));
+        app.client_id = SYNTHETIC_MS_ID.into();
+        app.google_client_id = SYNTHETIC_GOOGLE_ID.into();
+        app.google_client_secret = Zeroizing::new("synthetic-client-parameter".into());
+        app.mail_providers = BTreeSet::from([MailProvider::Microsoft, MailProvider::Google]);
+        let failed = BTreeSet::from([
+            (
+                MailProvider::Microsoft,
+                "Personal mailbox / Inbox".to_owned(),
+            ),
+            (MailProvider::Google, "Gmail / Sent".to_owned()),
+            (MailProvider::Google, "Gmail / Inbox".to_owned()),
+        ]);
+        let jobs = app.retry_jobs(&failed).unwrap();
+        assert_eq!(
+            jobs.iter()
+                .map(|(account, labels)| (account.provider(), labels.clone()))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    MailProvider::Microsoft,
+                    BTreeSet::from(["Personal mailbox / Inbox".to_owned()])
+                ),
+                (
+                    MailProvider::Google,
+                    BTreeSet::from(["Gmail / Inbox".to_owned(), "Gmail / Sent".to_owned()])
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn retry_jobs_skip_a_provider_without_registration() {
+        let mut app = AppModel::with_store(Ok(None));
+        if registration::google().is_some() {
+            return;
+        }
+        app.client_id = SYNTHETIC_MS_ID.into();
+        app.mail_providers = BTreeSet::from([MailProvider::Microsoft, MailProvider::Google]);
+        let failed = BTreeSet::from([
+            (
+                MailProvider::Microsoft,
+                "Personal mailbox / Inbox".to_owned(),
+            ),
+            (MailProvider::Google, "Gmail / Inbox".to_owned()),
+        ]);
+        let jobs = app.retry_jobs(&failed).unwrap();
+        assert_eq!(
+            jobs.iter()
+                .map(|(account, _)| account.provider())
+                .collect::<Vec<_>>(),
+            [MailProvider::Microsoft]
+        );
+        assert_eq!(
+            app.google.lines,
+            [format!("Google: {}", ConnectionError::InvalidConfiguration)]
+        );
+        assert!(app.microsoft.lines.is_empty());
+
+        app.client_id.clear();
+        if registration::microsoft().is_none() {
+            assert!(matches!(
+                app.retry_jobs(&failed),
+                Err(ConnectionError::InvalidConfiguration)
+            ));
+        }
+    }
+
+    #[test]
+    fn retry_mail_routes_replacements_by_provider_label() {
+        let mut app = AppModel::with_store(Ok(None));
+        app.review.failed_sources = BTreeSet::from([
+            (
+                MailProvider::Microsoft,
+                "Personal mailbox / Inbox".to_owned(),
+            ),
+            (MailProvider::Google, "Gmail / Inbox".to_owned()),
+        ]);
+        let (sender, receiver) = mpsc::channel();
+        app.pending = Some(receiver);
+        sender
+            .send(Outcome::RetryMail {
+                loads: vec![
+                    load(
+                        MailProvider::Microsoft,
+                        Ok(vec![provider_source(
+                            MailProvider::Microsoft,
+                            "Personal mailbox / Inbox",
+                            vec![],
+                        )]),
+                    ),
+                    load(
+                        MailProvider::Google,
+                        Err(ConnectionError::ProviderUnavailable),
+                    ),
+                ],
+                source_keys: app.review.failed_sources.clone(),
+                conversations: BTreeSet::new(),
+                attempted: 2,
+            })
+            .unwrap();
+        assert!(app.poll(|| {}));
+        assert_eq!(
+            app.review.failed_sources,
+            BTreeSet::from([(MailProvider::Google, "Gmail / Inbox".to_owned())])
+        );
+        assert_eq!(app.review_status.lines, ["Retried 2; 1 still failing."]);
+        assert_eq!(
+            app.google.lines,
+            [format!("Google: {}", ConnectionError::ProviderUnavailable)]
         );
     }
 
@@ -2039,7 +2638,12 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         app.pending = Some(receiver);
         app.pending_service = Service::Review;
-        sender.send(Outcome::Mail(Ok(sources))).unwrap();
+        sender
+            .send(Outcome::Mail(vec![load(
+                MailProvider::Microsoft,
+                Ok(sources),
+            )]))
+            .unwrap();
         assert!(app.poll(|| {}));
         assert!(app.load_progress.is_none());
         assert_eq!(app.mail_cache.len(), 2);
@@ -2063,7 +2667,10 @@ mod tests {
         app.pending = Some(receiver);
         app.pending_service = Service::Review;
         sender
-            .send(Outcome::Mail(Err(ConnectionError::Cancelled)))
+            .send(Outcome::Mail(vec![load(
+                MailProvider::Microsoft,
+                Err(ConnectionError::Cancelled),
+            )]))
             .unwrap();
         assert!(app.poll(|| {}));
         assert!(app.load_progress.is_none());
@@ -2084,7 +2691,7 @@ mod tests {
         app.pending = Some(receiver);
         sender
             .send(Outcome::CheckMail {
-                sources: Ok(Vec::new()),
+                loads: vec![load(MailProvider::Microsoft, Ok(Vec::new()))],
             })
             .unwrap();
         assert!(app.poll(|| {}));
@@ -2114,7 +2721,10 @@ mod tests {
         app.pending = Some(receiver);
         sender
             .send(Outcome::CheckMail {
-                sources: Err(ConnectionError::Cancelled),
+                loads: vec![load(
+                    MailProvider::Microsoft,
+                    Err(ConnectionError::Cancelled),
+                )],
             })
             .unwrap();
         assert!(app.poll(|| {}));
@@ -2181,7 +2791,10 @@ mod tests {
         app.pending = Some(receiver);
         sender
             .send(Outcome::CheckMail {
-                sources: Ok(vec![check_source(vec![known])]),
+                loads: vec![load(
+                    MailProvider::Microsoft,
+                    Ok(vec![check_source(vec![known])]),
+                )],
             })
             .unwrap();
         assert!(app.poll(|| {}));

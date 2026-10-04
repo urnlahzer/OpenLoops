@@ -22,7 +22,7 @@ use crate::{
         sync_list_cached, sync_value_cached,
     },
 };
-use openloops_graph::live::{ConnectionError, MailProvider, review::LoadProgress};
+use openloops_graph::live::{AccountConfig, ConnectionError, MailProvider, review::LoadProgress};
 use openloops_inference::blocks::CanonicalBlock;
 use slint::{ComponentHandle, Timer};
 
@@ -1428,7 +1428,7 @@ fn sync_review_inner(
     window.set_can_sync_todo(!busy && model.reminder_sync_eligible_count(cards) > 0);
     let mut sync_providers = model.reminder_sync_providers(cards);
     if sync_providers.is_empty() {
-        sync_providers.insert(model.active_mail_provider());
+        sync_providers.insert(model.primary_mail_provider());
     }
     window.set_sync_reminders_label(sync_reminders_label(&sync_providers).into());
     strip = apply_scan_failure(strip, &model.review_status, model.review.scan_failed);
@@ -1694,12 +1694,13 @@ fn sync_review_inner(
         window.set_can_track(false);
         window.set_can_watch(false);
         window.set_can_remind(false);
-        window.set_todo_url(model.active_mail_provider().tasks_url().into());
+        let primary = model.primary_mail_provider();
+        window.set_todo_url(primary.tasks_url().into());
         window.set_draft_open(false);
-        window.set_reminder_service(model.active_mail_provider().tasks_name().into());
-        window.set_reminder_time_note(reminder_time_note(model.active_mail_provider()).into());
-        window.set_reminder_scope_note(reminder_scope_note(model.active_mail_provider()).into());
-        window.set_remind_button_label(remind_button_label(model.active_mail_provider()).into());
+        window.set_reminder_service(primary.tasks_name().into());
+        window.set_reminder_time_note(reminder_time_note(primary).into());
+        window.set_reminder_scope_note(reminder_scope_note(primary).into());
+        window.set_remind_button_label(remind_button_label(primary).into());
         window.set_draft_title("".into());
         window.set_draft_when("".into());
         window.set_draft_scheduled_line("".into());
@@ -1779,12 +1780,31 @@ fn sign_in_label(provider: MailProvider, mode: ScanMode) -> &'static str {
     }
 }
 
+/// The busy label for one mail job: names every provider whose sign-in is
+/// still pending; with none pending, the plain download or check text.
+fn mail_load_label(pending_sign_ins: &[MailProvider], mode: ScanMode) -> &'static str {
+    match (pending_sign_ins, mode) {
+        ([], ScanMode::Full) => "Downloading recent messages",
+        ([], ScanMode::Incremental) => "Checking for new mail",
+        ([provider], mode) => sign_in_label(*provider, mode),
+        (_, ScanMode::Full) => {
+            "Complete Microsoft and Google sign-in; then downloading recent messages"
+        }
+        (_, ScanMode::Incremental) => {
+            "Complete Microsoft and Google sign-in; then checking for new mail"
+        }
+    }
+}
+
+fn pending_sign_ins(providers: impl IntoIterator<Item = MailProvider>) -> Vec<MailProvider> {
+    providers
+        .into_iter()
+        .filter(|provider| !openloops_graph::live::has_session_for(*provider))
+        .collect()
+}
+
 fn start_mail_load(model: &Rc<RefCell<AppModel>>, mode: ScanMode) -> Result<(), ConnectionError> {
-    let (provider, config) = {
-        let model = model.borrow();
-        let provider = model.active_mail_provider();
-        (provider, model.account_config(provider)?)
-    };
+    let accounts = model.borrow_mut().enabled_accounts()?;
     let mut model_ref = model.borrow_mut();
     if mode == ScanMode::Full {
         let decisions = std::mem::take(&mut model_ref.review.decisions);
@@ -1800,27 +1820,26 @@ fn start_mail_load(model: &Rc<RefCell<AppModel>>, mode: ScanMode) -> Result<(), 
     let progress = std::sync::Arc::new(LoadProgress::default());
     let cache = std::sync::Arc::clone(&model_ref.mail_cache);
     model_ref.load_progress = Some(std::sync::Arc::clone(&progress));
-    let signed_in = openloops_graph::live::has_session_for(provider);
+    let label = mail_load_label(
+        &pending_sign_ins(accounts.iter().map(AccountConfig::provider)),
+        mode,
+    );
     match mode {
         ScanMode::Full => model_ref.start(
             Service::Review,
-            if signed_in {
-                "Downloading recent messages"
-            } else {
-                sign_in_label(provider, ScanMode::Full)
+            label,
+            move || {
+                Outcome::Mail(openloops_graph::live::load_all(
+                    &accounts, &cache, &progress,
+                ))
             },
-            move || Outcome::Mail(config.load_recent_with(&cache, &progress)),
             || {},
         ),
         ScanMode::Incremental => model_ref.start(
             Service::Review,
-            if signed_in {
-                "Checking for new mail"
-            } else {
-                sign_in_label(provider, ScanMode::Incremental)
-            },
+            label,
             move || Outcome::CheckMail {
-                sources: config.load_recent_with(&cache, &progress),
+                loads: openloops_graph::live::load_all(&accounts, &cache, &progress),
             },
             || {},
         ),
@@ -2134,29 +2153,29 @@ pub(crate) fn register_callbacks(
                     .borrow_mut()
                     .start_retry_scan(conversations, attempted, || {});
             } else {
-                let (provider, config) = {
-                    let model = model.borrow();
-                    let provider = model.active_mail_provider();
-                    (provider, model.account_config(provider))
-                };
-                match config {
-                    Ok(config) => {
+                let jobs = model.borrow_mut().retry_jobs(&sources);
+                match jobs {
+                    Ok(jobs) => {
+                        // A skipped provider keeps its failed sources.
+                        let sources: std::collections::BTreeSet<_> = sources
+                            .into_iter()
+                            .filter(|(provider, _)| {
+                                jobs.iter()
+                                    .any(|(account, _)| account.provider() == *provider)
+                            })
+                            .collect();
                         let mut model_ref = model.borrow_mut();
                         let progress = std::sync::Arc::new(LoadProgress::default());
                         let cache = std::sync::Arc::clone(&model_ref.mail_cache);
                         model_ref.load_progress = Some(std::sync::Arc::clone(&progress));
+                        let pending =
+                            pending_sign_ins(jobs.iter().map(|(account, _)| account.provider()));
                         model_ref.start(
                             Service::Review,
-                            if openloops_graph::live::has_session_for(provider) {
-                                "Downloading recent messages"
-                            } else {
-                                sign_in_label(provider, ScanMode::Full)
-                            },
+                            mail_load_label(&pending, ScanMode::Full),
                             move || Outcome::RetryMail {
-                                sources: config.load_sources_with(
-                                    &cache,
-                                    &progress,
-                                    Some(&sources),
+                                loads: openloops_graph::live::load_selected(
+                                    &jobs, &cache, &progress,
                                 ),
                                 source_keys: sources,
                                 conversations,
@@ -2256,7 +2275,7 @@ pub(crate) fn register_callbacks(
             let eligible = model_ref.reminder_sync_eligible_count(&cards);
             if eligible == 0 {
                 model_ref.review.action_status =
-                    sync_nothing_status(model_ref.active_mail_provider());
+                    sync_nothing_status(model_ref.primary_mail_provider());
                 model_ref.review.action_status_succeeded = false;
             } else {
                 let providers = model_ref.reminder_sync_providers(&cards);
@@ -2666,7 +2685,7 @@ pub(crate) fn register_callbacks(
                         .and_then(|item| source_message(&model_ref.review, item))
                         .map(|source| source.provider)
                 })
-                .unwrap_or_else(|| model_ref.active_mail_provider());
+                .unwrap_or_else(|| model_ref.primary_mail_provider());
             apply_reconcile(&mut model_ref.review, key, provider, exists);
             drop(model_ref);
             refresh(&model, &weak);
@@ -3101,7 +3120,14 @@ mod tests {
         crate::slint_ui::sync(&model, &window);
         assert_eq!(window.get_mail_provider_index(), 1);
         assert!(!window.get_can_check_mailbox());
-        assert!(window.get_own_inbox_accessible());
+        assert_eq!(
+            window
+                .get_heading_pills()
+                .iter()
+                .map(|pill| pill.to_string())
+                .collect::<Vec<_>>(),
+            ["Personal inbox confirmed"]
+        );
         assert_eq!(window.get_microsoft_lines().row_count(), 0);
         assert_eq!(window.get_google_lines().row_count(), 1);
 
@@ -3141,15 +3167,135 @@ mod tests {
         window.invoke_mail_provider_selected(1);
         let callback_model = mailbox_callback_model.borrow();
         assert_eq!(callback_model.active_mail_provider(), MailProvider::Google);
-        assert!(callback_model.review.analysis.is_none());
-        assert!(callback_model.review.action_status.is_empty());
-        assert!(callback_model.review_status.lines.is_empty());
+        assert_eq!(
+            callback_model.enabled_mail_providers(),
+            [MailProvider::Microsoft]
+        );
+        assert!(callback_model.review.analysis.is_some());
+        assert_eq!(
+            callback_model.review.action_status,
+            "Synthetic action status"
+        );
         assert_eq!(callback_model.client_id, "malformed-guid");
         assert_eq!(
             callback_model.google_client_id,
             "123-synthetic.apps.googleusercontent.com"
         );
         drop(callback_model);
+        assert!(!window.get_provider_enabled());
+
+        // "Include in scans" on the Google view enables Google as well.
+        window.invoke_provider_enabled_toggled(true);
+        assert_eq!(
+            mailbox_callback_model.borrow().enabled_mail_providers(),
+            [MailProvider::Microsoft, MailProvider::Google]
+        );
+        assert!(window.get_provider_enabled());
+        assert_eq!(
+            window.get_scan_providers_text().as_str(),
+            "Scans include: Microsoft 365, Google"
+        );
+        assert_eq!(
+            window.get_scope_folders_label().as_str(),
+            "Inbox / Sent (both providers)"
+        );
+        // The fixture's messages are Microsoft mail, so only Microsoft is connected.
+        assert_eq!(
+            window
+                .get_heading_pills()
+                .iter()
+                .map(|pill| pill.to_string())
+                .collect::<Vec<_>>(),
+            ["Microsoft connected"]
+        );
+        mailbox_callback_model.borrow_mut().google.succeeded = true;
+        crate::slint_ui::sync(&mailbox_callback_model.borrow(), &window);
+        assert_eq!(window.get_heading_pills().row_count(), 2);
+        assert_eq!(
+            window.get_account_text().as_str(),
+            "Signed in · Microsoft 365 + Google"
+        );
+
+        // Disabling Google leaves Microsoft; disabling the last one is refused.
+        window.invoke_provider_enabled_toggled(false);
+        assert_eq!(
+            mailbox_callback_model.borrow().enabled_mail_providers(),
+            [MailProvider::Microsoft]
+        );
+        window.invoke_mail_provider_selected(0);
+        window.set_provider_enabled(false);
+        window.invoke_provider_enabled_toggled(false);
+        assert_eq!(
+            mailbox_callback_model.borrow().enabled_mail_providers(),
+            [MailProvider::Microsoft]
+        );
+        assert!(window.get_provider_enabled());
+        assert_eq!(
+            window.get_settings_status().as_str(),
+            "Keep at least one mail provider enabled."
+        );
+
+        // Viewing the Google segment with only Microsoft enabled changes the
+        // Sources card only: the Review pane copy, the "nothing to check"
+        // status and the reconcile fallback stay Microsoft.
+        let primary_model = Rc::new(RefCell::new(AppModel::with_store(Ok(None))));
+        primary_model
+            .borrow_mut()
+            .set_active_mail_provider(MailProvider::Google);
+        assert_eq!(
+            primary_model.borrow().enabled_mail_providers(),
+            [MailProvider::Microsoft]
+        );
+        REVIEW_UI.with(|state| state.borrow_mut().selected = None);
+        sync_review(
+            &primary_model.borrow(),
+            &window,
+            &[],
+            false,
+            false,
+            ScanStripModel::default(),
+        );
+        assert_eq!(
+            window.get_todo_url().as_str(),
+            MailProvider::Microsoft.tasks_url()
+        );
+        assert_eq!(window.get_reminder_service().as_str(), "Microsoft To Do");
+        assert_eq!(
+            window.get_reminder_time_note().as_str(),
+            MICROSOFT_REMINDER_TIME_NOTE
+        );
+        assert_eq!(
+            window.get_reminder_scope_note().as_str(),
+            reminder_scope_note(MailProvider::Microsoft)
+        );
+        assert_eq!(
+            window.get_remind_button_label().as_str(),
+            "Set To Do reminder…"
+        );
+        assert_eq!(window.get_sync_reminders_label().as_str(), "Sync To Do");
+        let primary_timer = Rc::new(Timer::default());
+        register_callbacks(&window, &primary_model, &primary_timer);
+        window.invoke_sync_todo();
+        assert_eq!(
+            primary_model.borrow().review.action_status,
+            sync_nothing_status(MailProvider::Microsoft)
+        );
+        let orphan_key = [0x5a; 32];
+        REVIEW_UI.with(|state| state.borrow_mut().selected = Some(orphan_key));
+        window.invoke_reconcile_reminder(true);
+        assert!(matches!(
+            primary_model
+                .borrow()
+                .review
+                .decisions
+                .get(&orphan_key)
+                .reminder,
+            Reminder::Created {
+                provider: MailProvider::Microsoft,
+                ..
+            }
+        ));
+        REVIEW_UI.with(|state| state.borrow_mut().selected = None);
 
         model.mail_providers = std::collections::BTreeSet::from([MailProvider::Microsoft]);
         model.provider = crate::settings::Provider::OpenRouter;
@@ -3469,6 +3615,35 @@ mod tests {
             window.get_training_export_status()
         );
         std::fs::remove_dir_all(&export_folder).ok();
+    }
+
+    #[test]
+    fn mail_load_label_lists_every_pending_sign_in() {
+        use MailProvider::{Google, Microsoft};
+        assert_eq!(
+            mail_load_label(&[], ScanMode::Full),
+            "Downloading recent messages"
+        );
+        assert_eq!(
+            mail_load_label(&[], ScanMode::Incremental),
+            "Checking for new mail"
+        );
+        assert_eq!(
+            mail_load_label(&[Microsoft], ScanMode::Full),
+            "Complete Microsoft sign-in; then downloading recent messages"
+        );
+        assert_eq!(
+            mail_load_label(&[Google], ScanMode::Incremental),
+            "Complete Google sign-in; then checking for new mail"
+        );
+        assert_eq!(
+            mail_load_label(&[Microsoft, Google], ScanMode::Full),
+            "Complete Microsoft and Google sign-in; then downloading recent messages"
+        );
+        assert_eq!(
+            mail_load_label(&[Microsoft, Google], ScanMode::Incremental),
+            "Complete Microsoft and Google sign-in; then checking for new mail"
+        );
     }
 
     #[test]

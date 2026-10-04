@@ -157,6 +157,80 @@ fn replace_if_changed<T: PartialEq>(current: &mut T, next: T) -> bool {
     }
 }
 
+/// Providers shown as connected: the connection check succeeded, or review
+/// messages from that provider are already loaded.
+fn connected_providers(model: &AppModel) -> Vec<MailProvider> {
+    MailProvider::ALL
+        .iter()
+        .copied()
+        .filter(|provider| {
+            model.connection_status(*provider).succeeded
+                || model
+                    .review
+                    .messages
+                    .iter()
+                    .any(|message| message.provider == *provider)
+        })
+        .collect()
+}
+
+/// The Sources card's provider-dependent text, computed outside Slint.
+#[derive(Debug, PartialEq, Eq)]
+struct SourcesView {
+    heading_pills: Vec<String>,
+    provider_enabled: bool,
+    scan_providers_text: String,
+    scope_folders_label: &'static str,
+    scope_groups_text: &'static str,
+}
+
+fn sources_view(model: &AppModel, connected: &[MailProvider]) -> SourcesView {
+    let enabled = model.enabled_mail_providers();
+    let both = enabled.len() > 1;
+    let heading_pills = if both {
+        connected
+            .iter()
+            .map(|provider| match provider {
+                MailProvider::Microsoft => "Microsoft connected".to_owned(),
+                MailProvider::Google => "Google connected".to_owned(),
+            })
+            .collect()
+    } else if enabled.first().is_some_and(|provider| {
+        model
+            .connection_status(*provider)
+            .lines
+            .first()
+            .is_some_and(|line| line == "Personal inbox: access confirmed.")
+    }) {
+        vec!["Personal inbox confirmed".to_owned()]
+    } else {
+        Vec::new()
+    };
+    let (scope_folders_label, scope_groups_text) = match enabled.as_slice() {
+        [MailProvider::Google] => ("Inbox / Sent", "Microsoft only"),
+        [_, _, ..] => ("Inbox / Sent (both providers)", "Microsoft only"),
+        _ => ("Inbox / Sent Items", "20 recent threads · 40 posts each"),
+    };
+    SourcesView {
+        heading_pills,
+        provider_enabled: enabled.contains(&model.active_mail_provider()),
+        scan_providers_text: if both {
+            format!(
+                "Scans include: {}",
+                enabled
+                    .iter()
+                    .map(|provider| provider.service_name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else {
+            String::new()
+        },
+        scope_folders_label,
+        scope_groups_text,
+    }
+}
+
 fn provider_connected(model: &AppModel) -> bool {
     !model.selected_model().is_empty() && model.model_status.succeeded
 }
@@ -220,19 +294,9 @@ pub(crate) fn sync(model: &AppModel, window: &AppWindow) {
     // succeeded, or once review messages have already loaded (mail is
     // plainly being scanned even if a rescan's own check has not yet
     // re-run), rather than a misleading "Not signed in".
-    let connected_providers = MailProvider::ALL
-        .iter()
-        .copied()
-        .filter(|provider| {
-            model.connection_status(*provider).succeeded
-                || model
-                    .review
-                    .messages
-                    .iter()
-                    .any(|message| message.provider == *provider)
-        })
-        .collect::<Vec<_>>();
+    let connected_providers = connected_providers(model);
     let account = AccountDisplay::connected(&connected_providers);
+    let sources = sources_view(model, &connected_providers);
     let cards = model
         .review
         .analysis
@@ -289,13 +353,6 @@ pub(crate) fn sync(model: &AppModel, window: &AppWindow) {
     window.set_client_id(model.client_id.clone().into());
     window.set_groups(model.groups.clone().into());
     window.set_shared_mailboxes(model.shared.clone().into());
-    window.set_own_inbox_accessible(
-        model
-            .connection_status(model.active_mail_provider())
-            .lines
-            .first()
-            .is_some_and(|line| line == "Personal inbox: access confirmed."),
-    );
     let microsoft_lines = model
         .microsoft
         .lines
@@ -354,6 +411,17 @@ pub(crate) fn sync(model: &AppModel, window: &AppWindow) {
         MailProvider::Microsoft => 0,
         MailProvider::Google => 1,
     });
+    window.set_heading_pills(ModelRc::new(VecModel::from(
+        sources
+            .heading_pills
+            .into_iter()
+            .map(SharedString::from)
+            .collect::<Vec<_>>(),
+    )));
+    window.set_provider_enabled(sources.provider_enabled);
+    window.set_scan_providers_text(sources.scan_providers_text.into());
+    window.set_scope_folders_label(sources.scope_folders_label.into());
+    window.set_scope_groups_text(sources.scope_groups_text.into());
     window.set_google_client_id(model.google_client_id.clone().into());
     let desired_google_secret = if window.get_active_screen() == 1 {
         model.google_client_secret.to_string()
@@ -562,8 +630,11 @@ pub(crate) fn register_check_mailbox_callback(
     });
 }
 
-pub(crate) fn register_mail_provider_callback(window: &AppWindow, model: &Rc<RefCell<AppModel>>) {
-    let model = Rc::clone(model);
+pub(crate) fn register_mail_provider_callback(
+    window: &AppWindow,
+    shared_model: &Rc<RefCell<AppModel>>,
+) {
+    let model = Rc::clone(shared_model);
     let weak = window.as_weak();
     window.on_mail_provider_selected(move |index| {
         let provider = if index == 1 {
@@ -575,6 +646,15 @@ pub(crate) fn register_mail_provider_callback(window: &AppWindow, model: &Rc<Ref
         if let Some(window) = weak.upgrade() {
             window.set_show_google_secret(false);
         }
+        refresh(&model, &weak);
+    });
+    let model = Rc::clone(shared_model);
+    let weak = window.as_weak();
+    window.on_provider_enabled_toggled(move |enabled| {
+        let mut model_ref = model.borrow_mut();
+        let provider = model_ref.active_mail_provider();
+        model_ref.set_provider_enabled(provider, enabled);
+        drop(model_ref);
         refresh(&model, &weak);
     });
 }
@@ -1372,6 +1452,57 @@ mod tests {
 
     fn model() -> AppModel {
         AppModel::with_store(Ok(None))
+    }
+
+    #[test]
+    fn sources_view_with_one_provider_keeps_the_single_provider_copy() {
+        let mut model = model();
+        let view = sources_view(&model, &[]);
+        assert!(view.heading_pills.is_empty());
+        assert!(view.provider_enabled);
+        assert!(view.scan_providers_text.is_empty());
+        assert_eq!(view.scope_folders_label, "Inbox / Sent Items");
+        assert_eq!(view.scope_groups_text, "20 recent threads · 40 posts each");
+
+        model.microsoft.lines = vec!["Personal inbox: access confirmed.".into()];
+        let view = sources_view(&model, &[MailProvider::Microsoft]);
+        assert_eq!(view.heading_pills, ["Personal inbox confirmed"]);
+
+        model.set_active_mail_provider(MailProvider::Google);
+        let view = sources_view(&model, &[MailProvider::Microsoft]);
+        assert!(!view.provider_enabled);
+        assert_eq!(view.scope_folders_label, "Inbox / Sent Items");
+
+        model.mail_providers = std::collections::BTreeSet::from([MailProvider::Google]);
+        let view = sources_view(&model, &[]);
+        assert!(view.provider_enabled);
+        assert_eq!(view.scope_folders_label, "Inbox / Sent");
+        assert_eq!(view.scope_groups_text, "Microsoft only");
+    }
+
+    #[test]
+    fn sources_view_with_both_providers_shows_one_pill_per_connected_provider() {
+        let mut model = model();
+        model.mail_providers =
+            std::collections::BTreeSet::from([MailProvider::Microsoft, MailProvider::Google]);
+        model.microsoft.lines = vec!["Personal inbox: access confirmed.".into()];
+        let view = sources_view(&model, &[MailProvider::Microsoft]);
+        assert_eq!(view.heading_pills, ["Microsoft connected"]);
+        let view = sources_view(&model, &[MailProvider::Microsoft, MailProvider::Google]);
+        assert_eq!(
+            view.heading_pills,
+            ["Microsoft connected", "Google connected"]
+        );
+        assert_eq!(
+            view.scan_providers_text,
+            "Scans include: Microsoft 365, Google"
+        );
+        assert_eq!(view.scope_folders_label, "Inbox / Sent (both providers)");
+        assert_eq!(view.scope_groups_text, "Microsoft only");
+        assert_eq!(
+            AccountDisplay::connected(&[MailProvider::Microsoft, MailProvider::Google]).name,
+            "Signed in · Microsoft 365 + Google"
+        );
     }
 
     #[test]

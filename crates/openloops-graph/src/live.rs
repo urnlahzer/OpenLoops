@@ -13,7 +13,7 @@ pub mod review;
 #[cfg(test)]
 mod test_support;
 
-pub use provider::{AccountConfig, MailProvider, ProviderLoad, load_all};
+pub use provider::{AccountConfig, MailProvider, ProviderLoad, load_all, load_selected};
 
 use std::collections::BTreeSet;
 use std::io::Read;

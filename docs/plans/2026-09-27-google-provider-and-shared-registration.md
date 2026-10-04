@@ -318,6 +318,18 @@ hash re-pins (two SHA-256 sites).
   added; ADR-001:46 amendment ("multiple accounts" no longer excluded for the two-provider
   case).
 
+## Follow-ups recorded during PR-4 review (not in scope of PR-4)
+
+- Disabling a provider removes its messages and cards, but a surviving card of the other
+  provider may keep `mentions`, `resolution`, `deadline` or `event` anchors that point at
+  removed handles, and a survivor whose folded duplicate mention belonged to the removed
+  provider is dropped. Display staleness only until the next scan; lookups return `Option`.
+- "Reload saved settings" can change `mail_providers` without clearing the dropped
+  provider's session, cache, or review data (pre-existing shape; now visible with two
+  providers).
+- With two providers enabled, "Scan inboxes" prompts both sign-ins back to back. A later
+  change could let the user pick which provider to sign in first.
+
 ## Verification
 
 Per PR, in this order, reading each result before committing (never gate and commit in

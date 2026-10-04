@@ -67,6 +67,8 @@ pub(super) fn identity_from_origin(
 
 /// Loads both recent Gmail sources into memory.
 ///
+/// Call [`LoadProgress::begin`] once per job before this. Loaders never call it.
+///
 /// # Errors
 /// Returns fixed, content-free configuration, authorization, transport, or cancellation errors.
 pub fn load_recent_with(
@@ -79,6 +81,8 @@ pub fn load_recent_with(
 
 /// Loads selected recent Gmail sources into memory.
 ///
+/// Call [`LoadProgress::begin`] once per job before this. Loaders never call it.
+///
 /// # Errors
 /// Returns fixed, content-free configuration, authorization, transport, or cancellation errors.
 pub fn load_sources_with(
@@ -90,7 +94,9 @@ pub fn load_sources_with(
     if progress.cancel.load(Ordering::Acquire) {
         return Err(ConnectionError::Cancelled);
     }
+    let start = progress.checkpoint();
     with_google_session(config, false, |http, token| {
+        progress.rewind(&start);
         load_sources_from_origins(
             http,
             token,
@@ -101,6 +107,14 @@ pub fn load_sources_with(
             GMAIL_ORIGIN,
         )
     })
+}
+
+/// How many Gmail labels a load with `filter` plans to read.
+pub(in crate::live) fn source_count(filter: Option<&BTreeSet<String>>) -> usize {
+    LABELS
+        .iter()
+        .filter(|(_, label)| selected(filter, label))
+        .count()
 }
 
 fn selected(filter: Option<&BTreeSet<String>>, label: &str) -> bool {
@@ -121,16 +135,6 @@ fn load_sources_from_origins(
     userinfo_origin: &str,
     gmail_origin: &str,
 ) -> Result<Vec<SourceReview>, ConnectionError> {
-    progress.listed.store(0, Ordering::Relaxed);
-    progress.loaded.store(0, Ordering::Relaxed);
-    progress.sources_done.store(0, Ordering::Relaxed);
-    progress.sources_total.store(
-        LABELS
-            .iter()
-            .filter(|(_, label)| selected(filter, label))
-            .count(),
-        Ordering::Relaxed,
-    );
     let identity = identity_from_origin(http, token, userinfo_origin)?;
     let mut sources = Vec::new();
     for (remote_label, display_label) in LABELS {
@@ -770,5 +774,54 @@ mod tests {
         server.join().unwrap();
         assert!(sources[0].messages.is_empty());
         assert!(sources[0].message_errors.is_empty());
+    }
+
+    #[test]
+    fn loader_adds_to_progress_left_by_an_earlier_provider() {
+        let listing = serde_json::json!({"messages":[
+            {"id":"synthetic-cached","threadId":"thread-cached"}
+        ]})
+        .to_string();
+        let (origin, _, server) = routed_server(vec![
+            ("/v1/userinfo", response("200 OK", &identity_body())),
+            (
+                "/gmail/v1/users/me/messages?labelIds=INBOX",
+                response("200 OK", &listing),
+            ),
+        ]);
+        let mut cache = MailCache::default();
+        cache.insert(
+            ("google:synthetic-sub".into(), "synthetic-cached".into()),
+            MailItem {
+                provider: MailProvider::Google,
+                id: "synthetic-cached".into(),
+                conversation: "thread-cached".into(),
+                received: "2030-01-01T00:00:00Z".into(),
+                body: "Synthetic cached body".into(),
+                ..MailItem::default()
+            },
+        );
+        let progress = LoadProgress::default();
+        progress.begin(3);
+        progress.listed.store(4, Ordering::Relaxed);
+        progress.loaded.store(4, Ordering::Relaxed);
+        progress.sources_done.store(2, Ordering::Relaxed);
+        let http = Client::builder().no_proxy().build().unwrap();
+        let filter = BTreeSet::from(["Gmail / Inbox".to_owned()]);
+        load_sources_from_origins(
+            &http,
+            "synthetic-token",
+            &cache,
+            &progress,
+            Some(&filter),
+            &origin,
+            &origin,
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(progress.listed.load(Ordering::Relaxed), 5);
+        assert_eq!(progress.loaded.load(Ordering::Relaxed), 5);
+        assert_eq!(progress.sources_done.load(Ordering::Relaxed), 3);
+        assert_eq!(progress.sources_total.load(Ordering::Relaxed), 3);
     }
 }
