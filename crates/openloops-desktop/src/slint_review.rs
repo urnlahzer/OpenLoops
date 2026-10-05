@@ -22,9 +22,7 @@ use crate::{
         sync_list_cached, sync_value_cached,
     },
 };
-use openloops_graph::live::{
-    ConnectionConfig, ConnectionError, MailProvider, review::LoadProgress,
-};
+use openloops_graph::live::{AccountConfig, ConnectionError, MailProvider, review::LoadProgress};
 use openloops_inference::blocks::CanonicalBlock;
 use slint::{ComponentHandle, Timer};
 
@@ -73,13 +71,108 @@ fn reminder_title(decision: Decision, action: &str) -> String {
     }
 }
 
+fn reminder_request(
+    draft: &ReminderDraft,
+    at_utc: i64,
+) -> openloops_graph::live::reminders::ReminderRequest {
+    openloops_graph::live::reminders::ReminderRequest {
+        provider: draft.provider,
+        account: draft.account.clone(),
+        title: draft.title.trim().into(),
+        at_utc,
+        marker: marker(&draft.key),
+    }
+}
+
+fn completion_target(
+    decision: Decision,
+    reminder: &Reminder,
+) -> Option<(MailProvider, String, String)> {
+    if decision != Decision::Done {
+        return None;
+    }
+    match reminder {
+        Reminder::Created {
+            provider,
+            list_id,
+            task_id,
+        } if !list_id.is_empty() && !task_id.is_empty() => {
+            Some((*provider, list_id.clone(), task_id.clone()))
+        }
+        Reminder::None
+        | Reminder::Attempted
+        | Reminder::Created { .. }
+        | Reminder::Completed { .. } => None,
+    }
+}
+
 const REMINDER_VALIDATION_HINT: &str = "Enter a future local date/time and a title of 3–320 bytes. Ambiguous daylight-saving times need a different time.";
-const GOOGLE_REMINDER_UNAVAILABLE: &str =
-    "Reminders for Google accounts arrive in a later release.";
-const TODO_URL: &str = MailProvider::Microsoft.tasks_url();
+const MICROSOFT_REMINDER_TIME_NOTE: &str = "This time is your choice, separate from the email deadline. Microsoft To Do controls alert delivery, including when OpenLoops is closed. A failed or uncertain write is never retried automatically.";
+const GOOGLE_REMINDER_TIME_NOTE: &str = "Google Tasks saves the date only and does not alert you. The task gets your local calendar date of the time you pick, and that time is written into the task's notes.";
+
+fn reminder_time_note(provider: MailProvider) -> &'static str {
+    match provider {
+        MailProvider::Microsoft => MICROSOFT_REMINDER_TIME_NOTE,
+        MailProvider::Google => GOOGLE_REMINDER_TIME_NOTE,
+    }
+}
+
+fn reminder_scope_note(provider: MailProvider) -> &'static str {
+    match provider {
+        MailProvider::Microsoft => {
+            "Creates one task in your personal default Tasks list. Only the title, reminder time, and an opaque OpenLoops reference are sent to Microsoft. This requires delegated Tasks.ReadWrite and a separate browser sign-in."
+        }
+        MailProvider::Google => {
+            "Creates one task in your default Google Tasks list. Only the title, the date, the reminder time as a note, and an opaque OpenLoops reference are sent to Google Tasks. A separate browser sign-in is required."
+        }
+    }
+}
+
+/// The short task-service name used on pills and buttons ("To Do" keeps the
+/// Microsoft wording unchanged).
+const fn tasks_short_name(provider: MailProvider) -> &'static str {
+    match provider {
+        MailProvider::Microsoft => "To Do",
+        MailProvider::Google => "Google Tasks",
+    }
+}
+
+fn remind_button_label(provider: MailProvider) -> String {
+    format!("Set {} reminder…", tasks_short_name(provider))
+}
+
+/// The sync button label for the providers that have reminder records.
+fn sync_reminders_label(providers: &std::collections::BTreeSet<MailProvider>) -> String {
+    match providers.iter().collect::<Vec<_>>().as_slice() {
+        [provider] => format!("Sync {}", tasks_short_name(**provider)),
+        [] => format!("Sync {}", tasks_short_name(MailProvider::Microsoft)),
+        _ => "Sync reminders".into(),
+    }
+}
+
+fn sync_checking_status(
+    eligible: usize,
+    providers: &std::collections::BTreeSet<MailProvider>,
+) -> String {
+    match providers.iter().collect::<Vec<_>>().as_slice() {
+        [provider] => format!(
+            "Checking {eligible} {} task(s)…",
+            tasks_short_name(**provider)
+        ),
+        _ => format!("Checking {eligible} linked task(s)…"),
+    }
+}
+
+fn sync_nothing_status(provider: MailProvider) -> String {
+    format!(
+        "Nothing to check: no tracked loop has a {} task attached.",
+        provider.tasks_name()
+    )
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DraftView {
+    provider: MailProvider,
     title: String,
     when: String,
     scheduled_line: String,
@@ -102,17 +195,10 @@ fn scheduled_instant_line(value: &str) -> (String, bool) {
     let Ok(at) = reminder_time(value) else {
         return (REMINDER_VALIDATION_HINT.into(), false);
     };
-    let Some(time) = chrono::DateTime::from_timestamp(at, 0) else {
+    let Some(time) = openloops_graph::live::reminders::format_local_reminder_time(at) else {
         return (REMINDER_VALIDATION_HINT.into(), false);
     };
-    (
-        format!(
-            "Scheduled instant: {}",
-            time.with_timezone(&chrono::Local)
-                .format("%a %b %d, %Y at %H:%M %:z")
-        ),
-        true,
-    )
+    (format!("Scheduled instant: {time}"), true)
 }
 
 fn meeting_time_label(timestamp: i64, approx: bool) -> String {
@@ -142,6 +228,7 @@ fn draft_view(draft: Option<&ReminderDraft>) -> Option<DraftView> {
     let draft = draft?;
     let (scheduled_line, time_valid) = scheduled_instant_line(&draft.when);
     Some(DraftView {
+        provider: draft.provider,
         title: draft.title.clone(),
         when: draft.when.clone(),
         scheduled_line: if draft.error.is_empty() {
@@ -179,26 +266,52 @@ struct ReminderView {
     marker: String,
 }
 
-fn reminder_state_view(record: &crate::loop_state::Record) -> ReminderView {
+/// `card_provider` names the service for `Attempted`, which stores no
+/// provider; the other variants use the record's own provider.
+fn reminder_state_view(
+    record: &crate::loop_state::Record,
+    card_provider: MailProvider,
+) -> ReminderView {
     match &record.reminder {
         Reminder::None => ReminderView {
             state: "none",
             text: "",
             marker: String::new(),
         },
-        Reminder::Created { .. } => ReminderView {
+        Reminder::Created { provider, .. } => ReminderView {
             state: "created",
-            text: "Reminder created in Microsoft To Do. Marking this loop Handled also marks the task complete there.",
+            text: match provider {
+                MailProvider::Microsoft => {
+                    "Reminder created in Microsoft To Do. Marking this loop Handled also marks the task complete there."
+                }
+                MailProvider::Google => {
+                    "Reminder created in Google Tasks. Marking this loop Handled also marks the task complete there."
+                }
+            },
             marker: String::new(),
         },
-        Reminder::Completed { .. } => ReminderView {
+        Reminder::Completed { provider, .. } => ReminderView {
             state: "created",
-            text: "The linked Microsoft To Do task was completed, which marked this loop Handled.",
+            text: match provider {
+                MailProvider::Microsoft => {
+                    "The linked Microsoft To Do task was completed, which marked this loop Handled."
+                }
+                MailProvider::Google => {
+                    "The linked Google Tasks task was completed, which marked this loop Handled."
+                }
+            },
             marker: String::new(),
         },
         Reminder::Attempted => ReminderView {
             state: "attempted",
-            text: "A reminder attempt has no confirmed outcome. Inspect Microsoft To Do before allowing another attempt.",
+            text: match card_provider {
+                MailProvider::Microsoft => {
+                    "A reminder attempt has no confirmed outcome. Inspect Microsoft To Do before allowing another attempt."
+                }
+                MailProvider::Google => {
+                    "A reminder attempt has no confirmed outcome. Inspect Google Tasks before allowing another attempt."
+                }
+            },
             marker: format!("Reference: {}", marker(&record.key)),
         },
     }
@@ -594,6 +707,7 @@ struct PillView {
 
 #[allow(clippy::struct_excessive_bools)]
 struct SelectedView {
+    provider: MailProvider,
     title: String,
     meta: Vec<(String, String)>,
     uncertainty: String,
@@ -654,9 +768,10 @@ fn owner_label(item: &LoopItem, decision: Decision) -> &'static str {
 /// below.
 fn status_pill_hint(decision: Decision, reminder: &Reminder, item: &LoopItem) -> String {
     match decision {
-        Decision::Done if matches!(reminder, Reminder::Completed { .. }) => {
-            "The linked Microsoft To Do task was completed, which marked this handled.".into()
-        }
+        Decision::Done if let Reminder::Completed { provider, .. } = reminder => format!(
+            "The linked {} task was completed, which marked this handled.",
+            provider.tasks_name()
+        ),
         Decision::Done if item.resolution.is_some() => {
             let cause = match item.resolution_kind {
                 None => "closing evidence".to_owned(),
@@ -750,25 +865,28 @@ fn pills_for(item: &LoopItem, card: &CardContext) -> Vec<PillView> {
             hint: "A later message may change this loop. Review the suggestion below.".into(),
         });
     }
-    match &card.record.reminder {
-        Reminder::None => {}
-        Reminder::Created { .. } => pills.push(PillView {
-            text: "To Do reminder set".into(),
-            kind: "brand",
-            hint: String::new(),
-        }),
-        Reminder::Completed { .. } => pills.push(PillView {
-            text: "To Do task completed".into(),
-            kind: "success",
-            hint: String::new(),
-        }),
-        Reminder::Attempted => pills.push(PillView {
-            text: "Reminder unconfirmed".into(),
-            kind: "warning",
-            hint: String::new(),
-        }),
-    }
+    pills.extend(reminder_pill(&card.record.reminder));
     pills
+}
+
+fn reminder_pill(reminder: &Reminder) -> Option<PillView> {
+    let (text, kind) = match reminder {
+        Reminder::None => return None,
+        Reminder::Created { provider, .. } => (
+            format!("{} reminder set", tasks_short_name(*provider)),
+            "brand",
+        ),
+        Reminder::Completed { provider, .. } => (
+            format!("{} task completed", tasks_short_name(*provider)),
+            "success",
+        ),
+        Reminder::Attempted => ("Reminder unconfirmed".into(), "warning"),
+    };
+    Some(PillView {
+        text,
+        kind,
+        hint: String::new(),
+    })
 }
 
 /// Case-insensitive substring filter over a card's visible text: action
@@ -1023,6 +1141,7 @@ fn selected_view(
             String::new()
         };
     Some(SelectedView {
+        provider: source.provider,
         title: item.action.clone(),
         meta,
         uncertainty: item.uncertainty.clone(),
@@ -1040,7 +1159,7 @@ fn selected_view(
                 .as_ref()
                 .filter(|draft| draft.key == card.record.key),
         ),
-        reminder: reminder_state_view(&card.record),
+        reminder: reminder_state_view(&card.record, source.provider),
         source_url,
         conversation_url,
         source_unavailable_note,
@@ -1307,6 +1426,11 @@ fn sync_review_inner(
     window.set_show_call_summaries_label(SHOW_CALL_SUMMARY_LABEL.into());
     window.set_review_search_query(model.review.search_query.clone().into());
     window.set_can_sync_todo(!busy && model.reminder_sync_eligible_count(cards) > 0);
+    let mut sync_providers = model.reminder_sync_providers(cards);
+    if sync_providers.is_empty() {
+        sync_providers.insert(model.primary_mail_provider());
+    }
+    window.set_sync_reminders_label(sync_reminders_label(&sync_providers).into());
     strip = apply_scan_failure(strip, &model.review_status, model.review.scan_failed);
     window.set_scan_strip(strip);
     window.set_coverage_open(review_ui.coverage_open);
@@ -1402,9 +1526,7 @@ fn sync_review_inner(
             });
     window.set_review_no_usable_items(no_usable);
     window.set_review_no_usable_text(no_usable_text.into());
-    let mut selected_can_remind = false;
     if let Some(selected) = selected_view(&model.review, review_ui.selected, cards) {
-        selected_can_remind = selected.can_remind;
         window.set_review_has_selection(true);
         window.set_review_title(selected.title.into());
         let meta = selected
@@ -1435,9 +1557,9 @@ fn sync_review_inner(
         window.set_selected_terminal(selected.terminal);
         window.set_can_track(selected.can_track && !busy);
         window.set_can_watch(selected.can_watch && !busy);
-        window.set_can_remind(
-            selected.can_remind && !busy && model.active_mail_provider() == MailProvider::Microsoft,
-        );
+        window.set_can_remind(selected.can_remind && !busy);
+        window.set_remind_button_label(remind_button_label(selected.provider).into());
+        window.set_todo_url(selected.provider.tasks_url().into());
         let has_links = review_ui.selected.is_some_and(|selected_key| {
             let loop_link = !model
                 .review
@@ -1470,12 +1592,18 @@ fn sync_review_inner(
         window.set_has_links(has_links);
         if let Some(draft) = selected.draft {
             window.set_draft_open(true);
+            window.set_reminder_service(draft.provider.tasks_name().into());
+            window.set_reminder_time_note(reminder_time_note(draft.provider).into());
+            window.set_reminder_scope_note(reminder_scope_note(draft.provider).into());
             window.set_draft_title(draft.title.into());
             window.set_draft_when(draft.when.into());
             window.set_draft_scheduled_line(draft.scheduled_line.into());
             window.set_draft_valid(draft.valid);
         } else {
             window.set_draft_open(false);
+            window.set_reminder_service(selected.provider.tasks_name().into());
+            window.set_reminder_time_note(reminder_time_note(selected.provider).into());
+            window.set_reminder_scope_note(reminder_scope_note(selected.provider).into());
             window.set_draft_title("".into());
             window.set_draft_when("".into());
             window.set_draft_scheduled_line("".into());
@@ -1566,7 +1694,13 @@ fn sync_review_inner(
         window.set_can_track(false);
         window.set_can_watch(false);
         window.set_can_remind(false);
+        let primary = model.primary_mail_provider();
+        window.set_todo_url(primary.tasks_url().into());
         window.set_draft_open(false);
+        window.set_reminder_service(primary.tasks_name().into());
+        window.set_reminder_time_note(reminder_time_note(primary).into());
+        window.set_reminder_scope_note(reminder_scope_note(primary).into());
+        window.set_remind_button_label(remind_button_label(primary).into());
         window.set_draft_title("".into());
         window.set_draft_when("".into());
         window.set_draft_scheduled_line("".into());
@@ -1600,12 +1734,6 @@ fn sync_review_inner(
     let decision_error = model.review.decisions.error.as_deref();
     if let Some(error) = decision_error {
         window.set_review_action_status(error.into());
-        window.set_review_action_status_succeeded(false);
-    } else if model.active_mail_provider() == MailProvider::Google
-        && selected_can_remind
-        && model.review.action_status.is_empty()
-    {
-        window.set_review_action_status(GOOGLE_REMINDER_UNAVAILABLE.into());
         window.set_review_action_status_succeeded(false);
     } else {
         window.set_review_action_status(model.review.action_status.clone().into());
@@ -1652,12 +1780,31 @@ fn sign_in_label(provider: MailProvider, mode: ScanMode) -> &'static str {
     }
 }
 
+/// The busy label for one mail job: names every provider whose sign-in is
+/// still pending; with none pending, the plain download or check text.
+fn mail_load_label(pending_sign_ins: &[MailProvider], mode: ScanMode) -> &'static str {
+    match (pending_sign_ins, mode) {
+        ([], ScanMode::Full) => "Downloading recent messages",
+        ([], ScanMode::Incremental) => "Checking for new mail",
+        ([provider], mode) => sign_in_label(*provider, mode),
+        (_, ScanMode::Full) => {
+            "Complete Microsoft and Google sign-in; then downloading recent messages"
+        }
+        (_, ScanMode::Incremental) => {
+            "Complete Microsoft and Google sign-in; then checking for new mail"
+        }
+    }
+}
+
+fn pending_sign_ins(providers: impl IntoIterator<Item = MailProvider>) -> Vec<MailProvider> {
+    providers
+        .into_iter()
+        .filter(|provider| !openloops_graph::live::has_session_for(*provider))
+        .collect()
+}
+
 fn start_mail_load(model: &Rc<RefCell<AppModel>>, mode: ScanMode) -> Result<(), ConnectionError> {
-    let (provider, config) = {
-        let model = model.borrow();
-        let provider = model.active_mail_provider();
-        (provider, model.account_config(provider)?)
-    };
+    let accounts = model.borrow_mut().enabled_accounts()?;
     let mut model_ref = model.borrow_mut();
     if mode == ScanMode::Full {
         let decisions = std::mem::take(&mut model_ref.review.decisions);
@@ -1673,27 +1820,26 @@ fn start_mail_load(model: &Rc<RefCell<AppModel>>, mode: ScanMode) -> Result<(), 
     let progress = std::sync::Arc::new(LoadProgress::default());
     let cache = std::sync::Arc::clone(&model_ref.mail_cache);
     model_ref.load_progress = Some(std::sync::Arc::clone(&progress));
-    let signed_in = openloops_graph::live::has_session_for(provider);
+    let label = mail_load_label(
+        &pending_sign_ins(accounts.iter().map(AccountConfig::provider)),
+        mode,
+    );
     match mode {
         ScanMode::Full => model_ref.start(
             Service::Review,
-            if signed_in {
-                "Downloading recent messages"
-            } else {
-                sign_in_label(provider, ScanMode::Full)
+            label,
+            move || {
+                Outcome::Mail(openloops_graph::live::load_all(
+                    &accounts, &cache, &progress,
+                ))
             },
-            move || Outcome::Mail(config.load_recent_with(&cache, &progress)),
             || {},
         ),
         ScanMode::Incremental => model_ref.start(
             Service::Review,
-            if signed_in {
-                "Checking for new mail"
-            } else {
-                sign_in_label(provider, ScanMode::Incremental)
-            },
+            label,
             move || Outcome::CheckMail {
-                sources: config.load_recent_with(&cache, &progress),
+                loads: openloops_graph::live::load_all(&accounts, &cache, &progress),
             },
             || {},
         ),
@@ -1730,7 +1876,12 @@ pub(crate) fn sync_review(
 /// "Recorded: ..." wording is layered on top of it (S8). Factored out of
 /// `on_reconcile_reminder` so both outcomes are directly testable without a
 /// live `AppWindow`.
-fn apply_reconcile(review: &mut ReviewState, key: [u8; 32], exists: bool) {
+fn apply_reconcile(
+    review: &mut ReviewState,
+    key: [u8; 32],
+    fallback_provider: MailProvider,
+    exists: bool,
+) {
     let record = review.decisions.get(&key);
     let reminder = if exists {
         // The user is manually confirming a task exists after an Uncertain
@@ -1742,7 +1893,7 @@ fn apply_reconcile(review: &mut ReviewState, key: [u8; 32], exists: bool) {
         // purpose (dedup, the pill, the button state).
         let provider = match record.reminder {
             Reminder::Created { provider, .. } | Reminder::Completed { provider, .. } => provider,
-            Reminder::None | Reminder::Attempted => MailProvider::Microsoft,
+            Reminder::None | Reminder::Attempted => fallback_provider,
         };
         Reminder::Created {
             provider,
@@ -1759,19 +1910,22 @@ fn dispatch_pending_reminder(model: &mut AppModel) -> bool {
     let Some((key, request)) = model.review.pending_reminder.take() else {
         return false;
     };
-    match model
-        .effective_microsoft_client_id()
-        .ok_or(ConnectionError::InvalidConfiguration)
-        .and_then(|client_id| ConnectionConfig::new(&client_id, None))
-    {
+    let provider = request.provider;
+    match model.reminder_account_config(provider) {
         Ok(config) => {
             model.start(
                 Service::Review,
-                "Sign in to create the reviewed Microsoft To Do reminder",
+                match provider {
+                    MailProvider::Microsoft => {
+                        "Sign in to create the reviewed Microsoft To Do reminder"
+                    }
+                    MailProvider::Google => "Sign in to create the reviewed Google Tasks reminder",
+                },
                 move || {
                     Outcome::Reminder(
                         key,
-                        openloops_graph::live::reminders::create(&config, &request),
+                        provider,
+                        openloops_graph::live::provider::create_reminder(&config, &request),
                     )
                 },
                 || {},
@@ -1831,32 +1985,21 @@ fn decide_selected(model: &mut AppModel, selected: Option<[u8; 32]>, value: i32)
     // the decision or the reminder record on failure (see
     // `reminders::complete()`), so it only ever affects the status
     // line, dispatched after the decision is already saved.
-    let complete_task = if decision == Decision::Done {
-        match &reminder {
-            Reminder::Created {
-                provider: MailProvider::Microsoft,
-                list_id,
-                task_id,
-            } if !list_id.is_empty() && !task_id.is_empty() => {
-                Some((list_id.clone(), task_id.clone()))
-            }
-            _ => None,
-        }
-    } else {
-        None
-    };
+    let complete_task = completion_target(decision, &reminder);
     model.review.apply_decision_change(key, decision, reminder);
-    if let Some((list_id, task_id)) = complete_task
-        && let Some(client_id) = model.effective_microsoft_client_id()
-        && let Ok(config) = ConnectionConfig::new(&client_id, None)
+    if let Some((provider, list_id, task_id)) = complete_task
+        && let Ok(config) = model.reminder_account_config(provider)
     {
         model.start(
             Service::Review,
-            "Marking the linked Microsoft To Do task complete",
+            match provider {
+                MailProvider::Microsoft => "Marking the linked Microsoft To Do task complete",
+                MailProvider::Google => "Marking the linked Google Tasks task complete",
+            },
             move || {
                 Outcome::ReminderCompletion(
                     key,
-                    openloops_graph::live::reminders::complete(
+                    openloops_graph::live::provider::complete_reminder(
                         &config, &account, &list_id, &task_id,
                     ),
                 )
@@ -1961,10 +2104,6 @@ pub(crate) fn register_callbacks(
     model: &Rc<RefCell<AppModel>>,
     timer: &Rc<Timer>,
 ) {
-    // Set once here rather than in every `sync`: the To Do URL never
-    // changes, and `review.slint` never embeds the literal itself (it calls
-    // back through `open-external(root.todo-url)`).
-    window.set_todo_url(TODO_URL.into());
     let model = Rc::clone(model);
     let timer = Rc::clone(timer);
     {
@@ -2014,29 +2153,29 @@ pub(crate) fn register_callbacks(
                     .borrow_mut()
                     .start_retry_scan(conversations, attempted, || {});
             } else {
-                let (provider, config) = {
-                    let model = model.borrow();
-                    let provider = model.active_mail_provider();
-                    (provider, model.account_config(provider))
-                };
-                match config {
-                    Ok(config) => {
+                let jobs = model.borrow_mut().retry_jobs(&sources);
+                match jobs {
+                    Ok(jobs) => {
+                        // A skipped provider keeps its failed sources.
+                        let sources: std::collections::BTreeSet<_> = sources
+                            .into_iter()
+                            .filter(|(provider, _)| {
+                                jobs.iter()
+                                    .any(|(account, _)| account.provider() == *provider)
+                            })
+                            .collect();
                         let mut model_ref = model.borrow_mut();
                         let progress = std::sync::Arc::new(LoadProgress::default());
                         let cache = std::sync::Arc::clone(&model_ref.mail_cache);
                         model_ref.load_progress = Some(std::sync::Arc::clone(&progress));
+                        let pending =
+                            pending_sign_ins(jobs.iter().map(|(account, _)| account.provider()));
                         model_ref.start(
                             Service::Review,
-                            if openloops_graph::live::has_session_for(provider) {
-                                "Downloading recent messages"
-                            } else {
-                                sign_in_label(provider, ScanMode::Full)
-                            },
+                            mail_load_label(&pending, ScanMode::Full),
                             move || Outcome::RetryMail {
-                                sources: config.load_sources_with(
-                                    &cache,
-                                    &progress,
-                                    Some(&sources),
+                                loads: openloops_graph::live::load_selected(
+                                    &jobs, &cache, &progress,
                                 ),
                                 source_keys: sources,
                                 conversations,
@@ -2136,10 +2275,11 @@ pub(crate) fn register_callbacks(
             let eligible = model_ref.reminder_sync_eligible_count(&cards);
             if eligible == 0 {
                 model_ref.review.action_status =
-                    "Nothing to check: no tracked loop has a Microsoft To Do task attached.".into();
+                    sync_nothing_status(model_ref.primary_mail_provider());
                 model_ref.review.action_status_succeeded = false;
             } else {
-                model_ref.review.action_status = format!("Checking {eligible} To Do task(s)…");
+                let providers = model_ref.reminder_sync_providers(&cards);
+                model_ref.review.action_status = sync_checking_status(eligible, &providers);
                 model_ref.review.action_status_succeeded = true;
                 model_ref.dispatch_reminder_sync();
             }
@@ -2374,6 +2514,7 @@ pub(crate) fn register_callbacks(
                 return;
             };
             let account = source.account.clone();
+            let provider = source.provider;
             let source_id = source.id.clone();
             let evidence_block = item.evidence.block;
             let evidence_quote = item.evidence.quote.clone();
@@ -2398,6 +2539,7 @@ pub(crate) fn register_callbacks(
                     .apply_decision_change(key, next, record.reminder);
                 model_ref.review.draft = Some(ReminderDraft {
                     key,
+                    provider,
                     account,
                     title,
                     when: default_reminder(),
@@ -2494,13 +2636,6 @@ pub(crate) fn register_callbacks(
         let timer = Rc::clone(&timer);
         window.on_create_reminder(move || {
             let mut model_ref = model.borrow_mut();
-            if model_ref.active_mail_provider() == MailProvider::Google {
-                model_ref.review.action_status = GOOGLE_REMINDER_UNAVAILABLE.into();
-                model_ref.review.action_status_succeeded = false;
-                drop(model_ref);
-                refresh(&model, &weak);
-                return;
-            }
             let Some(draft) = model_ref.review.draft.take() else {
                 return;
             };
@@ -2508,16 +2643,8 @@ pub(crate) fn register_callbacks(
                 Ok(at) if title_is_valid(&draft.title) => {
                     match model_ref.review.decisions.begin_reminder(draft.key) {
                         Ok(()) => {
-                            model_ref.review.pending_reminder = Some((
-                                draft.key,
-                                openloops_graph::live::reminders::ReminderRequest {
-                                    provider: openloops_graph::live::MailProvider::Microsoft,
-                                    account: draft.account,
-                                    title: draft.title.trim().into(),
-                                    at_utc: at,
-                                    marker: marker(&draft.key),
-                                },
-                            ));
+                            model_ref.review.pending_reminder =
+                                Some((draft.key, reminder_request(&draft, at)));
                             if dispatch_pending_reminder(&mut model_ref) {
                                 start_timer(&timer);
                             }
@@ -2545,7 +2672,21 @@ pub(crate) fn register_callbacks(
             let selected = REVIEW_UI.with(|state| state.borrow().selected);
             let Some(key) = selected else { return };
             let mut model_ref = model.borrow_mut();
-            apply_reconcile(&mut model_ref.review, key, exists);
+            let provider = model_ref
+                .review
+                .analysis
+                .as_ref()
+                .and_then(|analysis| {
+                    let cards = model_ref.review.card_contexts(&analysis.items);
+                    cards
+                        .iter()
+                        .position(|card| card.as_ref().is_some_and(|card| card.record.key == key))
+                        .and_then(|index| analysis.items.get(index))
+                        .and_then(|item| source_message(&model_ref.review, item))
+                        .map(|source| source.provider)
+                })
+                .unwrap_or_else(|| model_ref.primary_mail_provider());
+            apply_reconcile(&mut model_ref.review, key, provider, exists);
             drop(model_ref);
             refresh(&model, &weak);
         });
@@ -2979,7 +3120,14 @@ mod tests {
         crate::slint_ui::sync(&model, &window);
         assert_eq!(window.get_mail_provider_index(), 1);
         assert!(!window.get_can_check_mailbox());
-        assert!(window.get_own_inbox_accessible());
+        assert_eq!(
+            window
+                .get_heading_pills()
+                .iter()
+                .map(|pill| pill.to_string())
+                .collect::<Vec<_>>(),
+            ["Personal inbox confirmed"]
+        );
         assert_eq!(window.get_microsoft_lines().row_count(), 0);
         assert_eq!(window.get_google_lines().row_count(), 1);
 
@@ -3019,15 +3167,135 @@ mod tests {
         window.invoke_mail_provider_selected(1);
         let callback_model = mailbox_callback_model.borrow();
         assert_eq!(callback_model.active_mail_provider(), MailProvider::Google);
-        assert!(callback_model.review.analysis.is_none());
-        assert!(callback_model.review.action_status.is_empty());
-        assert!(callback_model.review_status.lines.is_empty());
+        assert_eq!(
+            callback_model.enabled_mail_providers(),
+            [MailProvider::Microsoft]
+        );
+        assert!(callback_model.review.analysis.is_some());
+        assert_eq!(
+            callback_model.review.action_status,
+            "Synthetic action status"
+        );
         assert_eq!(callback_model.client_id, "malformed-guid");
         assert_eq!(
             callback_model.google_client_id,
             "123-synthetic.apps.googleusercontent.com"
         );
         drop(callback_model);
+        assert!(!window.get_provider_enabled());
+
+        // "Include in scans" on the Google view enables Google as well.
+        window.invoke_provider_enabled_toggled(true);
+        assert_eq!(
+            mailbox_callback_model.borrow().enabled_mail_providers(),
+            [MailProvider::Microsoft, MailProvider::Google]
+        );
+        assert!(window.get_provider_enabled());
+        assert_eq!(
+            window.get_scan_providers_text().as_str(),
+            "Scans include: Microsoft 365, Google"
+        );
+        assert_eq!(
+            window.get_scope_folders_label().as_str(),
+            "Inbox / Sent (both providers)"
+        );
+        // The fixture's messages are Microsoft mail, so only Microsoft is connected.
+        assert_eq!(
+            window
+                .get_heading_pills()
+                .iter()
+                .map(|pill| pill.to_string())
+                .collect::<Vec<_>>(),
+            ["Microsoft connected"]
+        );
+        mailbox_callback_model.borrow_mut().google.succeeded = true;
+        crate::slint_ui::sync(&mailbox_callback_model.borrow(), &window);
+        assert_eq!(window.get_heading_pills().row_count(), 2);
+        assert_eq!(
+            window.get_account_text().as_str(),
+            "Signed in · Microsoft 365 + Google"
+        );
+
+        // Disabling Google leaves Microsoft; disabling the last one is refused.
+        window.invoke_provider_enabled_toggled(false);
+        assert_eq!(
+            mailbox_callback_model.borrow().enabled_mail_providers(),
+            [MailProvider::Microsoft]
+        );
+        window.invoke_mail_provider_selected(0);
+        window.set_provider_enabled(false);
+        window.invoke_provider_enabled_toggled(false);
+        assert_eq!(
+            mailbox_callback_model.borrow().enabled_mail_providers(),
+            [MailProvider::Microsoft]
+        );
+        assert!(window.get_provider_enabled());
+        assert_eq!(
+            window.get_settings_status().as_str(),
+            "Keep at least one mail provider enabled."
+        );
+
+        // Viewing the Google segment with only Microsoft enabled changes the
+        // Sources card only: the Review pane copy, the "nothing to check"
+        // status and the reconcile fallback stay Microsoft.
+        let primary_model = Rc::new(RefCell::new(AppModel::with_store(Ok(None))));
+        primary_model
+            .borrow_mut()
+            .set_active_mail_provider(MailProvider::Google);
+        assert_eq!(
+            primary_model.borrow().enabled_mail_providers(),
+            [MailProvider::Microsoft]
+        );
+        REVIEW_UI.with(|state| state.borrow_mut().selected = None);
+        sync_review(
+            &primary_model.borrow(),
+            &window,
+            &[],
+            false,
+            false,
+            ScanStripModel::default(),
+        );
+        assert_eq!(
+            window.get_todo_url().as_str(),
+            MailProvider::Microsoft.tasks_url()
+        );
+        assert_eq!(window.get_reminder_service().as_str(), "Microsoft To Do");
+        assert_eq!(
+            window.get_reminder_time_note().as_str(),
+            MICROSOFT_REMINDER_TIME_NOTE
+        );
+        assert_eq!(
+            window.get_reminder_scope_note().as_str(),
+            reminder_scope_note(MailProvider::Microsoft)
+        );
+        assert_eq!(
+            window.get_remind_button_label().as_str(),
+            "Set To Do reminder…"
+        );
+        assert_eq!(window.get_sync_reminders_label().as_str(), "Sync To Do");
+        let primary_timer = Rc::new(Timer::default());
+        register_callbacks(&window, &primary_model, &primary_timer);
+        window.invoke_sync_todo();
+        assert_eq!(
+            primary_model.borrow().review.action_status,
+            sync_nothing_status(MailProvider::Microsoft)
+        );
+        let orphan_key = [0x5a; 32];
+        REVIEW_UI.with(|state| state.borrow_mut().selected = Some(orphan_key));
+        window.invoke_reconcile_reminder(true);
+        assert!(matches!(
+            primary_model
+                .borrow()
+                .review
+                .decisions
+                .get(&orphan_key)
+                .reminder,
+            Reminder::Created {
+                provider: MailProvider::Microsoft,
+                ..
+            }
+        ));
+        REVIEW_UI.with(|state| state.borrow_mut().selected = None);
 
         model.mail_providers = std::collections::BTreeSet::from([MailProvider::Microsoft]);
         model.provider = crate::settings::Provider::OpenRouter;
@@ -3096,10 +3364,24 @@ mod tests {
             false,
             ScanStripModel::default(),
         );
-        assert!(!window.get_can_remind());
+        assert!(window.get_can_remind());
+        assert_eq!(window.get_reminder_service().as_str(), "Microsoft To Do");
         assert_eq!(
-            window.get_review_action_status().as_str(),
-            GOOGLE_REMINDER_UNAVAILABLE
+            window.get_reminder_time_note().as_str(),
+            MICROSOFT_REMINDER_TIME_NOTE
+        );
+        assert_eq!(
+            window.get_reminder_scope_note().as_str(),
+            reminder_scope_note(MailProvider::Microsoft)
+        );
+        assert_eq!(
+            window.get_remind_button_label().as_str(),
+            "Set To Do reminder…"
+        );
+        // No reminder records here: the label follows the active provider.
+        assert_eq!(
+            window.get_sync_reminders_label().as_str(),
+            "Sync Google Tasks"
         );
         model.review.decisions.error = Some("Synthetic decision error".into());
         sync_review(
@@ -3127,6 +3409,7 @@ mod tests {
         );
         assert!(!window.get_can_track());
         assert!(!window.get_can_watch());
+        assert_eq!(window.get_sync_reminders_label().as_str(), "Sync To Do");
 
         // Requirement 6b (perf fix, owner round 3): a `sync_review` re-run
         // over unchanged content must leave every projected list model in
@@ -3272,14 +3555,6 @@ mod tests {
         }
         let timer = Rc::new(Timer::default());
         register_callbacks(&window, &callback_model, &timer);
-        callback_model.borrow_mut().mail_providers =
-            std::collections::BTreeSet::from([MailProvider::Google]);
-        window.invoke_create_reminder();
-        assert_eq!(
-            callback_model.borrow().review.action_status,
-            GOOGLE_REMINDER_UNAVAILABLE
-        );
-        assert!(callback_model.borrow().review.pending_reminder.is_none());
         window.invoke_clear_results();
         let model = callback_model.borrow();
         assert!(cancel.cancel.load(Ordering::Relaxed));
@@ -3340,6 +3615,35 @@ mod tests {
             window.get_training_export_status()
         );
         std::fs::remove_dir_all(&export_folder).ok();
+    }
+
+    #[test]
+    fn mail_load_label_lists_every_pending_sign_in() {
+        use MailProvider::{Google, Microsoft};
+        assert_eq!(
+            mail_load_label(&[], ScanMode::Full),
+            "Downloading recent messages"
+        );
+        assert_eq!(
+            mail_load_label(&[], ScanMode::Incremental),
+            "Checking for new mail"
+        );
+        assert_eq!(
+            mail_load_label(&[Microsoft], ScanMode::Full),
+            "Complete Microsoft sign-in; then downloading recent messages"
+        );
+        assert_eq!(
+            mail_load_label(&[Google], ScanMode::Incremental),
+            "Complete Google sign-in; then checking for new mail"
+        );
+        assert_eq!(
+            mail_load_label(&[Microsoft, Google], ScanMode::Full),
+            "Complete Microsoft and Google sign-in; then downloading recent messages"
+        );
+        assert_eq!(
+            mail_load_label(&[Microsoft, Google], ScanMode::Incremental),
+            "Complete Microsoft and Google sign-in; then checking for new mail"
+        );
     }
 
     #[test]
@@ -3887,6 +4191,7 @@ mod tests {
         );
         let draft = ReminderDraft {
             key: [1; 32],
+            provider: MailProvider::Microsoft,
             account: "synthetic".into(),
             title: "Send notes".into(),
             when: valid_value,
@@ -3897,6 +4202,49 @@ mod tests {
     }
 
     #[test]
+    fn reminder_service_and_time_note_copy_are_provider_specific() {
+        assert_eq!(MailProvider::Microsoft.tasks_name(), "Microsoft To Do");
+        assert_eq!(
+            reminder_time_note(MailProvider::Microsoft),
+            MICROSOFT_REMINDER_TIME_NOTE
+        );
+        assert_eq!(MailProvider::Google.tasks_name(), "Google Tasks");
+        assert_eq!(
+            reminder_time_note(MailProvider::Google),
+            "Google Tasks saves the date only and does not alert you. The task gets your local calendar date of the time you pick, and that time is written into the task's notes."
+        );
+    }
+
+    #[test]
+    fn reminder_create_and_completion_targets_preserve_provider() {
+        for provider in [MailProvider::Microsoft, MailProvider::Google] {
+            let draft = ReminderDraft {
+                key: [4; 32],
+                provider,
+                account: "synthetic-account".into(),
+                title: "  Review the draft  ".into(),
+                when: "2096-10-02 07:06".into(),
+                error: String::new(),
+                prior_decision: Decision::Mine,
+            };
+            let request = reminder_request(&draft, 4_000_000_000);
+            assert_eq!(request.provider, provider);
+            assert_eq!(request.title, "Review the draft");
+
+            let reminder = Reminder::Created {
+                provider,
+                list_id: "synthetic-list".into(),
+                task_id: "synthetic-task".into(),
+            };
+            assert_eq!(
+                completion_target(Decision::Done, &reminder),
+                Some((provider, "synthetic-list".into(), "synthetic-task".into()))
+            );
+            assert!(completion_target(Decision::Mine, &reminder).is_none());
+        }
+    }
+
+    #[test]
     fn reminder_state_view_covers_every_variant() {
         let mut record = Record {
             key: [0xab; 32],
@@ -3904,13 +4252,16 @@ mod tests {
             reminder: Reminder::None,
             updated: 0,
         };
-        assert_eq!(reminder_state_view(&record).state, "none");
+        assert_eq!(
+            reminder_state_view(&record, MailProvider::Microsoft).state,
+            "none"
+        );
         record.reminder = Reminder::Created {
             provider: openloops_graph::live::MailProvider::Microsoft,
             list_id: "list".into(),
             task_id: "task".into(),
         };
-        let created = reminder_state_view(&record);
+        let created = reminder_state_view(&record, MailProvider::Microsoft);
         assert_eq!(created.state, "created");
         assert!(
             created
@@ -3918,9 +4269,154 @@ mod tests {
                 .starts_with("Reminder created in Microsoft To Do.")
         );
         record.reminder = Reminder::Attempted;
-        let attempted = reminder_state_view(&record);
+        let attempted = reminder_state_view(&record, MailProvider::Microsoft);
         assert_eq!(attempted.state, "attempted");
         assert!(attempted.marker.starts_with("Reference: "));
+    }
+
+    #[test]
+    fn reminder_state_view_text_follows_the_provider() {
+        let mut record = Record {
+            key: [0xab; 32],
+            decision: Decision::Done,
+            reminder: Reminder::Completed {
+                provider: MailProvider::Microsoft,
+                list_id: "list".into(),
+                task_id: "task".into(),
+            },
+            updated: 0,
+        };
+        // The record's own provider wins over the card's for Completed.
+        assert_eq!(
+            reminder_state_view(&record, MailProvider::Google).text,
+            "The linked Microsoft To Do task was completed, which marked this loop Handled."
+        );
+        record.reminder = Reminder::Completed {
+            provider: MailProvider::Google,
+            list_id: "list".into(),
+            task_id: "task".into(),
+        };
+        assert_eq!(
+            reminder_state_view(&record, MailProvider::Microsoft).text,
+            "The linked Google Tasks task was completed, which marked this loop Handled."
+        );
+        // Attempted stores no provider: the card's provider names the service.
+        record.reminder = Reminder::Attempted;
+        assert_eq!(
+            reminder_state_view(&record, MailProvider::Microsoft).text,
+            "A reminder attempt has no confirmed outcome. Inspect Microsoft To Do before allowing another attempt."
+        );
+        assert_eq!(
+            reminder_state_view(&record, MailProvider::Google).text,
+            "A reminder attempt has no confirmed outcome. Inspect Google Tasks before allowing another attempt."
+        );
+    }
+
+    #[test]
+    fn reminder_pills_and_completed_hint_follow_the_provider() {
+        let completed = |provider| Reminder::Completed {
+            provider,
+            list_id: "list".into(),
+            task_id: "task".into(),
+        };
+        let created = |provider| Reminder::Created {
+            provider,
+            list_id: "list".into(),
+            task_id: "task".into(),
+        };
+        let text = |reminder: &Reminder| reminder_pill(reminder).map(|pill| pill.text);
+        assert_eq!(
+            text(&created(MailProvider::Microsoft)).as_deref(),
+            Some("To Do reminder set")
+        );
+        assert_eq!(
+            text(&completed(MailProvider::Microsoft)).as_deref(),
+            Some("To Do task completed")
+        );
+        assert_eq!(
+            text(&created(MailProvider::Google)).as_deref(),
+            Some("Google Tasks reminder set")
+        );
+        assert_eq!(
+            text(&completed(MailProvider::Google)).as_deref(),
+            Some("Google Tasks task completed")
+        );
+        assert_eq!(
+            text(&Reminder::Attempted).as_deref(),
+            Some("Reminder unconfirmed")
+        );
+        assert!(reminder_pill(&Reminder::None).is_none());
+
+        let review = crate::review_model::layout_fixture();
+        let item = review.analysis.as_ref().unwrap().items[0].clone();
+        assert_eq!(
+            status_pill_hint(Decision::Done, &completed(MailProvider::Google), &item),
+            "The linked Google Tasks task was completed, which marked this handled."
+        );
+    }
+
+    #[test]
+    fn reminder_panel_copy_is_per_provider() {
+        assert_eq!(
+            reminder_scope_note(MailProvider::Microsoft),
+            "Creates one task in your personal default Tasks list. Only the title, reminder time, and an opaque OpenLoops reference are sent to Microsoft. This requires delegated Tasks.ReadWrite and a separate browser sign-in."
+        );
+        assert_eq!(
+            reminder_scope_note(MailProvider::Google),
+            "Creates one task in your default Google Tasks list. Only the title, the date, the reminder time as a note, and an opaque OpenLoops reference are sent to Google Tasks. A separate browser sign-in is required."
+        );
+        assert_eq!(
+            remind_button_label(MailProvider::Microsoft),
+            "Set To Do reminder…"
+        );
+        assert_eq!(
+            remind_button_label(MailProvider::Google),
+            "Set Google Tasks reminder…"
+        );
+    }
+
+    #[test]
+    fn sync_button_and_status_copy_follow_the_providers_with_records() {
+        use std::collections::BTreeSet;
+        let microsoft = BTreeSet::from([MailProvider::Microsoft]);
+        let google = BTreeSet::from([MailProvider::Google]);
+        let both = BTreeSet::from([MailProvider::Microsoft, MailProvider::Google]);
+        assert_eq!(sync_reminders_label(&microsoft), "Sync To Do");
+        assert_eq!(sync_reminders_label(&google), "Sync Google Tasks");
+        assert_eq!(sync_reminders_label(&both), "Sync reminders");
+        assert_eq!(
+            sync_checking_status(2, &microsoft),
+            "Checking 2 To Do task(s)…"
+        );
+        assert_eq!(
+            sync_checking_status(2, &google),
+            "Checking 2 Google Tasks task(s)…"
+        );
+        assert_eq!(sync_checking_status(3, &both), "Checking 3 linked task(s)…");
+        assert_eq!(
+            sync_nothing_status(MailProvider::Microsoft),
+            "Nothing to check: no tracked loop has a Microsoft To Do task attached."
+        );
+        assert_eq!(
+            sync_nothing_status(MailProvider::Google),
+            "Nothing to check: no tracked loop has a Google Tasks task attached."
+        );
+    }
+
+    #[test]
+    fn scheduled_line_uses_the_shared_local_time_formatter() {
+        let when = reminder_quick_pick_in_hour(chrono::Local::now());
+        let at = reminder_time(&when).unwrap();
+        assert_eq!(
+            scheduled_instant_line(&when),
+            (
+                format!(
+                    "Scheduled instant: {}",
+                    openloops_graph::live::reminders::format_local_reminder_time(at).unwrap()
+                ),
+                true
+            )
+        );
     }
 
     #[test]
@@ -4055,6 +4551,7 @@ mod tests {
         let valid_when = reminder_quick_pick_in_hour(chrono::Local::now());
         let with_error = ReminderDraft {
             key: [1; 32],
+            provider: MailProvider::Microsoft,
             account: "synthetic".into(),
             title: "Send notes".into(),
             when: valid_when.clone(),
@@ -4073,6 +4570,7 @@ mod tests {
 
         let short_title = ReminderDraft {
             key: [1; 32],
+            provider: MailProvider::Microsoft,
             account: "synthetic".into(),
             title: "ab".into(),
             when: valid_when.clone(),
@@ -4083,6 +4581,7 @@ mod tests {
 
         let long_title = ReminderDraft {
             key: [1; 32],
+            provider: MailProvider::Microsoft,
             account: "synthetic".into(),
             title: "x".repeat(321),
             when: valid_when,
@@ -4105,7 +4604,7 @@ mod tests {
             "send the draft budget",
         );
 
-        apply_reconcile(&mut review, key, true);
+        apply_reconcile(&mut review, key, MailProvider::Microsoft, true);
         assert!(review.action_status_succeeded);
         assert_eq!(
             review.action_status,
@@ -4120,7 +4619,7 @@ mod tests {
         review.decisions.error = Some(
             "The saved-decision limit (55) is reached. Existing decisions are preserved.".into(),
         );
-        apply_reconcile(&mut review, key, false);
+        apply_reconcile(&mut review, key, MailProvider::Microsoft, false);
         assert!(!review.action_status_succeeded);
         assert_eq!(
             review.action_status,
@@ -4152,7 +4651,7 @@ mod tests {
         };
         *provider = MailProvider::Google;
 
-        apply_reconcile(&mut review, key, true);
+        apply_reconcile(&mut review, key, MailProvider::Google, true);
 
         assert!(matches!(
             review.decisions.get(&key).reminder,

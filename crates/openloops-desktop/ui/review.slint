@@ -109,6 +109,11 @@ export component ReviewScreen {
     in-out property <string> draft-when;
     in property <string> draft-scheduled-line;
     in property <bool> draft-valid;
+    in property <string> reminder-service;
+    in property <string> reminder-time-note;
+    in property <string> reminder-scope-note;
+    in property <string> remind-button-label: "Set To Do reminder…";
+    in property <string> sync-reminders-label: "Sync To Do";
     in property <ReminderStateView> reminder-state;
     in property <string> todo-url;
     in property <string> source-url;
@@ -170,7 +175,7 @@ export component ReviewScreen {
                     if root.review-scanning: SecondaryButton { text: "■ Stop scan"; accessible-name: "Stop scan"; clicked => { root.stop-scan(); } }
                     if !root.review-scanning: PrimaryButton { text: "Scan inboxes"; enabled: root.can-scan; clicked => { root.scan-inboxes(); } }
                     SubtleButton { text: "Rescan loaded mail"; enabled: root.can-rescan; clicked => { root.rescan(); } }
-                    SubtleButton { text: "Sync To Do"; enabled: root.can-sync-todo; clicked => { root.sync-todo(); } }
+                    SubtleButton { text: root.sync-reminders-label; enabled: root.can-sync-todo; clicked => { root.sync-todo(); } }
                     SubtleButton { text: "Clear results and mail"; enabled: !root.busy; clicked => { root.clear-results(); } }
                     Rectangle { horizontal-stretch: 1; }
                 }
@@ -436,7 +441,7 @@ export component ReviewScreen {
                                             if root.can-track: PrimaryButton { text: "Track — this is mine"; enabled: !root.busy; clicked => { root.decision(1); } }
                                             if root.can-watch: SecondaryButton { text: "Keep an eye on this"; enabled: !root.busy; clicked => { root.decision(4); } }
                                             Rectangle { horizontal-stretch: 1; }
-                                            OutlineButton { text: "Set To Do reminder…"; enabled: root.can-remind; clicked => { root.open-reminder(); } }
+                                            OutlineButton { text: root.remind-button-label; enabled: root.can-remind; clicked => { root.open-reminder(); } }
                                         }
                                         if root.selected-open: HorizontalLayout { width: 100%; spacing: Tokens.space-2;
                                             SecondaryButton { text: "Handled"; enabled: !root.busy; clicked => { root.decision(2); } }
@@ -466,8 +471,8 @@ export component ReviewScreen {
                                         key-pressed(event) => { if event.text == Key.Escape { root.cancel-reminder(); return accept; } return reject; }
                                         Rectangle { width: 100%; height: draft-body.preferred-height; background: Tokens.brand-panel; border-color: Tokens.brand-stroke; border-width: Tokens.hairline; border-radius: Tokens.radius-6;
                                             draft-body := VerticalLayout { padding-left: Tokens.card-pad-x; padding-right: Tokens.card-pad-x; padding-top: Tokens.space-4; padding-bottom: Tokens.space-4; spacing: Tokens.space-3; alignment: start;
-                                                WrappedText { text: "Review your Microsoft To Do reminder"; text-color: Tokens.text-1; size: Tokens.font-15; weight: 600; }
-                                                WrappedText { text: "Creates one task in your personal default Tasks list. Only the title, reminder time, and an opaque OpenLoops reference are sent to Microsoft. This requires delegated Tasks.ReadWrite and a separate browser sign-in."; }
+                                                WrappedText { text: "Review your " + root.reminder-service + " reminder"; text-color: Tokens.text-1; size: Tokens.font-15; weight: 600; }
+                                                WrappedText { text: root.reminder-scope-note; }
                                                 if reading-column.width >= Tokens.review-reading-max-width: HorizontalLayout { spacing: Tokens.space-3;
                                                     Field { label: "Task title"; value <=> root.draft-title; enabled: !root.busy; horizontal-stretch: 2; edited(value) => { root.draft-title-edited(value); } }
                                                     Field { label: "Remind me at (local time)"; placeholder: "YYYY-MM-DD HH:MM"; value <=> root.draft-when; monospace: true; enabled: !root.busy; horizontal-stretch: 1; edited(value) => { root.draft-when-edited(value); } }
@@ -481,9 +486,9 @@ export component ReviewScreen {
                                                     SecondaryButton { text: "Tomorrow at 9 am"; enabled: !root.busy; clicked => { root.draft-tomorrow(); } }
                                                     WrappedText { text: root.draft-scheduled-line; text-color: root.draft-valid ? Tokens.text-2 : Tokens.danger; horizontal-stretch: 1; }
                                                 }
-                                                WrappedText { text: "This time is your choice, separate from the email deadline. Microsoft To Do controls alert delivery, including when OpenLoops is closed. A failed or uncertain write is never retried automatically."; }
+                                                WrappedText { text: root.reminder-time-note; }
                                                 HorizontalLayout { spacing: Tokens.space-2; alignment: start;
-                                                    PrimaryButton { text: "Create this reminder in Microsoft To Do"; enabled: !root.busy && root.draft-valid; clicked => { root.create-reminder(); } }
+                                                    PrimaryButton { text: "Create this reminder in " + root.reminder-service; enabled: !root.busy && root.draft-valid; clicked => { root.create-reminder(); } }
                                                     SecondaryButton { text: "Cancel"; enabled: !root.busy; clicked => { root.cancel-reminder(); } }
                                                 }
                                             }
@@ -492,7 +497,7 @@ export component ReviewScreen {
                                     if root.reminder-state.state == "created": Callout { kind: "success"; text: root.reminder-state.text; accessible-name: root.reminder-state.text;
                                         HorizontalLayout { spacing: Tokens.space-2;
                                             Rectangle { horizontal-stretch: 1; }
-                                            LinkButton { text: "Open Microsoft To Do"; enabled: !root.busy; clicked => { root.open-external(root.todo-url); } }
+                                            LinkButton { text: "Open " + root.reminder-service; enabled: !root.busy; clicked => { root.open-external(root.todo-url); } }
                                         }
                                     }
                                     if root.reminder-state.state == "attempted": Callout { kind: "warning"; text: root.reminder-state.text; accessible-name: root.reminder-state.text;
@@ -505,7 +510,7 @@ export component ReviewScreen {
                                         }
                                         HorizontalLayout { spacing: Tokens.space-2;
                                             Rectangle { horizontal-stretch: 1; }
-                                            LinkButton { text: "Inspect Microsoft To Do"; enabled: !root.busy; clicked => { root.open-external(root.todo-url); } }
+                                            LinkButton { text: "Inspect " + root.reminder-service; enabled: !root.busy; clicked => { root.open-external(root.todo-url); } }
                                         }
                                         HorizontalLayout { spacing: Tokens.space-2; alignment: start;
                                             SecondaryButton { text: "I checked: the task exists"; enabled: !root.busy; clicked => { root.reconcile-reminder(true); } }

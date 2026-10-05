@@ -159,3 +159,22 @@ operation kinds, incomplete operation keys, runtime activation, claims, and
 additive documentation contradictions. Fresh privacy, protocol, and adversarial
 judges are required for closure; their prompts, transcripts, and output are not
 repository evidence.
+
+## Amendment (2026-10-04): Google Tasks adapter and marker placement
+
+The owner approved on 2026-09-27 a Google Tasks adapter for Gmail accounts alongside the
+Microsoft To Do adapter. It follows this ADR's confirmation-first, single-request,
+no-automatic-retry rules through the same reminder outcome types. Google Tasks records a
+calendar date only for `due` and raises no alert; the application states this in the draft,
+sends the user's local calendar date, and writes the chosen reminder time as text in the
+task's notes. Completion for a detected loop still yields `completed_needs_evidence`.
+
+Marker placement. Neither Microsoft To Do nor Google Tasks offers an application-private
+opaque field proven by an adapter gate. Both adapters therefore transmit the recoverable
+marker inside the task's free-text body (`body.content` for To Do, `notes` for Google Tasks)
+on a line of its own prefixed "OpenLoops reference:", and never in the title or due value.
+Only the marker's HMAC is persisted. This records the current implementation; it does not
+claim either field as a proven opaque marker field, and the correlation rules above
+(complete enumeration, one match links, many or incomplete require the user) are unchanged.
+
+`contracts/reminder/adapter-boundary.json` is unchanged by this amendment.

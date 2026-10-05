@@ -76,6 +76,43 @@ pub struct LoadProgress {
     pub cancel: AtomicBool,
 }
 
+/// Counter values at the start of one provider's load; see [`LoadProgress::rewind`].
+pub struct LoadCheckpoint {
+    listed: usize,
+    loaded: usize,
+    sources_done: usize,
+}
+
+impl LoadProgress {
+    /// Starts one download job over every provider: zeroes the counters and
+    /// sets the planned source total. Called once per job, never by a loader.
+    pub fn begin(&self, total_sources: usize) {
+        self.listed.store(0, Ordering::Relaxed);
+        self.loaded.store(0, Ordering::Relaxed);
+        self.sources_done.store(0, Ordering::Relaxed);
+        self.sources_total.store(total_sources, Ordering::Relaxed);
+    }
+
+    /// The counters before a loader starts adding to them.
+    #[must_use]
+    pub fn checkpoint(&self) -> LoadCheckpoint {
+        LoadCheckpoint {
+            listed: self.listed.load(Ordering::Relaxed),
+            loaded: self.loaded.load(Ordering::Relaxed),
+            sources_done: self.sources_done.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Drops a loader's own increments when its session work restarts after
+    /// a re-authorization, keeping earlier providers' counts.
+    pub fn rewind(&self, checkpoint: &LoadCheckpoint) {
+        self.listed.store(checkpoint.listed, Ordering::Relaxed);
+        self.loaded.store(checkpoint.loaded, Ordering::Relaxed);
+        self.sources_done
+            .store(checkpoint.sources_done, Ordering::Relaxed);
+    }
+}
+
 /// Downloaded messages retained only for the current process session.
 pub type MailCache = HashMap<(String, String), MailItem>;
 
@@ -89,6 +126,8 @@ pub fn load_recent(config: &ConnectionConfig) -> Result<Vec<SourceReview>, Conne
 
 /// Browser sign-in, then a cancellable, cache-aware download of recent mail.
 ///
+/// Call [`LoadProgress::begin`] once per job before this. Loaders never call it.
+///
 /// # Errors
 /// Returns fixed configuration/authentication errors, or [`ConnectionError::Cancelled`] when the
 /// caller stops the download. Source-specific failures remain visible on their source.
@@ -101,6 +140,8 @@ pub fn load_recent_with(
 }
 
 /// Loads every configured source, or only labels present in `source_filter`.
+///
+/// Call [`LoadProgress::begin`] once per job before this. Loaders never call it.
 ///
 /// # Errors
 /// Returns fixed configuration/authentication errors, or [`ConnectionError::Cancelled`].
@@ -117,27 +158,10 @@ pub fn load_sources_with(
     if progress.cancel.load(Ordering::Acquire) {
         return Err(ConnectionError::Cancelled);
     }
-    progress.listed.store(0, Ordering::Relaxed);
-    progress.loaded.store(0, Ordering::Relaxed);
-    progress.sources_done.store(0, Ordering::Relaxed);
     let selected = |label: &str| source_selected(source_filter, label);
-    let configured_labels = source_labels(config);
-    progress.sources_total.store(
-        configured_labels
-            .iter()
-            .filter(|label| selected(label))
-            .count(),
-        Ordering::Relaxed,
-    );
+    let start = progress.checkpoint();
     with_session(config, |http, token, scope| {
-        progress.listed.store(0, Ordering::Relaxed);
-        progress.loaded.store(0, Ordering::Relaxed);
-        progress.sources_done.store(0, Ordering::Relaxed);
-        let active_labels = source_labels_for_scope(config, scope);
-        progress.sources_total.store(
-            active_labels.iter().filter(|label| selected(label)).count(),
-            Ordering::Relaxed,
-        );
+        progress.rewind(&start);
         ensure_loading(progress)?;
         let identity = identity(http, token)?;
         ensure_loading(progress)?;
@@ -170,19 +194,11 @@ pub fn load_sources_with(
         for address in &config.shared_mailboxes {
             ensure_loading(progress)?;
             if scope == SharedScope::Missing {
-                if !selected(address) {
-                    continue;
-                }
-                sources.push(SourceReview {
-                    provider: MailProvider::Microsoft,
-                    label: address.clone(),
-                    messages: vec![],
-                    errors: vec![ConnectionError::MissingSharedScope],
-                    message_errors: vec![],
-                    partial: false,
-                    failed: true,
-                });
-                progress.sources_done.fetch_add(1, Ordering::Relaxed);
+                sources.extend(missing_shared_scope_source(
+                    address,
+                    source_filter,
+                    progress,
+                ));
             } else {
                 if selected(&format!("{address} / Inbox")) {
                     sources.push(load_mailbox(
@@ -214,6 +230,33 @@ pub fn load_sources_with(
     })
 }
 
+/// The failed source for a shared mailbox when the shared-mail scope is
+/// missing, or `None` when the filter excludes it. Both planned folder labels
+/// count as done: the total from [`source_count`] plans them separately.
+fn missing_shared_scope_source(
+    address: &str,
+    source_filter: Option<&BTreeSet<String>>,
+    progress: &LoadProgress,
+) -> Option<SourceReview> {
+    let planned = [
+        format!("{address} / Inbox"),
+        format!("{address} / Sent Items"),
+    ]
+    .iter()
+    .filter(|label| source_selected(source_filter, label))
+    .count();
+    progress.sources_done.fetch_add(planned, Ordering::Relaxed);
+    source_selected(source_filter, address).then(|| SourceReview {
+        provider: MailProvider::Microsoft,
+        label: address.to_owned(),
+        messages: vec![],
+        errors: vec![ConnectionError::MissingSharedScope],
+        message_errors: vec![],
+        partial: false,
+        failed: true,
+    })
+}
+
 fn source_selected(source_filter: Option<&BTreeSet<String>>, label: &str) -> bool {
     source_filter.is_none_or(|filter| {
         filter.contains(label)
@@ -241,22 +284,15 @@ fn source_labels(config: &ConnectionConfig) -> Vec<String> {
     labels
 }
 
-fn source_labels_for_scope(config: &ConnectionConfig, scope: SharedScope) -> Vec<String> {
-    if scope != SharedScope::Missing {
-        return source_labels(config);
-    }
-    let mut labels = vec![
-        "Personal mailbox / Inbox".into(),
-        "Personal mailbox / Sent Items".into(),
-    ];
-    labels.extend(
-        config
-            .group_inboxes
-            .iter()
-            .map(|address| format!("Group: {address}")),
-    );
-    labels.extend(config.shared_mailboxes.iter().cloned());
-    labels
+/// How many configured sources a load with `source_filter` plans to read.
+pub(super) fn source_count(
+    config: &ConnectionConfig,
+    source_filter: Option<&BTreeSet<String>>,
+) -> usize {
+    source_labels(config)
+        .iter()
+        .filter(|label| source_selected(source_filter, label))
+        .count()
 }
 
 fn ensure_loading(progress: &LoadProgress) -> Result<(), ConnectionError> {
@@ -1170,6 +1206,65 @@ mod tests {
             addresses: addresses.iter().map(|address| (*address).into()).collect(),
             display_name: Some("Synthetic User".into()),
             given_name: Some("Synthetic".into()),
+        }
+    }
+
+    #[test]
+    fn begin_resets_counters_and_sets_the_total_once() {
+        let progress = LoadProgress::default();
+        progress.listed.store(7, Ordering::Relaxed);
+        progress.loaded.store(6, Ordering::Relaxed);
+        progress.sources_done.store(2, Ordering::Relaxed);
+        progress.begin(5);
+        assert_eq!(progress.listed.load(Ordering::Relaxed), 0);
+        assert_eq!(progress.loaded.load(Ordering::Relaxed), 0);
+        assert_eq!(progress.sources_done.load(Ordering::Relaxed), 0);
+        assert_eq!(progress.sources_total.load(Ordering::Relaxed), 5);
+    }
+
+    #[test]
+    fn rewind_restores_only_this_loaders_increments() {
+        let progress = LoadProgress::default();
+        progress.begin(4);
+        progress.listed.store(3, Ordering::Relaxed);
+        progress.loaded.store(3, Ordering::Relaxed);
+        progress.sources_done.store(2, Ordering::Relaxed);
+        let start = progress.checkpoint();
+        progress.listed.fetch_add(10, Ordering::Relaxed);
+        progress.loaded.fetch_add(4, Ordering::Relaxed);
+        progress.sources_done.fetch_add(1, Ordering::Relaxed);
+        progress.rewind(&start);
+        assert_eq!(progress.listed.load(Ordering::Relaxed), 3);
+        assert_eq!(progress.loaded.load(Ordering::Relaxed), 3);
+        assert_eq!(progress.sources_done.load(Ordering::Relaxed), 2);
+        assert_eq!(progress.sources_total.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn missing_shared_scope_completes_every_planned_shared_source() {
+        let address = "shared@example.invalid";
+        let config =
+            ConnectionConfig::new("11111111-1111-4111-8111-111111111111", Some(address)).unwrap();
+        for (filter, expected_total, expect_source) in [
+            (BTreeSet::from([address.to_owned()]), 2, true),
+            (BTreeSet::from([format!("{address} / Inbox")]), 1, false),
+        ] {
+            let progress = LoadProgress::default();
+            progress.begin(source_count(&config, Some(&filter)));
+            let source = missing_shared_scope_source(address, Some(&filter), &progress);
+            assert_eq!(
+                progress.sources_total.load(Ordering::Relaxed),
+                expected_total
+            );
+            assert_eq!(
+                progress.sources_done.load(Ordering::Relaxed),
+                progress.sources_total.load(Ordering::Relaxed)
+            );
+            assert_eq!(source.is_some(), expect_source);
+            if let Some(source) = source {
+                assert!(source.failed);
+                assert_eq!(source.errors, [ConnectionError::MissingSharedScope]);
+            }
         }
     }
 

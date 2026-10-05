@@ -42,10 +42,14 @@ export component AppWindow inherits Window {
     in-out property <string> client-id;
     in-out property <string> groups;
     in-out property <string> shared-mailboxes;
-    in property <bool> own-inbox-accessible;
     in property <[StatusLine]> microsoft-lines;
     in property <string> microsoft-busy-line;
     in-out property <int> mail-provider-index;
+    in property <[string]> heading-pills;
+    in-out property <bool> provider-enabled;
+    in property <string> scan-providers-text;
+    in property <string> scope-folders-label: "Inbox / Sent Items";
+    in property <string> scope-groups-text: "20 recent threads · 40 posts each";
     in property <bool> shipped-google-registration-present;
     in-out property <string> google-client-id;
     in-out property <string> google-client-secret;
@@ -119,6 +123,11 @@ export component AppWindow inherits Window {
     in-out property <string> draft-when;
     in property <string> draft-scheduled-line;
     in property <bool> draft-valid;
+    in property <string> reminder-service;
+    in property <string> reminder-time-note;
+    in property <string> reminder-scope-note;
+    in property <string> remind-button-label: "Set To Do reminder…";
+    in property <string> sync-reminders-label: "Sync To Do";
     in property <ReminderStateView> reminder-state;
     in property <string> source-url;
     in property <string> conversation-url;
@@ -139,6 +148,7 @@ export component AppWindow inherits Window {
     callback groups-edited(string);
     callback shared-edited(string);
     callback mail-provider-selected(int);
+    callback provider-enabled-toggled(bool);
     callback google-client-id-edited(string);
     callback google-client-secret-edited(string);
     callback open-google-console;
@@ -196,9 +206,11 @@ export component AppWindow inherits Window {
             if root.active-screen == 1: SourcesScreen {
                 controls-enabled: !root.busy; store-available: root.store-available; settings-status: root.settings-status; settings-succeeded: root.settings-succeeded;
                 shipped-registration-present: root.shipped-registration-present; shared-registration-active: root.shared-registration-active; admin-consent-url: root.admin-consent-url;
-                client-id <=> root.client-id; groups <=> root.groups; shared-mailboxes <=> root.shared-mailboxes; own-inbox-accessible: root.own-inbox-accessible; microsoft-lines: root.microsoft-lines;
+                client-id <=> root.client-id; groups <=> root.groups; shared-mailboxes <=> root.shared-mailboxes; microsoft-lines: root.microsoft-lines;
                 microsoft-busy-line: root.microsoft-busy-line;
                 mail-provider-index <=> root.mail-provider-index; shipped-google-registration-present: root.shipped-google-registration-present;
+                heading-pills: root.heading-pills; provider-enabled <=> root.provider-enabled; scan-providers-text: root.scan-providers-text;
+                scope-folders-label: root.scope-folders-label; scope-groups-text: root.scope-groups-text;
                 google-client-id <=> root.google-client-id; google-client-secret <=> root.google-client-secret; show-google-secret <=> root.show-google-secret;
                 google-lines: root.google-lines; google-busy-line: root.google-busy-line;
                 provider-index <=> root.provider-index; api-key <=> root.api-key; show-key <=> root.show-key; models: root.models; model-index <=> root.model-index; model-value <=> root.model-value;
@@ -212,7 +224,7 @@ export component AppWindow inherits Window {
                 can-check-mailbox: root.can-check-mailbox; can-load-models: root.can-load-models; can-test-model: root.can-test-model; can-check-decision-model: root.can-check-decision-model;
                 save-settings => { root.save-settings(); } reload-settings => { root.reload-settings(); } forget-settings => { root.forget-settings(); }
                 client-id-edited(value) => { root.client-id-edited(value); } groups-edited(value) => { root.groups-edited(value); } shared-edited(value) => { root.shared-edited(value); }
-                mail-provider-selected(index) => { root.mail-provider-selected(index); }
+                mail-provider-selected(index) => { root.mail-provider-selected(index); } provider-enabled-toggled(value) => { root.provider-enabled-toggled(value); }
                 google-client-id-edited(value) => { root.google-client-id-edited(value); } google-client-secret-edited(value) => { root.google-client-secret-edited(value); }
                 open-google-console => { root.open-google-console(); } check-mailbox => { root.check-mailbox(); }
                 provider-selected(index) => { root.provider-selected(index); } key-edited(value) => { root.key-edited(value); }
@@ -232,7 +244,7 @@ export component AppWindow inherits Window {
                 pills: root.review-pills; title: root.review-title; meta: root.review-meta; uncertainty: root.review-uncertainty;
                 action-status: root.review-action-status; action-status-succeeded: root.review-action-status-succeeded; linking-status: root.linking-status; has-links: root.has-links; selected-open: root.selected-open; selected-terminal: root.selected-terminal;
                 can-track: root.can-track; can-watch: root.can-watch; can-remind: root.can-remind;
-                draft-open: root.draft-open; draft-title <=> root.draft-title; draft-when <=> root.draft-when; draft-scheduled-line: root.draft-scheduled-line; draft-valid: root.draft-valid;
+                draft-open: root.draft-open; draft-title <=> root.draft-title; draft-when <=> root.draft-when; draft-scheduled-line: root.draft-scheduled-line; draft-valid: root.draft-valid; reminder-service: root.reminder-service; reminder-time-note: root.reminder-time-note; reminder-scope-note: root.reminder-scope-note; remind-button-label: root.remind-button-label; sync-reminders-label: root.sync-reminders-label;
                 reminder-state: root.reminder-state; source-url: root.source-url; conversation-url: root.conversation-url; source-unavailable-note: root.source-unavailable-note; evidence-cards: root.evidence-cards; completion-card: root.completion-card; suggested-update: root.suggested-update; conversation-title: root.conversation-title; conversation-rows: root.conversation-rows;
                 todo-url: root.todo-url; conversation-expanded-default: root.conversation-expanded-default;
                 scan-inboxes => { root.scan-inboxes(); } stop-scan => { root.stop-scan(); } rescan => { root.rescan(); } retry-failed => { root.retry-failed(); } sync-todo => { root.sync-todo(); } clear-results => { root.clear-results(); }

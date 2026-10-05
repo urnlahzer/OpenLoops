@@ -46,6 +46,7 @@ pub(crate) fn reset_card_contexts_call_count() {
 
 pub(crate) struct ReminderDraft {
     pub(crate) key: [u8; 32],
+    pub(crate) provider: MailProvider,
     pub(crate) account: String,
     pub(crate) title: String,
     pub(crate) when: String,
@@ -139,7 +140,7 @@ pub struct ReviewState {
     pub scan_errors: Vec<String>,
     pub scan_incomplete: bool,
     pub source_failures: usize,
-    pub failed_sources: BTreeSet<String>,
+    pub failed_sources: BTreeSet<(MailProvider, String)>,
     pub failed_conversations_detail: Vec<ConversationFailure>,
     pub decisions: Decisions,
     pub relations: Relations,
@@ -190,6 +191,12 @@ pub struct ReviewState {
     pub(crate) scan_failed: bool,
     source_notes: BTreeMap<String, Vec<String>>,
     source_issue_counts: BTreeMap<String, usize>,
+    /// The provider of each source label seen, so one provider's diagnostics
+    /// can be dropped without parsing labels.
+    source_providers: BTreeMap<String, MailProvider>,
+    /// The next unused message-handle index. Stays above every handle given
+    /// out, so handles stay unique after [`ReviewState::remove_provider`].
+    next_handle: usize,
     conversation_quality: BTreeMap<ConversationKey, (usize, usize)>,
     conversation_notes_by_id: BTreeMap<ConversationKey, Vec<String>>,
     conversation_rejection_reasons: BTreeMap<ConversationKey, Vec<&'static str>>,
@@ -225,6 +232,8 @@ impl Default for ReviewState {
             scan_failed: false,
             source_notes: BTreeMap::new(),
             source_issue_counts: BTreeMap::new(),
+            source_providers: BTreeMap::new(),
+            next_handle: 0,
             conversation_quality: BTreeMap::new(),
             conversation_notes_by_id: BTreeMap::new(),
             conversation_rejection_reasons: BTreeMap::new(),
@@ -348,11 +357,14 @@ impl ReviewState {
             let mut issue_count =
                 usize::from(source.partial) + source.errors.len() + source.message_errors.len();
             let mut prepare_failures = std::collections::BTreeMap::new();
+            let failed_key = (source.provider, label);
             if source.failed {
-                self.failed_sources.insert(label.clone());
+                self.failed_sources.insert(failed_key.clone());
             } else {
-                self.failed_sources.remove(&label);
+                self.failed_sources.remove(&failed_key);
             }
+            let (provider, label) = failed_key;
+            self.source_providers.insert(label.clone(), provider);
             for item in &source.messages {
                 if self
                     .messages
@@ -361,8 +373,10 @@ impl ReviewState {
                 {
                     continue;
                 }
-                match scanning::prepare(item, &label, self.messages.len()) {
+                let index = self.next_handle.max(self.messages.len());
+                match scanning::prepare(item, &label, index) {
                     Ok(m) => {
+                        self.next_handle = index + 1;
                         appended_handles.insert(m.input.handle.clone());
                         self.messages.push(m);
                     }
@@ -459,15 +473,74 @@ impl ReviewState {
 
     pub fn replace_sources(
         &mut self,
-        source_keys: &BTreeSet<String>,
+        source_keys: &BTreeSet<(MailProvider, String)>,
         sources: Vec<SourceReview>,
     ) -> BTreeSet<ConversationKey> {
         for key in source_keys {
             self.failed_sources.remove(key);
-            self.source_notes.remove(key);
-            self.source_issue_counts.remove(key);
+            self.source_notes.remove(&key.1);
+            self.source_issue_counts.remove(&key.1);
         }
         self.append_sources(sources)
+    }
+
+    /// Drops one provider's messages, cards and source diagnostics, keyed by
+    /// each message's provider. Saved decisions are not touched.
+    pub fn remove_provider(&mut self, provider: MailProvider) {
+        let removed: BTreeSet<String> = self
+            .messages
+            .iter()
+            .filter(|message| message.provider == provider)
+            .map(|message| message.input.handle.clone())
+            .collect();
+        self.messages.retain(|message| message.provider != provider);
+        if let Some(analysis) = &mut self.analysis {
+            analysis
+                .items
+                .retain(|item| !removed.contains(&item.evidence.message));
+        }
+        self.failed_sources.retain(|(owner, _)| *owner != provider);
+        let labels: Vec<String> = self
+            .source_providers
+            .iter()
+            .filter(|(_, owner)| **owner == provider)
+            .map(|(label, _)| label.clone())
+            .collect();
+        for label in &labels {
+            self.source_providers.remove(label);
+            self.source_notes.remove(label);
+            self.source_issue_counts.remove(label);
+        }
+        let live: BTreeSet<(&str, &str)> = self
+            .messages
+            .iter()
+            .map(|message| (message.account.as_str(), message.conversation.as_str()))
+            .collect();
+        self.failed_conversations_detail.retain(|failure| {
+            live.contains(&(failure.account.as_str(), failure.conversation.as_str()))
+        });
+        let keep = |key: &ConversationKey| live.contains(&(key.0.as_str(), key.1.as_str()));
+        self.conversation_quality.retain(|key, _| keep(key));
+        self.conversation_notes_by_id.retain(|key, _| keep(key));
+        self.conversation_rejection_reasons
+            .retain(|key, _| keep(key));
+        self.notices = self.source_notes.values().flatten().cloned().collect();
+        self.source_failures = self.source_issue_counts.values().sum();
+        self.scan_summary = format!(
+            "{} mail removed from this review. Scan inboxes to refresh the counts.",
+            provider.service_name()
+        );
+        self.scan_errors.clear();
+        self.scan_incomplete =
+            self.source_failures > 0 || !self.failed_conversations_detail.is_empty();
+        if self
+            .draft
+            .as_ref()
+            .is_some_and(|draft| draft.provider == provider)
+            && let Some(draft) = self.draft.take()
+        {
+            self.revert_draft_decision(draft.prior_decision, draft.key);
+        }
     }
     pub fn set_scan(&mut self, result: ScanResult, model: String) {
         self.scan_failed = false;
@@ -1079,7 +1152,7 @@ impl ReviewState {
         )
     }
 
-    /// Still-open, reminder-bearing decisions eligible for a To Do sync
+    /// Still-open, reminder-bearing decisions eligible for a reminder sync
     /// right now: a `Mine`/`Watching`/`Review` decision with a
     /// `Reminder::Created` record carrying real (non-empty) ids, matched
     /// back to the account that carries evidence for it. `cards` is the
@@ -1087,15 +1160,15 @@ impl ReviewState {
     /// recomputed here so a caller that already has it (every `sync`/
     /// `sync_review` pass) never pays for a second HMAC fingerprint pass
     /// just to learn how many cards are eligible. Shared by
-    /// `AppModel::dispatch_reminder_sync` (the actual Graph call) and
-    /// `AppModel::reminder_sync_eligible_count` (the Review toolbar's "Sync
-    /// To Do" button), so the two can never disagree about what counts as
+    /// `AppModel::dispatch_reminder_sync` (the actual provider calls) and
+    /// `AppModel::reminder_sync_eligible_count` (the Review toolbar's sync
+    /// button), so the two can never disagree about what counts as
     /// eligible.
     pub(crate) fn reminder_sync_checks(
         &self,
         items: &[LoopItem],
         cards: &[Option<CardContext>],
-    ) -> Vec<(String, [u8; 32], String, String)> {
+    ) -> Vec<(MailProvider, String, [u8; 32], String, String)> {
         items
             .iter()
             .zip(cards.iter())
@@ -1108,7 +1181,7 @@ impl ReviewState {
                     return None;
                 }
                 let Reminder::Created {
-                    provider: MailProvider::Microsoft,
+                    provider,
                     list_id,
                     task_id,
                 } = &card.record.reminder
@@ -1123,6 +1196,7 @@ impl ReviewState {
                     .iter()
                     .find(|m| m.input.handle == item.evidence.message)?;
                 Some((
+                    *provider,
                     source.account.clone(),
                     card.record.key,
                     list_id.clone(),
@@ -1875,6 +1949,7 @@ pub fn layout_fixture() -> ReviewState {
     });
     state.draft = Some(ReminderDraft {
         key: second_key,
+        provider: MailProvider::Microsoft,
         account: "synthetic".into(),
         title: "Confirm who will send the team budget".into(),
         when: default_reminder(),
@@ -2023,12 +2098,187 @@ mod tests {
         assert_eq!(state.messages.len(), 1);
     }
 
+    fn google_source(failed: bool, ids: &[&str]) -> SourceReview {
+        SourceReview {
+            provider: MailProvider::Google,
+            label: "Gmail / Inbox".into(),
+            messages: ids
+                .iter()
+                .map(|id| openloops_graph::live::review::MailItem {
+                    provider: MailProvider::Google,
+                    account: "google:synthetic-sub".into(),
+                    ..test_mail(
+                        id,
+                        &format!("thread-{id}"),
+                        "p9@example.invalid",
+                        vec!["user@example.invalid"],
+                    )
+                })
+                .collect(),
+            errors: vec![],
+            message_errors: vec![],
+            partial: false,
+            failed,
+        }
+    }
+
+    #[test]
+    fn failed_sources_are_keyed_by_provider_and_label() {
+        let mut state = ReviewState::loaded(vec![google_source(true, &[])]);
+        assert_eq!(
+            state.failed_sources,
+            BTreeSet::from([(MailProvider::Google, "Gmail / Inbox".to_owned())])
+        );
+        state.append_sources(vec![google_source(false, &[])]);
+        assert!(state.failed_sources.is_empty());
+    }
+
+    #[test]
+    fn remove_provider_drops_only_that_providers_messages_and_cards() {
+        let mut state = layout_fixture();
+        let microsoft_handles: Vec<String> = state
+            .messages
+            .iter()
+            .map(|message| message.input.handle.clone())
+            .collect();
+        let items_before = state.analysis.as_ref().unwrap().items.len();
+        let decisions_before = state.decisions.records.clone();
+        state.append_sources(vec![google_source(false, &["g1"])]);
+        let google_handle = state
+            .messages
+            .iter()
+            .find(|message| message.provider == MailProvider::Google)
+            .unwrap()
+            .input
+            .handle
+            .clone();
+        let mut google_item = state.analysis.as_ref().unwrap().items[0].clone();
+        google_item.evidence.message.clone_from(&google_handle);
+        state.analysis.as_mut().unwrap().items.push(google_item);
+        state
+            .failed_sources
+            .insert((MailProvider::Google, "Gmail / Sent".into()));
+        assert!(
+            state
+                .notices
+                .iter()
+                .any(|note| note.starts_with("Gmail / Inbox"))
+        );
+
+        state.remove_provider(MailProvider::Google);
+
+        assert_eq!(
+            state
+                .messages
+                .iter()
+                .map(|message| message.input.handle.clone())
+                .collect::<BTreeSet<_>>(),
+            microsoft_handles.into_iter().collect::<BTreeSet<_>>()
+        );
+        let items = &state.analysis.as_ref().unwrap().items;
+        assert_eq!(items.len(), items_before);
+        assert!(
+            items
+                .iter()
+                .all(|item| item.evidence.message != google_handle)
+        );
+        assert!(state.failed_sources.is_empty());
+        assert!(
+            !state
+                .notices
+                .iter()
+                .any(|note| note.starts_with("Gmail / "))
+        );
+        assert_eq!(
+            state
+                .decisions
+                .records
+                .iter()
+                .map(|record| (record.key, record.decision))
+                .collect::<Vec<_>>(),
+            decisions_before
+                .iter()
+                .map(|record| (record.key, record.decision))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn handles_stay_unique_after_a_provider_is_removed() {
+        // Google mail is loaded first, so it holds the lowest handle indices.
+        // After removal, `messages.len()` alone would reissue the surviving
+        // Microsoft message's index to the second appended message.
+        let mut state = ReviewState::loaded(vec![
+            google_source(false, &["g1", "g2"]),
+            source_review(
+                "Inbox",
+                vec![test_mail(
+                    "one",
+                    "c1",
+                    "p1@example.invalid",
+                    vec!["user@example.invalid"],
+                )],
+            ),
+        ]);
+        state.remove_provider(MailProvider::Google);
+        state.append_sources(vec![source_review(
+            "Inbox",
+            vec![
+                test_mail(
+                    "two",
+                    "c2",
+                    "p2@example.invalid",
+                    vec!["user@example.invalid"],
+                ),
+                test_mail(
+                    "three",
+                    "c3",
+                    "p3@example.invalid",
+                    vec!["user@example.invalid"],
+                ),
+            ],
+        )]);
+        assert_eq!(state.messages.len(), 3);
+        let handles: BTreeSet<_> = state
+            .messages
+            .iter()
+            .map(|message| message.input.handle.clone())
+            .collect();
+        assert_eq!(handles.len(), state.messages.len());
+    }
+
+    #[test]
+    fn remove_provider_resets_scan_summary_and_errors() {
+        let mut state = layout_fixture();
+        state.append_sources(vec![google_source(false, &["g1"])]);
+        state.scan_summary = "Synthetic summary that counts Google mail".into();
+        state.scan_errors = vec!["Synthetic Google scan error".into()];
+        state.scan_incomplete = true;
+        state.source_failures = 0;
+        state.failed_conversations_detail.clear();
+
+        state.remove_provider(MailProvider::Google);
+
+        assert_eq!(
+            state.scan_summary,
+            format!(
+                "{} mail removed from this review. Scan inboxes to refresh the counts.",
+                MailProvider::Google.service_name()
+            )
+        );
+        assert!(state.scan_errors.is_empty());
+        assert_eq!(
+            state.scan_incomplete,
+            state.source_failures > 0 || !state.failed_conversations_detail.is_empty()
+        );
+    }
+
     #[test]
     fn retry_count_includes_only_retryable_source_and_conversation_failures() {
         let mut state = ReviewState::default();
         state
             .failed_sources
-            .insert("Personal mailbox / Inbox".into());
+            .insert((MailProvider::Microsoft, "Personal mailbox / Inbox".into()));
         state.failed_conversations_detail = vec![
             failure("timeout", FailureReason::Timeout),
             failure("transport", FailureReason::Transport),
@@ -2870,7 +3120,7 @@ mod tests {
     }
 
     #[test]
-    fn google_reminders_are_not_eligible_for_microsoft_sync() {
+    fn reminder_sync_checks_keep_and_group_provider_provenance() {
         let mut state = layout_fixture();
         let record = state
             .decisions
@@ -2885,7 +3135,42 @@ mod tests {
 
         let items = &state.analysis.as_ref().unwrap().items;
         let cards = state.card_contexts(items);
-        assert!(state.reminder_sync_checks(items, &cards).is_empty());
+        let checks = state.reminder_sync_checks(items, &cards);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].0, MailProvider::Google);
+    }
+
+    #[test]
+    fn reminder_sync_checks_carry_each_provider_when_both_have_records() {
+        let mut state = layout_fixture();
+        let items = state.analysis.as_ref().unwrap().items.clone();
+        let cards = state.card_contexts(&items);
+        let second = cards[1].as_ref().unwrap().record.key;
+        state.apply_decision_change(
+            second,
+            Decision::Mine,
+            Reminder::Created {
+                provider: MailProvider::Google,
+                list_id: "synthetic-list".into(),
+                task_id: "synthetic-task".into(),
+            },
+        );
+        let cards = state.card_contexts(&items);
+        let checks = state.reminder_sync_checks(&items, &cards);
+        let mut providers = checks
+            .iter()
+            .map(|(provider, _, key, list_id, _)| (*provider, *key, list_id.clone()))
+            .collect::<Vec<_>>();
+        providers.sort();
+        assert_eq!(providers.len(), 2);
+        assert!(
+            providers
+                .iter()
+                .any(|(provider, _, _)| *provider == MailProvider::Microsoft)
+        );
+        assert!(providers.iter().any(|(provider, key, list_id)| {
+            *provider == MailProvider::Google && *key == second && list_id == "synthetic-list"
+        }));
     }
 
     #[test]
@@ -2955,6 +3240,7 @@ mod tests {
         state.decisions.records = vec![record];
         state.draft = Some(ReminderDraft {
             key,
+            provider: source.provider,
             account: source.account.clone(),
             title: item.action.clone(),
             when: default_reminder(),
@@ -3347,6 +3633,7 @@ mod tests {
         let mut state = ReviewState {
             draft: Some(ReminderDraft {
                 key: [7; 32],
+                provider: MailProvider::Microsoft,
                 account: "acct".into(),
                 title: "Send the draft".into(),
                 when: "2026-09-08 09:00".into(),

@@ -137,6 +137,75 @@ pub(super) fn routed_server(
     (format!("http://127.0.0.1:{port}/"), calls, handle)
 }
 
+/// Like [`routed_server`], but reads each request in full (head and
+/// `Content-Length` body) and records it as text, so a test can assert the
+/// method, path and body that were sent.
+pub(super) fn recording_routed_server(
+    routes: Vec<(&'static str, Vec<u8>)>,
+) -> (
+    String,
+    Arc<std::sync::Mutex<Vec<String>>>,
+    std::thread::JoinHandle<()>,
+) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&requests);
+    let handle = std::thread::spawn(move || {
+        for _ in 0..routes.len() {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let body_start = loop {
+                let read = stream.read(&mut chunk).unwrap_or(0);
+                if read == 0 {
+                    break None;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break Some(end + 4);
+                }
+            };
+            if let Some(start) = body_start {
+                let head = String::from_utf8_lossy(&request[..start]).to_ascii_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                while request.len() < start + length {
+                    let read = stream.read(&mut chunk).unwrap_or(0);
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                }
+            }
+            let text = String::from_utf8_lossy(&request).into_owned();
+            let path = text
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_owned();
+            recorded.lock().unwrap().push(text);
+            let response = routes
+                .iter()
+                .find(|(prefix, _)| path.starts_with(prefix))
+                .map_or_else(
+                    || {
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_vec()
+                    },
+                    |(_, response)| response.clone(),
+                );
+            let _ = stream.write_all(&response);
+            let _ = stream.flush();
+        }
+    });
+    (format!("http://127.0.0.1:{port}/"), requests, handle)
+}
+
 #[test]
 fn routed_server_selects_by_path_prefix_in_any_order() {
     let response = |body: &str| {

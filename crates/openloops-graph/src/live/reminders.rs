@@ -50,12 +50,28 @@ impl std::fmt::Display for ReminderFailure {
     }
 }
 
+impl ReminderFailure {
+    #[must_use]
+    pub fn describe(self, provider: MailProvider) -> String {
+        match (self, provider) {
+            (Self::DefaultListNotFound, MailProvider::Google) => "Google Tasks did not return a default list for this account. Open Google Tasks once, then try again.".to_owned(),
+            (Self::Rejected(error), MailProvider::Google)
+                if matches!(error, ConnectionError::AccessDenied | ConnectionError::Unauthorized) =>
+            {
+                format!("Google refused the Tasks write. The app registration needs the Google Tasks scope and the signed-in account must consent to it. {error}")
+            }
+            _ => self.to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReminderOutcome {
-    /// The task list and task id Graph reported, so a later action (e.g.
+    /// The provider plus the task list and task id it reported, so a later action (e.g.
     /// marking it complete once the review card is Handled) can address the
     /// same task without re-resolving the default list.
     Created {
+        provider: MailProvider,
         list_id: String,
         task_id: String,
     },
@@ -73,24 +89,15 @@ pub enum ReminderCompletionOutcome {
     Uncertain,
 }
 
-/// A Graph task-list or task id: non-empty, not `.`/`..`, and bounded, same
-/// as the id check `create()` already applies to the resolved list id.
+/// A provider task-list or task id (To Do or Google Tasks): non-empty, not
+/// `.`/`..`, and bounded, same as the id check `create()` applies to the
+/// resolved list id.
 pub(super) fn valid_remote_id(id: &str) -> bool {
     !id.is_empty() && id != "." && id != ".." && id.len() <= 2048
 }
 
 fn task_body(request: &ReminderRequest) -> Result<Vec<u8>, ReminderFailure> {
-    let now: chrono::DateTime<chrono::Utc> = std::time::SystemTime::now().into();
-    if request.account.is_empty()
-        || request.title.trim().chars().count() < 3
-        || request.title.chars().count() > 320
-        || request.title.chars().any(char::is_control)
-        || request.at_utc <= now.timestamp()
-        || request.marker.len() != 64
-        || !request.marker.bytes().all(|b| b.is_ascii_hexdigit())
-    {
-        return Err(ReminderFailure::InvalidDraft);
-    }
+    validate_request(request)?;
     let when = chrono::DateTime::from_timestamp(request.at_utc, 0)
         .ok_or(ReminderFailure::InvalidDraft)?
         .format("%Y-%m-%dT%H:%M:%S")
@@ -105,10 +112,39 @@ fn task_body(request: &ReminderRequest) -> Result<Vec<u8>, ReminderFailure> {
     serde_json::to_vec(&json!({"title":request.title,"body":{"contentType":"text","content":format!("Created after review in OpenLoops.\nOpenLoops reference: {}",request.marker)},"isReminderOn":true,"reminderDateTime":{"dateTime":when,"timeZone":"UTC"},"dueDateTime":{"dateTime":when,"timeZone":"UTC"}})).map_err(|_|ReminderFailure::InvalidDraft)
 }
 
+pub(super) fn validate_request(request: &ReminderRequest) -> Result<(), ReminderFailure> {
+    let now: chrono::DateTime<chrono::Utc> = std::time::SystemTime::now().into();
+    if request.account.is_empty()
+        || request.title.trim().chars().count() < 3
+        || request.title.chars().count() > 320
+        || request.title.chars().any(char::is_control)
+        || request.at_utc <= now.timestamp()
+        || request.marker.len() != 64
+        || !request.marker.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err(ReminderFailure::InvalidDraft);
+    }
+    Ok(())
+}
+
+/// The one formatter for a reminder instant in local time with its UTC
+/// offset. The draft's scheduled line and the Google Tasks notes both use it.
+#[must_use]
+pub fn format_local_reminder_time(at_utc: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp(at_utc, 0).map(|time| {
+        time.with_timezone(&chrono::Local)
+            .format("%a %b %d, %Y at %H:%M %:z")
+            .to_string()
+    })
+}
+
 /// Creates exactly one reviewed task, with an independently authorized session.
 /// Caller must durably record the attempt before invoking this function.
 #[must_use]
 pub fn create(config: &ConnectionConfig, request: &ReminderRequest) -> ReminderOutcome {
+    if request.provider != MailProvider::Microsoft {
+        return ReminderOutcome::NotCreated(ReminderFailure::InvalidDraft);
+    }
     let body = match task_body(request) {
         Ok(b) => b,
         Err(e) => return ReminderOutcome::NotCreated(e),
@@ -197,6 +233,7 @@ fn create_after_sign_in(
         .filter(|task_id| valid_remote_id(task_id))
     {
         Some(task_id) => Ok(ReminderOutcome::Created {
+            provider: MailProvider::Microsoft,
             list_id: id.to_owned(),
             task_id: task_id.to_owned(),
         }),
@@ -259,7 +296,7 @@ pub fn complete(
 }
 
 /// Whether a previously created task's `status` currently reads as
-/// completed. Read-only: never writes anything back to Graph. A task
+/// completed. Read-only: never writes anything back to the provider. A task
 /// deleted since creation (404), or any other failure, is `Unknown` rather
 /// than `NotCompleted` -- the caller must not treat "couldn't check" the
 /// same as "confirmed still open".
@@ -347,6 +384,16 @@ mod tests {
             .no_proxy()
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn local_reminder_time_carries_the_utc_offset() {
+        let expected = chrono::DateTime::from_timestamp(4_000_000_000, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%a %b %d, %Y at %H:%M %:z")
+            .to_string();
+        assert_eq!(format_local_reminder_time(4_000_000_000), Some(expected));
     }
 
     #[test]

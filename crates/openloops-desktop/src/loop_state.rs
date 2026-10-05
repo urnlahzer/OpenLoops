@@ -25,9 +25,9 @@ const CAP: usize = 55;
 /// unbounded, so the `CAP` rejection in `update()` stays rare under ordinary
 /// use while still bounding the store's size.
 const TERMINAL_EXPIRY_SECONDS: i64 = 180 * 86400;
-/// Bound on each Graph id stored in `Reminder::Created`, chosen to fit a
-/// single-byte length prefix (real Microsoft Graph To Do list/task ids are
-/// consistently well under this). Given the same 2560-byte credential-blob
+/// Bound on each provider task-list or task id stored in `Reminder::Created`,
+/// chosen to fit a single-byte length prefix (real Microsoft To Do and Google
+/// Tasks list/task ids are consistently well under this). Given the same 2560-byte credential-blob
 /// ceiling `CAP` is sized against, storing two such ids alongside every
 /// record is not something a raised `CAP` could also absorb; a save that
 /// would exceed the blob size still fails safely via `encode()`'s existing
@@ -53,8 +53,8 @@ pub enum Reminder {
     #[default]
     None,
     Attempted,
-    /// Carries the Graph task-list and task id `reminders::create()`
-    /// resolved, so a later action (marking it complete once the card is
+    /// Carries the provider plus the task-list and task id its adapter's
+    /// `create()` resolved, so a later action (marking it complete once the card is
     /// Handled) can address the same task -- see `reminders::complete()`.
     /// Each id is bounded to `MAX_REMINDER_ID_LEN` bytes for storage; see
     /// that constant for why.
@@ -63,8 +63,9 @@ pub enum Reminder {
         list_id: String,
         task_id: String,
     },
-    /// Set only by the reminder-sync check (`reminders::check_status`)
-    /// finding the linked task already completed in Microsoft To Do --
+    /// Set only by the reminder-sync check (`provider::reminder_status`)
+    /// finding the linked task already completed in Microsoft To Do or
+    /// Google Tasks --
     /// never by the user clicking Handled, which leaves `reminder` as
     /// `Created` even after `reminders::complete()` succeeds. This is the
     /// one thing that distinguishes "the user marked this handled" from
@@ -393,7 +394,7 @@ pub fn marker(key: &[u8; 32]) -> String {
     })
 }
 
-/// Appends one Graph id as a single-byte length prefix followed by its
+/// Appends one provider task-list or task id as a single-byte length prefix followed by its
 /// bytes. Fails rather than silently truncating an id over
 /// `MAX_REMINDER_ID_LEN` -- callers must reject or shorten it upstream
 /// instead (see `reminders::valid_graph_id`, which already bounds ids this
