@@ -248,6 +248,21 @@
       "instructions": "The later text cancels or withdraws the obligation.",
       "type": "noul"
     },
+    "expiry.ends_with_event": {
+      "accept": 0.9,
+      "escalate": 0.5,
+      "instructions": "`ask` has no purpose after `event` ends.",
+      "type": "noul"
+    },
+    "expiry.event": {
+      "accept": 0.7,
+      "escalate": 0.3,
+      "instructions": "Which event does `ask` help `waiting_party` prepare for or take part in?",
+      "options": {
+        "none": "The request serves no listed event."
+      },
+      "type": "choice"
+    },
     "extract.claim_type": {
       "accept": 0.7,
       "escalate": 0.3,
@@ -355,6 +370,87 @@
       "accept": 0.955,
       "escalate": 0.5,
       "instructions": "The paragraph_text names a time, date, or deadline.",
+      "type": "noul"
+    },
+    "walk.new_date": {
+      "accept": 0.7,
+      "escalate": 0.3,
+      "instructions": "Which date does `later.paragraph_text` set as the new time for `ask`?",
+      "options": {
+        "none": "The paragraph sets no new date for the request."
+      },
+      "type": "choice"
+    },
+    "walk.responds": {
+      "accept": 0.7,
+      "escalate": 0.3,
+      "instructions": "`later.paragraph_text` responds to the request in `ask`.",
+      "type": "noul"
+    },
+    "walk.third_party_done": {
+      "accept": 0.7,
+      "escalate": 0.3,
+      "instructions": "In `later.paragraph_text`, the writer says they did what `ask` requests or will do it.",
+      "type": "noul"
+    },
+    "walk.user_declines": {
+      "accept": 0.7,
+      "escalate": 0.3,
+      "instructions": "In `later.paragraph_text`, `user.name` declines to do what `ask` requests.",
+      "type": "noul"
+    },
+    "walk.user_delivers": {
+      "accept": 0.7,
+      "escalate": 0.3,
+      "instructions": "In `later.paragraph_text`, `user.name` gives `waiting_party` what `ask` requests.",
+      "type": "noul"
+    },
+    "walk.user_hands_off": {
+      "accept": 0.7,
+      "escalate": 0.3,
+      "instructions": "In `later.paragraph_text`, `user.name` says another person will do what `ask` requests.",
+      "type": "noul"
+    },
+    "walk.user_promises": {
+      "accept": 0.7,
+      "escalate": 0.3,
+      "instructions": "In `later.paragraph_text`, `user.name` says they will do what `ask` requests at a later time.",
+      "type": "noul"
+    },
+    "walk.wp_asks_again": {
+      "accept": 0.7,
+      "escalate": 0.3,
+      "instructions": "In `later.paragraph_text`, `waiting_party` asks again for what `ask` requests or asks for an update on it.",
+      "type": "noul"
+    },
+    "walk.wp_changes_due": {
+      "accept": 0.7,
+      "escalate": 0.3,
+      "instructions": "In `later.paragraph_text`, `waiting_party` changes when `ask` must be done.",
+      "type": "noul"
+    },
+    "walk.wp_changes_terms": {
+      "accept": 0.7,
+      "escalate": 0.3,
+      "instructions": "In `later.paragraph_text`, `waiting_party` changes what `ask` requests.",
+      "type": "noul"
+    },
+    "walk.wp_no_longer_needed": {
+      "accept": 0.9,
+      "escalate": 0.5,
+      "instructions": "In `later.paragraph_text`, `waiting_party` says they no longer need what `ask` requests.",
+      "type": "noul"
+    },
+    "walk.wp_received": {
+      "accept": 0.9,
+      "escalate": 0.5,
+      "instructions": "In `later.paragraph_text`, `waiting_party` says they received what `ask` requests.",
+      "type": "noul"
+    },
+    "walk.wp_still_owed": {
+      "accept": 0.9,
+      "escalate": 0.5,
+      "instructions": "After `later.paragraph_text`, `user.name` still owes `waiting_party` an action for `ask`.",
       "type": "noul"
     }
   },

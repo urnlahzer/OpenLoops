@@ -501,6 +501,21 @@ pub mod registry {
         "rules.duplicate_action",
         "rules.thread_merge",
         "rules.deadline_kind",
+        "walk.responds",
+        "walk.wp_received",
+        "walk.wp_no_longer_needed",
+        "walk.wp_asks_again",
+        "walk.wp_changes_terms",
+        "walk.wp_still_owed",
+        "walk.wp_changes_due",
+        "walk.user_delivers",
+        "walk.user_promises",
+        "walk.user_declines",
+        "walk.user_hands_off",
+        "walk.third_party_done",
+        "walk.new_date",
+        "expiry.event",
+        "expiry.ends_with_event",
     ];
     pub const CHECK_IDS: &[&str] = &["check.asks_recipient", "check.kind"];
 
@@ -1070,6 +1085,31 @@ mod tests {
                 .len(),
             registry::REQUIRED_IDS.len()
         );
+    }
+
+    #[test]
+    fn registry_contains_the_closure_walk_ids() {
+        let registry = registry::Registry::get();
+        for id in [
+            "walk.responds",
+            "walk.wp_received",
+            "walk.wp_no_longer_needed",
+            "walk.wp_asks_again",
+            "walk.wp_changes_terms",
+            "walk.wp_still_owed",
+            "walk.wp_changes_due",
+            "walk.user_delivers",
+            "walk.user_promises",
+            "walk.user_declines",
+            "walk.user_hands_off",
+            "walk.third_party_done",
+            "walk.new_date",
+            "expiry.event",
+            "expiry.ends_with_event",
+        ] {
+            assert!(registry.question(id).is_some(), "{id}");
+            assert!(registry::REQUIRED_IDS.contains(&id), "{id}");
+        }
     }
 
     #[test]
