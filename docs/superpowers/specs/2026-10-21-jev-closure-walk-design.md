@@ -305,3 +305,64 @@ the full run.
 | 2 | `chore/contract-walk-registry` | Bootstrap wording, hash re-pin (CONTRACT EDIT FOR OWNER REVIEW) |
 | 3 | `feat/jev-closure-walk` | Rust walk, new types and chips, tests; behind the existing decision-model toggle, no new setting |
 | 4 | tuned registry | After the paid runs in Cost gates |
+
+## Amendment, 2026-10-21 (owner review of the plan)
+
+The owner reviewed the plan's six adjustments. Adjustments 3 to 6 stand.
+This section replaces adjustments 1 and 2.
+
+### Gate per paragraph and per message
+
+A later message has these units:
+
+- each paragraph;
+- the whole message, when it has two or more paragraphs. Its text is the
+  paragraphs in order, joined by `"\n\n"`.
+
+Each unit gets its own request with `walk.responds` and the author role's
+branch nouls. The state names the unit's text `later.text`:
+
+```json
+{"user":{"name":…},"waiting_party":…,"ask":…,"due":…,"later":{"author_role":…,"text":…}}
+```
+
+The date follow-up state is `{"ask":…,"later":{"text":…}}`.
+
+The reading rules apply to all units of the message:
+
+- A unit responds when `walk.responds` accepts.
+- No unit responds: escalate when a unit's gate is gray. Otherwise the
+  message has no effect.
+- Terminal answers from different units that disagree escalate the loop.
+- Non-terminal effects keep one effect per kind. Paragraphs come before the
+  whole message, so evidence cites a paragraph when a paragraph carries the
+  change.
+- An effect from the whole-message unit cites the message's first
+  paragraph. Its date candidates are the candidates of all its paragraphs,
+  without duplicates.
+
+The whole-message unit finds a response that no single paragraph carries.
+It adds one request per later message that has two or more paragraphs.
+
+### `walk.handoff_to`
+
+When `walk.user_hands_off` accepts in a unit, a follow-up request asks
+`walk.handoff_to` with that unit's walk state. The options are the later
+message's participants (From, To, Cc) without the user's own addresses and
+without the waiting party. Each option has a handle (`p0`, `p1`, …) and the
+participant's display name, or the address local part when there is no
+display name. `none` is the last option.
+
+Code marks the chosen person:
+
+- **internal** when the address domain is the domain of one of the user's
+  own account addresses and the domain is not a public mail domain;
+- **external** in all other cases.
+
+The Delegated suggestion names the person and the mark: "Handed to Amara
+Okafor (internal)". `none` or a gray answer gives "Handed to someone not on
+the message". Accept moves the card to Watching in all three cases, and the
+Watching card names the person.
+
+`walk.handoff_to` has options per request, so it keeps bootstrap wording
+(adjustment 3). The thread corpus records the true person and mark.

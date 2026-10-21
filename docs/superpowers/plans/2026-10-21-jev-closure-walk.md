@@ -22,7 +22,9 @@
 - Checker baseline on 2026-10-21 (before this work): these eight checkers already fail and must not be "fixed" here: addin-bridge, automation-evaluation, distribution-registration, evidence-identity, policy-state, protected-state, reminder-adapter, self-email. `check-model-boundary.ps1` passes and must still pass after Part B.
 - If a signature in this plan does not match the code, follow the code and keep the behaviour this plan describes.
 
-## Adjustments to the spec (owner to confirm)
+## Adjustments to the spec
+
+Owner review, 2026-10-21: adjustments 3 to 6 stand. The spec's amendment section replaces adjustments 1 and 2 (gate per paragraph and per message; `walk.handoff_to` restored). Follow-up commits on each branch implement the amendment.
 
 The design was approved on 2026-10-21. Code mapping showed six places where the spec needs a smaller or safer form. The plan implements these:
 
