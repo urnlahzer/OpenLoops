@@ -707,10 +707,11 @@ pub(crate) fn register_training_export_callbacks(
                 ) {
                     Ok(summary) => Status {
                         lines: vec![format!(
-                            "Wrote {} files: {} triage rows, {} closure rows, and {} rules rows.",
+                            "Wrote {} files: {} triage rows, {} closure rows, {} walk rows, and {} rules rows.",
                             summary.files_written,
                             summary.triage_rows,
                             summary.closure_rows,
+                            summary.walk_rows,
                             summary.rules_rows
                         )],
                         succeeded: true,

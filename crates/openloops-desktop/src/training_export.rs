@@ -1,7 +1,8 @@
 //! Owner-invoked export of the currently loaded review scan into the `Jev`
 //! optimizer's JSONL training schema (`tools/jev-optimize/jev_optimize/data.py`'s
 //! `DatasetRow`). Pure and synchronous: takes a snapshot of [`ReviewState`]
-//! and a destination folder, and writes `triage.jsonl` and `closure.jsonl`.
+//! and a destination folder, and writes `triage.jsonl`, `closure.jsonl`,
+//! `walk.jsonl`, and `rules.jsonl`.
 //!
 //! This deliberately writes mail text (subjects, paragraphs, participants)
 //! to disk after applying the Jev name cipher to recognized participants --
@@ -32,6 +33,7 @@ const MAX_ROWS_PER_FILE: usize = 20_000;
 pub struct ExportSummary {
     pub triage_rows: usize,
     pub closure_rows: usize,
+    pub walk_rows: usize,
     pub rules_rows: usize,
     pub files_written: usize,
 }
@@ -49,8 +51,8 @@ impl From<std::io::Error> for ExportError {
     }
 }
 
-/// Writes ciphered `triage.jsonl`, `closure.jsonl`, and `rules.jsonl` under
-/// `folder`.
+/// Writes ciphered `triage.jsonl`, `closure.jsonl`, `walk.jsonl`, and
+/// `rules.jsonl` under `folder`.
 ///
 /// # Errors
 /// Refuses a relative `folder` ([`ExportError::RelativePath`]) or one
@@ -67,15 +69,18 @@ pub fn export(review: &ReviewState, folder: &Path) -> Result<ExportSummary, Expo
     let cipher = NameCipher::from_messages(&review.messages);
     let triage = cipher_rows(triage_rows(review), &cipher);
     let closure = cipher_rows(closure_rows(review), &cipher);
+    let walk = cipher_rows(walk_rows(review), &cipher);
     let rules = cipher_rows(rules_rows(review), &cipher);
     write_jsonl(&folder.join("triage.jsonl"), &triage)?;
     write_jsonl(&folder.join("closure.jsonl"), &closure)?;
+    write_jsonl(&folder.join("walk.jsonl"), &walk)?;
     write_jsonl(&folder.join("rules.jsonl"), &rules)?;
     Ok(ExportSummary {
         triage_rows: triage.len(),
         closure_rows: closure.len(),
+        walk_rows: walk.len(),
         rules_rows: rules.len(),
-        files_written: 3,
+        files_written: 4,
     })
 }
 
@@ -544,6 +549,180 @@ fn closure_label_map(kind: Option<SuggestedUpdateKind>) -> Map<String, Value> {
     label
 }
 
+fn has_resolved_walk_update(review: &ReviewState, item: &LoopItem) -> bool {
+    review.resolved_updates.iter().any(|update| {
+        update.obligation_message == item.evidence.message
+            && update.obligation_block == item.evidence.block
+            && matches!(
+                update.kind,
+                SuggestedUpdateKind::Closure
+                    | SuggestedUpdateKind::DeadlineChange
+                    | SuggestedUpdateKind::Declined
+                    | SuggestedUpdateKind::Delegated
+            )
+    })
+}
+
+fn walk_rows(review: &ReviewState) -> Vec<Value> {
+    let Some(analysis) = &review.analysis else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    for item in &analysis.items {
+        if rows.len() >= MAX_ROWS_PER_FILE
+            || (!is_offered_loop(item) && !has_resolved_walk_update(review, item))
+        {
+            continue;
+        }
+        let Some(evidence_message) = find_message(&review.messages, &item.evidence.message) else {
+            continue;
+        };
+        for candidate in later_candidates(review, item, evidence_message) {
+            for (ordinal, block) in candidate.input.message.body_blocks.iter().enumerate() {
+                if rows.len() >= MAX_ROWS_PER_FILE {
+                    return rows;
+                }
+                let text = block.as_string();
+                if text.chars().count() > MAX_PARAGRAPH_CHARS {
+                    continue;
+                }
+                rows.push(walk_row(
+                    review,
+                    item,
+                    evidence_message,
+                    candidate,
+                    ordinal,
+                    &text,
+                ));
+            }
+        }
+    }
+    rows
+}
+
+fn walk_row(
+    review: &ReviewState,
+    item: &LoopItem,
+    evidence_message: &ReviewMessage,
+    candidate: &ReviewMessage,
+    ordinal: usize,
+    paragraph_text: &str,
+) -> Value {
+    let user_name = evidence_message
+        .own_given_name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .or(evidence_message
+            .own_display_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty()))
+        .unwrap_or("the user");
+    let waiting_party = item
+        .waiting_party
+        .split_once('<')
+        .map(|(name, _)| name.trim())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&item.waiting_party);
+    let due = item
+        .deadline
+        .as_ref()
+        .map_or("not stated", |deadline| deadline.quote.as_str());
+    let group = stable_id(&format!(
+        "walk|{}|{}",
+        item.evidence.message, item.evidence.block
+    ));
+    let id = stable_id(&format!("walk|{group}|{paragraph_text}"));
+    let (label, label_source) = walk_label(review, item, candidate, ordinal);
+    let mut later = Map::new();
+    later.insert("author_role".into(), Value::String("user".into()));
+    later.insert(
+        "paragraph_text".into(),
+        Value::String(paragraph_text.into()),
+    );
+    let mut row = Map::new();
+    row.insert("ask".into(), Value::String(item.evidence.context.clone()));
+    row.insert("due".into(), Value::String(due.into()));
+    row.insert("group".into(), Value::String(group));
+    row.insert("id".into(), Value::String(id));
+    row.insert("label".into(), Value::Object(label));
+    row.insert("label_source".into(), Value::String(label_source.into()));
+    row.insert("later".into(), Value::Object(later));
+    row.insert("set".into(), Value::String("walk".into()));
+    row.insert("source".into(), Value::String("owner-export".into()));
+    row.insert(
+        "user".into(),
+        Value::Object(Map::from_iter([(
+            "name".into(),
+            Value::String(user_name.into()),
+        )])),
+    );
+    row.insert("waiting_party".into(), Value::String(waiting_party.into()));
+    Value::Object(row)
+}
+
+fn walk_label(
+    review: &ReviewState,
+    item: &LoopItem,
+    candidate: &ReviewMessage,
+    ordinal: usize,
+) -> (Map<String, Value>, &'static str) {
+    let matches_pair = |source_message: &str, source_block: usize| {
+        source_message == candidate.input.handle && source_block == ordinal
+    };
+    let gold = review.resolved_updates.iter().find(|update| {
+        update.obligation_message == item.evidence.message
+            && update.obligation_block == item.evidence.block
+            && matches_pair(&update.source_message, update.source_block)
+            && matches!(
+                update.kind,
+                SuggestedUpdateKind::Closure
+                    | SuggestedUpdateKind::DeadlineChange
+                    | SuggestedUpdateKind::Declined
+                    | SuggestedUpdateKind::Delegated
+            )
+    });
+    if let Some(resolved) = gold {
+        return (
+            walk_label_map(resolved.accepted.then_some(resolved.kind)),
+            "gold",
+        );
+    }
+    if let Some(update) = &item.suggested_update
+        && matches_pair(&update.source_message, update.source_block)
+        && matches!(
+            update.kind,
+            SuggestedUpdateKind::Closure
+                | SuggestedUpdateKind::DeadlineChange
+                | SuggestedUpdateKind::Declined
+                | SuggestedUpdateKind::Delegated
+        )
+    {
+        return (walk_label_map(Some(update.kind)), "silver");
+    }
+    (walk_label_map(None), "silver")
+}
+
+fn walk_label_map(kind: Option<SuggestedUpdateKind>) -> Map<String, Value> {
+    let mut label = Map::new();
+    label.insert(
+        "walk.user_delivers".into(),
+        Value::Bool(kind == Some(SuggestedUpdateKind::Closure)),
+    );
+    label.insert(
+        "walk.user_promises".into(),
+        Value::Bool(kind == Some(SuggestedUpdateKind::DeadlineChange)),
+    );
+    label.insert(
+        "walk.user_declines".into(),
+        Value::Bool(kind == Some(SuggestedUpdateKind::Declined)),
+    );
+    label.insert(
+        "walk.user_hands_off".into(),
+        Value::Bool(kind == Some(SuggestedUpdateKind::Delegated)),
+    );
+    label
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -817,6 +996,96 @@ mod tests {
         assert_eq!(label["closure.withdrawn"], Value::Bool(false));
         assert_eq!(label["closure.deadline_changed"], Value::Bool(false));
         assert_eq!(label["closure.modified"], Value::Bool(false));
+        std::fs::remove_dir_all(triage_path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn an_accepted_closure_update_yields_a_walk_shaped_gold_row() {
+        let mut review = layout_fixture();
+        let index = open_loop_with_pending_update(&mut review);
+        review.resolve_suggested_update(index, true);
+        let (summary, triage_path, closure_path) = export_to_temp(&review);
+        let walk_path = closure_path.parent().unwrap().join("walk.jsonl");
+        let rows = read_rows(&walk_path);
+        let gold_rows: Vec<&Value> = rows
+            .iter()
+            .filter(|row| row["label_source"] == "gold")
+            .collect();
+
+        assert_eq!(summary.files_written, 4);
+        assert_eq!(gold_rows.len(), 1);
+        let row = gold_rows[0];
+        assert_eq!(row["set"], "walk");
+        assert_eq!(row["label_source"], "gold");
+        assert_eq!(row["source"], "owner-export");
+        assert_eq!(row["later"]["author_role"], "user");
+        assert_eq!(
+            row["label"],
+            serde_json::json!({
+                "walk.user_delivers": true,
+                "walk.user_promises": false,
+                "walk.user_declines": false,
+                "walk.user_hands_off": false,
+            })
+        );
+        assert_eq!(
+            row["group"],
+            stable_id(&format!(
+                "walk|{}|{}",
+                review.analysis.as_ref().unwrap().items[index]
+                    .evidence
+                    .message,
+                review.analysis.as_ref().unwrap().items[index]
+                    .evidence
+                    .block
+            ))
+        );
+        assert_eq!(
+            row.as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                "ask",
+                "due",
+                "group",
+                "id",
+                "label",
+                "label_source",
+                "later",
+                "set",
+                "source",
+                "user",
+                "waiting_party"
+            ]
+            .into_iter()
+            .collect()
+        );
+        assert_eq!(row["later"].as_object().unwrap().len(), 2);
+        std::fs::remove_dir_all(triage_path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_rejected_walk_suggestion_yields_gold_all_false() {
+        let mut review = layout_fixture();
+        let index = open_loop_with_pending_update(&mut review);
+        review.resolve_suggested_update(index, false);
+        let (_summary, triage_path, closure_path) = export_to_temp(&review);
+        let walk_path = closure_path.parent().unwrap().join("walk.jsonl");
+        let rows = read_rows(&walk_path);
+        let gold_rows: Vec<&Value> = rows
+            .iter()
+            .filter(|row| row["label_source"] == "gold")
+            .collect();
+        assert_eq!(gold_rows.len(), 1);
+        assert!(
+            gold_rows[0]["label"]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(|value| value == &Value::Bool(false))
+        );
         std::fs::remove_dir_all(triage_path.parent().unwrap()).ok();
     }
 

@@ -76,12 +76,15 @@ pub struct EventPassed {
     pub end: i64,
     pub message_handle: String,
     pub from_subject: bool,
+    pub expired: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SuggestedUpdateKind {
     Closure,
     DeadlineChange,
+    Declined,
+    Delegated,
     Modification,
 }
 
@@ -150,6 +153,8 @@ pub enum MentionOrigin {
     Restated,
     OwnerLink,
     Duplicate,
+    Amended,
+    Rescheduled,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

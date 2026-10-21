@@ -130,6 +130,8 @@ pub(crate) enum SuggestionOutcome {
     /// An accepted closure; the caller applies the same `Done` decision as the
     /// Handled button.
     MarkHandled,
+    /// An accepted hand-off; the caller moves the card to Watching.
+    MarkWatching,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -937,6 +939,17 @@ impl ReviewState {
         }
         match (update.kind, update.temporal_value) {
             (SuggestedUpdateKind::Closure, _) => SuggestionOutcome::MarkHandled,
+            (SuggestedUpdateKind::Declined, _) => {
+                item.resolution = Some(Anchor {
+                    message: update.source_message,
+                    block: update.source_block,
+                    quote: update.evidence_text.clone(),
+                    context: update.evidence_text,
+                });
+                item.resolution_kind = Some(ResolutionKind::Declined);
+                SuggestionOutcome::MarkHandled
+            }
+            (SuggestedUpdateKind::Delegated, _) => SuggestionOutcome::MarkWatching,
             (SuggestedUpdateKind::DeadlineChange, Some(value)) if !value.trim().is_empty() => {
                 item.deadline = Some(Anchor {
                     message: update.source_message,
@@ -1287,7 +1300,11 @@ fn event_passed_status_label(event: &EventPassed) -> String {
                 .to_string()
         },
     );
-    format!("Closed: event passed ({}, ended {date})", event.name)
+    if event.expired {
+        format!("Expired with {} (ended {date})", event.name)
+    } else {
+        format!("Closed: event passed ({}, ended {date})", event.name)
+    }
 }
 fn resolution_status_label(kind: Option<ResolutionKind>) -> &'static str {
     match kind {
@@ -3342,6 +3359,7 @@ mod tests {
             end,
             message_handle: "m0".into(),
             from_subject: false,
+            expired: false,
         });
         let card = state.card_context(&item, 0, 0).unwrap();
         assert!(card.closed);
@@ -3372,6 +3390,51 @@ mod tests {
             summary.contains("· 1 closed because the event passed"),
             "summary: {summary}"
         );
+    }
+
+    #[test]
+    fn expired_event_label_is_explicit_and_declined_resolution_uses_resolved_card_path() {
+        let (state, mut item) = aging_fixture();
+        let end = chrono::DateTime::parse_from_rfc3339("2026-08-21T19:30:00Z")
+            .unwrap()
+            .timestamp();
+        item.event_passed = Some(EventPassed {
+            name: "the gala".into(),
+            end,
+            message_handle: "m0".into(),
+            from_subject: false,
+            expired: true,
+        });
+        let expired_card = state.card_context(&item, 0, 0).unwrap();
+        assert!(expired_card.closed);
+        for show_resolved in [false, true] {
+            assert_eq!(
+                card_hidden(expired_card.closed, show_resolved, false),
+                !show_resolved
+            );
+        }
+        assert!(status_base_label(Decision::Review, &item).starts_with("Expired with the gala"));
+
+        item.event_passed = None;
+        item.resolution = Some(Anchor {
+            message: "m2".into(),
+            block: 0,
+            quote: "I cannot do this.".into(),
+            context: "I cannot do this.".into(),
+        });
+        item.resolution_kind = Some(ResolutionKind::Declined);
+        let card = state.card_context(&item, 0, 0).unwrap();
+        assert!(card.closed);
+        assert_eq!(
+            status_base_label(Decision::Review, &item),
+            "Resolved: declined"
+        );
+        for show_resolved in [false, true] {
+            assert_eq!(
+                card_hidden(card.closed, show_resolved, false),
+                !show_resolved
+            );
+        }
     }
 
     #[test]

@@ -207,18 +207,41 @@ the scan rather than from the UI thread. Coverage details add one content-free
 line with answered and skipped rule-question counts; turning the setting off
 keeps the previous rule behavior and creates no decision client.
 
-After the per-conversation pass, the closure pass checks later messages that can
-reach open requests: a later message in the same thread, or a conversation
-reached through a later message you sent to the waiting party. With the
-`OpenRouter` decision-model setting enabled, `Jev` checks one later paragraph
-per request (the first 8 body paragraphs per message). Accepted answers become
-pending suggested updates. Gray-band loop/message pairs are grouped by
-conversation and sent to the existing governed chat-model closure call, capped
-at 40 conversations per scan. Coverage notes report content-free counts for
-decision-model suggestions, escalated pairs, and skipped pairs. With the
-setting off, the existing chat-model closure pass runs unchanged. Requests
-found earlier in the same scan are the only ones offered, because no mail text
-is stored between scans.
+After the per-conversation pass, the closure walk checks open requests the user
+owes. It visits later messages in timestamp order: every later message in the
+same thread, then reachable cross-thread messages the user sent to the waiting
+party. For each message, the first eight body paragraphs get a `walk.responds`
+gate and the questions for that author's role. A message that does not respond
+advances the walk; a waiting-party chaser adds an **Asked again** evidence card.
+An accepted amendment adds a **Changed** chip and is appended to the ask used
+by later steps. A confirmed new due date replaces the old date, keeps the old
+date as a **Due date changed** mention, and changes overdue grouping.
+
+A waiting-party confirmation closes the card as completed; a withdrawal or a
+change that means the action is no longer owed closes it as withdrawn. The
+user's own delivery, promise, decline, or hand-off and a third party's reported
+completion remain suggestions for the owner to review. Accepting a hand-off
+moves the card to Watching. A promise with no date is an acknowledgement and
+does not change the card. A waiting-party due-date change with no usable date
+candidate escalates for another check.
+
+Before walking, the decision model can match the ask to a later event. It asks
+twice with event options in opposite orders; only an agreeing event choice and
+an accepted `expiry.ends_with_event` answer can expire the loop. The event must
+also have ended. The card then shows **Expired with [event]** and stays closed
+under Show resolved. A due date passing before that event ends leaves the loop
+overdue and open.
+
+Gray-band answers and ambiguous date follow-ups go to the governed chat-model
+closure call, capped at 40 conversations per scan. A failed or rate-limited
+decision request skips that loop without a retry. Coverage details report this
+content-free line:
+
+`Closure walk: {closed} closed by the waiting party, {withdrawn} withdrawn, {expired} expired, {asked} asked again, {changed} changed, {rescheduled} new due dates, {suggested} suggested updates, {escalated} loops escalated to the chat model, {skipped} skipped (rate limit / errors).`
+
+With the decision-model setting off, the existing chat-model closure
+pass and its event guard run unchanged. Requests found earlier in the same scan
+are the only ones offered, because no mail text is stored between scans.
 
 ## Saved decisions and reminders
 
@@ -276,8 +299,8 @@ in PR 2. Only HMAC fingerprints, link-kind tags, and timestamps are stored.
 
 The Sources screen's OpenRouter card has an owner-invoked **Export training
 data** control: with a scan result loaded and a folder path typed into
-**Training export folder**, it writes `triage.jsonl`, `closure.jsonl`, and
-`rules.jsonl` for the `Jev` question-optimization harness in
+**Training export folder**, it writes `triage.jsonl`, `closure.jsonl`,
+`walk.jsonl`, and `rules.jsonl` for the `Jev` question-optimization harness in
 `tools/jev-optimize/` (see that tool's README). Recognized names and addresses
 of known participants are replaced with request-local pseudonyms, and other
 email addresses become `address@example.invalid`; names mentioned only in
@@ -296,6 +319,11 @@ record; nothing about the export is logged.
 carry `subject_a`, `subject_b`, `first_paragraph_a`, `first_paragraph_b`, and
 `label.rules.thread_merge`. Both also carry `id`, `label_source`, `set`, and
 `source`.
+
+`walk.jsonl` carries `user`, `waiting_party`, `ask`, `due`, and one later user
+paragraph with its author role. `group` keeps all rows for one evidence loop in
+the same training split. Accepted and rejected suggestions supply gold labels;
+pending suggestions supply silver labels.
 
 # Retry failed conversations and sources
 
