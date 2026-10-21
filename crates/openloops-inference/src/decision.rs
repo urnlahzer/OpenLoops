@@ -514,6 +514,7 @@ pub mod registry {
         "walk.user_hands_off",
         "walk.third_party_done",
         "walk.new_date",
+        "walk.handoff_to",
         "expiry.event",
         "expiry.ends_with_event",
     ];
@@ -1104,6 +1105,7 @@ mod tests {
             "walk.user_hands_off",
             "walk.third_party_done",
             "walk.new_date",
+            "walk.handoff_to",
             "expiry.event",
             "expiry.ends_with_event",
         ] {
