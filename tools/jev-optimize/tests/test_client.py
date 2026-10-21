@@ -32,7 +32,7 @@ def test_request_shape_is_byte_exact(monkeypatch):
             },
         )
 
-    monkeypatch.setenv("OPENROUTER_API_KEY", "synthetic-test-placeholder")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-not-real")
     client = DecisionsClient(transport=httpx.MockTransport(handler))
     client.decide({"text": "Synthetic."}, QUESTION)
     assert seen == [
@@ -82,7 +82,7 @@ def test_probe_drops_rejected_provider_member(monkeypatch):
             },
         )
 
-    monkeypatch.setenv("OPENROUTER_API_KEY", "synthetic-test-placeholder")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-not-real")
     client = DecisionsClient(transport=httpx.MockTransport(handler))
     assert client.probe() is False
     assert b'"provider"' in calls[0]

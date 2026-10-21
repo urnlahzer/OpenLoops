@@ -224,6 +224,166 @@ class RulesDeadlineKind(dspy.Signature):
     )
 
 
+class WalkBase(dspy.Signature):
+    user: dict[str, str] = dspy.InputField()
+    waiting_party: str = dspy.InputField()
+    ask: str = dspy.InputField()
+    due: str = dspy.InputField()
+    later: dict[str, Any] = dspy.InputField()
+
+
+def _walk_signature(name: str, instructions: str) -> type[dspy.Signature]:
+    return type(
+        name,
+        (WalkBase,),
+        {
+            "__doc__": instructions,
+            "__annotations__": {"decision": Noul},
+            "decision": dspy.OutputField(
+                desc="Probability that the statement is true."
+            ),
+        },
+    )
+
+
+_WALK_STATEMENTS = {
+    "walk.responds": "`later.paragraph_text` responds to the request in `ask`.",
+    "walk.wp_received": (
+        "In `later.paragraph_text`, `waiting_party` says they received what `ask` requests."
+    ),
+    "walk.wp_no_longer_needed": (
+        "In `later.paragraph_text`, `waiting_party` says they no longer need what `ask` requests."
+    ),
+    "walk.wp_asks_again": (
+        "In `later.paragraph_text`, `waiting_party` asks again for what `ask` requests "
+        "or asks for an update on it."
+    ),
+    "walk.wp_changes_terms": (
+        "In `later.paragraph_text`, `waiting_party` changes what `ask` requests."
+    ),
+    "walk.wp_still_owed": (
+        "After `later.paragraph_text`, `user.name` still owes `waiting_party` an action for `ask`."
+    ),
+    "walk.wp_changes_due": (
+        "In `later.paragraph_text`, `waiting_party` changes when `ask` must be done."
+    ),
+    "walk.user_delivers": (
+        "In `later.paragraph_text`, `user.name` gives `waiting_party` what `ask` requests."
+    ),
+    "walk.user_promises": (
+        "In `later.paragraph_text`, `user.name` says they will do what `ask` requests "
+        "at a later time."
+    ),
+    "walk.user_declines": (
+        "In `later.paragraph_text`, `user.name` declines to do what `ask` requests."
+    ),
+    "walk.user_hands_off": (
+        "In `later.paragraph_text`, `user.name` says another person will do what `ask` requests."
+    ),
+    "walk.third_party_done": (
+        "In `later.paragraph_text`, the writer says they did what `ask` requests or will do it."
+    ),
+}
+
+_WALK_INTENTS = {
+    "walk.responds": "The later paragraph is about the request.",
+    "walk.wp_received": "The waiting party confirms receipt.",
+    "walk.wp_no_longer_needed": "The waiting party withdraws the request.",
+    "walk.wp_asks_again": "The waiting party chases the request.",
+    "walk.wp_changes_terms": "The waiting party changes what the request requires.",
+    "walk.wp_still_owed": "The user still owes an action after the change.",
+    "walk.wp_changes_due": "The waiting party changes the due time.",
+    "walk.user_delivers": "The user delivers what was requested.",
+    "walk.user_promises": "The user promises to do it later.",
+    "walk.user_declines": "The user declines the request.",
+    "walk.user_hands_off": "The user hands the request to another person.",
+    "walk.third_party_done": "Another participant did or will do the request.",
+}
+
+_WALK_FIELDS = (
+    "user.name",
+    "waiting_party",
+    "ask",
+    "due",
+    "later.author_role",
+    "later.paragraph_text",
+)
+
+
+_WALK_NEW_DATE_OPTIONS = {"none": "The paragraph sets no new date for the request."}
+WalkNewDateDecision = Choice[tuple(_WALK_NEW_DATE_OPTIONS.items())]
+
+
+class WalkNewDate(dspy.Signature):
+    """Which date does `later.paragraph_text` set as the new time for `ask`?"""
+
+    ask: str = dspy.InputField()
+    later: dict[str, Any] = dspy.InputField()
+    decision: WalkNewDateDecision = dspy.OutputField(desc="The issued date handle, or none.")
+
+
+_EXPIRY_EVENT_OPTIONS = {"none": "The request serves no listed event."}
+ExpiryEventDecision = Choice[tuple(_EXPIRY_EVENT_OPTIONS.items())]
+
+
+class ExpiryEvent(dspy.Signature):
+    """Which event does `ask` help `waiting_party` prepare for or take part in?"""
+
+    ask: str = dspy.InputField()
+    waiting_party: str = dspy.InputField()
+    due: str = dspy.InputField()
+    decision: ExpiryEventDecision = dspy.OutputField(desc="The issued event handle, or none.")
+
+
+class ExpiryEndsWithEvent(dspy.Signature):
+    """`ask` has no purpose after `event` ends."""
+
+    ask: str = dspy.InputField()
+    waiting_party: str = dspy.InputField()
+    event: str = dspy.InputField()
+    decision: Noul = dspy.OutputField(desc="Probability that the statement is true.")
+
+
+def _walk_specs() -> dict[str, QuestionSpec]:
+    return {
+        **{
+            qid: QuestionSpec(
+                "walk",
+                _walk_signature(qid.replace(".", "_").title(), text),
+                _WALK_INTENTS[qid],
+                ("later.paragraph_text",),
+                _WALK_FIELDS,
+            )
+            for qid, text in _WALK_STATEMENTS.items()
+        },
+        "walk.new_date": QuestionSpec(
+            "walk",
+            WalkNewDate,
+            "The new date the paragraph sets for the request.",
+            ("later.paragraph_text",),
+            ("ask", "later.paragraph_text"),
+            "choice",
+            {"none": "The paragraph sets no new date for the request."},
+        ),
+        "expiry.event": QuestionSpec(
+            "expiry",
+            ExpiryEvent,
+            "The event the request serves.",
+            ("ask",),
+            ("ask", "waiting_party", "due"),
+            "choice",
+            {"none": "The request serves no listed event."},
+        ),
+        "expiry.ends_with_event": QuestionSpec(
+            "expiry",
+            ExpiryEndsWithEvent,
+            "The request loses its purpose when the event ends.",
+            ("ask", "event"),
+            ("ask", "waiting_party", "event"),
+        ),
+    }
+
+
 _CLOSURE_FIELDS = (
     "obligation.title",
     "obligation.evidence_text",
@@ -356,10 +516,11 @@ SPECS: dict[str, QuestionSpec] = {
         "choice",
         _RULES_DEADLINE_KIND_OPTIONS,
     ),
+    **_walk_specs(),
 }
 
 
 SETS = {
     name: tuple(key for key, spec in SPECS.items() if spec.set_name == name)
-    for name in ("closure", "triage", "rules", "extract")
+    for name in ("closure", "triage", "rules", "extract", "walk", "expiry")
 }

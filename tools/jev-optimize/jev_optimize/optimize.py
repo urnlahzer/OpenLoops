@@ -31,7 +31,7 @@ WRONG_DECISION_PENALTY = 9.0
 
 
 def _inputs(row: DatasetRow) -> dict[str, Any]:
-    return row.model_dump(exclude={"id", "set", "label", "source"})
+    return row.model_dump(exclude={"id", "set", "label", "source", "group"})
 
 
 def metric_for(question_id: str, *, feedback_includes_text: bool = False):
@@ -295,9 +295,19 @@ def optimize_set(
     budget: str = "light",
     feedback_includes_text: bool = False,
     reflection_lm: Any | None = None,
+    only: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     rows = load_jsonl(data_path)
-    if reflection_lm is None:
+    question_ids = [
+        question_id
+        for question_id in SETS[set_name]
+        if only is None or question_id in only
+    ]
+    dynamic_choices = {"walk.new_date", "expiry.event"}
+    optimizable = [
+        question_id for question_id in question_ids if question_id not in dynamic_choices
+    ]
+    if reflection_lm is None and optimizable:
         reflection_model = os.environ.get("OPENROUTER_REFLECTION_MODEL")
         if not reflection_model:
             raise RuntimeError("OPENROUTER_REFLECTION_MODEL is not set")
@@ -313,7 +323,13 @@ def optimize_set(
         "test_metrics": {},
         "proposer_rejection_count": 0,
     }
-    for question_id in SETS[set_name]:
+    for question_id in question_ids:
+        if question_id in dynamic_choices:
+            output["questions"][question_id] = {
+                "kept_baseline": True,
+                "baseline_reason": "dynamic options are issued per request",
+            }
+            continue
         parts = split_rows(rows, question_id=question_id)
         output["dataset_sizes"][question_id] = {
             name: len(values) for name, values in parts.items()

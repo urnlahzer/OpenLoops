@@ -112,7 +112,8 @@ def split_rows(
     small = len(population) < SMALL_POPULATION
     result: dict[str, list[DatasetRow]] = {"train": [], "validation": [], "test": []}
     for row in population:
-        result[split_name(row.id, seed, small=small)].append(row)
+        split_key = getattr(row, "group", None) or row.id
+        result[split_name(split_key, seed, small=small)].append(row)
     return result
 
 

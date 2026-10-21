@@ -78,6 +78,49 @@ already carries `closure.outcome`.
   triage question's own balance and `extract.claim_type`'s label
   distribution.
 
+## Walk and expiry sets
+
+Walk examples are complete synthetic threads: one request followed by one to
+three later messages. Each message has one to three paragraphs, and the fixed
+plan determines which paragraph responds and which outcome it expresses. The
+offline stub generator writes 800 threads by default; `threads.jsonl` stores
+each thread and `walk.jsonl` and `expiry.jsonl` store the question rows derived
+from them.
+
+Generate the offline stub corpus and check either derived set with:
+
+```powershell
+uv run --locked jev-optimize generate-threads --stub --threads 800
+uv run --locked jev-optimize check-corpus data/synthetic/walk.jsonl
+uv run --locked jev-optimize check-corpus data/synthetic/expiry.jsonl
+uv run --locked jev-optimize generate-threads --llm --smoke --threads 24 --output runs/smoke
+```
+
+`check-corpus` verifies thread groups, stable ids, the privacy scrub, distinct
+paragraph and ask counts, and at least 20 positive and 20 negative examples
+for each labeled question. Splits use `group` (the thread id), so every row
+from a thread stays in one split. The `--llm --smoke` command is the small
+paid trial (OpenRouter, `provider.zdr`); inspect its output before a full
+`--llm` run. The automated test uses `httpx.MockTransport` and never opens a
+network connection.
+
+The stub corpus carries `mk-*` marker tokens that reveal its labels to the
+offline fake endpoint. `optimize`, `evaluate` and `evaluate-walk` therefore
+refuse a file that holds `synthetic-stub` rows unless `--replay` is given:
+generate the LLM corpus before any paid run.
+
+Optimize selected questions with:
+
+```powershell
+uv run --locked jev-optimize optimize --set walk --only walk.responds,walk.user_delivers --budget light
+```
+
+`walk.new_date` and `expiry.event` remain at their bootstrap wording because
+their options are generated per request and the harness does not yet carry
+row-specific option sets. `evaluate-walk --threads data/synthetic/threads.jsonl
+--replay runs/walk.json` evaluates thread-level held-out statuses without a
+network call.
+
 Run `optimize` separately for `closure`, `triage`, and `rules`; pass all result
 files to `write-registry` to merge them in one reviewed edit. Replay files are
 stable-hash keyed and allow evaluation without a network call.

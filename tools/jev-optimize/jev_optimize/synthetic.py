@@ -124,6 +124,7 @@ class CorpusThresholds:
     min_rows: int = 600
     min_paragraphs: int = 300
     min_obligations: int = 40
+    min_thread_class_rows: int = 20
     max_from_user_gap: float = 0.1
     max_days_mean_gap: float = 2.0
     positive_rate_min: float = 0.4
@@ -395,11 +396,17 @@ def generate_stub(
 
     if rows < 10:
         raise ValueError("stub generation requires at least 10 rows")
-    names = tuple(name for name in SETS if name != "extract") if selected_set == "all" else (
-        selected_set,
+    names = (
+        tuple(name for name in SETS if name not in {"extract", "walk", "expiry"})
+        if selected_set == "all"
+        else (selected_set,)
     )
     if "extract" in names:
         raise ValueError("extract rows are derived from the triage corpus")
+    if selected_set in {"walk", "expiry"}:
+        raise ValueError(
+            "walk and expiry rows are derived from threads; use generate-threads"
+        )
     root = Path(output)
     paths: list[Path] = []
     for offset, set_name in enumerate(names):
@@ -723,12 +730,18 @@ def generate_llm(
     if smoke and rows < 128:
         raise ValueError("a smoke run needs at least 128 rows to balance every label")
     parallel = max(1, parallel)
+    if selected_set in {"walk", "expiry"}:
+        raise ValueError(
+            "walk and expiry rows are derived from threads; use generate-threads"
+        )
     api_key = os.environ.get("OPENROUTER_API_KEY")
     model = os.environ.get("OPENROUTER_SYNTH_MODEL")
     if not api_key or not model:
         raise RuntimeError("OPENROUTER_API_KEY and OPENROUTER_SYNTH_MODEL must be set")
-    names = tuple(name for name in SETS if name != "extract") if selected_set == "all" else (
-        selected_set,
+    names = (
+        tuple(name for name in SETS if name not in {"extract", "walk", "expiry"})
+        if selected_set == "all"
+        else (selected_set,)
     )
     if "extract" in names:
         raise ValueError("extract rows are derived from the triage corpus")
@@ -841,6 +854,74 @@ def _paragraph_text(row: DatasetRow) -> str:
     return str(getattr(row, _MAIN_TEXT_FIELD[question_id]))
 
 
+def _check_thread_corpus(
+    rows: list[DatasetRow], set_name: str, thresholds: CorpusThresholds
+) -> dict[str, Any]:
+    from .threads import _with_id
+
+    errors: list[str] = []
+    if any(not isinstance(getattr(row, "group", None), str) or not row.group for row in rows):
+        errors.append("every thread row must have a group")
+    if any(row.id != _with_id(row.model_dump())["id"] for row in rows):
+        errors.append("one or more row ids are not stable thread hashes")
+    scrubbed = sum(bool(scrub_row(row.model_dump())) for row in rows)
+    if scrubbed:
+        errors.append(f"privacy scrub rejected {scrubbed} rows")
+
+    paragraphs = {
+        _normalize(str(row.later["paragraph_text"]))
+        for row in rows
+        if set_name == "walk"
+        and isinstance(getattr(row, "later", None), dict)
+        and isinstance(row.later.get("paragraph_text"), str)
+    }
+    asks = {
+        _normalize(str(row.ask))
+        for row in rows
+        if isinstance(getattr(row, "ask", None), str)
+    }
+    if set_name == "walk" and len(paragraphs) < thresholds.min_paragraphs:
+        errors.append(
+            f"distinct later paragraphs {len(paragraphs)} < {thresholds.min_paragraphs}"
+        )
+    if len(asks) < thresholds.min_obligations:
+        errors.append(f"distinct asks {len(asks)} < {thresholds.min_obligations}")
+
+    choice_ids = {"walk.new_date", "expiry.event"}
+    question_stats: dict[str, Any] = {}
+    for question_id in SETS[set_name]:
+        if question_id in choice_ids:
+            continue
+        question_rows = [row for row in rows if question_id in row.label]
+        values = [row.label[question_id] for row in question_rows]
+        positives = sum(value is True for value in values)
+        negatives = sum(value is False for value in values)
+        question_stats[question_id] = {
+            "rows": len(question_rows),
+            "positives": positives,
+            "negatives": negatives,
+        }
+        if not all(isinstance(value, bool) for value in values):
+            errors.append(f"{question_id}: labels must be boolean")
+        minimum = thresholds.min_thread_class_rows
+        if positives < minimum or negatives < minimum:
+            errors.append(
+                f"{question_id}: needs {minimum} positives and {minimum} negatives"
+            )
+
+    report = {
+        "set": set_name,
+        "rows": len(rows),
+        "distinct_paragraph_texts": len(paragraphs),
+        "distinct_obligation_texts": len(asks),
+        "questions": question_stats,
+        "errors": errors,
+    }
+    if errors:
+        raise ValueError("; ".join(errors))
+    return report
+
+
 def check_corpus(
     path: str | Path, thresholds: CorpusThresholds | None = None
 ) -> dict[str, Any]:
@@ -854,6 +935,8 @@ def check_corpus(
     if len(set_names) != 1:
         raise ValueError("corpus must contain exactly one set")
     set_name = set_names.pop()
+    if set_name in {"walk", "expiry"}:
+        return _check_thread_corpus(rows, set_name, thresholds)
     errors: list[str] = []
     if len(rows) < thresholds.min_rows:
         errors.append(f"rows {len(rows)} < {thresholds.min_rows}")
