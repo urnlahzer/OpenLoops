@@ -5,7 +5,8 @@ use crate::link_state::LinkKind;
 use crate::{
     app_model::{self, AppModel, Outcome, Service, Status},
     claim_view::{
-        Anchor, EventPassed, LoopItem, Owner, ResolutionKind, SuggestedUpdate, SuggestedUpdateKind,
+        Anchor, EventPassed, LoopItem, MentionOrigin, Owner, ResolutionKind, SuggestedUpdate,
+        SuggestedUpdateKind,
     },
     deadline_view::label as deadline_label,
     loop_state::{Decision, Reminder, marker},
@@ -440,7 +441,7 @@ fn evidence_cards(
             .iter()
             .find(|message| message.input.handle == mention.message);
         cards.push(EvidenceView {
-            label: "Asked again".into(),
+            label: mention_label(mention.origin).into(),
             sender: message.map_or_else(String::new, sender_label),
             time: meeting_time_label(mention.timestamp, false),
             quote: typographic_quote(&mention.quote),
@@ -451,6 +452,16 @@ fn evidence_cards(
         });
     }
     cards
+}
+
+const fn mention_label(origin: MentionOrigin) -> &'static str {
+    match origin {
+        MentionOrigin::Restated | MentionOrigin::OwnerLink | MentionOrigin::Duplicate => {
+            "Asked again"
+        }
+        MentionOrigin::Amended => "Changed by the requester",
+        MentionOrigin::Rescheduled => "Earlier deadline",
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -515,7 +526,7 @@ const SUGGESTED_EVIDENCE_MAX_CHARS: usize = 240;
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 struct SuggestedView {
     state: &'static str,
-    label: &'static str,
+    label: String,
     evidence: String,
     deadline: String,
     sender: String,
@@ -530,6 +541,8 @@ fn suggested_kind_label(kind: SuggestedUpdateKind) -> &'static str {
     match kind {
         SuggestedUpdateKind::Closure => "Looks handled",
         SuggestedUpdateKind::DeadlineChange => "Deadline may have changed",
+        SuggestedUpdateKind::Declined => "You may have declined this",
+        SuggestedUpdateKind::Delegated => "You may have handed this off",
         SuggestedUpdateKind::Modification => "May have been modified",
     }
 }
@@ -554,11 +567,16 @@ fn suggested_view(review: &ReviewState, update: Option<&SuggestedUpdate>) -> Sug
     let (state, can_accept, reject_label) = match update.kind {
         SuggestedUpdateKind::Closure => ("closure", true, "Reject"),
         SuggestedUpdateKind::DeadlineChange => ("deadline_change", true, "Reject"),
+        SuggestedUpdateKind::Declined => ("declined", true, "Reject"),
+        SuggestedUpdateKind::Delegated => ("delegated", true, "Reject"),
         SuggestedUpdateKind::Modification => ("modification", false, "Dismiss"),
     };
     SuggestedView {
         state,
-        label: suggested_kind_label(update.kind),
+        label: update
+            .handoff_text
+            .clone()
+            .unwrap_or_else(|| suggested_kind_label(update.kind).into()),
         evidence: truncated_evidence(&update.evidence_text),
         deadline: review
             .suggested_deadline_view(update)
@@ -808,7 +826,12 @@ fn status_pill(item: &LoopItem, card: &CardContext) -> PillView {
         Decision::Dismissed => ("Dismissed – not mine".into(), "neutral"),
         Decision::Moot => ("No longer relevant".into(), "neutral"),
         Decision::Mine => ("Tracking".into(), "success"),
-        Decision::Watching => ("Watching team follow-up".into(), "watch"),
+        Decision::Watching => (
+            item.handoff_text
+                .clone()
+                .unwrap_or_else(|| "Watching team follow-up".into()),
+            "watch",
+        ),
         // A resolution keeps the spec's own pill text, with the model's
         // cross-thread suffix appended when it applies -- see
         // `status_shows_cross_thread`.
@@ -840,11 +863,43 @@ fn pills_for(item: &LoopItem, card: &CardContext) -> Vec<PillView> {
             hint: String::new(),
         });
     }
-    if !item.mentions.is_empty() {
+    let asked_again = item
+        .mentions
+        .iter()
+        .filter(|mention| {
+            matches!(
+                mention.origin,
+                MentionOrigin::Restated | MentionOrigin::OwnerLink | MentionOrigin::Duplicate
+            )
+        })
+        .count();
+    if asked_again > 0 {
         pills.push(PillView {
-            text: format!("Asked {}x", item.mentions.len() + 1),
+            text: format!("Asked {}x", asked_again + 1),
             kind: "neutral",
             hint: "The same ask appeared again in a later message.".into(),
+        });
+    }
+    if item
+        .mentions
+        .iter()
+        .any(|mention| mention.origin == MentionOrigin::Amended)
+    {
+        pills.push(PillView {
+            text: "Changed".into(),
+            kind: "neutral",
+            hint: "The requester changed what this asks for.".into(),
+        });
+    }
+    if item
+        .mentions
+        .iter()
+        .any(|mention| mention.origin == MentionOrigin::Rescheduled)
+    {
+        pills.push(PillView {
+            text: "Due date changed".into(),
+            kind: "neutral",
+            hint: "The requester moved the due date.".into(),
         });
     }
     if let Some(deadline) = &card.deadline {
@@ -2086,6 +2141,7 @@ fn resolve_selected_suggestion(
         SuggestionOutcome::DeadlineApplied => {
             Some("Deadline updated for this session. Saved decisions are unchanged.")
         }
+        SuggestionOutcome::MarkWatching => Some("Moved to Watching."),
         SuggestionOutcome::MarkHandled | SuggestionOutcome::Ignored => None,
     };
     if let Some(status) = status {
@@ -2094,6 +2150,8 @@ fn resolve_selected_suggestion(
     }
     if outcome == SuggestionOutcome::MarkHandled {
         decide_selected(model, selected, DECISION_DONE);
+    } else if outcome == SuggestionOutcome::MarkWatching {
+        decide_selected(model, selected, DECISION_WATCHING);
     }
     outcome
 }
@@ -2705,6 +2763,7 @@ pub(crate) fn register_callbacks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claim_view::{Mention, MentionOrigin};
     use crate::{deadline_view::DeadlineView, loop_state::Record, review_model::scan_strip};
     use slint::Model;
 
@@ -3688,6 +3747,7 @@ mod tests {
             end: 1,
             message_handle: "m0".into(),
             from_subject: true,
+            expired: false,
         });
         assert_eq!(
             status_pill_hint(Decision::Done, &Reminder::None, &item),
@@ -3803,6 +3863,7 @@ mod tests {
             end: 1,
             message_handle: "m0".into(),
             from_subject: true,
+            expired: false,
         });
         assert_eq!(
             status_pill(&item, &card),
@@ -4434,6 +4495,7 @@ mod tests {
             end: 1,
             message_handle: "m0".into(),
             from_subject: true,
+            expired: false,
         });
         let cards = evidence_cards(&item, &review.messages);
         assert_eq!(
@@ -4690,6 +4752,9 @@ mod tests {
     fn suggestion(kind: SuggestedUpdateKind, temporal: Option<&str>) -> SuggestedUpdate {
         SuggestedUpdate {
             kind,
+            handoff_text: (kind == SuggestedUpdateKind::Delegated)
+                .then(|| "Handed to Pat (internal)".into()),
+            source_unit: "paragraph",
             evidence_text: "Synthetic later message text.".into(),
             source_message: "m2".into(),
             source_block: 0,
@@ -4732,6 +4797,78 @@ mod tests {
                 .suggested_update
                 .is_none()
         );
+    }
+
+    #[test]
+    fn accepting_a_delegation_moves_the_card_to_watching() {
+        let (mut app, key) =
+            model_with_suggestion(suggestion(SuggestedUpdateKind::Delegated, None));
+        let label = suggested_view(
+            &app.review,
+            app.review.analysis.as_ref().unwrap().items[2]
+                .suggested_update
+                .as_ref(),
+        )
+        .label;
+        assert_eq!(label, "Handed to Pat (internal)");
+        resolve_selected_suggestion(&mut app, Some(key), true);
+        assert!(matches!(
+            app.review.decisions.get(&key).decision,
+            Decision::Watching
+        ));
+        let item = &app.review.analysis.as_ref().unwrap().items[2];
+        assert_eq!(
+            item.handoff_text.as_deref(),
+            Some("Handed to Pat (internal)")
+        );
+        let pills = pills_for(item, &card_at(&app, 2));
+        assert_eq!(pills[0].text, "Handed to Pat (internal)");
+    }
+
+    #[test]
+    fn accepting_a_decline_closes_the_card_as_declined() {
+        let (mut app, key) = model_with_suggestion(suggestion(SuggestedUpdateKind::Declined, None));
+        resolve_selected_suggestion(&mut app, Some(key), true);
+        let item = &app.review.analysis.as_ref().unwrap().items[2];
+        assert_eq!(item.resolution_kind, Some(ResolutionKind::Declined));
+        assert!(matches!(
+            app.review.decisions.get(&key).decision,
+            Decision::Done
+        ));
+    }
+
+    #[test]
+    fn mention_origins_label_their_evidence_cards_and_pills() {
+        let (mut app, _) = model_with_suggestion(suggestion(SuggestedUpdateKind::Closure, None));
+        let card = card_at(&app, 2);
+        let item = &mut app.review.analysis.as_mut().unwrap().items[2];
+        for origin in [
+            MentionOrigin::Restated,
+            MentionOrigin::Amended,
+            MentionOrigin::Rescheduled,
+        ] {
+            item.mentions.push(Mention {
+                message: "m0".into(),
+                block: 0,
+                quote: "q".into(),
+                timestamp: 1,
+                origin,
+            });
+        }
+        let labels: Vec<String> = evidence_cards(item, &[])
+            .into_iter()
+            .map(|card| card.label)
+            .collect();
+        assert!(labels.contains(&"Asked again".to_string()));
+        assert!(labels.contains(&"Changed by the requester".to_string()));
+        assert!(labels.contains(&"Earlier deadline".to_string()));
+        let pills: Vec<String> = pills_for(item, &card)
+            .into_iter()
+            .map(|pill| pill.text)
+            .collect();
+        assert!(pills.contains(&"Asked 2x".to_string()));
+        assert!(pills.contains(&"Changed".to_string()));
+        assert!(pills.contains(&"Due date changed".to_string()));
     }
 
     #[test]

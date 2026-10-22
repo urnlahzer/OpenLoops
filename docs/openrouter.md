@@ -130,16 +130,51 @@ assembled locally and never re-sent. A gray-band `extract.claim_type`
 answer, or a request error, sends that paragraph's whole conversation to
 the unchanged chat-model request instead.
 
-Closure checks may also be sent to
-`POST /api/alpha/decisions` with request members `model`, `state`, `questions`,
-and `provider: {"zdr": true}` when the endpoint accepts it (which the check
-reports). Each request contains the obligation title, its resolved evidence
-paragraph, and one later body paragraph, plus whether that later message was
-sent by the user and the whole days between the messages. At most the first 8
-body paragraphs of a later message are checked. The model is
-`typesafe/jev-1.13` and is validated against the ZDR listing before any content
-is sent. Its answers are probabilities, never text, and nothing from them is
-persisted. Gray-band pairs go to the governed chat-model closure call.
+The closure walk sends decision requests to `POST /api/alpha/decisions` with
+request members `model`, `state`, `questions`, and `provider: {"zdr": true}`
+when the endpoint accepts it (which the check reports). It visits each open
+request's later messages in timestamp order, checking the first 8 body
+paragraphs individually. A message with two or more paragraphs also gets one
+whole-message check; its text joins all of the message's paragraphs in order
+with `\n\n`, including any past the first 8. These unit requests run in one
+round. The message role is selected locally as
+`waiting_party`, `user`, or `third_party`. Each unit request has this state
+shape:
+
+```json
+{
+  "user": {"name": "the user's first or display name"},
+  "waiting_party": "the waiting party's display name",
+  "ask": "the evidence paragraph, with accepted later changes appended",
+  "due": "the current due-date text or not stated",
+  "later": {
+    "author_role": "waiting_party | user | third_party",
+    "text": "one later paragraph or the whole later message"
+  }
+}
+```
+
+There is no message history, address, or generated text in this state. When a
+unit changes a date, the follow-up state is `{"ask": ..., "later":
+{"text": ...}}`; its choice options are only date candidates found by the
+app's parser, plus `none`. A whole-message date follow-up offers the union of
+the paragraphs' candidates, without duplicates. When `walk.user_hands_off`
+accepts, `walk.handoff_to` receives that same unit state. Its options are
+handles for the later message's participants, described by their display names
+or address local parts when no display name exists, plus `none`; no participant
+addresses are sent as option values. For expiry, `expiry.event` receives
+`{"ask": ..., "waiting_party": ..., "due": ...}` and event descriptions
+found from the event index or ask text, plus `none`. That choice is requested
+twice with the event options reversed. If both answers agree, the
+`expiry.ends_with_event` state is `{"ask": ..., "waiting_party": ..., "event":
+...}`. The event can expire the request only when that answer is accepted and
+the event has ended.
+
+The model is `typesafe/jev-1.13` and is validated against the ZDR listing before
+any content is sent. Its answers are probabilities or option choices, never
+generated text, and nothing from them is persisted. Gray-band answers and
+ambiguous date follow-ups go to the governed chat-model closure call; a failed
+decision request is skipped without retry.
 
 Rule-residue requests use the same Decisions endpoint, ZDR routing, concurrency
 limit, cancellation, 20-second deadline, and never-resend policy. They send

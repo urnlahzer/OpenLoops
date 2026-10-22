@@ -76,18 +76,26 @@ pub struct EventPassed {
     pub end: i64,
     pub message_handle: String,
     pub from_subject: bool,
+    pub expired: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SuggestedUpdateKind {
     Closure,
     DeadlineChange,
+    Declined,
+    Delegated,
     Modification,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SuggestedUpdate {
     pub kind: SuggestedUpdateKind,
+    /// A locally matched hand-off participant and its classification.
+    /// Recomputed on each scan and never persisted.
+    pub handoff_text: Option<String>,
+    /// Walk unit that produced the suggestion, used to label an exact export row.
+    pub source_unit: &'static str,
     pub evidence_text: String,
     pub source_message: String,
     pub source_block: usize,
@@ -112,6 +120,7 @@ pub struct ResolvedUpdate {
     /// The later paragraph the suggestion cited.
     pub source_message: String,
     pub source_block: usize,
+    pub source_unit: &'static str,
     pub accepted: bool,
 }
 
@@ -139,6 +148,8 @@ pub struct LoopItem {
     pub cross_thread: bool,
     pub event_passed: Option<EventPassed>,
     pub suggested_update: Option<SuggestedUpdate>,
+    /// Retained on the session's Watching card after accepting a hand-off.
+    pub handoff_text: Option<String>,
     pub from_call_summary: bool,
     pub meeting_time: Option<i64>,
     pub meeting_time_approx: bool,
@@ -150,6 +161,8 @@ pub enum MentionOrigin {
     Restated,
     OwnerLink,
     Duplicate,
+    Amended,
+    Rescheduled,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -191,6 +204,9 @@ pub(crate) fn fold_into(
         {
             survivor.mentions.push(mention);
         }
+    }
+    if survivor.handoff_text.is_none() {
+        survivor.handoff_text = dropped.handoff_text;
     }
 }
 

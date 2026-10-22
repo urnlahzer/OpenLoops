@@ -739,6 +739,7 @@ mod tests {
             cross_thread: false,
             event_passed: None,
             suggested_update: None,
+            handoff_text: None,
             from_call_summary: false,
             meeting_time: None,
             meeting_time_approx: false,
