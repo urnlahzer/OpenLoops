@@ -277,17 +277,19 @@ in PR 2. Only HMAC fingerprints, link-kind tags, and timestamps are stored.
 The Sources screen's OpenRouter card has an owner-invoked **Export training
 data** control: with a scan result loaded and a folder path typed into
 **Training export folder**, it writes `triage.jsonl`, `closure.jsonl`, and
-`rules.jsonl` --
-real mail text (subjects, paragraphs, participants) from the currently
-loaded scan, plus the owner's own accept/reject decisions on suggested
-updates -- for the `Jev` question-optimization harness in
-`tools/jev-optimize/` (see that tool's README). This is the one deliberate
-exception to the no-persistence rule described above: it writes real content
-to disk only when the owner explicitly asks, only to a folder the owner
-names outside this repository, and the button requires two presses (the
-first only arms a warning). The folder path itself lives in memory only for
-the running session and is never saved to Windows Credential Manager or any
-other settings record; nothing about the export is logged.
+`rules.jsonl` for the `Jev` question-optimization harness in
+`tools/jev-optimize/` (see that tool's README). Recognized names and addresses
+of known participants are replaced with request-local pseudonyms, and other
+email addresses become `address@example.invalid`; names mentioned only in
+prose, nicknames, spelling variants, and organization names can remain. The
+rows still contain the original mail wording and the owner's accept/reject
+decisions on suggested updates. This is the one deliberate exception to the
+no-persistence rule described above: it writes content to disk only when the
+owner explicitly asks, only to a folder the owner names outside this
+repository, and the button requires two presses (the first only arms a
+warning). The folder path itself lives in memory only for the running session
+and is never saved to Windows Credential Manager or any other settings
+record; nothing about the export is logged.
 
 `rules.jsonl` contains two gold owner-label shapes. Loop rows carry
 `action_a`, `action_b`, and `label.rules.duplicate_action`. Conversation rows

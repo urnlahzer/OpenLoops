@@ -7,6 +7,7 @@ use crate::claim_view::{
 use crate::deadline_view::{
     DeadlineKindHint, DeadlineView, EVENT_GENERIC_NOUNS, classify, classify_with_hint,
 };
+use crate::name_cipher::{CipherDecisionClient, NameCipher};
 use crate::settings::{ExtractionBackend, Provider};
 use chrono::{Datelike, TimeZone};
 use openloops_contracts::{
@@ -3272,6 +3273,41 @@ pub fn scan(
     progress: &ScanProgress,
     scope: ScanScope<'_>,
 ) -> Result<ScanResult, ProviderError> {
+    let decision_key = (options.provider == Provider::OpenRouter && options.use_decision_model)
+        .then(|| key.clone());
+    let client = connect(options.provider, key, model, parallel)?;
+    let inner_decision_client = maybe_decision_client(options, || {
+        Ok(OpenRouterDecisions::connect(
+            decision_key.expect("decision key exists when enabled"),
+            &Registry::get().model,
+        )?
+        .with_max_parallel(parallel))
+    })?;
+    let name_cipher = NameCipher::from_messages(messages);
+    let ciphered_decision_client = inner_decision_client
+        .as_ref()
+        .map(|inner| CipherDecisionClient::new(inner, &name_cipher));
+    let decision_client: Option<&dyn DecisionClient> = ciphered_decision_client
+        .as_ref()
+        .map(|client| client as &dyn DecisionClient);
+    scan_with_clients(
+        options,
+        messages,
+        progress,
+        scope,
+        client.as_ref(),
+        decision_client,
+    )
+}
+
+fn scan_with_clients(
+    options: ScanOptions,
+    messages: &[ReviewMessage],
+    progress: &ScanProgress,
+    scope: ScanScope<'_>,
+    client: &dyn ModelClient,
+    decision_client: Option<&dyn DecisionClient>,
+) -> Result<ScanResult, ProviderError> {
     let conversation_filter = borrowed_filter(&scope);
     let conversation_filter = conversation_filter.as_ref();
     let selected_messages = messages
@@ -3282,29 +3318,16 @@ pub fn scan(
             })
         })
         .count();
-    let decision_key = (options.provider == Provider::OpenRouter && options.use_decision_model)
-        .then(|| key.clone());
-    let client = connect(options.provider, key, model, parallel)?;
-    let client = client.as_ref();
     let pass = ParallelPass::new(client.max_parallel());
-    let decision_client = maybe_decision_client(options, || {
-        Ok(OpenRouterDecisions::connect(
-            decision_key.expect("decision key exists when enabled"),
-            &Registry::get().model,
-        )?
-        .with_max_parallel(parallel))
-    })?;
-    let mut rule_decisions = decision_client.as_ref().map(|_| RuleDecisions::default());
+    let mut rule_decisions = decision_client.map(|_| RuleDecisions::default());
     let mut rule_messages = None;
-    if let (Some(decision), Some(rules)) = (decision_client.as_ref(), rule_decisions.as_mut()) {
+    if let (Some(decision), Some(rules)) = (decision_client, rule_decisions.as_mut()) {
         rule_messages = Some(prepare_rule_messages(messages, rules, decision, progress)?);
     }
     let messages = rule_messages.as_deref().unwrap_or(messages);
     let clients = PrimaryPassClients {
         client,
-        decision_client: decision_client
-            .as_ref()
-            .map(|value| value as &dyn DecisionClient),
+        decision_client,
     };
     let mut result = run_primary_pass(
         options,
@@ -3315,7 +3338,7 @@ pub fn scan(
         conversation_filter,
         selected_messages,
     )?;
-    if let (Some(decision), Some(rules)) = (decision_client.as_ref(), rule_decisions.as_mut()) {
+    if let (Some(decision), Some(rules)) = (decision_client, rule_decisions.as_mut()) {
         apply_rule_residue(&mut result, messages, rules, decision, progress)?;
     } else {
         close_passed_events(&mut result, messages, chrono::Utc::now().timestamp());
@@ -3334,8 +3357,6 @@ pub fn scan(
         None
     } else {
         decision_client
-            .as_ref()
-            .map(|value| value as &dyn DecisionClient)
     };
     scan_closures_selected(
         messages,
@@ -7470,7 +7491,7 @@ fn format_comparison(
 /// `extract.waiting_party` is intentionally not attempted in this phase.
 pub fn compare_decisions(
     chat: &OpenRouter,
-    decisions: &OpenRouterDecisions,
+    decisions: &dyn DecisionClient,
     data: Option<&Path>,
 ) -> Result<Vec<String>, String> {
     let chat_started = Instant::now();
@@ -7481,7 +7502,22 @@ pub fn compare_decisions(
     };
     let chat_wall = chat_started.elapsed();
     let chat_tokens = chat.input_tokens();
+    let cipher_messages = data.is_none().then(compare_cipher_messages);
+    let cipher = cipher_messages
+        .as_deref()
+        .map_or_else(NameCipher::default, NameCipher::from_messages);
+    compare_decision_rows_with_cipher(rows, decisions, &cipher, chat_wall, chat_tokens)
+}
+
+fn compare_decision_rows_with_cipher(
+    rows: Vec<CompareRow>,
+    decisions: &dyn DecisionClient,
+    cipher: &NameCipher,
+    chat_wall: Duration,
+    chat_tokens: u64,
+) -> Result<Vec<String>, String> {
     let questions = Questions::from_registry(COMPARE_IDS).map_err(|error| error.to_string())?;
+    let decisions = CipherDecisionClient::new(decisions, cipher);
     let jev_started = Instant::now();
     let mut jev_tokens = 0;
     let mut counts = BTreeMap::new();
@@ -7512,6 +7548,21 @@ pub fn compare_decisions(
         jev_started.elapsed(),
         jev_tokens,
     ))
+}
+
+fn compare_cipher_messages() -> Vec<ReviewMessage> {
+    SEMANTIC_CASES
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (body, _, _, _, _))| {
+            prepare(
+                &synthetic(body, index, "compare-cipher"),
+                "Synthetic",
+                index,
+            )
+            .ok()
+        })
+        .collect()
 }
 
 const SEMANTIC_CASES: [(&str, bool, bool, bool, usize); 7] = [
@@ -7815,6 +7866,347 @@ fn synthetic(body: &str, index: usize, conversation: &str) -> MailItem {
         to: vec!["user@example.invalid".into()],
         own_addresses: vec!["user@example.invalid".into()],
         ..MailItem::default()
+    }
+}
+
+#[cfg(test)]
+mod cipher_scan_integration_tests {
+    use super::*;
+    use crate::name_cipher::{CipherDecisionClient, NameCipher};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingScanDecision {
+        requests: Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl RecordingScanDecision {
+        fn requests(&self) -> Vec<serde_json::Value> {
+            self.requests
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl DecisionClient for RecordingScanDecision {
+        fn model(&self) -> &'static str {
+            "synthetic/scan-decisions"
+        }
+
+        fn max_parallel(&self) -> usize {
+            1
+        }
+
+        fn decide(
+            &self,
+            state: &serde_json::Value,
+            questions: &Questions,
+            _cancel: Option<&AtomicBool>,
+            _deadline: Duration,
+        ) -> Result<Answers, ProviderError> {
+            let body =
+                openloops_inference::decision::request_body(self.model(), state, questions, false)?;
+            let request: serde_json::Value =
+                serde_json::from_slice(&body).map_err(|_| ProviderError::InvalidQuestion)?;
+            self.requests
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(request.clone());
+            let mut answer_values = serde_json::Map::new();
+            for (id, question) in request["questions"]
+                .as_object()
+                .ok_or(ProviderError::InvalidQuestion)?
+            {
+                let answer = match question["type"].as_str() {
+                    Some("noul") => {
+                        let probability = if id == "triage.asks_recipient" {
+                            0.99
+                        } else {
+                            0.01
+                        };
+                        serde_json::json!({"type":"noul","noul":probability})
+                    }
+                    Some("choice") => {
+                        let options = question["criteria"]
+                            .as_object()
+                            .ok_or(ProviderError::InvalidQuestion)?;
+                        let chosen =
+                            if id == "extract.claim_type" && options.contains_key("request") {
+                                "request"
+                            } else if id == "extract.waiting_party" {
+                                options
+                                    .keys()
+                                    .next()
+                                    .ok_or(ProviderError::InvalidQuestion)?
+                            } else if options.contains_key("none") {
+                                "none"
+                            } else {
+                                options
+                                    .keys()
+                                    .next()
+                                    .ok_or(ProviderError::InvalidQuestion)?
+                            };
+                        let count = options.len().max(1);
+                        let rest = 0.01 / count_as_f64(count.saturating_sub(1).max(1));
+                        let probabilities: serde_json::Map<String, serde_json::Value> = options
+                            .keys()
+                            .map(|key| {
+                                (
+                                    key.clone(),
+                                    serde_json::Value::from(if key == chosen {
+                                        0.99
+                                    } else {
+                                        rest
+                                    }),
+                                )
+                            })
+                            .collect();
+                        serde_json::json!({
+                            "type":"choice",
+                            "choice":chosen,
+                            "probabilities":probabilities,
+                            "confidence":0.99
+                        })
+                    }
+                    Some("score") => {
+                        let levels = question["criteria"]
+                            .as_array()
+                            .ok_or(ProviderError::InvalidQuestion)?;
+                        let probabilities: serde_json::Map<String, serde_json::Value> = levels
+                            .iter()
+                            .enumerate()
+                            .map(|(index, _)| {
+                                (
+                                    index.to_string(),
+                                    serde_json::Value::from(if index == 0 { 0.99 } else { 0.01 }),
+                                )
+                            })
+                            .collect();
+                        serde_json::json!({
+                            "type":"score",
+                            "score":0.0,
+                            "probabilities":probabilities,
+                            "legend":levels.iter().enumerate().map(|(index, level)| (index.to_string(), level.clone())).collect::<serde_json::Map<_,_>>(),
+                            "confidence":0.99
+                        })
+                    }
+                    _ => return Err(ProviderError::InvalidQuestion),
+                };
+                answer_values.insert(id.clone(), answer);
+            }
+            let response = serde_json::json!({
+                "model":self.model(),
+                "answers":answer_values,
+                "usage":{"input_tokens":1}
+            });
+            openloops_inference::decision::parse_answers(
+                &serde_json::to_vec(&response).map_err(|_| ProviderError::InvalidResponse)?,
+                self.model(),
+                questions,
+            )
+        }
+    }
+
+    struct NeverChat;
+
+    impl ModelClient for NeverChat {
+        fn model(&self) -> &'static str {
+            "synthetic/no-chat"
+        }
+
+        fn max_parallel(&self) -> usize {
+            1
+        }
+
+        fn complete(
+            &self,
+            _system: &str,
+            _user: &str,
+            _cancel: Option<&AtomicBool>,
+            _deadline: Duration,
+        ) -> Result<zeroize::Zeroizing<String>, ProviderError> {
+            Err(ProviderError::InvalidResponse)
+        }
+    }
+
+    fn scan_messages() -> Vec<ReviewMessage> {
+        let mut incoming = synthetic(
+            "Meeting recap: Please send the signed report. Rellian Voss is the recipient.",
+            0,
+            "cipher-thread",
+        );
+        incoming.subject = "Meeting recap: signed report".into();
+        incoming.sender = "Maren Qorrel <maren.qorrel@example.invalid>".into();
+        incoming.sender_address = "maren.qorrel@example.invalid".into();
+        incoming.to = vec!["rellian.voss@example.invalid".into()];
+        incoming.own_addresses = vec!["rellian.voss@example.invalid".into()];
+        let mut first = prepare(&incoming, "Inbox", 0).unwrap();
+        first.own_addresses = vec!["rellian.voss@example.invalid".into()];
+        first.own_display_name = Some("Rellian Voss".into());
+        first.own_given_name = Some("Rellian".into());
+        first.input.own_addresses = first.own_addresses.clone();
+        first.input.user_display_name = first.own_display_name.clone();
+        first.input.user_given_name = first.own_given_name.clone();
+
+        let mut outgoing = synthetic(
+            "Rellian Voss, I sent the signed report.",
+            1,
+            "cipher-thread",
+        );
+        outgoing.sender = "Rellian Voss <rellian.voss@example.invalid>".into();
+        outgoing.sender_address = "rellian.voss@example.invalid".into();
+        outgoing.to = vec!["maren.qorrel@example.invalid".into()];
+        outgoing.own_addresses = vec!["rellian.voss@example.invalid".into()];
+        let mut second = prepare(&outgoing, "Sent", 1).unwrap();
+        second.own_addresses = vec!["rellian.voss@example.invalid".into()];
+        second.own_display_name = Some("Rellian Voss".into());
+        second.own_given_name = Some("Rellian".into());
+        second.input.own_addresses = second.own_addresses.clone();
+        second.input.user_display_name = second.own_display_name.clone();
+        second.input.user_given_name = second.own_given_name.clone();
+        second.input.from_user = true;
+        vec![first, second]
+    }
+
+    fn result_signature(
+        result: &ScanResult,
+    ) -> (Vec<String>, usize, usize, Vec<String>, Vec<String>) {
+        let items = result
+            .analysis
+            .items
+            .iter()
+            .map(|item| {
+                let owner = match item.owner {
+                    Owner::You => "you",
+                    Owner::Team => "team",
+                    Owner::Unclear => "unclear",
+                };
+                format!(
+                    "{owner}|{}|{}|{}|{}|{}",
+                    item.action,
+                    item.action_phrase,
+                    item.kind,
+                    item.evidence.message,
+                    item.evidence.context
+                )
+            })
+            .collect();
+        (
+            items,
+            result.analysis.rejected,
+            result.analysis.degraded,
+            result.failures.clone(),
+            result.conversation_notes.clone(),
+        )
+    }
+
+    #[test]
+    fn compare_probe_requests_are_ciphered() {
+        let messages = scan_messages();
+        let cipher = NameCipher::from_messages(&messages);
+        let client = RecordingScanDecision::default();
+        let rows = vec![CompareRow {
+            subject: "Maren Qorrel's signed report".into(),
+            paragraph_text: "Maren Qorrel <maren.qorrel@example.invalid> wrote Rellian Voss."
+                .into(),
+            from_user: false,
+            labels: BTreeMap::from([
+                ("triage.asks_recipient".into(), CompareValue::Bool(true)),
+                (
+                    "extract.claim_type".into(),
+                    CompareValue::Choice("request".into()),
+                ),
+            ]),
+        }];
+        let _ =
+            compare_decision_rows_with_cipher(rows, &client, &cipher, Duration::ZERO, 0).unwrap();
+        let requests = client.requests();
+        assert_eq!(requests.len(), 1);
+        let body = requests[0].to_string();
+        for real in [
+            "Maren",
+            "Qorrel",
+            "maren.qorrel@example.invalid",
+            "Rellian",
+            "Voss",
+        ] {
+            assert!(
+                !body.contains(real),
+                "real value {real:?} in compare request"
+            );
+        }
+    }
+
+    #[test]
+    fn full_decision_scan_ciphers_every_request_and_preserves_results() {
+        let messages = scan_messages();
+        let options = ScanOptions {
+            provider: Provider::OpenRouter,
+            use_decision_model: true,
+            extraction_backend: ExtractionBackend::DecisionModel,
+        };
+        let cipher = NameCipher::from_messages(&messages);
+        let recorded = RecordingScanDecision::default();
+        let wrapped = CipherDecisionClient::new(&recorded, &cipher);
+        let chat = NeverChat;
+        let ciphered_result = scan_with_clients(
+            options,
+            &messages,
+            &ScanProgress::default(),
+            ScanScope::Full,
+            &chat,
+            Some(&wrapped),
+        )
+        .unwrap();
+        let requests = recorded.requests();
+        assert!(!requests.is_empty());
+        for request in &requests {
+            let body = request.to_string();
+            for real in [
+                "Maren",
+                "Qorrel",
+                "maren.qorrel@example.invalid",
+                "Rellian",
+                "Voss",
+                "rellian.voss@example.invalid",
+            ] {
+                assert!(
+                    !body.contains(real),
+                    "real value {real:?} in decision request"
+                );
+            }
+        }
+        let question_ids = requests
+            .iter()
+            .flat_map(|request| {
+                request["questions"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert!(question_ids.iter().any(|id| id == "rules.recap"));
+        assert!(question_ids.iter().any(|id| id == "triage.asks_recipient"));
+        assert!(question_ids.iter().any(|id| id == "extract.claim_type"));
+        assert!(question_ids.iter().any(|id| id.ends_with(".outcome")));
+
+        let direct = RecordingScanDecision::default();
+        let direct_result = scan_with_clients(
+            options,
+            &messages,
+            &ScanProgress::default(),
+            ScanScope::Full,
+            &chat,
+            Some(&direct),
+        )
+        .unwrap();
+        assert_eq!(
+            result_signature(&ciphered_result),
+            result_signature(&direct_result)
+        );
     }
 }
 

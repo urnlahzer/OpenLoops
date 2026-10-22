@@ -130,6 +130,24 @@ impl Questions {
         self.items.is_empty()
     }
 
+    /// Returns a copy with each choice option description transformed.
+    ///
+    /// Question ids, choice handles, instructions, and score levels are kept
+    /// unchanged. This is intended for request wrappers that redact text
+    /// while preserving the registry contract.
+    #[must_use]
+    pub fn map_choice_descriptions(&self, mut map: impl FnMut(&str) -> String) -> Self {
+        let mut mapped = self.clone();
+        for (_, question) in &mut mapped.items {
+            if let Question::Choice { options, .. } = question {
+                for (_, description) in options {
+                    *description = map(description);
+                }
+            }
+        }
+        mapped
+    }
+
     /// Builds the named questions from the pinned registry.
     /// # Errors
     /// Returns [`ProviderError::InvalidQuestion`] for an unknown id or invalid registry entry.
@@ -174,6 +192,107 @@ impl Questions {
     }
 }
 
+#[cfg(test)]
+mod cipher_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn choice_description_mapping_preserves_handles_instructions_and_score_levels() {
+        let questions = Questions::new()
+            .choice(
+                "person",
+                "Keep instructions unchanged.",
+                &[
+                    ("p0", "Maren Qorrel"),
+                    ("none", "No person"),
+                    ("2026-10-21", "By date"),
+                ],
+            )
+            .unwrap()
+            .score("urgency", "Score instructions.", &["low", "high"])
+            .unwrap();
+        let mapped =
+            questions.map_choice_descriptions(|description| format!("redacted:{description}"));
+
+        assert_eq!(
+            mapped.items[0],
+            (
+                "person".into(),
+                Question::Choice {
+                    instructions: "Keep instructions unchanged.".into(),
+                    options: vec![
+                        ("p0".into(), "redacted:Maren Qorrel".into()),
+                        ("none".into(), "redacted:No person".into()),
+                        ("2026-10-21".into(), "redacted:By date".into()),
+                    ],
+                }
+            )
+        );
+        assert_eq!(
+            mapped.items[1].1,
+            Question::Score {
+                instructions: "Score instructions.".into(),
+                levels: vec!["low".into(), "high".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn answer_text_mapping_transforms_choice_and_probability_keys_only() {
+        let answers = Answers {
+            answers: BTreeMap::from([
+                (
+                    "person".into(),
+                    Answer::Choice {
+                        choice: "Priya Venkataraman".into(),
+                        probabilities: BTreeMap::from([
+                            ("Priya Venkataraman".into(), 0.8),
+                            ("none".into(), 0.2),
+                        ]),
+                        confidence: 0.8,
+                    },
+                ),
+                (
+                    "urgency".into(),
+                    Answer::Score {
+                        score: 1.0,
+                        probabilities: BTreeMap::from([("high".into(), 1.0)]),
+                        confidence: 1.0,
+                    },
+                ),
+            ]),
+            input_tokens: 23,
+        };
+        let mapped = answers.map_choice_text(|text| {
+            if text == "Priya Venkataraman" {
+                "Maren Qorrel".into()
+            } else {
+                text.into()
+            }
+        });
+
+        assert_eq!(mapped.input_tokens, 23);
+        assert_eq!(
+            mapped.get("person"),
+            Some(&Answer::Choice {
+                choice: "Maren Qorrel".into(),
+                probabilities: BTreeMap::from(
+                    [("Maren Qorrel".into(), 0.8), ("none".into(), 0.2),]
+                ),
+                confidence: 0.8,
+            })
+        );
+        assert_eq!(
+            mapped.get("urgency"),
+            Some(&Answer::Score {
+                score: 1.0,
+                probabilities: BTreeMap::from([("high".into(), 1.0)]),
+                confidence: 1.0,
+            })
+        );
+    }
+}
+
 fn valid_question_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128 && id.split('.').all(valid_handle)
 }
@@ -205,6 +324,35 @@ impl Answers {
     #[must_use]
     pub fn get(&self, id: &str) -> Option<&Answer> {
         self.answers.get(id)
+    }
+
+    /// Transforms choice values and probability keys, preserving all other
+    /// answer data and input-token accounting.
+    #[must_use]
+    pub fn map_choice_text(mut self, mut map: impl FnMut(&str) -> String) -> Self {
+        for answer in self.answers.values_mut() {
+            match answer {
+                Answer::Choice {
+                    choice,
+                    probabilities,
+                    ..
+                } => {
+                    *choice = map(choice);
+                    *probabilities = std::mem::take(probabilities)
+                        .into_iter()
+                        .map(|(key, probability)| (map(&key), probability))
+                        .collect();
+                }
+                Answer::Score { probabilities, .. } => {
+                    *probabilities = std::mem::take(probabilities)
+                        .into_iter()
+                        .map(|(key, probability)| (map(&key), probability))
+                        .collect();
+                }
+                Answer::Noul { .. } => {}
+            }
+        }
+        self
     }
 }
 

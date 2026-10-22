@@ -10,6 +10,8 @@ pub(crate) mod link_state;
 #[cfg(feature = "native-ui")]
 pub(crate) mod loop_state;
 #[cfg(feature = "native-ui")]
+mod name_cipher;
+#[cfg(feature = "native-ui")]
 pub(crate) mod review_model;
 #[cfg(feature = "native-ui")]
 pub(crate) mod settings;

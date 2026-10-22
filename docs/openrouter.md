@@ -73,10 +73,37 @@ configured for ZDR, and OpenLoops never relaxes it for an individual request.
 Before any message text is sent, connecting re-checks that the selected model
 still appears in the ZDR listing.
 
-The governed projection also sends the signed-in user's display and given name,
-plus authoritative per-message facts for whether the user is the sender, a
-direct recipient, or a cc recipient. Participant slots carry a user marker so
-requests addressed to someone else are not attributed to the signed-in user.
+Chat-model requests use the governed projection, which also sends the signed-in
+user's display and given name, plus authoritative per-message facts for whether
+the user is the sender, a direct recipient, or a cc recipient. Participant
+slots carry a user marker so requests addressed to someone else are not
+attributed to the signed-in user. These chat requests are outside the Jev name
+cipher described below.
+
+### Jev name cipher
+
+Before each Jev Decisions request, OpenLoops builds an in-memory table from
+display names and addresses in message sender, To and Cc fields, plus the
+signed-in user's display name, given name and own addresses. Within every
+string value in the request state and every choice option description, known
+people's full, given and family names are replaced with request-local synthetic
+names, and their addresses are replaced with synthetic addresses. Other email
+addresses become `address@example.invalid`. The assignment follows first
+occurrence in the request, so one person's name and address stay consistent
+within that request. Choice handles such as `p0`, `none` and dates, question
+instructions, and registry text stay unchanged. Jev's returned choice text and
+probability keys are decoded locally before the app uses them.
+
+The cipher applies to scan and compare Decisions requests and to the
+`triage.jsonl`, `closure.jsonl`, and `rules.jsonl` training export files. Its
+table and per-request assignments stay in memory and are not logged or saved.
+The governed chat requests described above, including the chat side of the
+compare probe, keep their existing text projection and are not ciphered.
+
+Only recognized names for known participants are replaced. Names mentioned
+only in message text, nicknames, spelling variants, and organization names can
+remain; known organization and system senders keep their names and addresses.
+A pseudonym can also differ in gender from pronouns in the text.
 
 When the decision model is on, triage requests are sent before the governed
 conversation request. Each triage request contains exactly the message subject,
@@ -97,7 +124,8 @@ sent only when at least one candidate exists). The request additionally
 carries `to_user`, `cc_user`, the signed-in user's display and given name,
 and the participant catalog's own display text -- the same facts the
 governed chat request already carries, reshaped for a typed choice instead
-of free text. Nothing about a Jev answer is persisted; a confident claim is
+of free text. Known names and addresses in these values are ciphered before
+the Jev request. Nothing about a Jev answer is persisted; a confident claim is
 assembled locally and never re-sent. A gray-band `extract.claim_type`
 answer, or a request error, sends that paragraph's whole conversation to
 the unchanged chat-model request instead.
