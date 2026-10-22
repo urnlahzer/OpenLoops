@@ -1,600 +1,600 @@
 {"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00000"}
 {"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00001"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00002"}
+{"messages":[{"units":[[],[],[]]},{"units":[[{"handle":"t0","value":"2026-11-05","text":"on Thursday"}],[],[{"handle":"t0","value":"2026-11-05","text":"on Thursday"}]]},{"units":[[],[],[]]}],"thread_id":"thread-00002"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00003"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00004"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00005"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00006"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00007"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-11-03","text":"end of day tomorrow"}],[{"handle":"t0","value":"2026-11-03","text":"end of day tomorrow"}]]}],"thread_id":"thread-00007"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00008"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00009"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-27","text":"on Tuesday"}],[],[{"handle":"t0","value":"2026-10-27","text":"on Tuesday"}]]}],"thread_id":"thread-00009"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00010"}
-{"messages":[{"units":[[],[],[]]},{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00011"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-01","text":"next week"}],[],[{"handle":"t0","value":"2026-11-01","text":"next week"}]]},{"units":[[]]},{"units":[[],[],[{"handle":"t0","value":"2026-10-29","text":"on Thursday"}],[{"handle":"t0","value":"2026-10-29","text":"on Thursday"}]]}],"thread_id":"thread-00011"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00012"}
-{"messages":[{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00013"}
+{"messages":[{"units":[[]]},{"units":[[],[],[{"handle":"t0","value":"2026-09-11","text":"by Friday"}],[{"handle":"t0","value":"2026-09-11","text":"by Friday"}]]}],"thread_id":"thread-00013"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00014"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00015"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00016"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00017"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-15","text":"end of the day"}]]}],"thread_id":"thread-00016"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-09-27","text":"early next week"}],[{"handle":"t0","value":"2026-09-27","text":"early next week"}]]}],"thread_id":"thread-00017"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00018"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00019"}
-{"messages":[{"units":[[]]},{"units":[[],[],[],[]]},{"units":[[]]}],"thread_id":"thread-00020"}
-{"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00021"}
-{"messages":[{"units":[[]]},{"units":[[],[],[]]}],"thread_id":"thread-00022"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-09-20","text":"this week"}],[{"handle":"t0","value":"2026-09-20","text":"this week"}]]}],"thread_id":"thread-00019"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-29","text":"next Tuesday"}]]},{"units":[[],[],[],[]]},{"units":[[]]}],"thread_id":"thread-00020"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-22","text":"this morning"}],[{"handle":"t0","value":"2026-10-29","text":"on Thursday"}],[{"handle":"t0","value":"2026-10-22","text":"this morning"},{"handle":"t1","value":"2026-10-29","text":"on Thursday"}]]}],"thread_id":"thread-00021"}
+{"messages":[{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-11-08","text":"end of the week"}],[],[{"handle":"t0","value":"2026-11-08","text":"end of the week"}]]}],"thread_id":"thread-00022"}
 {"messages":[{"units":[[]]},{"units":[[],[],[]]},{"units":[[]]}],"thread_id":"thread-00023"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00024"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00025"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00026"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00027"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-16","text":"tomorrow morning"}],[{"handle":"t0","value":"2026-10-16","text":"tomorrow morning"}]]}],"thread_id":"thread-00027"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00028"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00029"}
-{"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00030"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-18","text":"today"}],[{"handle":"t0","value":"2026-10-25","text":"next week"}],[],[{"handle":"t0","value":"2026-10-18","text":"today"},{"handle":"t1","value":"2026-10-25","text":"next week"}]]}],"thread_id":"thread-00030"}
 {"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00031"}
 {"messages":[{"units":[[],[],[]]},{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00032"}
 {"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00033"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00034"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00035"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00036"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00037"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-11","text":"end of the week"}]]}],"thread_id":"thread-00036"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-10","text":"tomorrow morning"}],[{"handle":"t0","value":"2026-10-10","text":"tomorrow morning"}]]}],"thread_id":"thread-00037"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00038"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00039"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00040"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00041"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-27","text":"next Tuesday"}],[],[{"handle":"t0","value":"2026-10-27","text":"next Tuesday"}]]}],"thread_id":"thread-00039"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-17","text":"this morning"}],[],[],[{"handle":"t0","value":"2026-11-17","text":"this morning"}]]},{"units":[[],[],[{"handle":"t0","value":"2026-11-23","text":"Monday"}],[{"handle":"t0","value":"2026-11-23","text":"Monday"}]]}],"thread_id":"thread-00040"}
+{"messages":[{"units":[[],[],[],[]]},{"units":[[]]},{"units":[[],[],[{"handle":"t0","value":"2026-11-01","text":"next week"}],[{"handle":"t0","value":"2026-11-01","text":"next week"}]]}],"thread_id":"thread-00041"}
 {"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00042"}
 {"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00043"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00044"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00045"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00046"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00047"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-18","text":"early next week"}]]}],"thread_id":"thread-00046"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-07","text":"this Saturday"}],[{"handle":"t0","value":"2026-11-02","text":"today"},{"handle":"t1","value":"2026-11-04","text":"by Wednesday"}],[{"handle":"t0","value":"2026-11-07","text":"this Saturday"},{"handle":"t1","value":"2026-11-02","text":"today"},{"handle":"t2","value":"2026-11-04","text":"by Wednesday"}]]}],"thread_id":"thread-00047"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00048"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00049"}
-{"messages":[{"units":[[],[],[]]},{"units":[[]]},{"units":[[],[],[]]}],"thread_id":"thread-00050"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-11-08","text":"this week"}],[{"handle":"t0","value":"2026-11-08","text":"this week"}]]}],"thread_id":"thread-00049"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-20","text":"next Tuesday"}],[],[{"handle":"t0","value":"2026-10-20","text":"next Tuesday"}]]},{"units":[[]]},{"units":[[],[],[]]}],"thread_id":"thread-00050"}
 {"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00051"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00052"}
+{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[{"handle":"t0","value":"2026-10-30","text":"this Friday"}],[{"handle":"t0","value":"2026-10-30","text":"this Friday"}]]}],"thread_id":"thread-00052"}
 {"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]},{"units":[[]]}],"thread_id":"thread-00053"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00054"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00055"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00056"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00057"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-08-24","text":"by Monday"}],[{"handle":"t0","value":"2026-08-24","text":"by Monday"}]]}],"thread_id":"thread-00057"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00058"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00059"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00060"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00061"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]},{"units":[[]]}],"thread_id":"thread-00062"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-05","text":"Thursday"}],[],[],[{"handle":"t0","value":"2026-11-05","text":"Thursday"}]]},{"units":[[],[],[]]},{"units":[[]]}],"thread_id":"thread-00062"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00063"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00064"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00065"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00066"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00067"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-10","text":"Tuesday"}],[{"handle":"t0","value":"2026-11-08","text":"tomorrow morning"}],[{"handle":"t0","value":"2026-11-10","text":"Tuesday"},{"handle":"t1","value":"2026-11-08","text":"tomorrow morning"}]]}],"thread_id":"thread-00067"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00068"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00069"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00070"}
-{"messages":[{"units":[[]]},{"units":[[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00071"}
+{"messages":[{"units":[[],[],[]]},{"units":[[{"handle":"t0","value":"2026-10-30","text":"this morning"}],[],[{"handle":"t0","value":"2026-11-08","text":"next week"}],[{"handle":"t0","value":"2026-10-30","text":"this morning"},{"handle":"t1","value":"2026-11-08","text":"next week"}]]}],"thread_id":"thread-00070"}
+{"messages":[{"units":[[]]},{"units":[[],[{"handle":"t0","value":"2026-10-29","text":"on Thursday"}],[{"handle":"t0","value":"2026-10-29","text":"on Thursday"}]]},{"units":[[],[],[]]}],"thread_id":"thread-00071"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00072"}
 {"messages":[{"units":[[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00073"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00074"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00075"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00076"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00077"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-06","text":"on Friday"}],[{"handle":"t0","value":"2026-11-03","text":"tomorrow morning"}],[{"handle":"t0","value":"2026-11-06","text":"on Friday"},{"handle":"t1","value":"2026-11-03","text":"tomorrow morning"}]]}],"thread_id":"thread-00077"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00078"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00079"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[]]},{"units":[[],[],[]]}],"thread_id":"thread-00080"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-19","text":"next Monday"}],[],[{"handle":"t0","value":"2026-10-19","text":"next Monday"}]]},{"units":[[]]},{"units":[[],[{"handle":"t0","value":"2026-10-25","text":"next week"}],[{"handle":"t0","value":"2026-10-25","text":"next week"}]]}],"thread_id":"thread-00080"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00081"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00082"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[],[]]},{"units":[[]]}],"thread_id":"thread-00083"}
+{"messages":[{"units":[[],[],[],[]]},{"units":[[{"handle":"t0","value":"2026-11-03","text":"today"}],[],[],[{"handle":"t0","value":"2026-11-03","text":"today"}]]}],"thread_id":"thread-00082"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-08","text":"tomorrow morning"}],[],[],[{"handle":"t0","value":"2026-09-08","text":"tomorrow morning"}]]},{"units":[[],[],[],[]]},{"units":[[]]}],"thread_id":"thread-00083"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00084"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00085"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00086"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00087"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-11-13","text":"tomorrow afternoon"}],[{"handle":"t0","value":"2026-11-13","text":"tomorrow afternoon"}]]}],"thread_id":"thread-00087"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00088"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00089"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00090"}
 {"messages":[{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00091"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00092"}
+{"messages":[{"units":[[],[],[{"handle":"t0","value":"2026-10-30","text":"on Friday"}],[{"handle":"t0","value":"2026-10-30","text":"on Friday"}]]},{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00092"}
 {"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00093"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00094"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00095"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00096"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00097"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-18","text":"tomorrow afternoon"}],[{"handle":"t0","value":"2026-10-18","text":"tomorrow afternoon"}]]}],"thread_id":"thread-00097"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00098"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00099"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00100"}
-{"messages":[{"units":[[],[],[]]},{"units":[[]]},{"units":[[],[],[]]}],"thread_id":"thread-00101"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-11-01","text":"next week"}],[{"handle":"t0","value":"2026-10-26","text":"on Monday"}],[{"handle":"t0","value":"2026-11-01","text":"next week"},{"handle":"t1","value":"2026-10-26","text":"on Monday"}]]},{"units":[[],[],[]]}],"thread_id":"thread-00100"}
+{"messages":[{"units":[[],[],[]]},{"units":[[]]},{"units":[[],[{"handle":"t0","value":"2026-11-01","text":"next week"}],[{"handle":"t0","value":"2026-11-01","text":"next week"}]]}],"thread_id":"thread-00101"}
 {"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00102"}
 {"messages":[{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00103"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00104"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00105"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00106"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00107"}
-{"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00108"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00109"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00110"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00111"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-09","text":"this morning"}],[{"handle":"t0","value":"2026-10-11","text":"end of the week"}],[{"handle":"t0","value":"2026-10-09","text":"this morning"},{"handle":"t1","value":"2026-10-11","text":"end of the week"}]]}],"thread_id":"thread-00107"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-11","text":"this morning"}]]},{"units":[[]]}],"thread_id":"thread-00108"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-25","text":"next week"}],[],[{"handle":"t0","value":"2026-10-25","text":"next week"}]]}],"thread_id":"thread-00109"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-31","text":"this Saturday"}],[],[{"handle":"t0","value":"2026-10-31","text":"this Saturday"}]]},{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00110"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-27","text":"on Tuesday"}],[],[{"handle":"t0","value":"2026-10-27","text":"on Tuesday"}]]}],"thread_id":"thread-00111"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00112"}
-{"messages":[{"units":[[]]},{"units":[[],[],[],[]]},{"units":[[]]}],"thread_id":"thread-00113"}
+{"messages":[{"units":[[]]},{"units":[[],[],[{"handle":"t0","value":"2026-09-13","text":"this week"}],[{"handle":"t0","value":"2026-09-13","text":"this week"}]]},{"units":[[]]}],"thread_id":"thread-00113"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00114"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00115"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00116"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00117"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-11","text":"later this week"}]]}],"thread_id":"thread-00116"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-16","text":"by Friday"}],[{"handle":"t0","value":"2026-10-16","text":"by Friday"}]]}],"thread_id":"thread-00117"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00118"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00119"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00120"}
 {"messages":[{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00121"}
 {"messages":[{"units":[[],[],[]]},{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00122"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00123"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-09-08","text":"tomorrow morning"}],[{"handle":"t0","value":"2026-09-08","text":"tomorrow morning"}]]}],"thread_id":"thread-00123"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00124"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00125"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00126"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00127"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-08-17","text":"today"},{"handle":"t1","value":"2026-08-18","text":"next Tuesday"}],[{"handle":"t0","value":"2026-08-17","text":"today"},{"handle":"t1","value":"2026-08-18","text":"next Tuesday"}]]}],"thread_id":"thread-00127"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00128"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00129"}
-{"messages":[{"units":[[]]},{"units":[[],[],[]]}],"thread_id":"thread-00130"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00131"}
+{"messages":[{"units":[[]]},{"units":[[],[{"handle":"t0","value":"2026-08-25","text":"tonight"}],[{"handle":"t0","value":"2026-08-25","text":"tonight"}]]}],"thread_id":"thread-00130"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-20","text":"on Tuesday"}],[],[],[{"handle":"t0","value":"2026-10-20","text":"on Tuesday"}]]},{"units":[[],[],[]]},{"units":[[],[],[{"handle":"t0","value":"2026-10-23","text":"Friday"}],[{"handle":"t0","value":"2026-10-23","text":"Friday"}]]}],"thread_id":"thread-00131"}
 {"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00132"}
 {"messages":[{"units":[[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00133"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00134"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00135"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00136"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00137"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-23","text":"by Friday"}],[{"handle":"t0","value":"2026-10-23","text":"by Friday"}]]}],"thread_id":"thread-00137"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00138"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00139"}
-{"messages":[{"units":[[]]},{"units":[[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00140"}
+{"messages":[{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-11-01","text":"this week"}],[{"handle":"t0","value":"2026-11-04","text":"on Wednesday"}],[{"handle":"t0","value":"2026-11-01","text":"this week"},{"handle":"t1","value":"2026-11-04","text":"on Wednesday"}]]},{"units":[[],[{"handle":"t0","value":"2026-11-02","text":"today"}],[],[{"handle":"t0","value":"2026-11-02","text":"today"}]]}],"thread_id":"thread-00140"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00141"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00142"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00143"}
+{"messages":[{"units":[[],[],[]]},{"units":[[{"handle":"t0","value":"2026-10-27","text":"next Tuesday"}],[],[{"handle":"t0","value":"2026-10-26","text":"on Monday"}],[{"handle":"t0","value":"2026-10-27","text":"next Tuesday"},{"handle":"t1","value":"2026-10-26","text":"on Monday"}]]}],"thread_id":"thread-00142"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-09-07","text":"this afternoon"}],[{"handle":"t0","value":"2026-09-20","text":"early next week"}],[{"handle":"t0","value":"2026-09-07","text":"this afternoon"},{"handle":"t1","value":"2026-09-20","text":"early next week"}]]},{"units":[[],[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00143"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00144"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00145"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00146"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00147"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-01","text":"this afternoon"}],[{"handle":"t0","value":"2026-11-01","text":"end of the week"}],[{"handle":"t0","value":"2026-11-01","text":"this afternoon"}]]}],"thread_id":"thread-00147"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00148"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00149"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00150"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00151"}
-{"messages":[{"units":[[]]},{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00152"}
+{"messages":[{"units":[[],[],[]]},{"units":[[],[{"handle":"t0","value":"2026-10-23","text":"this morning"}],[{"handle":"t0","value":"2026-10-23","text":"this morning"}]]}],"thread_id":"thread-00151"}
+{"messages":[{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-11-03","text":"on Tuesday"}],[],[],[{"handle":"t0","value":"2026-11-03","text":"on Tuesday"}]]},{"units":[[],[{"handle":"t0","value":"2026-10-29","text":"this morning"}],[],[{"handle":"t0","value":"2026-10-29","text":"this morning"}]]}],"thread_id":"thread-00152"}
 {"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00153"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00154"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00155"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00156"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00157"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-19","text":"end of day tomorrow"}]]}],"thread_id":"thread-00156"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-09-28","text":"by Monday"}],[{"handle":"t0","value":"2026-09-28","text":"by Monday"}]]}],"thread_id":"thread-00157"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00158"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00159"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-28","text":"this morning"}],[],[{"handle":"t0","value":"2026-09-28","text":"this morning"}]]}],"thread_id":"thread-00159"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00160"}
-{"messages":[{"units":[[]]},{"units":[[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00161"}
-{"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00162"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00163"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-25","text":"next week"}]]},{"units":[[],[{"handle":"t0","value":"2026-10-18","text":"today"}],[{"handle":"t0","value":"2026-10-18","text":"today"}]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00161"}
+{"messages":[{"units":[[],[],[{"handle":"t0","value":"2026-10-30","text":"on Friday"}],[{"handle":"t0","value":"2026-10-30","text":"on Friday"}]]}],"thread_id":"thread-00162"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-13","text":"this week"}],[],[],[{"handle":"t0","value":"2026-09-13","text":"this week"}]]},{"units":[[],[{"handle":"t0","value":"2026-09-14","text":"on Monday"}],[],[{"handle":"t0","value":"2026-09-14","text":"on Monday"}]]}],"thread_id":"thread-00163"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00164"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00165"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00166"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00167"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-09-27","text":"end of the week"}],[{"handle":"t0","value":"2026-09-27","text":"end of the week"}]]}],"thread_id":"thread-00167"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00168"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00169"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00170"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-07","text":"today"}],[],[{"handle":"t0","value":"2026-10-07","text":"today"}]]}],"thread_id":"thread-00169"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-19","text":"next Monday"}],[],[],[{"handle":"t0","value":"2026-10-19","text":"next Monday"}]]},{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00170"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00171"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[]]}],"thread_id":"thread-00172"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-29","text":"today"}],[{"handle":"t0","value":"2026-11-08","text":"next week"}],[{"handle":"t0","value":"2026-10-29","text":"today"},{"handle":"t1","value":"2026-11-08","text":"next week"}]]},{"units":[[]]}],"thread_id":"thread-00172"}
 {"messages":[{"units":[[],[],[]]},{"units":[[],[],[],[]]},{"units":[[]]}],"thread_id":"thread-00173"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00174"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00175"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00176"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00177"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-25","text":"this week"},{"handle":"t1","value":"2026-10-26","text":"by Monday"}],[{"handle":"t0","value":"2026-10-25","text":"this week"},{"handle":"t1","value":"2026-10-26","text":"by Monday"}]]}],"thread_id":"thread-00177"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00178"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00179"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-31","text":"on Saturday"}],[{"handle":"t0","value":"2026-10-31","text":"on Saturday"}]]}],"thread_id":"thread-00179"}
 {"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00180"}
 {"messages":[{"units":[[]]},{"units":[[],[],[]]}],"thread_id":"thread-00181"}
-{"messages":[{"units":[[]]},{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00182"}
+{"messages":[{"units":[[]]},{"units":[[],[{"handle":"t0","value":"2026-11-08","text":"next week"}],[],[{"handle":"t0","value":"2026-11-08","text":"next week"}]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00182"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00183"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00184"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00185"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00186"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00187"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-20","text":"next Tuesday"}],[{"handle":"t0","value":"2026-10-17","text":"tomorrow afternoon"},{"handle":"t1","value":"2026-10-20","text":"next Tuesday"}],[{"handle":"t0","value":"2026-10-20","text":"next Tuesday"},{"handle":"t1","value":"2026-10-17","text":"tomorrow afternoon"}]]}],"thread_id":"thread-00187"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00188"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00189"}
-{"messages":[{"units":[[],[],[]]},{"units":[[]]}],"thread_id":"thread-00190"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00191"}
-{"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00192"}
-{"messages":[{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00193"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-28","text":"this evening"}],[{"handle":"t0","value":"2026-10-28","text":"this evening"}],[{"handle":"t0","value":"2026-10-28","text":"this evening"}]]},{"units":[[]]}],"thread_id":"thread-00190"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-20","text":"this morning"}],[],[{"handle":"t0","value":"2026-10-20","text":"this morning"}]]},{"units":[[],[],[]]},{"units":[[],[{"handle":"t0","value":"2026-10-22","text":"this morning"}],[{"handle":"t0","value":"2026-10-22","text":"this morning"}]]}],"thread_id":"thread-00191"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-25","text":"this week"}],[],[{"handle":"t0","value":"2026-10-25","text":"this week"}]]}],"thread_id":"thread-00192"}
+{"messages":[{"units":[[]]},{"units":[[],[],[{"handle":"t0","value":"2026-09-09","text":"today"}],[{"handle":"t0","value":"2026-09-09","text":"today"}]]}],"thread_id":"thread-00193"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00194"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00195"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00196"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00197"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-12-06","text":"next week"}],[{"handle":"t0","value":"2026-12-06","text":"next week"}]]}],"thread_id":"thread-00197"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00198"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00199"}
-{"messages":[{"units":[[]]},{"units":[[],[],[],[]]},{"units":[[]]}],"thread_id":"thread-00200"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-05-19","text":"next Tuesday"}]]},{"units":[[],[],[],[]]},{"units":[[]]}],"thread_id":"thread-00200"}
 {"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00201"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00202"}
-{"messages":[{"units":[[],[],[]]},{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00203"}
+{"messages":[{"units":[[],[],[],[]]},{"units":[[],[{"handle":"t0","value":"2026-10-29","text":"tomorrow morning"}],[{"handle":"t0","value":"2026-10-29","text":"tomorrow morning"}]]}],"thread_id":"thread-00202"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-08","text":"later today"}],[{"handle":"t0","value":"2026-09-09","text":"tomorrow afternoon"}],[{"handle":"t0","value":"2026-09-08","text":"later today"},{"handle":"t1","value":"2026-09-09","text":"tomorrow afternoon"}]]},{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00203"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00204"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00205"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00206"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00207"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-09-03","text":"tomorrow morning"}],[{"handle":"t0","value":"2026-09-03","text":"tomorrow morning"}]]}],"thread_id":"thread-00207"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00208"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00209"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00210"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00211"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-16","text":"today"}],[],[{"handle":"t0","value":"2026-10-16","text":"today"}]]}],"thread_id":"thread-00209"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-02","text":"tomorrow"}],[],[{"handle":"t0","value":"2026-11-02","text":"tomorrow"}]]}],"thread_id":"thread-00210"}
+{"messages":[{"units":[[],[],[]]},{"units":[[],[],[{"handle":"t0","value":"2026-10-25","text":"this week"}],[{"handle":"t0","value":"2026-10-25","text":"this week"}]]}],"thread_id":"thread-00211"}
 {"messages":[{"units":[[]]},{"units":[[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00212"}
 {"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00213"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00214"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00215"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00216"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00217"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-16","text":"by Friday"}]]}],"thread_id":"thread-00216"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-29","text":"today"}],[{"handle":"t0","value":"2026-11-01","text":"end of the week"}],[{"handle":"t0","value":"2026-10-29","text":"today"},{"handle":"t1","value":"2026-11-01","text":"end of the week"}]]}],"thread_id":"thread-00217"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00218"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00219"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00220"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]},{"units":[[]]}],"thread_id":"thread-00221"}
+{"messages":[{"units":[[],[],[],[]]},{"units":[[],[{"handle":"t0","value":"2026-10-27","text":"next Tuesday"}],[{"handle":"t0","value":"2026-10-27","text":"next Tuesday"}]]}],"thread_id":"thread-00220"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-25","text":"this week"}],[{"handle":"t0","value":"2026-10-23","text":"this afternoon"}],[{"handle":"t0","value":"2026-10-25","text":"this week"},{"handle":"t1","value":"2026-10-23","text":"this afternoon"}]]},{"units":[[],[{"handle":"t0","value":"2026-10-24","text":"this morning"}],[{"handle":"t0","value":"2026-10-24","text":"this morning"}]]},{"units":[[]]}],"thread_id":"thread-00221"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00222"}
-{"messages":[{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00223"}
+{"messages":[{"units":[[]]},{"units":[[],[{"handle":"t0","value":"2026-09-20","text":"early next week"}],[],[{"handle":"t0","value":"2026-09-20","text":"early next week"}]]}],"thread_id":"thread-00223"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00224"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00225"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00226"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00227"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-18","text":"tomorrow"}],[{"handle":"t0","value":"2026-11-22","text":"end of the week"}],[{"handle":"t0","value":"2026-11-18","text":"tomorrow"},{"handle":"t1","value":"2026-11-22","text":"end of the week"}]]}],"thread_id":"thread-00227"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00228"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00229"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00230"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-12-02","text":"this morning"}],[],[{"handle":"t0","value":"2026-12-02","text":"this morning"}]]}],"thread_id":"thread-00229"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-15","text":"by Thursday"}],[],[{"handle":"t0","value":"2026-10-15","text":"by Thursday"}]]},{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-10-18","text":"next week"}],[],[],[{"handle":"t0","value":"2026-10-18","text":"next week"}]]}],"thread_id":"thread-00230"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00231"}
-{"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00232"}
-{"messages":[{"units":[[]]},{"units":[[],[],[]]},{"units":[[]]}],"thread_id":"thread-00233"}
+{"messages":[{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-10-23","text":"tomorrow morning"}]]}],"thread_id":"thread-00232"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-08","text":"tomorrow afternoon"}]]},{"units":[[],[],[]]},{"units":[[]]}],"thread_id":"thread-00233"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00234"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00235"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00236"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00237"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-14","text":"by Wednesday"}],[{"handle":"t0","value":"2026-10-14","text":"by Wednesday"}]]}],"thread_id":"thread-00237"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00238"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00239"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-12-03","text":"next Thursday"}],[],[{"handle":"t0","value":"2026-12-03","text":"next Thursday"}]]}],"thread_id":"thread-00239"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00240"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00241"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-22","text":"this morning"}],[],[{"handle":"t0","value":"2026-10-22","text":"this morning"}]]},{"units":[[],[{"handle":"t0","value":"2026-10-27","text":"next Tuesday"}],[{"handle":"t0","value":"2026-10-27","text":"next Tuesday"}]]}],"thread_id":"thread-00241"}
 {"messages":[{"units":[[],[],[]]},{"units":[[],[],[]]},{"units":[[]]}],"thread_id":"thread-00242"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00243"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00244"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00245"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00246"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00247"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-18","text":"this Friday"}],[{"handle":"t0","value":"2026-09-27","text":"early next week"}],[{"handle":"t0","value":"2026-09-18","text":"this Friday"},{"handle":"t1","value":"2026-09-27","text":"early next week"}]]}],"thread_id":"thread-00247"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00248"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00249"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-17","text":"today"}],[{"handle":"t0","value":"2026-10-18","text":"this week"}],[{"handle":"t0","value":"2026-10-17","text":"today"},{"handle":"t1","value":"2026-10-18","text":"this week"}]]}],"thread_id":"thread-00249"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00250"}
 {"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00251"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00252"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[]]}],"thread_id":"thread-00253"}
+{"messages":[{"units":[[],[],[],[]]},{"units":[[{"handle":"t0","value":"2026-09-09","text":"tomorrow morning"}]]}],"thread_id":"thread-00253"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00254"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00255"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00256"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00257"}
-{"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00258"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00259"}
-{"messages":[{"units":[[],[],[]]},{"units":[[]]},{"units":[[],[],[]]}],"thread_id":"thread-00260"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-08-30","text":"early next week"}],[{"handle":"t0","value":"2026-08-30","text":"early next week"}]]}],"thread_id":"thread-00257"}
+{"messages":[{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-08-23","text":"this morning"}]]}],"thread_id":"thread-00258"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-08-29","text":"today"}],[],[{"handle":"t0","value":"2026-08-29","text":"today"}]]}],"thread_id":"thread-00259"}
+{"messages":[{"units":[[],[],[]]},{"units":[[{"handle":"t0","value":"2026-09-29","text":"next Tuesday"}]]},{"units":[[],[],[]]}],"thread_id":"thread-00260"}
 {"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00261"}
-{"messages":[{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00262"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00263"}
+{"messages":[{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-11-04","text":"tomorrow morning"}],[],[],[{"handle":"t0","value":"2026-11-04","text":"tomorrow morning"}]]}],"thread_id":"thread-00262"}
+{"messages":[{"units":[[],[],[],[]]},{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-09-20","text":"next week"}],[],[],[{"handle":"t0","value":"2026-09-20","text":"next week"}]]}],"thread_id":"thread-00263"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00264"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00265"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00266"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00267"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-18","text":"early next week"}],[{"handle":"t0","value":"2026-10-18","text":"early next week"}]]}],"thread_id":"thread-00267"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00268"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00269"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-18","text":"this week"}],[{"handle":"t0","value":"2026-10-15","text":"this morning"}],[{"handle":"t0","value":"2026-10-18","text":"this week"},{"handle":"t1","value":"2026-10-15","text":"this morning"}]]}],"thread_id":"thread-00269"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00270"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00271"}
+{"messages":[{"units":[[],[],[],[]]},{"units":[[{"handle":"t0","value":"2026-10-25","text":"next week"}],[],[],[{"handle":"t0","value":"2026-10-25","text":"next week"}]]}],"thread_id":"thread-00271"}
 {"messages":[{"units":[[],[],[]]},{"units":[[],[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00272"}
 {"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00273"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00274"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00275"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00276"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00277"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-01","text":"early next week"}]]}],"thread_id":"thread-00276"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-23","text":"tomorrow evening"}],[{"handle":"t0","value":"2026-10-23","text":"end of the day tomorrow"}],[{"handle":"t0","value":"2026-10-23","text":"tomorrow evening"}]]}],"thread_id":"thread-00277"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00278"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00279"}
-{"messages":[{"units":[[]]},{"units":[[],[],[]]}],"thread_id":"thread-00280"}
-{"messages":[{"units":[[]]},{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00281"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00282"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-11-05","text":"next Thursday"}],[{"handle":"t0","value":"2026-11-05","text":"next Thursday"}]]}],"thread_id":"thread-00279"}
+{"messages":[{"units":[[]]},{"units":[[],[{"handle":"t0","value":"2026-11-08","text":"end of the week"}],[{"handle":"t0","value":"2026-11-08","text":"end of the week"}]]}],"thread_id":"thread-00280"}
+{"messages":[{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-11-01","text":"next week"}],[],[],[{"handle":"t0","value":"2026-11-01","text":"next week"}]]},{"units":[[],[],[{"handle":"t0","value":"2026-10-26","text":"Monday"}],[{"handle":"t0","value":"2026-10-26","text":"Monday"}]]}],"thread_id":"thread-00281"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-12","text":"this morning"}]]}],"thread_id":"thread-00282"}
 {"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00283"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00284"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00285"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00286"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00287"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-22","text":"this week"}]]}],"thread_id":"thread-00286"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-05","text":"tomorrow"}],[{"handle":"t0","value":"2026-11-05","text":"tomorrow morning"}],[{"handle":"t0","value":"2026-11-05","text":"tomorrow"}]]}],"thread_id":"thread-00287"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00288"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00289"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00290"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00291"}
-{"messages":[{"units":[[]]},{"units":[[],[],[]]}],"thread_id":"thread-00292"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-02","text":"today"}],[],[{"handle":"t0","value":"2026-10-02","text":"today"}]]}],"thread_id":"thread-00289"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-09","text":"next Friday"}],[],[{"handle":"t0","value":"2026-10-09","text":"next Friday"}]]},{"units":[[],[],[]]},{"units":[[],[{"handle":"t0","value":"2026-10-06","text":"today"}],[{"handle":"t0","value":"2026-10-06","text":"today"}]]}],"thread_id":"thread-00290"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-01","text":"next week"}]]}],"thread_id":"thread-00291"}
+{"messages":[{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-10-23","text":"this afternoon"}],[],[{"handle":"t0","value":"2026-10-23","text":"this afternoon"}]]}],"thread_id":"thread-00292"}
 {"messages":[{"units":[[]]},{"units":[[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00293"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00294"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00295"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00296"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00297"}
-{"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00298"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00299"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-25","text":"this week"}],[{"handle":"t0","value":"2026-10-23","text":"tomorrow morning"}],[{"handle":"t0","value":"2026-10-25","text":"this week"},{"handle":"t1","value":"2026-10-23","text":"tomorrow morning"}]]}],"thread_id":"thread-00297"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-17","text":"this morning"}]]},{"units":[[]]}],"thread_id":"thread-00298"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-20","text":"Tuesday"}],[{"handle":"t0","value":"2026-10-20","text":"Tuesday"}]]}],"thread_id":"thread-00299"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00300"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00301"}
+{"messages":[{"units":[[],[],[]]},{"units":[[{"handle":"t0","value":"2026-10-27","text":"this afternoon"}],[],[{"handle":"t0","value":"2026-10-27","text":"this afternoon"}]]}],"thread_id":"thread-00301"}
 {"messages":[{"units":[[],[],[]]},{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00302"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00303"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00304"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00305"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00306"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00307"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-08-11","text":"by Tuesday"}],[{"handle":"t0","value":"2026-08-11","text":"by Tuesday"}]]}],"thread_id":"thread-00307"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00308"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00309"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00310"}
+{"messages":[{"units":[[],[],[],[]]},{"units":[[],[{"handle":"t0","value":"2026-10-17","text":"this Saturday"}],[{"handle":"t0","value":"2026-10-13","text":"today"}],[{"handle":"t0","value":"2026-10-17","text":"this Saturday"},{"handle":"t1","value":"2026-10-13","text":"today"}]]}],"thread_id":"thread-00310"}
 {"messages":[{"units":[[]]},{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00311"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00312"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00313"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-13","text":"this week"}],[],[],[{"handle":"t0","value":"2026-09-13","text":"this week"}]]},{"units":[[],[],[]]}],"thread_id":"thread-00313"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00314"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00315"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00316"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00317"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-27","text":"later this week"}]]}],"thread_id":"thread-00316"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-04","text":"early next week"}],[{"handle":"t0","value":"2026-10-04","text":"early next week"}]]}],"thread_id":"thread-00317"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00318"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00319"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00320"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00321"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[]]}],"thread_id":"thread-00322"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00323"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-06","text":"next Tuesday"}],[],[{"handle":"t0","value":"2026-10-06","text":"next Tuesday"}]]}],"thread_id":"thread-00319"}
+{"messages":[{"units":[[],[],[]]},{"units":[[],[],[{"handle":"t0","value":"2026-09-15","text":"on Tuesday"}],[{"handle":"t0","value":"2026-09-15","text":"on Tuesday"}]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00320"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-12","text":"today"}],[{"handle":"t0","value":"2026-10-12","text":"today"}]]}],"thread_id":"thread-00321"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-27","text":"today"}],[],[{"handle":"t0","value":"2026-10-27","text":"today"}]]},{"units":[[]]}],"thread_id":"thread-00322"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-09-20","text":"early next week"}],[{"handle":"t0","value":"2026-09-20","text":"early next week"}]]},{"units":[[],[],[{"handle":"t0","value":"2026-09-08","text":"today"}],[{"handle":"t0","value":"2026-09-08","text":"today"}]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00323"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00324"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00325"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00326"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00327"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-11-12","text":"today"},{"handle":"t1","value":"2026-11-22","text":"early next week"}],[{"handle":"t0","value":"2026-11-12","text":"today"},{"handle":"t1","value":"2026-11-22","text":"early next week"}]]}],"thread_id":"thread-00327"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00328"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00329"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-02","text":"tomorrow"}],[{"handle":"t0","value":"2026-11-01","text":"this week"}],[{"handle":"t0","value":"2026-11-02","text":"tomorrow"},{"handle":"t1","value":"2026-11-01","text":"this week"}]]}],"thread_id":"thread-00329"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00330"}
 {"messages":[{"units":[[],[],[]]},{"units":[[]]}],"thread_id":"thread-00331"}
-{"messages":[{"units":[[]]},{"units":[[],[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00332"}
+{"messages":[{"units":[[]]},{"units":[[],[{"handle":"t0","value":"2026-10-18","text":"this morning"}],[],[{"handle":"t0","value":"2026-10-18","text":"this morning"}]]},{"units":[[],[],[]]}],"thread_id":"thread-00332"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00333"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00334"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00335"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00336"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00337"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-26","text":"by Monday"}],[{"handle":"t0","value":"2026-10-26","text":"by Monday"}]]}],"thread_id":"thread-00337"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00338"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00339"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[]]}],"thread_id":"thread-00340"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-09-12","text":"later today"}],[{"handle":"t0","value":"2026-09-12","text":"this morning"}],[{"handle":"t0","value":"2026-09-12","text":"later today"}]]},{"units":[[]]}],"thread_id":"thread-00340"}
 {"messages":[{"units":[[],[],[]]},{"units":[[],[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00341"}
 {"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00342"}
-{"messages":[{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00343"}
+{"messages":[{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-09-09","text":"tomorrow morning"}],[],[],[{"handle":"t0","value":"2026-09-09","text":"tomorrow morning"}]]}],"thread_id":"thread-00343"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00344"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00345"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00346"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00347"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-23","text":"tomorrow morning"}],[{"handle":"t0","value":"2026-10-23","text":"tomorrow morning"}]]}],"thread_id":"thread-00347"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00348"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00349"}
-{"messages":[{"units":[[]]},{"units":[[],[],[]]},{"units":[[]]}],"thread_id":"thread-00350"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-31","text":"this Saturday"}],[{"handle":"t0","value":"2026-10-31","text":"this Saturday"}]]}],"thread_id":"thread-00349"}
+{"messages":[{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-11-08","text":"next week"}],[],[{"handle":"t0","value":"2026-11-08","text":"next week"}]]},{"units":[[]]}],"thread_id":"thread-00350"}
 {"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00351"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00352"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-22","text":"this morning"}],[{"handle":"t0","value":"2026-10-22","text":"today"}],[],[{"handle":"t0","value":"2026-10-22","text":"this morning"}]]},{"units":[[],[{"handle":"t0","value":"2026-10-25","text":"this week"}],[],[{"handle":"t0","value":"2026-10-25","text":"this week"}]]}],"thread_id":"thread-00352"}
 {"messages":[{"units":[[]]},{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00353"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00354"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00355"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00356"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00357"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-11-08","text":"end of the week"}],[{"handle":"t0","value":"2026-11-08","text":"end of the week"}]]}],"thread_id":"thread-00357"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00358"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00359"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-11-12","text":"this afternoon"}],[{"handle":"t0","value":"2026-11-12","text":"this afternoon"}]]}],"thread_id":"thread-00359"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00360"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[]]}],"thread_id":"thread-00361"}
+{"messages":[{"units":[[],[],[{"handle":"t0","value":"2026-10-25","text":"next week"}],[{"handle":"t0","value":"2026-10-25","text":"next week"}]]},{"units":[[]]}],"thread_id":"thread-00361"}
 {"messages":[{"units":[[],[],[]]},{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00362"}
-{"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00363"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-06","text":"tomorrow morning"}],[],[],[{"handle":"t0","value":"2026-09-06","text":"tomorrow morning"}]]}],"thread_id":"thread-00363"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00364"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00365"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00366"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00367"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-13","text":"later this week"}]]}],"thread_id":"thread-00366"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-07","text":"this evening"}],[{"handle":"t0","value":"2026-10-08","text":"tomorrow morning"}],[{"handle":"t0","value":"2026-10-07","text":"this evening"},{"handle":"t1","value":"2026-10-08","text":"tomorrow morning"}]]}],"thread_id":"thread-00367"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00368"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00369"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00370"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00371"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-25","text":"this week"}],[],[{"handle":"t0","value":"2026-10-25","text":"this week"}]]}],"thread_id":"thread-00369"}
+{"messages":[{"units":[[],[],[]]},{"units":[[],[],[{"handle":"t0","value":"2026-10-27","text":"end of the day"}],[{"handle":"t0","value":"2026-10-27","text":"end of the day"}]]}],"thread_id":"thread-00370"}
+{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[],[]]},{"units":[[{"handle":"t0","value":"2026-10-19","text":"this afternoon"}],[],[],[{"handle":"t0","value":"2026-10-19","text":"this afternoon"}]]}],"thread_id":"thread-00371"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00372"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00373"}
+{"messages":[{"units":[[],[],[]]},{"units":[[{"handle":"t0","value":"2026-09-06","text":"tomorrow"}],[],[],[{"handle":"t0","value":"2026-09-06","text":"tomorrow"}]]}],"thread_id":"thread-00373"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00374"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00375"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00376"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00377"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-19","text":"by Monday"}],[{"handle":"t0","value":"2026-10-19","text":"by Monday"}]]}],"thread_id":"thread-00377"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00378"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00379"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00380"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00381"}
-{"messages":[{"units":[[],[],[]]},{"units":[[]]}],"thread_id":"thread-00382"}
-{"messages":[{"units":[[]]},{"units":[[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00383"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-17","text":"this morning"}],[{"handle":"t0","value":"2026-10-23","text":"on Friday"}],[{"handle":"t0","value":"2026-10-17","text":"this morning"},{"handle":"t1","value":"2026-10-23","text":"on Friday"}]]}],"thread_id":"thread-00379"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-26","text":"next Monday"}],[{"handle":"t0","value":"2026-10-26","text":"next Monday"}]]},{"units":[[],[],[{"handle":"t0","value":"2026-10-25","text":"this week"}],[{"handle":"t0","value":"2026-10-25","text":"this week"}]]},{"units":[[],[],[{"handle":"t0","value":"2026-10-25","text":"this week"}],[{"handle":"t0","value":"2026-10-25","text":"this week"}]]}],"thread_id":"thread-00380"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-27","text":"on Tuesday"}],[],[{"handle":"t0","value":"2026-10-27","text":"on Tuesday"}]]}],"thread_id":"thread-00381"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-22","text":"today"}],[],[{"handle":"t0","value":"2026-10-22","text":"today"}]]},{"units":[[]]}],"thread_id":"thread-00382"}
+{"messages":[{"units":[[]]},{"units":[[],[{"handle":"t0","value":"2026-09-08","text":"today"}],[{"handle":"t0","value":"2026-09-08","text":"today"}]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00383"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00384"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00385"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00386"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00387"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-18","text":"end of the week"}],[{"handle":"t0","value":"2026-10-18","text":"end of the week"}]]}],"thread_id":"thread-00387"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00388"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00389"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-11-09","text":"next Monday"}],[{"handle":"t0","value":"2026-11-09","text":"next Monday"}]]}],"thread_id":"thread-00389"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00390"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00391"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[],[]]},{"units":[[]]}],"thread_id":"thread-00392"}
-{"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00393"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-01","text":"next week"}],[],[],[{"handle":"t0","value":"2026-11-01","text":"next week"}]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00391"}
+{"messages":[{"units":[[],[],[]]},{"units":[[],[],[{"handle":"t0","value":"2026-10-18","text":"this week"}],[{"handle":"t0","value":"2026-10-18","text":"this week"}]]},{"units":[[]]}],"thread_id":"thread-00392"}
+{"messages":[{"units":[[],[],[{"handle":"t0","value":"2026-09-11","text":"on Friday"}],[{"handle":"t0","value":"2026-09-11","text":"on Friday"}]]}],"thread_id":"thread-00393"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00394"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00395"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00396"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00397"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-22","text":"next week"}]]}],"thread_id":"thread-00396"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-13","text":"tomorrow morning"}],[{"handle":"t0","value":"2026-10-13","text":"tomorrow morning"}]]}],"thread_id":"thread-00397"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00398"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00399"}
-{"messages":[{"units":[[],[],[]]},{"units":[[]]}],"thread_id":"thread-00400"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-08","text":"next week"}],[],[{"handle":"t0","value":"2026-11-08","text":"next week"}]]}],"thread_id":"thread-00399"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-05-19","text":"today"}],[{"handle":"t0","value":"2026-05-19","text":"today"}]]},{"units":[[{"handle":"t0","value":"2026-05-20","text":"this morning"}]]}],"thread_id":"thread-00400"}
 {"messages":[{"units":[[]]},{"units":[[]]},{"units":[[],[],[]]}],"thread_id":"thread-00401"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00402"}
-{"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00403"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-02","text":"today"}]]}],"thread_id":"thread-00402"}
+{"messages":[{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-09-09","text":"this morning"}]]}],"thread_id":"thread-00403"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00404"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00405"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00406"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00407"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-08-12","text":"tomorrow"}],[{"handle":"t0","value":"2026-08-12","text":"tomorrow"}]]}],"thread_id":"thread-00407"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00408"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00409"}
-{"messages":[{"units":[[]]},{"units":[[],[],[]]},{"units":[[]]}],"thread_id":"thread-00410"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-06-13","text":"this Saturday"}],[{"handle":"t0","value":"2026-06-13","text":"this Saturday"}]]}],"thread_id":"thread-00409"}
+{"messages":[{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-07-05","text":"this week"}],[],[{"handle":"t0","value":"2026-07-05","text":"this week"}]]},{"units":[[]]}],"thread_id":"thread-00410"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00411"}
-{"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00412"}
-{"messages":[{"units":[[]]},{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00413"}
+{"messages":[{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-11-08","text":"this week"}]]}],"thread_id":"thread-00412"}
+{"messages":[{"units":[[]]},{"units":[[]]},{"units":[[],[],[{"handle":"t0","value":"2026-09-04","text":"later today"}],[{"handle":"t0","value":"2026-09-04","text":"later today"}]]}],"thread_id":"thread-00413"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00414"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00415"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00416"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00417"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-23","text":"this morning"}],[{"handle":"t0","value":"2026-10-25","text":"end of the week"}],[{"handle":"t0","value":"2026-10-23","text":"this morning"},{"handle":"t1","value":"2026-10-25","text":"end of the week"}]]}],"thread_id":"thread-00417"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00418"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00419"}
-{"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00420"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-25","text":"this week"}],[{"handle":"t0","value":"2026-10-25","text":"this week"}]]}],"thread_id":"thread-00419"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-28","text":"today"}],[],[{"handle":"t0","value":"2026-10-28","text":"today"}]]}],"thread_id":"thread-00420"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00421"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00422"}
-{"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00423"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-01","text":"end of the week"}],[],[],[{"handle":"t0","value":"2026-11-01","text":"end of the week"}]]},{"units":[[{"handle":"t0","value":"2026-10-29","text":"this morning"}],[],[{"handle":"t0","value":"2026-10-29","text":"this morning"}]]},{"units":[[{"handle":"t0","value":"2026-11-03","text":"next Tuesday"}],[],[{"handle":"t0","value":"2026-11-03","text":"next Tuesday"}]]}],"thread_id":"thread-00422"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-09-07","text":"today"}],[],[{"handle":"t0","value":"2026-09-07","text":"today"}]]}],"thread_id":"thread-00423"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00424"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00425"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00426"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00427"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-18","text":"later this week"}]]}],"thread_id":"thread-00426"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-11-02","text":"tomorrow"}],[{"handle":"t0","value":"2026-11-02","text":"tomorrow"}]]}],"thread_id":"thread-00427"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00428"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00429"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00430"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[{"handle":"t0","value":"2026-10-30"}],[],[{"handle":"t0","value":"2026-10-30"}]]},{"units":[[{"handle":"t0","value":"2026-10-30"}],[],[{"handle":"t0","value":"2026-10-30"}]]}],"thread_id":"thread-00431"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-27","text":"Tuesday"}],[{"handle":"t0","value":"2026-10-27","text":"Tuesday"}]]}],"thread_id":"thread-00429"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-08","text":"tomorrow"}],[],[{"handle":"t0","value":"2026-10-08","text":"tomorrow"}]]},{"units":[[],[],[]]}],"thread_id":"thread-00430"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-25","text":"this morning"}],[{"handle":"t0","value":"2026-10-29","text":"on Thursday"}],[{"handle":"t0","value":"2026-10-25","text":"this morning"},{"handle":"t1","value":"2026-10-29","text":"on Thursday"}]]},{"units":[[],[{"handle":"t0","value":"2026-10-30","text":"2026-10-30"}],[],[{"handle":"t0","value":"2026-10-30","text":"2026-10-30"}]]},{"units":[[{"handle":"t0","value":"2026-10-30","text":"2026-10-30"}],[],[{"handle":"t0","value":"2026-10-30","text":"2026-10-30"}]]}],"thread_id":"thread-00431"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00432"}
-{"messages":[{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00433"}
+{"messages":[{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-09-14","text":"on Monday"}],[],[],[{"handle":"t0","value":"2026-09-14","text":"on Monday"}]]}],"thread_id":"thread-00433"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00434"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00435"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00436"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00437"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-13","text":"next week"}]]}],"thread_id":"thread-00436"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-07","text":"today"}],[{"handle":"t0","value":"2026-09-11","text":"Friday"}],[{"handle":"t0","value":"2026-09-07","text":"today"},{"handle":"t1","value":"2026-09-11","text":"Friday"}]]}],"thread_id":"thread-00437"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00438"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00439"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]},{"units":[[]]}],"thread_id":"thread-00440"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00441"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00442"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]},{"units":[[]]}],"thread_id":"thread-00443"}
+{"messages":[{"units":[[],[],[{"handle":"t0","value":"2026-05-12","text":"today"}],[{"handle":"t0","value":"2026-05-12","text":"today"}]]},{"units":[[],[],[]]},{"units":[[]]}],"thread_id":"thread-00440"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-18","text":"this week"}],[],[{"handle":"t0","value":"2026-10-18","text":"this week"}]]}],"thread_id":"thread-00441"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-11-12","text":"this morning"}],[],[{"handle":"t0","value":"2026-11-12","text":"this morning"}]]},{"units":[[{"handle":"t0","value":"2026-11-15","text":"this week"}],[{"handle":"t0","value":"2026-11-15","text":"on Sunday"}],[],[{"handle":"t0","value":"2026-11-15","text":"this week"}]]}],"thread_id":"thread-00442"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-09-20","text":"next week"}],[],[{"handle":"t0","value":"2026-09-20","text":"next week"}]]},{"units":[[],[],[]]},{"units":[[]]}],"thread_id":"thread-00443"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00444"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00445"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00446"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00447"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-09-18","text":"tomorrow"}],[{"handle":"t0","value":"2026-09-18","text":"tomorrow"}]]}],"thread_id":"thread-00447"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00448"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00449"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-12","text":"this morning"}],[{"handle":"t0","value":"2026-10-25","text":"next week"}],[{"handle":"t0","value":"2026-10-12","text":"this morning"},{"handle":"t1","value":"2026-10-25","text":"next week"}]]}],"thread_id":"thread-00449"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00450"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00451"}
+{"messages":[{"units":[[],[],[],[]]},{"units":[[],[{"handle":"t0","value":"2026-10-24","text":"tomorrow"}],[],[{"handle":"t0","value":"2026-10-24","text":"tomorrow"}]]}],"thread_id":"thread-00451"}
 {"messages":[{"units":[[]]},{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00452"}
 {"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00453"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00454"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00455"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00456"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00457"}
-{"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00458"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00459"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-09-17","text":"by Thursday"}],[{"handle":"t0","value":"2026-09-17","text":"by Thursday"}]]}],"thread_id":"thread-00457"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-17","text":"this morning"}]]},{"units":[[]]}],"thread_id":"thread-00458"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-20","text":"next week"}],[{"handle":"t0","value":"2026-09-20","text":"on Sunday"}],[{"handle":"t0","value":"2026-09-20","text":"next week"}]]}],"thread_id":"thread-00459"}
 {"messages":[{"units":[[],[],[],[]]},{"units":[[]]}],"thread_id":"thread-00460"}
-{"messages":[{"units":[[],[],[]]},{"units":[[]]},{"units":[[],[],[]]}],"thread_id":"thread-00461"}
-{"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00462"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[]]}],"thread_id":"thread-00463"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-13","text":"next Tuesday"}],[{"handle":"t0","value":"2026-10-13","text":"next Tuesday"}]]},{"units":[[]]},{"units":[[],[],[]]}],"thread_id":"thread-00461"}
+{"messages":[{"units":[[],[],[{"handle":"t0","value":"2026-11-02","text":"this morning"}],[{"handle":"t0","value":"2026-11-02","text":"this morning"}]]}],"thread_id":"thread-00462"}
+{"messages":[{"units":[[],[],[{"handle":"t0","value":"2026-09-12","text":"on Saturday"}],[{"handle":"t0","value":"2026-09-12","text":"on Saturday"}]]},{"units":[[]]}],"thread_id":"thread-00463"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00464"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00465"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00466"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00467"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-19","text":"today"}],[{"handle":"t0","value":"2026-10-20","text":"tomorrow morning"}],[{"handle":"t0","value":"2026-10-19","text":"today"},{"handle":"t1","value":"2026-10-20","text":"tomorrow morning"}]]}],"thread_id":"thread-00467"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00468"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00469"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00470"}
+{"messages":[{"units":[[],[],[]]},{"units":[[],[{"handle":"t0","value":"2026-11-05","text":"this afternoon"}],[{"handle":"t0","value":"2026-11-15","text":"next week"}],[{"handle":"t0","value":"2026-11-05","text":"this afternoon"},{"handle":"t1","value":"2026-11-15","text":"next week"}]]},{"units":[[{"handle":"t0","value":"2026-11-06","text":"today"}],[],[],[{"handle":"t0","value":"2026-11-06","text":"today"}]]}],"thread_id":"thread-00470"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00471"}
-{"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00472"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00473"}
+{"messages":[{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-10-26","text":"by Monday"}]]}],"thread_id":"thread-00472"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-09-07","text":"this morning"}],[{"handle":"t0","value":"2026-09-07","text":"this morning"}]]},{"units":[[],[],[{"handle":"t0","value":"2026-09-08","text":"this morning"}],[{"handle":"t0","value":"2026-09-08","text":"this morning"}]]},{"units":[[],[],[]]}],"thread_id":"thread-00473"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00474"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00475"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00476"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00477"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-01","text":"later this week"}]]}],"thread_id":"thread-00476"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-12-04","text":"by Friday"}],[{"handle":"t0","value":"2026-12-04","text":"by Friday"}]]}],"thread_id":"thread-00477"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00478"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00479"}
-{"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00480"}
-{"messages":[{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00481"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-09-28","text":"on Monday"}],[{"handle":"t0","value":"2026-09-28","text":"on Monday"}]]}],"thread_id":"thread-00479"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-09-15","text":"this afternoon"}],[],[{"handle":"t0","value":"2026-09-15","text":"this afternoon"}]]}],"thread_id":"thread-00480"}
+{"messages":[{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-11-01","text":"next week"}],[],[],[{"handle":"t0","value":"2026-11-01","text":"next week"}]]}],"thread_id":"thread-00481"}
 {"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00482"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00483"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00484"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00485"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00486"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00487"}
-{"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00488"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00489"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-04","text":"end of the week"}]]}],"thread_id":"thread-00486"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-22","text":"today"}],[{"handle":"t0","value":"2026-09-23","text":"tomorrow morning"}],[{"handle":"t0","value":"2026-09-22","text":"today"},{"handle":"t1","value":"2026-09-23","text":"tomorrow morning"}]]}],"thread_id":"thread-00487"}
+{"messages":[{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-10-25","text":"this week"}]]}],"thread_id":"thread-00488"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-24","text":"this morning"}],[],[{"handle":"t0","value":"2026-10-24","text":"this morning"}]]}],"thread_id":"thread-00489"}
 {"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00490"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[]]},{"units":[[],[],[]]}],"thread_id":"thread-00491"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-23","text":"tonight"}],[],[],[{"handle":"t0","value":"2026-10-23","text":"tonight"}]]},{"units":[[]]},{"units":[[],[],[]]}],"thread_id":"thread-00491"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00492"}
-{"messages":[{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00493"}
+{"messages":[{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-09-08","text":"today"}],[{"handle":"t0","value":"2026-09-11","text":"on Friday"}],[{"handle":"t0","value":"2026-09-08","text":"this morning"}],[{"handle":"t0","value":"2026-09-08","text":"today"},{"handle":"t1","value":"2026-09-11","text":"on Friday"}]]}],"thread_id":"thread-00493"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00494"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00495"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00496"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00497"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-22","text":"this afternoon"}],[{"handle":"t0","value":"2026-11-01","text":"early next week"}],[{"handle":"t0","value":"2026-10-22","text":"this afternoon"},{"handle":"t1","value":"2026-11-01","text":"early next week"}]]}],"thread_id":"thread-00497"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00498"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00499"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00500"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-14","text":"next Wednesday"},{"handle":"t1","value":"2026-10-16","text":"this Friday"}],[],[{"handle":"t0","value":"2026-10-14","text":"next Wednesday"},{"handle":"t1","value":"2026-10-16","text":"this Friday"}]]},{"units":[[],[],[]]},{"units":[[],[{"handle":"t0","value":"2026-10-15","text":"tomorrow morning"}],[],[{"handle":"t0","value":"2026-10-15","text":"tomorrow morning"}]]}],"thread_id":"thread-00500"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00501"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00502"}
+{"messages":[{"units":[[],[],[{"handle":"t0","value":"2026-10-12","text":"today"}],[{"handle":"t0","value":"2026-10-12","text":"today"}]]},{"units":[[{"handle":"t0","value":"2026-10-14","text":"tomorrow"}],[{"handle":"t0","value":"2026-10-15","text":"next Thursday"}],[{"handle":"t0","value":"2026-10-14","text":"tomorrow"},{"handle":"t1","value":"2026-10-15","text":"next Thursday"}]]}],"thread_id":"thread-00502"}
 {"messages":[{"units":[[]]},{"units":[[],[],[],[]]},{"units":[[]]}],"thread_id":"thread-00503"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00504"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00505"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00506"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00507"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-25","text":"this week"}],[{"handle":"t0","value":"2026-10-25","text":"tomorrow morning"}],[{"handle":"t0","value":"2026-10-25","text":"this week"}]]}],"thread_id":"thread-00507"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00508"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00509"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-20","text":"next Tuesday"}],[],[{"handle":"t0","value":"2026-10-20","text":"next Tuesday"}]]}],"thread_id":"thread-00509"}
 {"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00510"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00511"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00512"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00513"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-18","text":"this week"}],[],[{"handle":"t0","value":"2026-10-18","text":"this week"}]]},{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00512"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-04","text":"today"}],[],[{"handle":"t0","value":"2026-09-04","text":"today"}]]}],"thread_id":"thread-00513"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00514"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00515"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00516"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00517"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-08-30","text":"end of the week"}]]}],"thread_id":"thread-00516"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-02","text":"this morning"}],[{"handle":"t0","value":"2026-09-03","text":"tomorrow afternoon"}],[{"handle":"t0","value":"2026-09-02","text":"this morning"},{"handle":"t1","value":"2026-09-03","text":"tomorrow afternoon"}]]}],"thread_id":"thread-00517"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00518"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00519"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-09","text":"Friday"},{"handle":"t1","value":"2026-10-08","text":"Thursday"}],[{"handle":"t0","value":"2026-10-09","text":"Friday"},{"handle":"t1","value":"2026-10-08","text":"Thursday"}]]}],"thread_id":"thread-00519"}
 {"messages":[{"units":[[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00520"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00521"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-25","text":"next week"}],[{"handle":"t0","value":"2026-10-18","text":"on Sunday"}],[{"handle":"t0","value":"2026-10-25","text":"next week"},{"handle":"t1","value":"2026-10-18","text":"on Sunday"}]]},{"units":[[],[],[]]},{"units":[[],[{"handle":"t0","value":"2026-10-20","text":"tomorrow"}],[],[{"handle":"t0","value":"2026-10-20","text":"tomorrow"}]]}],"thread_id":"thread-00521"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00522"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00523"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-09-14","text":"next Monday"}],[{"handle":"t0","value":"2026-09-14","text":"next Monday"}]]},{"units":[[],[],[]]}],"thread_id":"thread-00523"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00524"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00525"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00526"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00527"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-11","text":"this week"}]]}],"thread_id":"thread-00526"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-13","text":"tomorrow afternoon"}],[{"handle":"t0","value":"2026-10-13","text":"tomorrow afternoon"}]]}],"thread_id":"thread-00527"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00528"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00529"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00530"}
+{"messages":[{"units":[[],[],[]]},{"units":[[{"handle":"t0","value":"2026-10-18","text":"today"}],[],[],[{"handle":"t0","value":"2026-10-18","text":"today"}]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00530"}
 {"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00531"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00532"}
+{"messages":[{"units":[[],[],[],[]]},{"units":[[{"handle":"t0","value":"2026-10-31","text":"end of the day tomorrow"}],[{"handle":"t0","value":"2026-11-08","text":"next week"}],[{"handle":"t0","value":"2026-10-31","text":"end of the day tomorrow"},{"handle":"t1","value":"2026-11-08","text":"next week"}]]}],"thread_id":"thread-00532"}
 {"messages":[{"units":[[]]},{"units":[[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00533"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00534"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00535"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00536"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00537"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-08-16","text":"this week"}]]}],"thread_id":"thread-00536"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-08-23","text":"end of the week"}],[{"handle":"t0","value":"2026-08-23","text":"end of the week"}]]}],"thread_id":"thread-00537"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00538"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00539"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00540"}
-{"messages":[{"units":[[],[],[]]},{"units":[[{"handle":"t0","value":"2026-10-30"}],[],[],[{"handle":"t0","value":"2026-10-30"}]]}],"thread_id":"thread-00541"}
-{"messages":[{"units":[[],[],[]]},{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00542"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00543"}
+{"messages":[{"units":[[],[],[]]},{"units":[[{"handle":"t0","value":"2026-10-30","text":"2026-10-30"}],[],[{"handle":"t0","value":"2026-10-19","text":"next Monday"}],[{"handle":"t0","value":"2026-10-30","text":"2026-10-30"},{"handle":"t1","value":"2026-10-19","text":"next Monday"}]]}],"thread_id":"thread-00541"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-25","text":"next week"}],[{"handle":"t0","value":"2026-10-25","text":"next week"}],[{"handle":"t0","value":"2026-10-25","text":"next week"}]]},{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00542"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-12","text":"this Saturday"}],[{"handle":"t0","value":"2026-09-12","text":"this Saturday"}],[{"handle":"t0","value":"2026-09-12","text":"this Saturday"}]]}],"thread_id":"thread-00543"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00544"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00545"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00546"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00547"}
-{"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00548"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00549"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[]]}],"thread_id":"thread-00550"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00551"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-21","text":"this morning"}],[{"handle":"t0","value":"2026-10-22","text":"end of the day tomorrow"}],[{"handle":"t0","value":"2026-10-21","text":"this morning"},{"handle":"t1","value":"2026-10-22","text":"end of the day tomorrow"}]]}],"thread_id":"thread-00547"}
+{"messages":[{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-10-20","text":"this morning"}]]}],"thread_id":"thread-00548"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-18","text":"this afternoon"}],[],[{"handle":"t0","value":"2026-10-18","text":"this afternoon"}]]}],"thread_id":"thread-00549"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-11-01","text":"next week"}],[],[{"handle":"t0","value":"2026-11-01","text":"next week"}]]},{"units":[[]]}],"thread_id":"thread-00550"}
+{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[{"handle":"t0","value":"2026-10-27","text":"tomorrow evening"}],[{"handle":"t0","value":"2026-10-27","text":"tomorrow evening"}]]},{"units":[[],[],[]]}],"thread_id":"thread-00551"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00552"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00553"}
+{"messages":[{"units":[[],[],[],[]]},{"units":[[],[{"handle":"t0","value":"2026-09-13","text":"this week"}],[{"handle":"t0","value":"2026-09-13","text":"this week"}]]}],"thread_id":"thread-00553"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00554"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00555"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00556"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00557"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-09-27","text":"end of the week"}],[{"handle":"t0","value":"2026-09-27","text":"end of the week"}]]}],"thread_id":"thread-00557"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00558"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00559"}
-{"messages":[{"units":[[]]},{"units":[[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00560"}
-{"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00561"}
-{"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00562"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00563"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-02","text":"next Monday"}]]},{"units":[[],[{"handle":"t0","value":"2026-10-28","text":"end of day"}],[{"handle":"t0","value":"2026-10-28","text":"end of day"}]]},{"units":[[],[],[]]}],"thread_id":"thread-00560"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-27","text":"on Tuesday"}],[{"handle":"t0","value":"2026-10-22","text":"this afternoon"}],[{"handle":"t0","value":"2026-10-27","text":"on Tuesday"},{"handle":"t1","value":"2026-10-22","text":"this afternoon"}]]}],"thread_id":"thread-00561"}
+{"messages":[{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-11-04","text":"tomorrow morning"}]]}],"thread_id":"thread-00562"}
+{"messages":[{"units":[[],[],[{"handle":"t0","value":"2026-09-09","text":"by Wednesday"}],[{"handle":"t0","value":"2026-09-09","text":"by Wednesday"}]]},{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00563"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00564"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00565"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00566"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00567"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-07-19","text":"end of the week"}]]}],"thread_id":"thread-00566"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-19","text":"next Monday"}],[{"handle":"t0","value":"2026-10-18","text":"end of the week"}],[{"handle":"t0","value":"2026-10-19","text":"next Monday"},{"handle":"t1","value":"2026-10-18","text":"end of the week"}]]}],"thread_id":"thread-00567"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00568"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00569"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-11-03","text":"tomorrow morning"}],[{"handle":"t0","value":"2026-11-03","text":"tomorrow morning"}]]}],"thread_id":"thread-00569"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00570"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00571"}
-{"messages":[{"units":[[]]},{"units":[[]]},{"units":[[],[],[]]}],"thread_id":"thread-00572"}
-{"messages":[{"units":[[],[],[],[]]}],"thread_id":"thread-00573"}
+{"messages":[{"units":[[],[],[]]},{"units":[[],[],[{"handle":"t0","value":"2026-10-19","text":"tomorrow"}],[{"handle":"t0","value":"2026-10-19","text":"tomorrow"}]]}],"thread_id":"thread-00571"}
+{"messages":[{"units":[[]]},{"units":[[]]},{"units":[[{"handle":"t0","value":"2026-10-25","text":"this week"}],[],[{"handle":"t0","value":"2026-10-25","text":"this week"}]]}],"thread_id":"thread-00572"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-05","text":"tomorrow morning"}],[],[],[{"handle":"t0","value":"2026-09-05","text":"tomorrow morning"}]]}],"thread_id":"thread-00573"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00574"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00575"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00576"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00577"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-27","text":"this morning"}],[{"handle":"t0","value":"2026-09-27","text":"end of the week"}],[{"handle":"t0","value":"2026-09-27","text":"this morning"}]]}],"thread_id":"thread-00577"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00578"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00579"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[]]}],"thread_id":"thread-00580"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[]]},{"units":[[]]}],"thread_id":"thread-00581"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00582"}
-{"messages":[{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00583"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-19","text":"Saturday"}],[],[{"handle":"t0","value":"2026-09-19","text":"Saturday"}]]}],"thread_id":"thread-00579"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-05","text":"Monday"}],[],[{"handle":"t0","value":"2026-10-02","text":"end of the day"}],[{"handle":"t0","value":"2026-10-05","text":"Monday"},{"handle":"t1","value":"2026-10-02","text":"end of the day"}]]},{"units":[[],[],[]]}],"thread_id":"thread-00580"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-20","text":"next Tuesday"}],[{"handle":"t0","value":"2026-10-20","text":"next Tuesday"}]]},{"units":[[],[],[]]},{"units":[[]]}],"thread_id":"thread-00581"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-02","text":"this morning"}],[{"handle":"t0","value":"2026-11-08","text":"end of the week"}],[{"handle":"t0","value":"2026-11-02","text":"this morning"},{"handle":"t1","value":"2026-11-08","text":"end of the week"}]]}],"thread_id":"thread-00582"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-08","text":"tomorrow morning"}],[],[],[{"handle":"t0","value":"2026-09-08","text":"tomorrow morning"}]]},{"units":[[],[],[{"handle":"t0","value":"2026-09-11","text":"on Friday"}],[{"handle":"t0","value":"2026-09-11","text":"on Friday"}]]}],"thread_id":"thread-00583"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00584"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00585"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00586"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00587"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-22","text":"Thursday"}],[{"handle":"t0","value":"2026-10-20","text":"tomorrow morning"}],[{"handle":"t0","value":"2026-10-22","text":"Thursday"},{"handle":"t1","value":"2026-10-20","text":"tomorrow morning"}]]}],"thread_id":"thread-00587"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00588"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00589"}
 {"messages":[{"units":[[]]},{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00590"}
-{"messages":[{"units":[[]]}],"thread_id":"thread-00591"}
-{"messages":[{"units":[[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00592"}
-{"messages":[{"units":[[],[],[]]},{"units":[[],[],[],[]]},{"units":[[],[],[],[]]}],"thread_id":"thread-00593"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-10-22","text":"today"}]]}],"thread_id":"thread-00591"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-11-02","text":"today"}]]},{"units":[[],[{"handle":"t0","value":"2026-11-08","text":"end of the week"}],[],[{"handle":"t0","value":"2026-11-08","text":"end of the week"}]]}],"thread_id":"thread-00592"}
+{"messages":[{"units":[[{"handle":"t0","value":"2026-09-09","text":"today"}],[{"handle":"t0","value":"2026-09-10","text":"tomorrow morning"}],[{"handle":"t0","value":"2026-09-09","text":"today"},{"handle":"t1","value":"2026-09-10","text":"tomorrow morning"}]]},{"units":[[],[],[],[]]},{"units":[[{"handle":"t0","value":"2026-09-11","text":"this morning"}],[],[],[{"handle":"t0","value":"2026-09-11","text":"this morning"}]]}],"thread_id":"thread-00593"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00594"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00595"}
 {"messages":[{"units":[[]]}],"thread_id":"thread-00596"}
-{"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00597"}
+{"messages":[{"units":[[],[{"handle":"t0","value":"2026-10-11","text":"this week"}],[{"handle":"t0","value":"2026-10-11","text":"this week"}]]}],"thread_id":"thread-00597"}
 {"messages":[{"units":[[]]},{"units":[[]]}],"thread_id":"thread-00598"}
 {"messages":[{"units":[[],[],[]]}],"thread_id":"thread-00599"}
