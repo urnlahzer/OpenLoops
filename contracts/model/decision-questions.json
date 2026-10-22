@@ -57,6 +57,23 @@
         }
       }
     },
+    "expiry": {
+      "dataset_sizes": {
+        "expiry.ends_with_event": {
+          "test": 47,
+          "train": 141,
+          "validation": 53
+        }
+      },
+      "model": "typesafe/jev-1.13",
+      "test": {
+        "expiry.ends_with_event": {
+          "accuracy": 0.7872340425531915,
+          "brier": 0.16211489361702128,
+          "ece_10": 0.21531914893617018
+        }
+      }
+    },
     "rules": {
       "dataset_sizes": {
         "rules.deadline_kind": {
@@ -190,6 +207,133 @@
           "ece_10": 0.09555555555555552
         }
       }
+    },
+    "walk": {
+      "dataset_sizes": {
+        "walk.responds": {
+          "test": 272,
+          "train": 1489,
+          "validation": 147
+        },
+        "walk.third_party_done": {
+          "test": 31,
+          "train": 76,
+          "validation": 28
+        },
+        "walk.user_declines": {
+          "test": 105,
+          "train": 270,
+          "validation": 95
+        },
+        "walk.user_delivers": {
+          "test": 105,
+          "train": 270,
+          "validation": 95
+        },
+        "walk.user_hands_off": {
+          "test": 105,
+          "train": 270,
+          "validation": 95
+        },
+        "walk.user_promises": {
+          "test": 105,
+          "train": 270,
+          "validation": 95
+        },
+        "walk.wp_asks_again": {
+          "test": 57,
+          "train": 249,
+          "validation": 107
+        },
+        "walk.wp_changes_due": {
+          "test": 57,
+          "train": 249,
+          "validation": 107
+        },
+        "walk.wp_changes_terms": {
+          "test": 57,
+          "train": 249,
+          "validation": 107
+        },
+        "walk.wp_no_longer_needed": {
+          "test": 57,
+          "train": 249,
+          "validation": 107
+        },
+        "walk.wp_received": {
+          "test": 57,
+          "train": 249,
+          "validation": 107
+        },
+        "walk.wp_still_owed": {
+          "test": 57,
+          "train": 249,
+          "validation": 107
+        }
+      },
+      "model": "typesafe/jev-1.13",
+      "test": {
+        "walk.responds": {
+          "accuracy": 0.9852941176470589,
+          "brier": 0.021382720588235295,
+          "ece_10": 0.0696691176470588
+        },
+        "walk.third_party_done": {
+          "accuracy": 0.967741935483871,
+          "brier": 0.03666774193548387,
+          "ece_10": 0.10999999999999999
+        },
+        "walk.user_declines": {
+          "accuracy": 0.9809523809523809,
+          "brier": 0.017242857142857143,
+          "ece_10": 0.0656190476190476
+        },
+        "walk.user_delivers": {
+          "accuracy": 0.9142857142857143,
+          "brier": 0.09153714285714283,
+          "ece_10": 0.21504761904761904
+        },
+        "walk.user_hands_off": {
+          "accuracy": 1.0,
+          "brier": 0.037700000000000004,
+          "ece_10": 0.1698095238095238
+        },
+        "walk.user_promises": {
+          "accuracy": 0.9809523809523809,
+          "brier": 0.015434285714285716,
+          "ece_10": 0.0756190476190476
+        },
+        "walk.wp_asks_again": {
+          "accuracy": 0.9649122807017544,
+          "brier": 0.036817543859649124,
+          "ece_10": 0.10736842105263156
+        },
+        "walk.wp_changes_due": {
+          "accuracy": 1.0,
+          "brier": 0.008352631578947368,
+          "ece_10": 0.05526315789473685
+        },
+        "walk.wp_changes_terms": {
+          "accuracy": 0.8070175438596491,
+          "brier": 0.15775087719298245,
+          "ece_10": 0.16350877192982452
+        },
+        "walk.wp_no_longer_needed": {
+          "accuracy": 0.8421052631578947,
+          "brier": 0.1277438596491228,
+          "ece_10": 0.16947368421052628
+        },
+        "walk.wp_received": {
+          "accuracy": 0.9473684210526315,
+          "brier": 0.027957894736842105,
+          "ece_10": 0.07789473684210528
+        },
+        "walk.wp_still_owed": {
+          "accuracy": 1.0,
+          "brier": 0.03446842105263158,
+          "ece_10": 0.16438596491228072
+        }
+      }
     }
   },
   "model": "typesafe/jev-1.13",
@@ -247,6 +391,21 @@
       "escalate": 0.33,
       "instructions": "The later text cancels or withdraws the obligation.",
       "type": "noul"
+    },
+    "expiry.ends_with_event": {
+      "accept": 0.665,
+      "escalate": 0.5,
+      "instructions": "`ask` loses its purpose when `event` ends.",
+      "type": "noul"
+    },
+    "expiry.event": {
+      "accept": 0.7,
+      "escalate": 0.3,
+      "instructions": "Which event does `ask` help `waiting_party` prepare for or take part in?",
+      "options": {
+        "none": "The request serves no listed event."
+      },
+      "type": "choice"
     },
     "extract.claim_type": {
       "accept": 0.7,
@@ -356,8 +515,98 @@
       "escalate": 0.5,
       "instructions": "The paragraph_text names a time, date, or deadline.",
       "type": "noul"
+    },
+    "walk.handoff_to": {
+      "accept": 0.7,
+      "escalate": 0.3,
+      "instructions": "Which person does `later.text` name as the one who will now do what `ask` requests?",
+      "options": {
+        "none": "The text names no listed person."
+      },
+      "type": "choice"
+    },
+    "walk.new_date": {
+      "accept": 0.7,
+      "escalate": 0.3,
+      "instructions": "Which date does `later.text` set as the new time for `ask`?",
+      "options": {
+        "none": "The text sets no new date for the request."
+      },
+      "type": "choice"
+    },
+    "walk.responds": {
+      "accept": 0.7,
+      "escalate": 0.34,
+      "instructions": "`later.text` relates to, discusses, or addresses the request in `ask`.",
+      "type": "noul"
+    },
+    "walk.third_party_done": {
+      "accept": 0.68,
+      "escalate": 0.5,
+      "instructions": "In `later.text`, the writer says they did what `ask` requests or will do it.",
+      "type": "noul"
+    },
+    "walk.user_declines": {
+      "accept": 0.5,
+      "escalate": 0.4,
+      "instructions": "In `later.text`, `user.name` explicitly declines or refuses the request made in `ask`.",
+      "type": "noul"
+    },
+    "walk.user_delivers": {
+      "accept": 0.77,
+      "escalate": 0.55,
+      "instructions": "`later.text` provides what `ask` requests.",
+      "type": "noul"
+    },
+    "walk.user_hands_off": {
+      "accept": 0.5,
+      "escalate": 0.4,
+      "instructions": "In `later.text`, `user.name` says another person will do what `ask` requests.",
+      "type": "noul"
+    },
+    "walk.user_promises": {
+      "accept": 0.58,
+      "escalate": 0.5,
+      "instructions": "`later.text` indicates a commitment or intention by the author to complete the requested task at a later time.",
+      "type": "noul"
+    },
+    "walk.wp_asks_again": {
+      "accept": 0.5,
+      "escalate": 0.22,
+      "instructions": "In `later.text`, `waiting_party` chases `ask` by directly requesting a status update or completion.",
+      "type": "noul"
+    },
+    "walk.wp_changes_due": {
+      "accept": 0.5,
+      "escalate": 0.4,
+      "instructions": "In `later.text`, `waiting_party` changes the `due` time.",
+      "type": "noul"
+    },
+    "walk.wp_changes_terms": {
+      "accept": 0.98,
+      "escalate": 0.2,
+      "instructions": "In `later.text`, `waiting_party` changes, updates, or modifies what `ask` requires.",
+      "type": "noul"
+    },
+    "walk.wp_no_longer_needed": {
+      "accept": 0.97,
+      "escalate": 0.3,
+      "instructions": "In `later.text`, `waiting_party` explicitly withdraws `ask`.",
+      "type": "noul"
+    },
+    "walk.wp_received": {
+      "accept": 0.88,
+      "escalate": 0.5,
+      "instructions": "In `later.text`, `waiting_party` explicitly confirms receipt.",
+      "type": "noul"
+    },
+    "walk.wp_still_owed": {
+      "accept": 0.5,
+      "escalate": 0.2,
+      "instructions": "After `later.text`, `user.name` still owes `waiting_party` an action for `ask`.",
+      "type": "noul"
     }
   },
   "schema_version": 1,
-  "tuned_at": "2026-09-27T15:18:48.313117+00:00"
+  "tuned_at": "2026-10-22T03:49:06.508160+00:00"
 }
