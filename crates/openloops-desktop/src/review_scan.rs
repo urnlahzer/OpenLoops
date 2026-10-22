@@ -5923,7 +5923,7 @@ struct DateFollowupJob<'a> {
     unit: closure_walk::UnitKind,
     text: String,
     probability: f64,
-    candidates: Vec<(String, String)>,
+    candidates: Vec<closure_walk::DateCandidate>,
     questions: Questions,
     state: serde_json::Value,
 }
@@ -6110,7 +6110,7 @@ fn walk_unit_date_candidates(
     later: &ReviewMessage,
     unit: closure_walk::UnitKind,
     ordinal: usize,
-) -> Vec<(String, String)> {
+) -> Vec<closure_walk::DateCandidate> {
     let ordinals: Vec<usize> = match unit {
         closure_walk::UnitKind::Paragraph => vec![ordinal],
         closure_walk::UnitKind::Message => (0..later.input.message.body_blocks.len()).collect(),
@@ -6120,7 +6120,11 @@ fn walk_unit_date_candidates(
     for paragraph_ordinal in ordinals {
         for candidate in extraction_temporal_candidates(&later.input, paragraph_ordinal) {
             if seen.insert(candidate.value.clone()) {
-                candidates.push((format!("t{}", candidates.len()), candidate.value));
+                candidates.push(closure_walk::DateCandidate {
+                    handle: format!("t{}", candidates.len()),
+                    value: candidate.value,
+                    text: candidate.text,
+                });
             }
         }
     }
@@ -8994,7 +8998,7 @@ mod tests {
         sent_at: &str,
         thread_id: &str,
         message_index: usize,
-    ) -> Result<Vec<Vec<(String, String)>>, String> {
+    ) -> Result<Vec<Vec<closure_walk::DateCandidate>>, String> {
         let mut item = reply_to(
             "recipient@example.invalid",
             &format!("{thread_id}-{message_index}"),
@@ -9093,8 +9097,12 @@ mod tests {
                         .into_iter()
                         .map(|unit| {
                             unit.into_iter()
-                                .map(|(handle, value)| {
-                                    serde_json::json!({ "handle": handle, "value": value })
+                                .map(|candidate| {
+                                    serde_json::json!({
+                                        "handle": candidate.handle,
+                                        "value": candidate.value,
+                                        "text": candidate.text,
+                                    })
                                 })
                                 .collect::<Vec<_>>()
                         })
@@ -9190,20 +9198,38 @@ mod tests {
     #[test]
     fn export_walk_date_candidates_for_message() {
         let paragraphs = vec![
-            "Please hold September 9, 2026.".to_owned(),
+            "Please hold September 9, 2026 by Friday.".to_owned(),
             "The rest of the details follow.".to_owned(),
         ];
         let units =
             walk_date_candidate_units(&paragraphs, "2026-09-02T12:00:00Z", "thread-test", 0)
                 .unwrap();
-        assert_eq!(
-            units,
-            vec![
-                vec![("t0".to_owned(), "2026-09-09".to_owned())],
-                vec![],
-                vec![("t0".to_owned(), "2026-09-09".to_owned())],
-            ]
-        );
+        let first = vec![
+            closure_walk::DateCandidate {
+                handle: "t0".to_owned(),
+                value: "2026-09-09".to_owned(),
+                text: "2026-09-09".to_owned(),
+            },
+            closure_walk::DateCandidate {
+                handle: "t1".to_owned(),
+                value: "2026-09-04".to_owned(),
+                text: "by Friday".to_owned(),
+            },
+        ];
+        assert_eq!(units, vec![first.clone(), vec![], first]);
+        let thread = serde_json::json!({
+            "thread_id": "thread-test",
+            "later": [{
+                "sent_at": "2026-09-02T12:00:00Z",
+                "paragraphs": paragraphs,
+            }],
+        });
+        let exported = walk_date_export_thread(&thread.to_string(), 0);
+        let output: serde_json::Value = serde_json::from_str(&exported.output_line).unwrap();
+        let candidate = &output["messages"][0]["units"][0][1];
+        assert_eq!(candidate["handle"], "t1");
+        assert_eq!(candidate["value"], "2026-09-04");
+        assert_eq!(candidate["text"], "by Friday");
     }
 
     fn vocative_message() -> ConversationMessage {
@@ -15377,6 +15403,51 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         );
         assert!(result.analysis.items[0].suggested_update.is_none());
         assert_eq!(client.calls(), 1, "no date candidate means no follow-up");
+    }
+
+    #[test]
+    fn walk_offers_relative_date_text_and_picks_its_resolved_deadline() {
+        let (mut all, item) = closure_test_messages();
+        let mut promise = reply_to("sam@example.invalid", "user-1", "c1", "acct", "Fee");
+        promise.received = "2026-09-02T12:00:00Z".into();
+        promise.body = "I will send the rest by Friday.".into();
+        all.push(prepare(&promise, "Sent", all.len()).unwrap());
+        let client = FixedDecisionClient::walk(|_, _, id| {
+            (id == "walk.responds" || id == "walk.user_promises").then(|| registry_accept(id))
+        })
+        .with_choice(|_, _, id, options| {
+            if id == closure_walk::NEW_DATE {
+                options
+                    .iter()
+                    .any(|option| option == "t0")
+                    .then(|| ("t0".to_owned(), registry_accept(id)))
+            } else {
+                options
+                    .iter()
+                    .find(|option| option.as_str() == "none")
+                    .cloned()
+                    .map(|none| (none, registry_accept(id)))
+            }
+        });
+
+        let result = run_decision_closures(
+            &all,
+            vec![item],
+            &client,
+            &empty_chat(),
+            &ScanProgress::default(),
+            1_800_000_000,
+        );
+
+        let date_options = client.choice_options(closure_walk::NEW_DATE);
+        assert!(
+            date_options
+                .iter()
+                .any(|(handle, text)| { handle == "t0" && text == "by Friday" })
+        );
+        let suggestion = result.analysis.items[0].suggested_update.as_ref().unwrap();
+        assert_eq!(suggestion.kind, SuggestedUpdateKind::DeadlineChange);
+        assert_eq!(suggestion.temporal_value.as_deref(), Some("2026-09-04"));
     }
 
     #[test]

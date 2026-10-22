@@ -365,6 +365,14 @@ pub(super) fn date_state(ask: &str, text: &str) -> serde_json::Value {
     serde_json::json!({"ask": ask, "later": {"text": text}})
 }
 
+/// One date option's display text and the value recorded for its handle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DateCandidate {
+    pub handle: String,
+    pub value: String,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct HandoffCandidate {
     pub handle: String,
@@ -413,8 +421,7 @@ pub(super) fn handoff_pick(
         .cloned()
 }
 
-/// `candidates` are `(handle, normalized value)` pairs.
-pub(super) fn date_questions(candidates: &[(String, String)]) -> Result<Questions, ProviderError> {
+pub(super) fn date_questions(candidates: &[DateCandidate]) -> Result<Questions, ProviderError> {
     let registered = Registry::get()
         .question(NEW_DATE)
         .ok_or(ProviderError::InvalidQuestion)?;
@@ -428,14 +435,14 @@ pub(super) fn date_questions(candidates: &[(String, String)]) -> Result<Question
         );
     let mut options: Vec<(&str, &str)> = candidates
         .iter()
-        .map(|(handle, value)| (handle.as_str(), value.as_str()))
+        .map(|candidate| (candidate.handle.as_str(), candidate.text.as_str()))
         .collect();
     options.push((NONE_OPTION, none));
     Questions::new().choice(NEW_DATE, &registered.instructions, &options)
 }
 
-/// The chosen normalized date, or `None` (`none`, gray or low confidence).
-pub(super) fn date_pick(answers: &Answers, candidates: &[(String, String)]) -> Option<String> {
+/// The chosen date value, or `None` (`none`, gray or low confidence).
+pub(super) fn date_pick(answers: &Answers, candidates: &[DateCandidate]) -> Option<String> {
     let Some(Answer::Choice {
         choice, confidence, ..
     }) = answers.get(NEW_DATE)
@@ -447,8 +454,8 @@ pub(super) fn date_pick(answers: &Answers, candidates: &[(String, String)]) -> O
     }
     candidates
         .iter()
-        .find(|(handle, _)| handle == choice)
-        .map(|(_, value)| value.clone())
+        .find(|candidate| &candidate.handle == choice)
+        .map(|candidate| candidate.value.clone())
 }
 
 /// One event an ask may serve.
@@ -911,6 +918,80 @@ mod tests {
         assert!(!expired(&ends_answers(accept(EXPIRY_ENDS)), end, end));
         assert!(!expired(&ends_answers(no(EXPIRY_ENDS)), end, end + 1));
         assert!(!expired(&ends_answers(gray(EXPIRY_ENDS)), end, end + 1));
+    }
+
+    #[test]
+    fn date_questions_offer_candidate_text_and_none() {
+        let candidates = vec![
+            DateCandidate {
+                handle: "t0".into(),
+                value: "2026-09-04".into(),
+                text: "by Friday".into(),
+            },
+            DateCandidate {
+                handle: "t1".into(),
+                value: "2026-09-05".into(),
+                text: "tomorrow morning".into(),
+            },
+        ];
+        let questions = date_questions(&candidates).unwrap();
+        let body = openloops_inference::decision::request_body(
+            MODEL,
+            &serde_json::json!({}),
+            &questions,
+            false,
+        )
+        .unwrap();
+        let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let options = &request["questions"][NEW_DATE]["criteria"];
+
+        assert_eq!(options["t0"], "by Friday");
+        assert_eq!(options["t1"], "tomorrow morning");
+        let registered_none = Registry::get()
+            .question(NEW_DATE)
+            .and_then(|question| {
+                question
+                    .options
+                    .iter()
+                    .find(|(key, _)| key == NONE_OPTION)
+                    .map(|(_, text)| text.clone())
+            })
+            .unwrap();
+        assert_eq!(options["none"], registered_none.as_str());
+    }
+
+    #[test]
+    fn date_pick_returns_the_resolved_value_for_a_relative_candidate() {
+        let candidates = vec![DateCandidate {
+            handle: "t0".into(),
+            value: "2026-09-04".into(),
+            text: "by Friday".into(),
+        }];
+        let questions = date_questions(&candidates).unwrap();
+        let mut probabilities = serde_json::Map::new();
+        probabilities.insert("t0".into(), serde_json::Value::from(accept(NEW_DATE)));
+        probabilities.insert("none".into(), serde_json::Value::from(0.0));
+        let body = serde_json::json!({
+            "model": MODEL,
+            "answers": {NEW_DATE: {
+                "type": "choice",
+                "choice": "t0",
+                "probabilities": probabilities,
+                "confidence": accept(NEW_DATE)
+            }},
+            "usage": {"input_tokens": 1}
+        });
+        let answers = openloops_inference::decision::parse_answers(
+            &serde_json::to_vec(&body).unwrap(),
+            MODEL,
+            &questions,
+        )
+        .unwrap();
+
+        assert_eq!(
+            date_pick(&answers, &candidates).as_deref(),
+            Some("2026-09-04")
+        );
     }
 
     #[test]
