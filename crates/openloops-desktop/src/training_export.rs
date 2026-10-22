@@ -3,16 +3,19 @@
 //! `DatasetRow`). Pure and synchronous: takes a snapshot of [`ReviewState`]
 //! and a destination folder, and writes `triage.jsonl` and `closure.jsonl`.
 //!
-//! This deliberately writes real mail text (subjects, paragraphs,
-//! participants) to disk -- see `docs/inbox-review.md` and
-//! `tools/jev-optimize/README.md` for the privacy note. Nothing here ever
-//! logs or returns row content; callers may only surface row counts.
+//! This deliberately writes mail text (subjects, paragraphs, participants)
+//! to disk after applying the Jev name cipher to recognized participants --
+//! see `docs/inbox-review.md` and `tools/jev-optimize/README.md` for the
+//! privacy note. Other names can remain in prose. Nothing here ever logs or
+//! returns row content; callers may only surface row counts.
 
 use crate::claim_view::{LoopItem, Owner, RecoveredClaimKind, SuggestedUpdateKind, claim_kind_of};
 use crate::link_state::LinkKind;
+use crate::name_cipher::NameCipher;
 use crate::review_model::{
     ReviewMessage, ReviewState, closure_candidates, same_thread_closure_candidates,
 };
+use openloops_inference::decision::Questions;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::io::Write as _;
@@ -46,7 +49,8 @@ impl From<std::io::Error> for ExportError {
     }
 }
 
-/// Writes `triage.jsonl` and `closure.jsonl` under `folder`.
+/// Writes ciphered `triage.jsonl`, `closure.jsonl`, and `rules.jsonl` under
+/// `folder`.
 ///
 /// # Errors
 /// Refuses a relative `folder` ([`ExportError::RelativePath`]) or one
@@ -60,9 +64,10 @@ pub fn export(review: &ReviewState, folder: &Path) -> Result<ExportSummary, Expo
         return Err(ExportError::PathInRepo);
     }
     std::fs::create_dir_all(folder)?;
-    let triage = triage_rows(review);
-    let closure = closure_rows(review);
-    let rules = rules_rows(review);
+    let cipher = NameCipher::from_messages(&review.messages);
+    let triage = cipher_rows(triage_rows(review), &cipher);
+    let closure = cipher_rows(closure_rows(review), &cipher);
+    let rules = cipher_rows(rules_rows(review), &cipher);
     write_jsonl(&folder.join("triage.jsonl"), &triage)?;
     write_jsonl(&folder.join("closure.jsonl"), &closure)?;
     write_jsonl(&folder.join("rules.jsonl"), &rules)?;
@@ -72,6 +77,12 @@ pub fn export(review: &ReviewState, folder: &Path) -> Result<ExportSummary, Expo
         rules_rows: rules.len(),
         files_written: 3,
     })
+}
+
+fn cipher_rows(rows: Vec<Value>, cipher: &NameCipher) -> Vec<Value> {
+    rows.into_iter()
+        .map(|row| cipher.encode_request(&row, &Questions::new()).state)
+        .collect()
 }
 
 fn rules_rows(review: &ReviewState) -> Vec<Value> {
@@ -822,6 +833,39 @@ mod tests {
         let review = layout_fixture();
         let error = export(&review, Path::new("relative/folder")).expect_err("relative refused");
         assert!(matches!(error, ExportError::RelativePath));
+    }
+
+    #[test]
+    fn export_ciphers_known_people_in_every_training_file() {
+        let mut review = layout_fixture();
+        let message = &mut review.messages[0];
+        message.input.message.subject =
+            openloops_inference::blocks::CanonicalBlock::new("Rellian Voss asked for a document")
+                .unwrap();
+        message.input.message.sender = Some(
+            openloops_inference::blocks::CanonicalBlock::new(
+                "Rellian Voss <rellian.voss@example.invalid>",
+            )
+            .unwrap(),
+        );
+        message.input.message.body_blocks[0] = openloops_inference::blocks::CanonicalBlock::new(
+            "Rellian Voss can be reached at rellian.voss@example.invalid.",
+        )
+        .unwrap();
+
+        let (_summary, triage_path, closure_path) = export_to_temp(&review);
+        let folder = triage_path.parent().unwrap().to_path_buf();
+        let files = [triage_path, closure_path, folder.join("rules.jsonl")];
+        for path in &files {
+            let text = std::fs::read_to_string(path).expect("read exported data");
+            assert!(!text.contains("Rellian"), "real given name in {path:?}");
+            assert!(!text.contains("Voss"), "real family name in {path:?}");
+            assert!(
+                !text.contains("rellian.voss@example.invalid"),
+                "real address in {path:?}"
+            );
+        }
+        std::fs::remove_dir_all(folder).ok();
     }
 
     #[test]

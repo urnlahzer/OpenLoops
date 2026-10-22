@@ -38,11 +38,18 @@ the messages it reads:
 - the user: `own_display_name`, `own_given_name`, `own_addresses`.
 
 One person is one lowercase address; the display names seen for that
-address all belong to that person. A display name counts as a person's name
+address all belong to that person. Code first removes surrounding quotes,
+bracketed parts such as "(Acme)", and suffixes such as "Jr.", "III" or
+"Esq.". Initials ("Q.") and lower-case particles ("de", "van") after the
+first word stay in the full name but are not the given or family name, so
+"Ana Q. de la Cruz" has given name "Ana" and family name "Cruz". A leading
+initial ("J. Smith") is the given name. When the user's given name differs
+from the first word of their display name ("Elsie" for "Elsabet Morrow"),
+both are matched as given names. A display name counts as a person's name
 only when it looks like one:
 
-- one to four words, each starting with an upper-case letter and made of
-  letters, hyphens or apostrophes;
+- one to four name words, each starting with an upper-case letter and made
+  of letters, hyphens or apostrophes;
 - no word from a fixed organization and system list (for example `Inc`,
   `LLC`, `Ltd`, `Team`, `Support`, `Billing`, `Notifications`, `Service`,
   `Admin`, `Sales`, `Help`, `Desk`, `Calendar`, `Bot`, `Reply`);
