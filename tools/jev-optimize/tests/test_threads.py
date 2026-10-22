@@ -1149,3 +1149,12 @@ def test_plan_payload_states_what_to_write_not_where_it_goes():
     assert later[1]["response_required"] is False
     assert later[1]["filler_count"] == 2
     assert all("paragraphs" not in item and "responding" not in item for item in later)
+
+
+def test_pay_by_date_plans_mention_an_event_that_does_not_end_the_ask():
+    plans = plan_threads(600)
+    pay = [plan for plan in plans if plan.hard_case == "pay_by_date"]
+    assert pay and all(plan.has_event and plan.ends_with_event is False for plan in pay)
+    labels = [plan.ends_with_event for plan in plans if plan.has_event]
+    assert labels.count(False) >= 80
+    assert labels.count(True) >= 80

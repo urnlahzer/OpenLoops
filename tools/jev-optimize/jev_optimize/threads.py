@@ -147,10 +147,17 @@ def plan_threads(count: int, seed: int = 20261021) -> list[ThreadPlan]:
     for index in range(count):
         hard_case = HARD_CASES[index % len(HARD_CASES)]
         later = _later_for(hard_case, index, role_cycle, rng)
-        has_event = hard_case in {"rsvp_before_event", "prepare_for_meeting"} or index % 7 == 0
+        # pay_by_date asks mention an event but stay owed after it ("pay the
+        # gala invoice by 9/12"), the main source of expiry negatives.
+        has_event = (
+            hard_case in {"rsvp_before_event", "prepare_for_meeting", "pay_by_date"}
+            or index % 7 == 0
+        )
         ends = None
         if has_event:
-            ends = hard_case in {"rsvp_before_event", "prepare_for_meeting"} or index % 2 == 0
+            ends = hard_case in {"rsvp_before_event", "prepare_for_meeting"} or (
+                hard_case != "pay_by_date" and index % 2 == 0
+            )
         plans.append(ThreadPlan(f"thread-{index:05d}", hard_case, has_event, ends, later))
     handoff_count = sum(
         message.outcome == "user_hands_off"
@@ -313,7 +320,11 @@ def _stub_ask(plan: ThreadPlan, number: int) -> tuple[str, str, str | None]:
             f"board meeting {number} on 2026-09-12",
         )
     if plan.hard_case == "pay_by_date":
-        return f"Please pay invoice {number} by 9/12.", "9/12", None
+        return (
+            f"Please pay invoice {number} for the spring gala by 9/12.",
+            "9/12",
+            f"the spring gala {number} on 2026-10-30",
+        )
     event = f"planning session {number} on 2026-11-05" if plan.has_event else None
     if plan.ends_with_event:
         return (
@@ -518,8 +529,10 @@ _PLAN_DEFINITIONS = (
     "event: when has_event is true, write a named event with a date in the event field and "
     "mention it in the ask; otherwise event is null. ends_with_event true: the ask only helps "
     "the waiting party prepare for or take part in that event (prepare, attend, RSVP, bring), "
-    "so doing it after the event ends has no purpose. ends_with_event false: the ask stays "
-    "useful after the event (send a report, pay an invoice), even if it mentions the event. "
+    "so doing it after the event ends has no purpose. ends_with_event false: the ask is owed "
+    "after the event or apart from it (a report about the event, an invoice payment, a "
+    "follow-up after it), even if it mentions the event; its wording never says it is for "
+    "preparing for, registering for, or attending the event. "
     "Outcomes for response: wp_received = the waiting party says they received "
     "what the ask requests; wp_no_longer_needed = the waiting party withdraws the ask; "
     "wp_asks_again = the waiting party chases or asks for an update; wp_changes_terms_owed = "
