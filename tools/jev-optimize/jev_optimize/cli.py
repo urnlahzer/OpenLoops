@@ -125,7 +125,10 @@ def main() -> None:
         for path in paths:
             print(path)
     elif args.command == "generate-threads":
-        count = args.threads if args.threads is not None else (800 if args.stub else 600)
+        # A smoke run is the small paid trial: 24 threads cover every outcome
+        # and hard case in one round of requests.
+        default_count = 800 if args.stub else (24 if args.smoke else 600)
+        count = args.threads if args.threads is not None else default_count
         if count <= 0:
             raise SystemExit("generate-threads: --threads must be positive")
         if args.stub:
@@ -155,8 +158,12 @@ def main() -> None:
         else:
             from .threads import generate_threads_llm
 
+            output = args.output
+            if args.smoke and output == DEFAULT_ROOT:
+                # A smoke run never writes over the committed corpus.
+                output = Path("runs") / "smoke-threads"
             result = generate_threads_llm(
-                args.output, threads=count, seed=args.seed, smoke=args.smoke
+                output, threads=count, seed=args.seed, smoke=args.smoke
             )
             print(json.dumps(result, indent=2, sort_keys=True))
     elif args.command == "check-corpus":

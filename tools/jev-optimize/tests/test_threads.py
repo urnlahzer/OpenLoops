@@ -494,14 +494,23 @@ def test_generate_stub_refuses_thread_derived_sets(tmp_path):
 
 
 class FakeOpenRouter:
-    def __init__(self, *, malformed_call=2, corrupt_call=3, omit_handoff_once=False):
+    def __init__(
+        self,
+        *,
+        malformed_call=2,
+        corrupt_call=3,
+        omit_handoff_once=False,
+        repeat_key_once=False,
+    ):
         self.calls = 0
         self.malformed_call = malformed_call
         self.corrupt_call = corrupt_call
         self.omit_handoff_once = omit_handoff_once
+        self.repeat_key_once = repeat_key_once
         self.omitted_handoffs = set()
         self.omitted_names = {}
         self.omitted_paragraphs = {}
+        self.repeated_key_threads = set()
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.calls += 1
@@ -516,10 +525,21 @@ class FakeOpenRouter:
         for index, plan in enumerate(plans):
             later = []
             for message in plan["later"]:
-                paragraphs = [
-                    f"Paragraph {paragraph} about the vendor summary for {plan['thread_id']}."
-                    for paragraph in range(message["paragraphs"])
+                filler_topics = (
+                    "The break room has a new coffee machine.",
+                    "A garden path is being repaved this week.",
+                    "The parking garage now closes at six.",
+                )
+                filler_count = message["filler_count"]
+                fillers = [
+                    filler_topics[paragraph % len(filler_topics)]
+                    for paragraph in range(filler_count)
                 ]
+                response = (
+                    None
+                    if message["outcome"] == "unrelated"
+                    else f"I will send the vendor summary for {plan['thread_id']} next week."
+                )
                 delegate_name = message.get("delegate_name")
                 if message["outcome"] == "user_hands_off":
                     omit_name = (
@@ -529,21 +549,21 @@ class FakeOpenRouter:
                     if omit_name:
                         self.omitted_handoffs.add(plan["thread_id"])
                         self.omitted_names[plan["thread_id"]] = delegate_name
-                        self.omitted_paragraphs[plan["thread_id"]] = paragraphs[
-                            message["responding"]
-                        ]
+                        self.omitted_paragraphs[plan["thread_id"]] = response
+                        response = f"I will send the vendor summary for {plan['thread_id']}."
                     else:
-                        paragraphs[message["responding"]] = (
-                            f"{delegate_name} will send the vendor summary."
-                        )
+                        response = f"{delegate_name} will send the vendor summary."
+                if self.repeat_key_once and not self.repeated_key_threads and fillers:
+                    self.repeated_key_threads.add(plan["thread_id"])
+                    fillers[0] = "The vendor kitchen has a new coffee machine."
                 later.append(
-                    {"paragraphs": paragraphs, "delegate_name": delegate_name}
+                    {"response": response, "fillers": fillers, "delegate_name": delegate_name}
                 )
             ask = f"Could you send the vendor summary for {plan['thread_id']} by Friday?"
             if self.calls == self.corrupt_call and index == 0:
                 ask += " See https://example.com/x"
             if self.calls == self.corrupt_call and index == 1 and later:
-                later[0]["paragraphs"].append("An extra paragraph.")
+                later[0]["fillers"].append("An extra paragraph.")
             threads.append(
                 {
                     "thread_id": plan["thread_id"],
@@ -582,6 +602,7 @@ def test_llm_threads_reject_bad_rows_and_retry_offline(tmp_path, monkeypatch):
     assert fake.calls >= 4
     assert "https://" not in (tmp_path / "walk.jsonl").read_text(encoding="utf-8")
     assert out["rejected"] >= 2
+    assert sum(out["rejected_reasons"].values()) == out["rejected"]
 
 
 def test_llm_handoff_paragraph_without_delegate_is_rejected_and_regenerated(
@@ -630,6 +651,178 @@ def test_llm_handoff_paragraph_without_delegate_is_rejected_and_regenerated(
                 assert later_message["delegate"]["name"] in later_message["paragraphs"][
                     message["responding"]
                 ]
+
+
+def test_llm_thread_assembly_places_response_at_the_planned_index():
+    from jev_optimize.threads import ThreadPlan, _validated_thread, stub_threads
+
+    plan = ThreadPlan(
+        "assembly-thread",
+        "none",
+        False,
+        None,
+        [
+            _m("user", "user_delivers", paragraphs=2, responding=0),
+            _m("user", "user_promises", paragraphs=3, responding=2),
+            _m("third_party", "unrelated", paragraphs=2, responding=1),
+        ],
+    )
+    assigned = stub_threads([plan])[0]
+    fillers = [
+        "The break room has a new coffee machine.",
+        "A garden path is being repaved this week.",
+        "The parking garage now closes at six.",
+    ]
+    candidate = {
+        "thread_id": plan.thread_id,
+        "ask": "Could you send the vendor summary before Friday?",
+        "due": "Friday",
+        "event": None,
+        "later": [
+            {
+                "response": "Attached is the vendor summary.",
+                "fillers": fillers[:1],
+                "delegate_name": None,
+            },
+            {
+                "response": "I will send the vendor summary next week.",
+                "fillers": fillers[:2],
+                "delegate_name": None,
+            },
+            {"response": None, "fillers": fillers[:2], "delegate_name": None},
+        ],
+    }
+
+    thread, reason = _validated_thread(candidate, plan, assigned)
+
+    assert reason == "ok"
+    assert thread is not None
+    assert thread.later == [
+        ["Attached is the vendor summary.", fillers[0]],
+        [fillers[0], fillers[1], "I will send the vendor summary next week."],
+        fillers[:2],
+    ]
+
+
+def test_llm_thread_schema_uses_strict_response_and_filler_fields():
+    from jev_optimize.threads import _thread_schema
+
+    schema = _thread_schema()["json_schema"]
+    later = schema["schema"]["properties"]["threads"]["items"]["properties"]["later"]
+    later_item = later["items"]
+    assert schema["strict"] is True
+    assert later_item["additionalProperties"] is False
+    assert set(later_item["properties"]) == {"response", "fillers", "delegate_name"}
+    assert set(later_item["required"]) == {"response", "fillers", "delegate_name"}
+
+
+def test_llm_threads_reject_missing_response_and_wrong_filler_count():
+    from jev_optimize.threads import ThreadPlan, _validated_thread, stub_threads
+
+    plan = ThreadPlan(
+        "validation-thread",
+        "none",
+        False,
+        None,
+        [_m("user", "user_delivers", paragraphs=2, responding=1)],
+    )
+    assigned = stub_threads([plan])[0]
+    candidate = {
+        "thread_id": plan.thread_id,
+        "ask": "Please send the vendor summary by Friday.",
+        "due": "Friday",
+        "event": None,
+        "later": [
+            {
+                "response": None,
+                "fillers": ["The break room has a new coffee machine."],
+                "delegate_name": None,
+            }
+        ],
+    }
+    thread, reason = _validated_thread(candidate, plan, assigned)
+    assert thread is None
+    assert reason == "response is missing or malformed"
+
+    candidate["later"][0]["response"] = "Attached is the vendor summary."
+    candidate["later"][0]["fillers"].append("A garden path is being repaved this week.")
+    thread, reason = _validated_thread(candidate, plan, assigned)
+    assert thread is None
+    assert reason == "filler count or text mismatch"
+
+
+def test_repeated_filler_key_term_is_rejected_then_regenerated(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("OPENROUTER_SYNTH_MODEL", "fake/model")
+    fake = FakeOpenRouter(
+        malformed_call=None,
+        corrupt_call=None,
+        repeat_key_once=True,
+    )
+    client = httpx.Client(transport=httpx.MockTransport(fake))
+    result = generate_threads_llm(
+        tmp_path,
+        threads=24,
+        seed=3,
+        client=client,
+        parallel=1,
+        smoke=True,
+        batch_size=24,
+    )
+
+    reason = "filler shares ask or event key term"
+    assert fake.repeated_key_threads
+    assert fake.calls >= 2
+    assert result["rejected_reasons"][reason] >= 1
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "threads.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    regenerated = [record for record in records if record["thread_id"] in fake.repeated_key_threads]
+    assert regenerated
+    for record in regenerated:
+        for planned, later in zip(record["plan"]["later"], record["later"], strict=True):
+            paragraphs = later["paragraphs"]
+            if planned["outcome"] == "unrelated":
+                fillers = paragraphs
+            else:
+                fillers = [
+                    paragraph
+                    for index, paragraph in enumerate(paragraphs)
+                    if index != planned["responding"]
+                ]
+            assert all("vendor" not in filler.casefold() for filler in fillers)
+
+
+def test_filler_key_term_filter_ignores_stop_words_and_pool_names():
+    from jev_optimize.threads import ThreadPlan, _validated_thread, stub_threads
+
+    plan = ThreadPlan(
+        "allowed-filler-thread",
+        "none",
+        False,
+        None,
+        [_m("user", "user_delivers", paragraphs=2)],
+    )
+    assigned = stub_threads([plan])[0]
+    candidate = {
+        "thread_id": plan.thread_id,
+        "ask": "Could you send notes about Tomas Lindqvist before Friday?",
+        "due": "Friday",
+        "event": None,
+        "later": [
+            {
+                "response": "Attached are the notes.",
+                "fillers": ["Tomas Lindqvist waits before lunch."],
+                "delegate_name": None,
+            }
+        ],
+    }
+
+    thread, reason = _validated_thread(candidate, plan, assigned)
+
+    assert reason == "ok"
+    assert thread is not None
 
 
 def _answers(role, gate, **branch):
@@ -884,3 +1077,75 @@ def test_scrub_does_not_join_names_across_fields():
     assert scrub_row({"later": {"text": "Please ask Quentin Marlowe."}}) == [
         "capitalized name outside the synthetic pool"
     ]
+
+
+def test_generate_threads_smoke_is_small_and_never_writes_the_committed_corpus(monkeypatch):
+    import sys
+    from pathlib import Path
+
+    import jev_optimize.threads as threads_module
+    from jev_optimize import cli
+
+    calls = []
+
+    def fake_generate(output, *, threads, seed, smoke):
+        calls.append((Path(output), threads, smoke))
+        return {"threads": threads}
+
+    monkeypatch.setattr(threads_module, "generate_threads_llm", fake_generate)
+    monkeypatch.setattr(sys, "argv", ["jev-optimize", "generate-threads", "--llm", "--smoke"])
+    cli.main()
+    monkeypatch.setattr(sys, "argv", ["jev-optimize", "generate-threads", "--llm"])
+    cli.main()
+
+    assert calls[0] == (Path("runs") / "smoke-threads", 24, True)
+    assert calls[1] == (cli.DEFAULT_ROOT, 600, False)
+
+
+def test_a_refused_thread_request_stops_the_run_and_names_the_status(tmp_path, monkeypatch):
+    from jev_optimize.threads import ThreadRequestError
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("OPENROUTER_SYNTH_MODEL", "fake/model")
+    calls = []
+
+    def refuse(request):
+        calls.append(request)
+        return httpx.Response(
+            404, json={"error": {"message": "No endpoints found matching your data policy"}}
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(refuse))
+    with pytest.raises(ThreadRequestError, match="HTTP 404.*data policy"):
+        generate_threads_llm(
+            tmp_path, threads=24, seed=3, client=client, parallel=1, smoke=True, batch_size=8
+        )
+    assert len(calls) == 1
+    assert not (tmp_path / "threads.jsonl").exists()
+
+
+def test_plan_payload_states_what_to_write_not_where_it_goes():
+    from jev_optimize.threads import _plan_payload
+
+    plan = ThreadPlan(
+        "payload-thread",
+        "none",
+        False,
+        None,
+        [
+            _m("waiting_party", "wp_received", paragraphs=3, responding=1),
+            _m("user", "unrelated", 2),
+        ],
+    )
+    thread = stub_threads([plan])[0]
+    later = _plan_payload(plan, thread)["later"]
+    assert later[0] == {
+        "author_role": "waiting_party",
+        "outcome": "wp_received",
+        "response_required": True,
+        "filler_count": 2,
+        "delegate_name": None,
+    }
+    assert later[1]["response_required"] is False
+    assert later[1]["filler_count"] == 2
+    assert all("paragraphs" not in item and "responding" not in item for item in later)

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import random
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -449,10 +450,19 @@ def thread_record(thread: Thread, source: str = "synthetic-stub") -> dict[str, A
 def _plan_payload(plan: ThreadPlan, thread: Thread) -> dict[str, Any]:
     later = []
     for index, message in enumerate(plan.later):
-        item = asdict(message)
+        # The model sees what to write, not where it goes: code places the
+        # response at the planned paragraph.
+        responds = message.outcome != "unrelated"
         delegate = thread.delegates[index]
-        item["delegate_name"] = delegate["name"] if delegate else None
-        later.append(item)
+        later.append(
+            {
+                "author_role": message.author_role,
+                "outcome": message.outcome,
+                "response_required": responds,
+                "filler_count": message.paragraphs - int(responds),
+                "delegate_name": delegate["name"] if delegate else None,
+            }
+        )
     return {
         "thread_id": plan.thread_id,
         "hard_case": plan.hard_case,
@@ -466,14 +476,14 @@ def _plan_payload(plan: ThreadPlan, thread: Thread) -> dict[str, Any]:
 
 
 def _thread_schema() -> dict[str, Any]:
-    paragraph = {"type": "string"}
     later = {
         "type": "object",
         "properties": {
-            "paragraphs": {"type": "array", "items": paragraph},
+            "response": {"type": ["string", "null"]},
+            "fillers": {"type": "array", "items": {"type": "string"}},
             "delegate_name": {"type": ["string", "null"]},
         },
-        "required": ["paragraphs", "delegate_name"],
+        "required": ["response", "fillers", "delegate_name"],
         "additionalProperties": False,
     }
     item = {
@@ -510,7 +520,7 @@ _PLAN_DEFINITIONS = (
     "the waiting party prepare for or take part in that event (prepare, attend, RSVP, bring), "
     "so doing it after the event ends has no purpose. ends_with_event false: the ask stays "
     "useful after the event (send a report, pay an invoice), even if it mentions the event. "
-    "Outcomes for the responding paragraph: wp_received = the waiting party says they received "
+    "Outcomes for response: wp_received = the waiting party says they received "
     "what the ask requests; wp_no_longer_needed = the waiting party withdraws the ask; "
     "wp_asks_again = the waiting party chases or asks for an update; wp_changes_terms_owed = "
     "the waiting party changes what is required and the user still owes it (\"the fee is 350, "
@@ -520,12 +530,13 @@ _PLAN_DEFINITIONS = (
     "the user says they will do it later; user_declines = the user declines; user_hands_off = "
     "the user says another named person will do it; third_party_done = another participant "
     "says they did it or will do it; third_party_other = another participant mentions the ask "
-    "without doing it or promising it; unrelated = the paragraph is about something else. "
+    "without doing it or promising it; unrelated = the message has no response to the ask. "
     "Hard cases: thanks_will_look = a brief acknowledgement that promises a later look without "
-    "a date; partial_delivery = the user sends part and promises the rest; "
+    "a date; partial_delivery = the user sends part and promises the rest in the same response "
+    "paragraph; "
     "chaser_after_delivery = the waiting party chases after the user claimed delivery. "
     "For every user_hands_off message, its planned delegate_name is the full name of the "
-    "person who will do the request. Use that name in the responding paragraph. Copy the "
+    "person who will do the request. Use that name in the response paragraph. Copy the "
     "planned delegate_name into the message result; use null for other outcomes."
 )
 
@@ -534,10 +545,18 @@ def _thread_prompt(plans: list[dict[str, Any]]) -> str:
     return (
         "Write realistic but fully invented email threads from these fixed plans. Return strict "
         "JSON with one member named threads, in the same order as the plans. Each result must "
-        "contain thread_id, ask, due, event, and later. Each later message contains paragraphs "
-        "and delegate_name, with exactly the planned paragraph count. Put the planned outcome only "
-        "in the responding paragraph; all other paragraphs must be unrelated. Preserve the listed "
-        "author role, hard case, and event semantics. "
+        "contain thread_id, ask, due, event, and later. Each later message contains response, "
+        "fillers, and delegate_name. The ask is the request paragraph as the waiting "
+        "party wrote it, without a speaker label such as 'Name:'. For a responding outcome, "
+        "response is one paragraph that carries the planned outcome by itself, including any date "
+        "or name it needs. For partial_delivery, that one response paragraph both sends the part "
+        "and promises the rest. Each later message plan gives response_required and "
+        "filler_count. When response_required is true, response is that one paragraph and is "
+        "never null. When response_required is false, response is null. fillers always has "
+        "exactly filler_count paragraphs, and a filler never carries the outcome. "
+        "Each filler must be about a different topic and must never mention the ask, its subject, "
+        "its documents, the event, or the request. Preserve the listed author role, hard case, and "
+        "event semantics. "
         + _PLAN_DEFINITIONS
         + " Use only these invented names: "
         f"{', '.join((*SYNTHETIC_PEOPLE, *SYNTHETIC_COMPANIES, *SYNTHETIC_SERVICES))}. "
@@ -545,6 +564,31 @@ def _thread_prompt(plans: list[dict[str, Any]]) -> str:
         "Plans:\n"
         + json.dumps(plans, ensure_ascii=False, sort_keys=True)
     )
+
+
+_KEY_TERM_STOP_WORDS = frozenset(
+    {
+        "about", "after", "again", "before", "could", "email", "every", "fully", "great", "hello",
+        "morning", "other", "please", "quick", "should", "still", "thank", "thanks", "their",
+        "there", "these", "those", "today", "tomorrow", "update", "which", "while", "would",
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "january",
+        "february", "march", "april", "may", "june", "july", "august", "september", "october",
+        "november", "december",
+    }
+)
+_POOL_NAME_WORDS = frozenset(
+    word
+    for name in (*SYNTHETIC_PEOPLE, *SYNTHETIC_COMPANIES, *SYNTHETIC_SERVICES)
+    for word in re.findall(r"[^\W\d_]+", name.casefold())
+)
+
+
+def _key_terms(text: str) -> set[str]:
+    return {
+        word
+        for word in re.findall(r"[^\W\d_]+", text.casefold())
+        if len(word) >= 5 and word not in _KEY_TERM_STOP_WORDS and word not in _POOL_NAME_WORDS
+    }
 
 
 def _request_thread_batch(
@@ -569,14 +613,43 @@ def _request_thread_batch(
                 "max_tokens": 16384,
             },
         )
-        response.raise_for_status()
+    except httpx.HTTPError:
+        return []
+    if response.status_code >= 400:
+        # A refusal such as a data-policy 404 or an auth error repeats on every
+        # retry, so it stops the run instead of counting as rejected threads.
+        if response.status_code not in _RETRYABLE_STATUS:
+            raise ThreadRequestError(
+                f"thread request refused: HTTP {response.status_code} "
+                f"{_error_message(response)}".rstrip()
+            )
+        return []
+    try:
         content = response.json()["choices"][0]["message"]["content"]
         payload = json.loads(content)
-    except (httpx.HTTPError, KeyError, IndexError, TypeError, json.JSONDecodeError):
+    except (KeyError, IndexError, TypeError, ValueError):
         return []
     if not isinstance(payload, dict) or not isinstance(payload.get("threads"), list):
         return []
     return payload["threads"]
+
+
+class ThreadRequestError(RuntimeError):
+    """The endpoint refused a thread request in a way a retry would repeat."""
+
+
+_RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+
+
+def _error_message(response: httpx.Response) -> str:
+    """The endpoint's own error text (no request content), cut to 300 characters."""
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    error = body.get("error") if isinstance(body, dict) else None
+    message = error.get("message") if isinstance(error, dict) else None
+    return str(message)[:300] if message else ""
 
 
 def _validated_thread(
@@ -600,6 +673,9 @@ def _validated_thread(
     raw_later = candidate.get("later")
     if not isinstance(raw_later, list) or len(raw_later) != len(plan.later):
         return None, "later message count mismatch"
+    blocked_terms = _key_terms(candidate["ask"])
+    if isinstance(event, str):
+        blocked_terms.update(_key_terms(event))
     later: list[list[str]] = []
     for index, (planned_message, generated_message) in enumerate(
         zip(plan.later, raw_later, strict=True)
@@ -612,13 +688,32 @@ def _validated_thread(
         )
         if generated_message.get("delegate_name") != expected_delegate_name:
             return None, "delegate name mismatch"
-        paragraphs = generated_message.get("paragraphs")
+        if "response" not in generated_message:
+            return None, "response is missing or malformed"
+        response = generated_message.get("response")
+        responds = planned_message.outcome != "unrelated"
+        if responds and (not isinstance(response, str) or not response.strip()):
+            return None, "response is missing or malformed"
+        if not responds and response is not None:
+            return None, "unexpected response"
+        fillers = generated_message.get("fillers")
+        expected_fillers = planned_message.paragraphs - int(responds)
         if (
-            not isinstance(paragraphs, list)
-            or len(paragraphs) != planned_message.paragraphs
-            or not all(isinstance(text, str) and text.strip() for text in paragraphs)
+            not isinstance(fillers, list)
+            or len(fillers) != expected_fillers
+            or not all(isinstance(text, str) and text.strip() for text in fillers)
         ):
-            return None, "paragraph count or text mismatch"
+            return None, "filler count or text mismatch"
+        if any(_key_terms(filler) & blocked_terms for filler in fillers):
+            return None, "filler shares ask or event key term"
+        if responds:
+            paragraph_iter = iter(fillers)
+            paragraphs = [
+                response if ordinal == planned_message.responding else next(paragraph_iter)
+                for ordinal in range(planned_message.paragraphs)
+            ]
+        else:
+            paragraphs = list(fillers)
         if planned_message.outcome == "user_hands_off" and (
             not expected_delegate_name
             or expected_delegate_name.casefold()
@@ -687,6 +782,13 @@ def generate_threads_llm(
     pending = list(plans)
     accepted: dict[str, Thread] = {}
     rejected = 0
+    rejected_reasons: dict[str, int] = {}
+
+    def reject(reason: str) -> None:
+        nonlocal rejected
+        rejected += 1
+        rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
+
     attempts = 0
     parallel = max(1, parallel)
     owned_client = client is None
@@ -722,13 +824,13 @@ def generate_threads_llm(
                 for plan in batch:
                     candidate = candidate_by_id.get(plan.thread_id)
                     if candidate is None:
-                        rejected += 1
+                        reject("missing thread result")
                         continue
-                    thread, _reason = _validated_thread(
+                    thread, reason = _validated_thread(
                         candidate, plan, assigned_by_id[plan.thread_id]
                     )
                     if thread is None:
-                        rejected += 1
+                        reject(reason)
                         continue
                     accepted[plan.thread_id] = thread
                     completed.add(plan.thread_id)
@@ -741,7 +843,8 @@ def generate_threads_llm(
     if len(accepted) != threads:
         raise RuntimeError(
             f"synthetic thread generation produced {len(accepted)} of {threads} threads "
-            f"after {attempts} attempts; rejected {rejected} rows"
+            f"after {attempts} attempts; rejected {rejected} rows; "
+            f"reasons {json.dumps(rejected_reasons, sort_keys=True)}"
         )
 
     generated = [accepted[plan.thread_id] for plan in plans]
@@ -770,7 +873,12 @@ def generate_threads_llm(
         write_jsonl(path, (row for row in rows if row["set"] == set_name))
         check_corpus(path, thresholds)
         files.append(path)
-    return {"threads": threads, "rejected": rejected, "files": [str(path) for path in files]}
+    return {
+        "threads": threads,
+        "rejected": rejected,
+        "rejected_reasons": rejected_reasons,
+        "files": [str(path) for path in files],
+    }
 
 
 def _walk_row(thread, ask, role, text, unit, label, source) -> dict[str, Any]:

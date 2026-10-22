@@ -101,8 +101,9 @@ uv run --locked jev-optimize generate-threads --llm --smoke --threads 24 --outpu
 per unit, distinct unit text and ask counts, and at least 20 positive and 20
 negative examples for each labeled question. Splits use `group` (the thread
 id), so every row from a thread stays in one split. The `--llm --smoke` command
-is the small paid trial (OpenRouter, `provider.zdr`); inspect its output before a full
-`--llm` run. The automated test uses `httpx.MockTransport` and never opens a
+is the small paid trial (OpenRouter, `provider.zdr`): 24 threads by default,
+written to `runs/smoke-threads/` unless `--output` names another folder.
+Inspect its output before a full `--llm` run. The automated test uses `httpx.MockTransport` and never opens a
 network connection.
 
 The stub corpus carries `mk-*` marker tokens that reveal its labels to the
