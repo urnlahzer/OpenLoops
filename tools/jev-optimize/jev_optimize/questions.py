@@ -247,57 +247,59 @@ def _walk_signature(name: str, instructions: str) -> type[dspy.Signature]:
 
 
 _WALK_STATEMENTS = {
-    "walk.responds": "`later.paragraph_text` responds to the request in `ask`.",
+    "walk.responds": "`later.text` responds to the request in `ask`.",
     "walk.wp_received": (
-        "In `later.paragraph_text`, `waiting_party` says they received what `ask` requests."
+        "In `later.text`, `waiting_party` says they received what `ask` requests."
     ),
     "walk.wp_no_longer_needed": (
-        "In `later.paragraph_text`, `waiting_party` says they no longer need what `ask` requests."
+        "In `later.text`, `waiting_party` says they no longer need what `ask` requests."
     ),
     "walk.wp_asks_again": (
-        "In `later.paragraph_text`, `waiting_party` asks again for what `ask` requests "
+        "In `later.text`, `waiting_party` asks again for what `ask` requests "
         "or asks for an update on it."
     ),
     "walk.wp_changes_terms": (
-        "In `later.paragraph_text`, `waiting_party` changes what `ask` requests."
+        "In `later.text`, `waiting_party` changes what `ask` requests."
     ),
     "walk.wp_still_owed": (
-        "After `later.paragraph_text`, `user.name` still owes `waiting_party` an action for `ask`."
+        "After `later.text`, `user.name` still owes `waiting_party` an action for `ask`."
     ),
     "walk.wp_changes_due": (
-        "In `later.paragraph_text`, `waiting_party` changes when `ask` must be done."
+        "In `later.text`, `waiting_party` changes when `ask` must be done."
     ),
     "walk.user_delivers": (
-        "In `later.paragraph_text`, `user.name` gives `waiting_party` what `ask` requests."
+        "In `later.text`, `user.name` gives `waiting_party` what `ask` requests."
     ),
     "walk.user_promises": (
-        "In `later.paragraph_text`, `user.name` says they will do what `ask` requests "
+        "In `later.text`, `user.name` says they will do what `ask` requests "
         "at a later time."
     ),
     "walk.user_declines": (
-        "In `later.paragraph_text`, `user.name` declines to do what `ask` requests."
+        "In `later.text`, `user.name` declines to do what `ask` requests."
     ),
     "walk.user_hands_off": (
-        "In `later.paragraph_text`, `user.name` says another person will do what `ask` requests."
+        "In `later.text`, `user.name` says another person will do what `ask` requests."
     ),
     "walk.third_party_done": (
-        "In `later.paragraph_text`, the writer says they did what `ask` requests or will do it."
+        "In `later.text`, the writer says they did what `ask` requests or will do it."
     ),
 }
 
 _WALK_INTENTS = {
-    "walk.responds": "The later paragraph is about the request.",
-    "walk.wp_received": "The waiting party confirms receipt.",
-    "walk.wp_no_longer_needed": "The waiting party withdraws the request.",
-    "walk.wp_asks_again": "The waiting party chases the request.",
-    "walk.wp_changes_terms": "The waiting party changes what the request requires.",
-    "walk.wp_still_owed": "The user still owes an action after the change.",
-    "walk.wp_changes_due": "The waiting party changes the due time.",
-    "walk.user_delivers": "The user delivers what was requested.",
-    "walk.user_promises": "The user promises to do it later.",
-    "walk.user_declines": "The user declines the request.",
-    "walk.user_hands_off": "The user hands the request to another person.",
-    "walk.third_party_done": "Another participant did or will do the request.",
+    "walk.responds": "`later.text` is about the request.",
+    "walk.wp_received": "In `later.text`, the waiting party confirms receipt.",
+    "walk.wp_no_longer_needed": "In `later.text`, the waiting party withdraws the request.",
+    "walk.wp_asks_again": "In `later.text`, the waiting party chases the request.",
+    "walk.wp_changes_terms": (
+        "In `later.text`, the waiting party changes what the request requires."
+    ),
+    "walk.wp_still_owed": "After `later.text`, the user still owes an action for the request.",
+    "walk.wp_changes_due": "In `later.text`, the waiting party changes the due time.",
+    "walk.user_delivers": "In `later.text`, the user delivers what was requested.",
+    "walk.user_promises": "In `later.text`, the user promises to do it later.",
+    "walk.user_declines": "In `later.text`, the user declines the request.",
+    "walk.user_hands_off": "In `later.text`, the user hands the request to another person.",
+    "walk.third_party_done": "In `later.text`, another participant did or will do the request.",
 }
 
 _WALK_FIELDS = (
@@ -306,20 +308,32 @@ _WALK_FIELDS = (
     "ask",
     "due",
     "later.author_role",
-    "later.paragraph_text",
+    "later.text",
 )
 
 
-_WALK_NEW_DATE_OPTIONS = {"none": "The paragraph sets no new date for the request."}
+_WALK_NEW_DATE_OPTIONS = {"none": "The text sets no new date for the request."}
 WalkNewDateDecision = Choice[tuple(_WALK_NEW_DATE_OPTIONS.items())]
 
 
 class WalkNewDate(dspy.Signature):
-    """Which date does `later.paragraph_text` set as the new time for `ask`?"""
+    """Which date does `later.text` set as the new time for `ask`?"""
 
     ask: str = dspy.InputField()
     later: dict[str, Any] = dspy.InputField()
     decision: WalkNewDateDecision = dspy.OutputField(desc="The issued date handle, or none.")
+
+
+_WALK_HANDOFF_OPTIONS = {"none": "The text names no listed person."}
+WalkHandoffToDecision = Choice[tuple(_WALK_HANDOFF_OPTIONS.items())]
+
+
+class WalkHandoffTo(WalkBase):
+    """Which person does `later.text` name as the one who will now do what `ask` requests?"""
+
+    decision: WalkHandoffToDecision = dspy.OutputField(
+        desc="The issued participant handle, or none."
+    )
 
 
 _EXPIRY_EVENT_OPTIONS = {"none": "The request serves no listed event."}
@@ -351,7 +365,7 @@ def _walk_specs() -> dict[str, QuestionSpec]:
                 "walk",
                 _walk_signature(qid.replace(".", "_").title(), text),
                 _WALK_INTENTS[qid],
-                ("later.paragraph_text",),
+                ("later.text",),
                 _WALK_FIELDS,
             )
             for qid, text in _WALK_STATEMENTS.items()
@@ -359,11 +373,20 @@ def _walk_specs() -> dict[str, QuestionSpec]:
         "walk.new_date": QuestionSpec(
             "walk",
             WalkNewDate,
-            "The new date the paragraph sets for the request.",
-            ("later.paragraph_text",),
-            ("ask", "later.paragraph_text"),
+            "The new date set in later.text for the request.",
+            ("later.text",),
+            ("ask", "later.text"),
             "choice",
-            {"none": "The paragraph sets no new date for the request."},
+            _WALK_NEW_DATE_OPTIONS,
+        ),
+        "walk.handoff_to": QuestionSpec(
+            "walk",
+            WalkHandoffTo,
+            "The person named in later.text who will now do the request.",
+            ("later.text",),
+            _WALK_FIELDS,
+            "choice",
+            _WALK_HANDOFF_OPTIONS,
         ),
         "expiry.event": QuestionSpec(
             "expiry",

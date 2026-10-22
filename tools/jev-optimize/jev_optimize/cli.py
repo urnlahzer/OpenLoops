@@ -142,7 +142,12 @@ def main() -> None:
                 summaries[set_name] = {
                     "rows": report["rows"],
                     "distinct_paragraph_texts": report["distinct_paragraph_texts"],
+                    "distinct_message_texts": report.get("distinct_message_texts", 0),
+                    "distinct_unit_text_counts": report.get(
+                        "distinct_unit_text_counts", {}
+                    ),
                     "distinct_asks": report["distinct_obligation_texts"],
+                    "unit_counts": report.get("unit_counts", {}),
                     "questions": report["questions"],
                     "errors": report["errors"],
                 }

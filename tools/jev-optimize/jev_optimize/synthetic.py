@@ -214,6 +214,16 @@ def scrub_row(row: dict[str, Any]) -> list[str]:
     if _URL_RE.search(text):
         violations.append("URL")
     allowed_names = _allowed_name_phrases()
+    # Each value is matched on its own, so a name ending one field and a name
+    # starting the next never join into one phrase.
+    for value in _text_values(row):
+        if _has_unknown_name(value, allowed_names):
+            violations.append("capitalized name outside the synthetic pool")
+            break
+    return violations
+
+
+def _has_unknown_name(text: str, allowed_names: set[str]) -> bool:
     for match in _CAPITALIZED_BIGRAM_RE.finditer(text):
         phrase = match.group(1)
         if phrase in allowed_names:
@@ -223,9 +233,8 @@ def scrub_row(row: dict[str, Any]) -> list[str]:
             continue
         # A name-shaped run that is not a pool name and contains no ordinary
         # capitalized word.
-        violations.append("capitalized name outside the synthetic pool")
-        break
-    return violations
+        return True
+    return False
 
 
 def _question_assignment(set_name: str, index: int, rows: int) -> tuple[str, int]:
@@ -868,26 +877,51 @@ def _check_thread_corpus(
     if scrubbed:
         errors.append(f"privacy scrub rejected {scrubbed} rows")
 
-    paragraphs = {
-        _normalize(str(row.later["paragraph_text"]))
+    unit_counts = {
+        unit: sum(
+            getattr(row, "unit", None) == unit
+            for row in rows
+        )
+        for unit in ("paragraph", "message")
+    }
+    if set_name == "walk" and any(
+        getattr(row, "unit", None) not in {"paragraph", "message"}
         for row in rows
-        if set_name == "walk"
-        and isinstance(getattr(row, "later", None), dict)
-        and isinstance(row.later.get("paragraph_text"), str)
+    ):
+        errors.append("every walk row must have a paragraph or message unit")
+    if set_name == "walk" and any(
+        not isinstance(getattr(row, "later", None), dict)
+        or not isinstance(row.later.get("text"), str)
+        or not row.later["text"].strip()
+        for row in rows
+    ):
+        errors.append("every walk row must have non-empty later.text")
+
+    unit_texts = {
+        unit: {
+            _normalize(str(row.later["text"]))
+            for row in rows
+            if set_name == "walk"
+            and getattr(row, "unit", None) == unit
+            and isinstance(getattr(row, "later", None), dict)
+            and isinstance(row.later.get("text"), str)
+        }
+        for unit in ("paragraph", "message")
     }
     asks = {
         _normalize(str(row.ask))
         for row in rows
         if isinstance(getattr(row, "ask", None), str)
     }
-    if set_name == "walk" and len(paragraphs) < thresholds.min_paragraphs:
+    if set_name == "walk" and len(unit_texts["paragraph"]) < thresholds.min_paragraphs:
         errors.append(
-            f"distinct later paragraphs {len(paragraphs)} < {thresholds.min_paragraphs}"
+            "distinct later paragraphs "
+            f"{len(unit_texts['paragraph'])} < {thresholds.min_paragraphs}"
         )
     if len(asks) < thresholds.min_obligations:
         errors.append(f"distinct asks {len(asks)} < {thresholds.min_obligations}")
 
-    choice_ids = {"walk.new_date", "expiry.event"}
+    choice_ids = {"walk.new_date", "walk.handoff_to", "expiry.event"}
     question_stats: dict[str, Any] = {}
     for question_id in SETS[set_name]:
         if question_id in choice_ids:
@@ -912,11 +946,18 @@ def _check_thread_corpus(
     report = {
         "set": set_name,
         "rows": len(rows),
-        "distinct_paragraph_texts": len(paragraphs),
+        "distinct_paragraph_texts": len(unit_texts["paragraph"]),
+        "distinct_message_texts": len(unit_texts["message"]),
+        "distinct_unit_texts": len(set().union(*unit_texts.values())),
         "distinct_obligation_texts": len(asks),
         "questions": question_stats,
         "errors": errors,
     }
+    if set_name == "walk":
+        report["unit_counts"] = unit_counts
+        report["distinct_unit_text_counts"] = {
+            unit: len(texts) for unit, texts in unit_texts.items()
+        }
     if errors:
         raise ValueError("; ".join(errors))
     return report

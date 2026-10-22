@@ -81,11 +81,12 @@ already carries `closure.outcome`.
 ## Walk and expiry sets
 
 Walk examples are complete synthetic threads: one request followed by one to
-three later messages. Each message has one to three paragraphs, and the fixed
-plan determines which paragraph responds and which outcome it expresses. The
-offline stub generator writes 800 threads by default; `threads.jsonl` stores
-each thread and `walk.jsonl` and `expiry.jsonl` store the question rows derived
-from them.
+three later messages. Each paragraph is a unit, and messages with two or more
+paragraphs also have a whole-message unit whose `later.text` joins those
+paragraphs with a blank line. The fixed plan determines which paragraph
+responds and which outcome it expresses. The offline stub generator writes 800
+threads by default; `threads.jsonl` stores each thread and `walk.jsonl` and
+`expiry.jsonl` store the question rows derived from them.
 
 Generate the offline stub corpus and check either derived set with:
 
@@ -96,11 +97,11 @@ uv run --locked jev-optimize check-corpus data/synthetic/expiry.jsonl
 uv run --locked jev-optimize generate-threads --llm --smoke --threads 24 --output runs/smoke
 ```
 
-`check-corpus` verifies thread groups, stable ids, the privacy scrub, distinct
-paragraph and ask counts, and at least 20 positive and 20 negative examples
-for each labeled question. Splits use `group` (the thread id), so every row
-from a thread stays in one split. The `--llm --smoke` command is the small
-paid trial (OpenRouter, `provider.zdr`); inspect its output before a full
+`check-corpus` verifies thread groups, stable ids, the privacy scrub, counts
+per unit, distinct unit text and ask counts, and at least 20 positive and 20
+negative examples for each labeled question. Splits use `group` (the thread
+id), so every row from a thread stays in one split. The `--llm --smoke` command
+is the small paid trial (OpenRouter, `provider.zdr`); inspect its output before a full
 `--llm` run. The automated test uses `httpx.MockTransport` and never opens a
 network connection.
 
@@ -115,11 +116,11 @@ Optimize selected questions with:
 uv run --locked jev-optimize optimize --set walk --only walk.responds,walk.user_delivers --budget light
 ```
 
-`walk.new_date` and `expiry.event` remain at their bootstrap wording because
-their options are generated per request and the harness does not yet carry
-row-specific option sets. `evaluate-walk --threads data/synthetic/threads.jsonl
---replay runs/walk.json` evaluates thread-level held-out statuses without a
-network call.
+`walk.new_date`, `walk.handoff_to`, and `expiry.event` remain at their
+bootstrap wording because their options are generated per request. The
+thread-level hand-off report separately counts mark and person accuracy.
+`evaluate-walk --threads data/synthetic/threads.jsonl --replay runs/walk.json`
+evaluates held-out statuses and hand-off accuracy without a network call.
 
 Run `optimize` separately for `closure`, `triage`, and `rules`; pass all result
 files to `write-registry` to merge them in one reviewed edit. Replay files are

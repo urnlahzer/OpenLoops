@@ -282,9 +282,9 @@ def test_real_optimize_path_is_offline_and_production_shaped(tmp_path, monkeypat
 def _reflection_lm():
     return DummyLM(
         {
-            "later.paragraph_text": {
+            "later.text": {
                 "reasoning": "The statement stays literal and names the primary field.",
-                "proposed_statement": "later.paragraph_text states the relevant walk condition.",
+                "proposed_statement": "later.text states the relevant walk condition.",
             }
         }
     )

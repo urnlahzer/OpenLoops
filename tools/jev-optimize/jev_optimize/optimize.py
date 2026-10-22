@@ -31,7 +31,9 @@ WRONG_DECISION_PENALTY = 9.0
 
 
 def _inputs(row: DatasetRow) -> dict[str, Any]:
-    return row.model_dump(exclude={"id", "set", "label", "source", "group"})
+    return row.model_dump(
+        exclude={"id", "set", "label", "source", "group", "unit"}
+    )
 
 
 def metric_for(question_id: str, *, feedback_includes_text: bool = False):
@@ -303,7 +305,7 @@ def optimize_set(
         for question_id in SETS[set_name]
         if only is None or question_id in only
     ]
-    dynamic_choices = {"walk.new_date", "expiry.event"}
+    dynamic_choices = {"walk.new_date", "walk.handoff_to", "expiry.event"}
     optimizable = [
         question_id for question_id in question_ids if question_id not in dynamic_choices
     ]

@@ -7,7 +7,7 @@ import json
 import os
 import random
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +84,7 @@ class MessagePlan:
     outcome: str
     paragraphs: int = 1
     responding: int = 0
+    delegate: str | None = None
 
 
 @dataclass(frozen=True)
@@ -104,6 +105,11 @@ class Thread:
     due: str
     event: str | None
     later: list[list[str]]
+    user_display_name: str
+    user_addresses: list[str]
+    waiting_party_address: str
+    delegates: list[dict[str, str] | None]
+    participants: list[list[dict[str, str]] | None]
 
 
 def branch_labels(role: str, outcome: str) -> dict[str, bool]:
@@ -145,7 +151,29 @@ def plan_threads(count: int, seed: int = 20261021) -> list[ThreadPlan]:
         if has_event:
             ends = hard_case in {"rsvp_before_event", "prepare_for_meeting"} or index % 2 == 0
         plans.append(ThreadPlan(f"thread-{index:05d}", hard_case, has_event, ends, later))
-    return plans
+    handoff_count = sum(
+        message.outcome == "user_hands_off"
+        for plan in plans
+        for message in plan.later
+    )
+    delegate_marks: list[str] = []
+    while len(delegate_marks) < handoff_count:
+        cycle = ["internal", "external", "absent"]
+        rng.shuffle(cycle)
+        delegate_marks.extend(cycle)
+    marks = iter(delegate_marks[:handoff_count])
+    return [
+        replace(
+            plan,
+            later=[
+                replace(message, delegate=next(marks))
+                if message.outcome == "user_hands_off"
+                else message
+                for message in plan.later
+            ],
+        )
+        for plan in plans
+    ]
 
 
 def _later_for(
@@ -180,19 +208,94 @@ def stub_threads(plans: list[ThreadPlan]) -> list[Thread]:
     """Deterministic template text; keyword markers keep the offline fake predictable."""
     threads = []
     for number, plan in enumerate(plans):
-        user = SYNTHETIC_PEOPLE[number % len(SYNTHETIC_PEOPLE)].split()[0].casefold()
+        user_display_name = SYNTHETIC_PEOPLE[number % len(SYNTHETIC_PEOPLE)]
+        user = user_display_name.split()[0]
         waiting = SYNTHETIC_PEOPLE[(number + 3) % len(SYNTHETIC_PEOPLE)]
+        user_address = _person_address(user_display_name, "halcyonridge.example.invalid")
+        waiting_address = _person_address(waiting, "copperlantern.example.invalid")
         ask, due, event = _stub_ask(plan, number)
         later = []
-        for message in plan.later:
+        delegates: list[dict[str, str] | None] = []
+        participants: list[list[dict[str, str]] | None] = []
+        for message_index, message in enumerate(plan.later):
             paragraphs = [
                 f"Unrelated note {number}-{index}: the parking garage closes early this week."
                 for index in range(message.paragraphs)
             ]
-            paragraphs[message.responding] = _stub_paragraph(message, number)
+            delegate = _delegate_person(
+                message,
+                user_display_name,
+                waiting,
+                number,
+                message_index,
+            )
+            delegates.append(delegate)
+            if message.outcome == "user_hands_off":
+                message_participants = [
+                    {"name": user_display_name, "address": user_address},
+                    {"name": waiting, "address": waiting_address},
+                ]
+                if message.delegate != "absent" and delegate is not None:
+                    message_participants.append(delegate)
+                participants.append(message_participants)
+            else:
+                participants.append(None)
+            paragraphs[message.responding] = _stub_paragraph(
+                message,
+                number,
+                delegate["name"] if delegate is not None else None,
+            )
             later.append(paragraphs)
-        threads.append(Thread(plan, user, waiting, ask, due, event, later))
+        threads.append(
+            Thread(
+                plan,
+                user,
+                waiting,
+                ask,
+                due,
+                event,
+                later,
+                user_display_name,
+                [user_address],
+                waiting_address,
+                delegates,
+                participants,
+            )
+        )
     return threads
+
+
+def _person_address(name: str, domain: str) -> str:
+    mailbox = name.casefold().replace(" ", ".")
+    return f"{mailbox}@{domain}"
+
+
+def _delegate_person(
+    message: MessagePlan,
+    user_name: str,
+    waiting_party: str,
+    thread_number: int,
+    message_index: int,
+) -> dict[str, str] | None:
+    if message.outcome != "user_hands_off":
+        return None
+    if message.delegate not in {"internal", "external", "absent"}:
+        raise ValueError("hand-off plans must have a delegate mark")
+    candidates = [
+        name
+        for offset in range(len(SYNTHETIC_PEOPLE))
+        if (name := SYNTHETIC_PEOPLE[
+            (thread_number + message_index + 5 + offset) % len(SYNTHETIC_PEOPLE)
+        ]).casefold()
+        not in {user_name.casefold(), waiting_party.casefold()}
+    ]
+    name = candidates[0]
+    domain = (
+        "halcyonridge.example.invalid"
+        if message.delegate == "internal"
+        else "copperlantern.example.invalid"
+    )
+    return {"name": name, "address": _person_address(name, domain)}
 
 
 def _stub_ask(plan: ThreadPlan, number: int) -> tuple[str, str, str | None]:
@@ -224,7 +327,13 @@ def _stub_ask(plan: ThreadPlan, number: int) -> tuple[str, str, str | None]:
     )
 
 
-def _stub_paragraph(message: MessagePlan, number: int) -> str:
+def _stub_paragraph(
+    message: MessagePlan, number: int, delegate_name: str | None = None
+) -> str:
+    if message.outcome == "user_hands_off":
+        if not delegate_name:
+            raise ValueError("hand-off stub text requires its planned delegate name")
+        return f"{delegate_name} will send summary {number}. mk-handoff."
     return {
         "wp_received": f"Got the summary {number}, thanks. mk-received.",
         "wp_no_longer_needed": f"Never mind summary {number}, we no longer need it. mk-withdrawn.",
@@ -243,7 +352,6 @@ def _stub_paragraph(message: MessagePlan, number: int) -> str:
         "user_delivers": f"Attached is summary {number}. mk-delivered.",
         "user_promises": f"I will send summary {number} next week. mk-promise.",
         "user_declines": f"I can't take on summary {number}, sorry. mk-decline.",
-        "user_hands_off": f"Looping in a colleague who will send summary {number}. mk-handoff.",
         "third_party_done": f"I sent summary {number} this morning. mk-thirddone.",
         "third_party_other": (
             f"I am reviewing summary {number} and will share an update tomorrow. mk-reviewing."
@@ -263,10 +371,28 @@ def derive_rows(threads: list[Thread], source: str = "synthetic-stub") -> list[d
                 if responds:
                     label.update(branch_labels(message.author_role, message.outcome))
                 rows.append(
-                    _walk_row(thread, ask, message.author_role, text, label, source)
+                    _walk_row(
+                        thread, ask, message.author_role, text, "paragraph", label, source
+                    )
+                )
+            if len(paragraphs) >= 2:
+                message_text = "\n\n".join(paragraphs)
+                label = {"walk.responds": message.outcome != "unrelated"}
+                if label["walk.responds"]:
+                    label.update(branch_labels(message.author_role, message.outcome))
+                rows.append(
+                    _walk_row(
+                        thread,
+                        ask,
+                        message.author_role,
+                        message_text,
+                        "message",
+                        label,
+                        source,
+                    )
                 )
             if message.outcome == "wp_changes_terms_owed":
-                ask = f"{ask}\n\nlater change: {paragraphs[message.responding]}"
+                ask = f"{ask}\n\nLater change: {paragraphs[message.responding]}"
             if message.outcome in TERMINAL:
                 break
         if thread.event is not None and thread.plan.ends_with_event is not None:
@@ -291,20 +417,42 @@ def derive_rows(threads: list[Thread], source: str = "synthetic-stub") -> list[d
 
 def thread_record(thread: Thread, source: str = "synthetic-stub") -> dict[str, Any]:
     """Return one JSON-safe thread record containing its fixed plan and text."""
+    later_records = []
+    for index, (message, paragraphs) in enumerate(
+        zip(thread.plan.later, thread.later, strict=True)
+    ):
+        later_record: dict[str, Any] = {"paragraphs": paragraphs}
+        if message.outcome == "user_hands_off":
+            later_record["participants"] = thread.participants[index] or []
+            delegate = thread.delegates[index]
+            later_record["delegate"] = {
+                "name": delegate["name"] if delegate else "",
+                "mark": "none" if message.delegate == "absent" else message.delegate,
+            }
+        later_records.append(later_record)
     return {
         "thread_id": thread.plan.thread_id,
         "source": source,
         "plan": asdict(thread.plan),
         "user_name": thread.user_name,
+        "user_display_name": thread.user_display_name,
+        "user_addresses": thread.user_addresses,
         "waiting_party": thread.waiting_party,
+        "waiting_party_address": thread.waiting_party_address,
         "ask": thread.ask,
         "due": thread.due,
         "event": thread.event,
-        "later": thread.later,
+        "later": later_records,
     }
 
 
 def _plan_payload(plan: ThreadPlan, thread: Thread) -> dict[str, Any]:
+    later = []
+    for index, message in enumerate(plan.later):
+        item = asdict(message)
+        delegate = thread.delegates[index]
+        item["delegate_name"] = delegate["name"] if delegate else None
+        later.append(item)
     return {
         "thread_id": plan.thread_id,
         "hard_case": plan.hard_case,
@@ -313,7 +461,7 @@ def _plan_payload(plan: ThreadPlan, thread: Thread) -> dict[str, Any]:
         "user_name": thread.user_name,
         "waiting_party": thread.waiting_party,
         "event_hint": thread.event,
-        "later": [asdict(message) for message in plan.later],
+        "later": later,
     }
 
 
@@ -321,8 +469,11 @@ def _thread_schema() -> dict[str, Any]:
     paragraph = {"type": "string"}
     later = {
         "type": "object",
-        "properties": {"paragraphs": {"type": "array", "items": paragraph}},
-        "required": ["paragraphs"],
+        "properties": {
+            "paragraphs": {"type": "array", "items": paragraph},
+            "delegate_name": {"type": ["string", "null"]},
+        },
+        "required": ["paragraphs", "delegate_name"],
         "additionalProperties": False,
     }
     item = {
@@ -372,7 +523,10 @@ _PLAN_DEFINITIONS = (
     "without doing it or promising it; unrelated = the paragraph is about something else. "
     "Hard cases: thanks_will_look = a brief acknowledgement that promises a later look without "
     "a date; partial_delivery = the user sends part and promises the rest; "
-    "chaser_after_delivery = the waiting party chases after the user claimed delivery."
+    "chaser_after_delivery = the waiting party chases after the user claimed delivery. "
+    "For every user_hands_off message, its planned delegate_name is the full name of the "
+    "person who will do the request. Use that name in the responding paragraph. Copy the "
+    "planned delegate_name into the message result; use null for other outcomes."
 )
 
 
@@ -380,8 +534,8 @@ def _thread_prompt(plans: list[dict[str, Any]]) -> str:
     return (
         "Write realistic but fully invented email threads from these fixed plans. Return strict "
         "JSON with one member named threads, in the same order as the plans. Each result must "
-        "contain thread_id, ask, due, event, and later. Each later message contains only its "
-        "paragraphs array, with exactly the planned paragraph count. Put the planned outcome only "
+        "contain thread_id, ask, due, event, and later. Each later message contains paragraphs "
+        "and delegate_name, with exactly the planned paragraph count. Put the planned outcome only "
         "in the responding paragraph; all other paragraphs must be unrelated. Preserve the listed "
         "author role, hard case, and event semantics. "
         + _PLAN_DEFINITIONS
@@ -447,9 +601,17 @@ def _validated_thread(
     if not isinstance(raw_later, list) or len(raw_later) != len(plan.later):
         return None, "later message count mismatch"
     later: list[list[str]] = []
-    for planned_message, generated_message in zip(plan.later, raw_later, strict=True):
+    for index, (planned_message, generated_message) in enumerate(
+        zip(plan.later, raw_later, strict=True)
+    ):
         if not isinstance(generated_message, dict):
             return None, "later message is malformed"
+        assigned_delegate = assigned.delegates[index]
+        expected_delegate_name = (
+            assigned_delegate["name"] if assigned_delegate is not None else None
+        )
+        if generated_message.get("delegate_name") != expected_delegate_name:
+            return None, "delegate name mismatch"
         paragraphs = generated_message.get("paragraphs")
         if (
             not isinstance(paragraphs, list)
@@ -457,6 +619,12 @@ def _validated_thread(
             or not all(isinstance(text, str) and text.strip() for text in paragraphs)
         ):
             return None, "paragraph count or text mismatch"
+        if planned_message.outcome == "user_hands_off" and (
+            not expected_delegate_name
+            or expected_delegate_name.casefold()
+            not in paragraphs[planned_message.responding].casefold()
+        ):
+            return None, "hand-off paragraph omits the planned delegate"
         later.append(paragraphs)
 
     texts = {
@@ -478,6 +646,11 @@ def _validated_thread(
             due=candidate["due"],
             event=event or None,
             later=later,
+            user_display_name=assigned.user_display_name,
+            user_addresses=assigned.user_addresses,
+            waiting_party_address=assigned.waiting_party_address,
+            delegates=assigned.delegates,
+            participants=assigned.participants,
         ),
         "ok",
     )
@@ -600,7 +773,7 @@ def generate_threads_llm(
     return {"threads": threads, "rejected": rejected, "files": [str(path) for path in files]}
 
 
-def _walk_row(thread, ask, role, text, label, source) -> dict[str, Any]:
+def _walk_row(thread, ask, role, text, unit, label, source) -> dict[str, Any]:
     return _with_id(
         {
             "set": "walk",
@@ -610,7 +783,8 @@ def _walk_row(thread, ask, role, text, label, source) -> dict[str, Any]:
             "waiting_party": thread.waiting_party,
             "ask": ask,
             "due": thread.due,
-            "later": {"author_role": role, "paragraph_text": text},
+            "later": {"author_role": role, "text": text},
+            "unit": unit,
             "label": label,
         }
     )
