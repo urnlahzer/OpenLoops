@@ -204,6 +204,7 @@ fn collect_matches(tokens: &[Token], patterns: &[Pattern]) -> Vec<PhraseMatch> {
 }
 
 /// Finds relative date phrases as `(canonical value, matched text)` pairs.
+/// The matched text keeps its case; whitespace runs become single spaces.
 pub(super) fn find_relative_date_phrases(text: &str) -> Vec<(String, String)> {
     let tokens = tokenize(text);
     if tokens.is_empty() {
@@ -229,7 +230,11 @@ pub(super) fn find_relative_date_phrases(text: &str) -> Vec<(String, String)> {
         used[candidate.start..candidate.end].fill(true);
         let start = tokens[candidate.start].start;
         let end = tokens[candidate.end - 1].end;
-        phrases.push((candidate.value, text[start..end].to_string()));
+        let phrase_text = text[start..end]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        phrases.push((candidate.value, phrase_text));
     }
     phrases
 }
@@ -303,6 +308,14 @@ mod tests {
         assert!(find_relative_date_phrases("end of the month").is_empty());
         assert!(find_relative_date_phrases("Mayday").is_empty());
         assert!(find_relative_date_phrases("todayish").is_empty());
+    }
+
+    #[test]
+    fn matched_text_spanning_a_line_break_uses_single_spaces() {
+        assert_eq!(
+            find_relative_date_phrases("by the end of\r\n  the day"),
+            vec![("today".to_string(), "end of the day".to_string())]
+        );
     }
 
     #[test]

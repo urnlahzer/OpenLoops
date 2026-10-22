@@ -3616,10 +3616,11 @@ struct WaitingPartyOption {
     display: String,
 }
 
-/// One paragraph's normalized temporal candidate: the option key sent to
-/// Jev and the `deadline_parse`-grammar value it stands for.
+/// One paragraph's temporal candidate: its option key and text sent to Jev,
+/// and the `deadline_parse`-grammar value it stands for.
 struct TemporalCandidate {
     handle: String,
+    text: String,
     value: String,
 }
 
@@ -3674,7 +3675,7 @@ fn extraction_temporal_candidates_with_context(
         return Vec::new();
     };
     let mut seen = BTreeSet::new();
-    let mut values = Vec::new();
+    let mut candidates = Vec::new();
     for (start, _, _) in prose_event_time_candidates(&text, message.timestamp, offset) {
         let Some(local) = timezone.timestamp_opt(start, 0).single() else {
             continue;
@@ -3683,30 +3684,31 @@ fn extraction_temporal_candidates_with_context(
         if reparse(DeadlineTemporalKind::Date, &value, context).is_ok()
             && seen.insert(value.clone())
         {
-            values.push(value);
-            if values.len() == MAX_EXTRACTION_OPTIONS {
+            candidates.push((value.clone(), value));
+            if candidates.len() == MAX_EXTRACTION_OPTIONS {
                 break;
             }
         }
     }
-    if values.len() < MAX_EXTRACTION_OPTIONS {
-        for (relative_value, _) in relative_dates::find_relative_date_phrases(&text) {
-            if values.len() == MAX_EXTRACTION_OPTIONS {
+    if candidates.len() < MAX_EXTRACTION_OPTIONS {
+        for (relative_value, matched_text) in relative_dates::find_relative_date_phrases(&text) {
+            if candidates.len() == MAX_EXTRACTION_OPTIONS {
                 break;
             }
             let Some(value) = relative_candidate_date(&relative_value, context) else {
                 continue;
             };
             if seen.insert(value.clone()) {
-                values.push(value);
+                candidates.push((value, matched_text));
             }
         }
     }
-    values
+    candidates
         .into_iter()
         .enumerate()
-        .map(|(index, value)| TemporalCandidate {
+        .map(|(index, (value, text))| TemporalCandidate {
             handle: format!("t{index}"),
+            text,
             value,
         })
         .collect()
@@ -3777,7 +3779,7 @@ fn extraction_questions(
         .ok_or(ProviderError::InvalidQuestion)?;
     let mut temporal_options: Vec<(&str, &str)> = temporal
         .iter()
-        .map(|candidate| (candidate.handle.as_str(), candidate.value.as_str()))
+        .map(|candidate| (candidate.handle.as_str(), candidate.text.as_str()))
         .collect();
     temporal_options.push((EXTRACT_NONE, EXTRACT_NONE_TEMPORAL));
     questions.choice(
@@ -12959,6 +12961,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         script: Box<ExtractionScriptFn<'a>>,
         calls: AtomicUsize,
         states: Mutex<Vec<serde_json::Value>>,
+        requests: Mutex<Vec<serde_json::Value>>,
     }
 
     impl<'a> FixedExtractionClient<'a> {
@@ -12972,6 +12975,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 script: Box::new(script),
                 calls: AtomicUsize::new(0),
                 states: Mutex::new(Vec::new()),
+                requests: Mutex::new(Vec::new()),
             }
         }
 
@@ -12981,6 +12985,10 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
 
         fn state(&self, index: usize) -> serde_json::Value {
             self.states.lock().unwrap_or_else(PoisonError::into_inner)[index].clone()
+        }
+
+        fn request(&self, index: usize) -> serde_json::Value {
+            self.requests.lock().unwrap_or_else(PoisonError::into_inner)[index].clone()
         }
     }
 
@@ -13089,6 +13097,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         let overlap = fixed_temporal_message("by end of day tomorrow", "2026-10-28T12:00:00Z");
         let candidates = extraction_temporal_candidates_with_context(&overlap, 0, &context);
         assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].text, "end of day tomorrow");
         assert_eq!(candidates[0].value, "2026-10-29");
 
         for phrase in ["as soon as I can", "soon", "end of the month", "Mayday"] {
@@ -13111,9 +13120,15 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         assert_eq!(
             candidates
                 .iter()
-                .map(|candidate| (candidate.handle.as_str(), candidate.value.as_str()))
+                .map(|candidate| {
+                    (
+                        candidate.handle.as_str(),
+                        candidate.text.as_str(),
+                        candidate.value.as_str(),
+                    )
+                })
                 .collect::<Vec<_>>(),
-            vec![("t0", "2026-09-09")]
+            vec![("t0", "2026-09-09", "2026-09-09")]
         );
 
         let explicit_first =
@@ -13122,9 +13137,18 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         assert_eq!(
             candidates
                 .iter()
-                .map(|candidate| (candidate.handle.as_str(), candidate.value.as_str()))
+                .map(|candidate| {
+                    (
+                        candidate.handle.as_str(),
+                        candidate.text.as_str(),
+                        candidate.value.as_str(),
+                    )
+                })
                 .collect::<Vec<_>>(),
-            vec![("t0", "2026-09-09"), ("t1", "2026-09-03")]
+            vec![
+                ("t0", "2026-09-09", "2026-09-09"),
+                ("t1", "Tomorrow", "2026-09-03"),
+            ]
         );
     }
 
@@ -13162,7 +13186,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
     }
 
     #[test]
-    fn extraction_job_offers_the_resolved_friday_date_to_jev() {
+    fn extraction_job_offers_the_friday_phrase_and_records_its_resolved_date() {
         let message =
             fixed_temporal_message("I will send the report by Friday.", "2026-10-28T12:00:00Z");
         let waiting_party = extraction_waiting_party_options(std::slice::from_ref(&message));
@@ -13179,6 +13203,10 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
             panic!("fixed client returns a confident promise");
         };
         assert_eq!(fields.temporal_value.as_deref(), Some("2026-10-30"));
+        assert_eq!(
+            decision.request(0)["questions"][EXTRACT_TEMPORAL_ID]["criteria"]["t0"],
+            "by Friday"
+        );
     }
 
     impl DecisionClient for FixedExtractionClient<'_> {
@@ -13208,6 +13236,10 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 openloops_inference::decision::request_body(self.model(), state, questions, false)?;
             let request: serde_json::Value =
                 serde_json::from_slice(&request).map_err(|_| ProviderError::InvalidQuestion)?;
+            self.requests
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(request.clone());
             let ids: Vec<String> = request["questions"]
                 .as_object()
                 .ok_or(ProviderError::InvalidQuestion)?

@@ -59,8 +59,33 @@ the normalized value against the message timestamp.
    Handles stay `t0`, `t1`, ... in that order. Each value is `YYYY-MM-DD` and
    passes the existing `reparse(DeadlineTemporalKind::Date, ..)` check.
 
-4. Option text stays the date value. The questions' instructions, the
-   registry and its hash pin do not change.
+4. Option text (amended 2026-10-22, see "Trial"): an explicit candidate's
+   option text stays its date value. A relative candidate's option text is
+   the phrase as written in the paragraph ("by Friday", "tomorrow
+   morning"); its value stays the resolved `YYYY-MM-DD` date, and a pick
+   records that date. Because duplicates keep the first candidate, an
+   explicit date wins over a relative phrase that resolves to the same day.
+   The questions' instructions, the registry and its hash pin do not
+   change.
+
+## Trial
+
+The `extract.temporal` and `walk.new_date` states carry no message date.
+With the date value as option text, Jev cannot connect "by Friday" to
+`2026-10-16`. A paid trial on the 17 held-out promise paragraphs that have
+a relative candidate (`walk.new_date`, tuned registry, accept 0.7):
+
+| Option text | Picked | None | Gray |
+|---|---|---|---|
+| date value (`2026-10-16`) | 0 | 13 | 4 |
+| date, weekday and phrase | 0 | 3 | 14 |
+| date value, send date added to the state | 4 | 7 | 6 |
+| phrase as written (`by Friday`) | 15 | 0 | 2 |
+
+All 15 picks were the phrase that sets the promised time. Jev reads the
+text and code does the date arithmetic. The trial took its phrases from a
+regex approximation of the finder; the `evaluate-walk` rerun uses the
+finder's own matched text.
 
 ## Effects
 
@@ -68,7 +93,9 @@ the normalized value against the message timestamp.
   resolved date as the claim's `date` temporal value.
 - After `feat/jev-closure-walk` rebases onto this change, `walk.new_date`
   offers them too, because `walk_unit_date_candidates` calls
-  `extraction_temporal_candidates`.
+  `extraction_temporal_candidates`. Its `date_questions` must use the
+  candidate's option text, and its harness export must write that text
+  next to the value.
 
 ## Known limits
 
@@ -86,6 +113,7 @@ the normalized value against the message timestamp.
   give none; explicit candidates come first; duplicates are removed; the cap
   holds.
 - An extraction test: a paragraph "I will send the report by Friday." offers
-  an `extract.temporal` option with Friday's date.
+  an `extract.temporal` option whose text is "by Friday"; picking it records
+  Friday's date.
 - The jev-optimize harness regenerates `date_candidates.jsonl` with the
   desktop dev test and reruns `evaluate-walk`.
