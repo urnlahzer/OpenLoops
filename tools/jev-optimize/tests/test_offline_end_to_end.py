@@ -347,6 +347,74 @@ def test_evaluate_walk_reports_offline_metrics(tmp_path, monkeypatch):
     assert {"accuracy", "escalated_share", "confusion"} <= set(report)
 
 
+def test_evaluate_walk_uses_candidate_text_for_new_date_option(tmp_path):
+    from jev_optimize.threads import MessagePlan, ThreadPlan, stub_threads, thread_record
+    from jev_optimize.walk_metric import is_held_out_thread
+
+    index = 0
+    while not is_held_out_thread(f"date-text-{index}"):
+        index += 1
+    plan = ThreadPlan(
+        f"date-text-{index}",
+        "none",
+        False,
+        None,
+        [MessagePlan("user", "user_promises")],
+    )
+    thread = stub_threads([plan])[0]
+    path = tmp_path / "threads.jsonl"
+    write_jsonl(path, [thread_record(thread)])
+    write_jsonl(
+        path.with_name("date_candidates.jsonl"),
+        [
+            {
+                "thread_id": plan.thread_id,
+                "messages": [
+                    {
+                        "units": [
+                            [
+                                {
+                                    "handle": "t0",
+                                    "value": "2026-10-30",
+                                    "text": "by Friday",
+                                }
+                            ]
+                        ]
+                    }
+                ],
+            }
+        ],
+    )
+
+    class CapturingClient:
+        def __init__(self):
+            self.date_question = None
+
+        def decide(self, _state, questions):
+            question_id, question = next(iter(questions.items()))
+            if question_id == "walk.new_date":
+                self.date_question = question
+                return {
+                    question_id: {
+                        "type": "choice",
+                        "choice": "t0",
+                        "probabilities": {"t0": 0.95},
+                        "confidence": 0.95,
+                    }
+                }
+            probability = (
+                0.99
+                if question_id in {"walk.responds", "walk.user_promises"}
+                else 0.01
+            )
+            return {question_id: {"type": "noul", "noul": probability}}
+
+    client = CapturingClient()
+    evaluate_walk(path, client)
+
+    assert client.date_question["criteria"]["t0"] == "by Friday"
+
+
 def test_evaluate_question_rejects_malformed_reply(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-not-real")
     endpoint = FakeDecisionsEndpoint("malformed")

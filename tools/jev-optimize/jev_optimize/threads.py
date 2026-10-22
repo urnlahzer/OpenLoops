@@ -588,6 +588,17 @@ def check_thread_corpus(path: str | Path) -> dict[str, Any]:
                         ) is not None
                         if not valid_date:
                             errors.append("date-candidate values must match YYYY-MM-DD")
+                        if "text" in candidate:
+                            text = candidate["text"]
+                            if (
+                                not isinstance(text, str)
+                                or not text
+                                or "\n" in text
+                                or "\r" in text
+                            ):
+                                errors.append(
+                                    "date-candidate texts must be non-empty single-line strings"
+                                )
 
                 if message_index >= len(planned_messages):
                     continue

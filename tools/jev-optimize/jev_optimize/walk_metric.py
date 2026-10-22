@@ -557,6 +557,20 @@ def evaluate_walk(
                 )
             if any(not isinstance(unit_candidates, list) for unit_candidates in date_units):
                 raise ValueError(f"date-candidate units must be lists for {thread_id}")
+            for unit_candidates in date_units:
+                for candidate in unit_candidates:
+                    if isinstance(candidate, dict) and "text" in candidate:
+                        candidate_text = candidate["text"]
+                        if (
+                            not isinstance(candidate_text, str)
+                            or not candidate_text
+                            or "\n" in candidate_text
+                            or "\r" in candidate_text
+                        ):
+                            raise ValueError(
+                                f"date-candidate text must be a non-empty single-line string "
+                                f"for {thread_id}"
+                            )
             unit_answers = []
             for unit_index, text in enumerate(unit_texts):
                 state = walk_state(
@@ -605,7 +619,11 @@ def evaluate_walk(
                         date_counts["skipped_no_candidates"] += 1
                     else:
                         criteria = {
-                            str(candidate["handle"]): str(candidate["value"])
+                            str(candidate["handle"]): str(
+                                candidate["text"]
+                                if "text" in candidate
+                                else candidate["value"]
+                            )
                             for candidate in choices
                         }
                         criteria["none"] = date_none_text

@@ -1060,7 +1060,9 @@ def test_evaluate_walk_reports_handoff_mark_and_person_accuracy(tmp_path):
     }
 
 
-def test_promise_date_question_uses_sidecar_candidates_and_registry_wording(tmp_path):
+def test_promise_date_question_falls_back_to_candidate_value_and_uses_registry_wording(
+    tmp_path,
+):
     from jev_optimize.threads import MessagePlan
 
     class PromiseClient:
@@ -1292,6 +1294,34 @@ def test_check_corpus_validates_date_sidecar_and_reports_response_share(tmp_path
         "share": 1.0,
     }
     assert report["date_candidates"]["wp_changes_due"]["share"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["", 17, "by\nFriday"],
+    ids=["empty", "non-string", "line-break"],
+)
+def test_check_thread_corpus_rejects_invalid_date_candidate_text(tmp_path, text):
+    from jev_optimize.threads import MessagePlan, check_thread_corpus
+
+    plan = ThreadPlan(
+        "check-date-text",
+        "none",
+        False,
+        None,
+        [MessagePlan("user", "user_promises")],
+    )
+    thread = stub_threads([plan])[0]
+    path = tmp_path / "threads.jsonl"
+    write_jsonl(path, [thread_record(thread)])
+    candidate_records = _date_candidate_records(
+        [thread], {plan.thread_id: {0: {0: ["2026-10-30"]}}}
+    )
+    candidate_records[0]["messages"][0]["units"][0][0]["text"] = text
+    write_jsonl(path.with_name("date_candidates.jsonl"), candidate_records)
+
+    with pytest.raises(ValueError, match="date-candidate texts"):
+        check_thread_corpus(path)
 
 
 def test_whole_message_date_follow_up_uses_joined_message_text(tmp_path):
