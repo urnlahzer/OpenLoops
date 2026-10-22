@@ -84,17 +84,21 @@ Walk examples are complete synthetic threads: one request followed by one to
 three later messages. Each paragraph is a unit, and messages with two or more
 paragraphs also have a whole-message unit whose `later.text` joins those
 paragraphs with a blank line. The fixed plan determines which paragraph
-responds and which outcome it expresses. The offline stub generator writes 800
-threads by default; `threads.jsonl` stores each thread and `walk.jsonl` and
-`expiry.jsonl` store the question rows derived from them.
+responds and which outcome it expresses. `threads.jsonl` stores each thread and
+`walk.jsonl` and `expiry.jsonl` store the question rows derived from them.
 
-Generate the offline stub corpus and check either derived set with:
+The committed corpus in `data/synthetic/` is LLM-authored: 600 threads written
+by `google/gemini-3.1-flash-lite` through OpenRouter with `provider.zdr`
+(1,908 walk rows, 241 expiry rows). The offline stub generator is for tests
+and local checks; send it to another folder so it never replaces the
+committed corpus:
 
 ```powershell
-uv run --locked jev-optimize generate-threads --stub --threads 800
+uv run --locked jev-optimize generate-threads --stub --threads 800 --output runs/stub-threads
 uv run --locked jev-optimize check-corpus data/synthetic/walk.jsonl
 uv run --locked jev-optimize check-corpus data/synthetic/expiry.jsonl
-uv run --locked jev-optimize generate-threads --llm --smoke --threads 24 --output runs/smoke
+uv run --locked jev-optimize generate-threads --llm --smoke
+uv run --locked jev-optimize generate-threads --llm --threads 600
 ```
 
 `check-corpus` verifies thread groups, stable ids, the privacy scrub, counts
