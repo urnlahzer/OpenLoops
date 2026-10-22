@@ -9,6 +9,7 @@ import random
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -430,10 +431,14 @@ def derive_rows(threads: list[Thread], source: str = "synthetic-stub") -> list[d
 def thread_record(thread: Thread, source: str = "synthetic-stub") -> dict[str, Any]:
     """Return one JSON-safe thread record containing its fixed plan and text."""
     later_records = []
+    sent_at_values = message_times(thread.due, len(thread.plan.later))
     for index, (message, paragraphs) in enumerate(
         zip(thread.plan.later, thread.later, strict=True)
     ):
-        later_record: dict[str, Any] = {"paragraphs": paragraphs}
+        later_record: dict[str, Any] = {
+            "paragraphs": paragraphs,
+            "sent_at": sent_at_values[index],
+        }
         if message.outcome == "user_hands_off":
             later_record["participants"] = thread.participants[index] or []
             delegate = thread.delegates[index]
@@ -456,6 +461,170 @@ def thread_record(thread: Thread, source: str = "synthetic-stub") -> dict[str, A
         "event": thread.event,
         "later": later_records,
     }
+
+
+def message_times(due: str, count: int) -> list[str]:
+    """Return noon-UTC message times, beginning three days before the due date."""
+    try:
+        due_date = date.fromisoformat(due)
+    except ValueError:
+        # Synthetic plans can use prose such as "Friday" or "not stated".
+        # Keep those records deterministic while ISO due dates use their own day.
+        due_date = date(2026, 10, 30)
+    return [
+        f"{(due_date - timedelta(days=3) + timedelta(days=index)).isoformat()}T12:00:00Z"
+        for index in range(count)
+    ]
+
+
+def with_message_times(record: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of a thread record with deterministic later-message times."""
+    copied = dict(record)
+    later = record.get("later", [])
+    if not isinstance(later, list):
+        raise ValueError("thread later messages must be a list")
+    copied_later = [dict(message) if isinstance(message, dict) else message for message in later]
+    times = message_times(str(record["due"]), len(copied_later))
+    for message, sent_at in zip(copied_later, times, strict=True):
+        if isinstance(message, dict):
+            message["sent_at"] = sent_at
+    copied["later"] = copied_later
+    return copied
+
+
+def check_thread_corpus(path: str | Path) -> dict[str, Any]:
+    """Validate thread timestamps and an adjacent optional date-candidate sidecar."""
+    records = [
+        json.loads(line)
+        for line in Path(path).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if not records:
+        raise ValueError("thread corpus is empty")
+
+    errors: list[str] = []
+    total_messages = 0
+    for record in records:
+        later = record.get("later", [])
+        if not isinstance(later, list):
+            errors.append("every thread later field must be a list")
+            continue
+        expected_times = message_times(str(record.get("due", "")), len(later))
+        total_messages += len(later)
+        for message, expected in zip(later, expected_times, strict=True):
+            if not isinstance(message, dict) or message.get("sent_at") != expected:
+                errors.append("every later record must have the expected sent_at")
+                break
+
+    report: dict[str, Any] = {
+        "threads": len(records),
+        "messages": total_messages,
+        "date_candidates": None,
+    }
+    sidecar_path = Path(path).with_name("date_candidates.jsonl")
+    if sidecar_path.exists():
+        candidate_records = [
+            json.loads(line)
+            for line in sidecar_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        candidates_by_id: dict[str, dict[str, Any]] = {}
+        for candidate_record in candidate_records:
+            if not isinstance(candidate_record, dict):
+                errors.append("date-candidate entries must be objects")
+                continue
+            thread_id = str(candidate_record.get("thread_id", ""))
+            if not thread_id or thread_id in candidates_by_id:
+                errors.append("date-candidate sidecar must have one entry per thread")
+            candidates_by_id[thread_id] = candidate_record
+        thread_ids = {str(record.get("thread_id", "")) for record in records}
+        if set(candidates_by_id) != thread_ids or len(candidate_records) != len(records):
+            errors.append("date-candidate sidecar thread entries do not match the thread corpus")
+
+        outcomes: dict[str, list[int]] = {
+            name: [0, 0] for name in ("user_promises", "wp_changes_due")
+        }
+        all_eligible = [0, 0]
+        for record in records:
+            thread_id = str(record.get("thread_id", ""))
+            candidate_record = candidates_by_id.get(thread_id)
+            if candidate_record is None:
+                continue
+            later = record.get("later", [])
+            candidate_messages = candidate_record.get("messages")
+            if not isinstance(candidate_messages, list) or len(candidate_messages) != len(later):
+                errors.append(f"date-candidate message count differs for {thread_id}")
+                continue
+            planned_messages = record.get("plan", {}).get("later", [])
+            for message_index, (raw_later, raw_candidates) in enumerate(
+                zip(later, candidate_messages, strict=True)
+            ):
+                paragraphs = (
+                    raw_later.get("paragraphs", []) if isinstance(raw_later, dict) else []
+                )
+                if not isinstance(paragraphs, list):
+                    errors.append(f"thread paragraphs must be a list for {thread_id}")
+                    paragraphs = []
+                expected_unit_count = len(paragraphs) + int(len(paragraphs) >= 2)
+                units = raw_candidates.get("units") if isinstance(raw_candidates, dict) else None
+                if not isinstance(units, list) or len(units) != expected_unit_count:
+                    errors.append(
+                        f"date-candidate unit count differs for {thread_id} message {message_index}"
+                    )
+                    continue
+                for unit_candidates in units:
+                    if not isinstance(unit_candidates, list):
+                        errors.append("date-candidate units must be lists")
+                        continue
+                    for candidate_index, candidate in enumerate(unit_candidates):
+                        if not isinstance(candidate, dict):
+                            errors.append("date candidates must be objects")
+                            continue
+                        if candidate.get("handle") != f"t{candidate_index}":
+                            errors.append("date-candidate handles must be t0..tN in order")
+                        value = candidate.get("value")
+                        valid_date = isinstance(value, str) and re.fullmatch(
+                            r"\d{4}-\d{2}-\d{2}", value
+                        ) is not None
+                        if not valid_date:
+                            errors.append("date-candidate values must match YYYY-MM-DD")
+
+                if message_index >= len(planned_messages):
+                    continue
+                plan_message = planned_messages[message_index]
+                if not isinstance(plan_message, dict):
+                    continue
+                outcome = plan_message.get("outcome")
+                if outcome not in outcomes:
+                    continue
+                responding = int(plan_message.get("responding", 0))
+                outcomes[outcome][0] += 1
+                all_eligible[0] += 1
+                has_candidate = (
+                    0 <= responding < len(paragraphs)
+                    and responding < len(units)
+                    and bool(units[responding])
+                )
+                if has_candidate:
+                    outcomes[outcome][1] += 1
+                    all_eligible[1] += 1
+
+        def share_counts(counts: list[int]) -> dict[str, int | float]:
+            total, with_candidates = counts
+            return {
+                "responding_paragraphs": total,
+                "with_candidates": with_candidates,
+                "share": with_candidates / total if total else 0.0,
+            }
+
+        report["date_candidates"] = {
+            name: share_counts(counts) for name, counts in outcomes.items()
+        }
+        report["date_candidates"]["all"] = share_counts(all_eligible)
+
+    if errors:
+        raise ValueError("; ".join(errors))
+    return report
 
 
 def _plan_payload(plan: ThreadPlan, thread: Thread) -> dict[str, Any]:

@@ -16,9 +16,11 @@ from jev_optimize.threads import (
     ThreadPlan,
     derive_rows,
     generate_threads_llm,
+    message_times,
     plan_threads,
     stub_threads,
     thread_record,
+    with_message_times,
 )
 from jev_optimize.walk_metric import (
     date_state,
@@ -54,6 +56,7 @@ def _no_dspy_cache(monkeypatch):
     # earlier run would skip them.
     monkeypatch.setattr("dspy.cache.get", lambda _request: None)
     monkeypatch.setattr("dspy.cache.put", lambda _request, _response: None)
+    monkeypatch.setattr("jev_optimize.adapter.JevLM.cache", False)
 
 
 def _row(row_id: str, group: str) -> DatasetRow:
@@ -911,6 +914,23 @@ def test_expected_status_reads_the_plan():
     assert expected_status(plan) == "closed:completed"
 
 
+def test_expected_status_uses_candidate_presence_when_supplied():
+    from jev_optimize.threads import MessagePlan
+
+    plan = ThreadPlan(
+        "promise-date-status",
+        "none",
+        False,
+        None,
+        [MessagePlan("user", "user_promises")],
+    )
+    assert expected_status(plan) == "suggested:deadline_change"
+    assert expected_status(plan, [{"units": [[]]}]) == "open"
+    assert expected_status(plan, [{"units": [[{"handle": "t0", "value": "2026-10-30"}]]}]) == (
+        "suggested:deadline_change"
+    )
+
+
 def _test_thread_id(prefix):
     index = 0
     while True:
@@ -918,6 +938,70 @@ def _test_thread_id(prefix):
         if is_held_out_thread(thread_id):
             return thread_id
         index += 1
+
+
+def _date_candidate_records(threads, populated=None):
+    populated = populated or {}
+    records = []
+    for thread in threads:
+        messages = []
+        for message_index, paragraphs in enumerate(thread.later):
+            units = [[] for _ in range(len(paragraphs) + int(len(paragraphs) >= 2))]
+            for unit_index, values in populated.get(thread.plan.thread_id, {}).get(
+                message_index, {}
+            ).items():
+                units[unit_index] = [
+                    {"handle": f"t{index}", "value": value}
+                    for index, value in enumerate(values)
+                ]
+            messages.append({"units": units})
+        records.append({"thread_id": thread.plan.thread_id, "messages": messages})
+    return records
+
+
+def _write_date_candidates(threads_path, threads, populated=None):
+    write_jsonl(
+        threads_path.parent / "date_candidates.jsonl",
+        _date_candidate_records(threads, populated),
+    )
+
+
+def test_message_times_are_added_to_thread_records_and_idempotently_to_copies():
+    from dataclasses import replace
+    from datetime import date, timedelta
+
+    due = "2026-10-30"
+    expected = [
+        f"{(date.fromisoformat(due) + timedelta(days=offset)).isoformat()}T12:00:00Z"
+        for offset in (-3, -2, -1)
+    ]
+    assert message_times(due, 3) == expected
+
+    plan = ThreadPlan(
+        "message-times",
+        "none",
+        False,
+        None,
+        [
+            _m("user", "user_delivers"),
+            _m("waiting_party", "wp_received"),
+            _m("user", "user_declines"),
+        ],
+    )
+    thread = replace(stub_threads([plan])[0], due=due)
+    record = thread_record(thread)
+    assert [message["sent_at"] for message in record["later"]] == expected
+    legacy_record = {
+        **record,
+        "later": [
+            {key: value for key, value in message.items() if key != "sent_at"}
+            for message in record["later"]
+        ],
+    }
+    updated = with_message_times(legacy_record)
+    assert [message["sent_at"] for message in updated["later"]] == expected
+    assert with_message_times(updated) == updated
+    assert "sent_at" not in legacy_record["later"][0]
 
 
 def test_evaluate_walk_reports_handoff_mark_and_person_accuracy(tmp_path):
@@ -963,7 +1047,9 @@ def test_evaluate_walk_reports_handoff_mark_and_person_accuracy(tmp_path):
         for mark in marks
     ]
     path = tmp_path / "threads.jsonl"
-    write_jsonl(path, map(thread_record, stub_threads(plans)))
+    threads = stub_threads(plans)
+    write_jsonl(path, map(thread_record, threads))
+    _write_date_candidates(path, threads)
     report = evaluate_walk(path, HandoffClient(), thresholds=THRESHOLDS)
     assert report["handoff"] == {
         "total": 3,
@@ -972,6 +1058,240 @@ def test_evaluate_walk_reports_handoff_mark_and_person_accuracy(tmp_path):
         "mark_accuracy": 1.0,
         "person_accuracy": 1.0,
     }
+
+
+def test_promise_date_question_uses_sidecar_candidates_and_registry_wording(tmp_path):
+    from jev_optimize.threads import MessagePlan
+
+    class PromiseClient:
+        def __init__(self):
+            self.date_request = None
+
+        def decide(self, state, questions):
+            question_id, question = next(iter(questions.items()))
+            if question_id == "walk.new_date":
+                self.date_request = (state, question)
+                return {
+                    question_id: {
+                        "type": "choice",
+                        "choice": "t0",
+                        "probabilities": {"t0": 0.95},
+                        "confidence": 0.95,
+                    }
+                }
+            text = state["later"]["text"].casefold()
+            marker = {
+                "walk.responds": "mk-promise.",
+                "walk.user_promises": "mk-promise.",
+            }.get(question_id)
+            probability = 0.99 if marker and marker in text else 0.01
+            return {question_id: {"type": "noul", "noul": probability}}
+
+    plan = ThreadPlan(
+        _test_thread_id("promise-date"),
+        "none",
+        False,
+        None,
+        [MessagePlan("user", "user_promises")],
+    )
+    thread = stub_threads([plan])[0]
+    path = tmp_path / "threads.jsonl"
+    write_jsonl(path, [thread_record(thread)])
+    _write_date_candidates(path, [thread], {plan.thread_id: {0: {0: ["2026-10-30"]}}})
+    registry = {
+        "questions": {
+            "walk.new_date": {
+                "instructions": "Choose the date that changes the deadline.",
+                "options": {"none": "The promise gives no new calendar date."},
+            }
+        }
+    }
+
+    client = PromiseClient()
+    report = evaluate_walk(path, client, thresholds=THRESHOLDS, registry=registry)
+
+    assert client.date_request == (
+        date_state(thread.ask, thread.later[0][0]),
+        {
+            "type": "choice",
+            "instructions": "Choose the date that changes the deadline.",
+            "criteria": {
+                "t0": "2026-10-30",
+                "none": "The promise gives no new calendar date.",
+            },
+        },
+    )
+    assert report["confusion"] == {"suggested:deadline_change": {"suggested:deadline_change": 1}}
+    assert report["correct"] == 1
+    assert report["date"] == {
+        "asked": 1,
+        "skipped_no_candidates": 0,
+        "picked": 1,
+        "none": 0,
+        "gray": 0,
+    }
+
+
+def test_promise_without_date_candidates_is_open_and_matches_expected(tmp_path):
+    from jev_optimize.threads import MessagePlan
+
+    class PromiseClient:
+        def __init__(self):
+            self.questions = []
+
+        def decide(self, state, questions):
+            question_id, question = next(iter(questions.items()))
+            self.questions.append(question_id)
+            text = state["later"]["text"].casefold()
+            marker = {
+                "walk.responds": "mk-promise.",
+                "walk.user_promises": "mk-promise.",
+            }.get(question_id)
+            probability = 0.99 if marker and marker in text else 0.01
+            return {question_id: {"type": "noul", "noul": probability}}
+
+    plan = ThreadPlan(
+        _test_thread_id("promise-no-date"),
+        "none",
+        False,
+        None,
+        [MessagePlan("user", "user_promises")],
+    )
+    thread = stub_threads([plan])[0]
+    path = tmp_path / "threads.jsonl"
+    write_jsonl(path, [thread_record(thread)])
+    _write_date_candidates(path, [thread])
+
+    client = PromiseClient()
+    report = evaluate_walk(path, client, thresholds=THRESHOLDS)
+
+    assert "walk.new_date" not in client.questions
+    assert report["confusion"] == {"open": {"open": 1}}
+    assert report["correct"] == 1
+    assert report["date"] == {
+        "asked": 0,
+        "skipped_no_candidates": 1,
+        "picked": 0,
+        "none": 0,
+        "gray": 0,
+    }
+
+
+def test_waiting_party_due_change_without_date_candidates_escalates(tmp_path):
+    from jev_optimize.threads import MessagePlan
+
+    class DueChangeClient:
+        def decide(self, state, questions):
+            question_id, _question = next(iter(questions.items()))
+            marker = {
+                "walk.responds": "mk-newdate.",
+                "walk.wp_changes_due": "mk-newdate.",
+            }.get(question_id)
+            text = state["later"]["text"].casefold()
+            probability = 0.99 if marker and marker in text else 0.01
+            return {question_id: {"type": "noul", "noul": probability}}
+
+    plan = ThreadPlan(
+        _test_thread_id("wp-due-no-date"),
+        "none",
+        False,
+        None,
+        [MessagePlan("waiting_party", "wp_changes_due")],
+    )
+    thread = stub_threads([plan])[0]
+    path = tmp_path / "threads.jsonl"
+    write_jsonl(path, [thread_record(thread)])
+    _write_date_candidates(path, [thread])
+
+    report = evaluate_walk(path, DueChangeClient(), thresholds=THRESHOLDS)
+
+    assert report["confusion"] == {"escalated": {"escalated": 1}}
+    assert report["expected_escalated"] == 1
+    assert report["correct"] == 1
+    assert report["date"]["skipped_no_candidates"] == 1
+
+
+def test_evaluate_walk_requires_a_sidecar_and_matching_unit_counts(tmp_path):
+    from jev_optimize.threads import MessagePlan
+
+    plan = ThreadPlan(
+        _test_thread_id("date-sidecar-required"),
+        "none",
+        False,
+        None,
+        [MessagePlan("user", "user_delivers")],
+    )
+    thread = stub_threads([plan])[0]
+    path = tmp_path / "threads.jsonl"
+    write_jsonl(path, [thread_record(thread)])
+    with pytest.raises(ValueError, match="date_candidates.jsonl.*missing"):
+        evaluate_walk(path, object(), thresholds=THRESHOLDS)
+
+    write_jsonl(path.parent / "date_candidates.jsonl", [])
+    with pytest.raises(ValueError, match="has no date-candidate entry"):
+        evaluate_walk(path, object(), thresholds=THRESHOLDS)
+
+    write_jsonl(path.parent / "date_candidates.jsonl", [{
+        "thread_id": plan.thread_id,
+        "messages": [{"units": []}],
+    }])
+    with pytest.raises(ValueError, match="unit count"):
+        evaluate_walk(path, object(), thresholds=THRESHOLDS)
+
+
+@pytest.mark.parametrize("change", ["missing", "wrong"])
+def test_check_corpus_rejects_missing_or_wrong_message_times(tmp_path, change):
+    from copy import deepcopy
+
+    from jev_optimize.threads import MessagePlan
+
+    plan = ThreadPlan(
+        "check-times",
+        "none",
+        False,
+        None,
+        [MessagePlan("user", "user_delivers"), MessagePlan("waiting_party", "wp_received")],
+    )
+    record = thread_record(stub_threads([plan])[0])
+    invalid = deepcopy(record)
+    if change == "missing":
+        invalid["later"][0].pop("sent_at")
+    else:
+        invalid["later"][1]["sent_at"] = "2026-10-29T12:00:00Z"
+    path = tmp_path / "threads.jsonl"
+    write_jsonl(path, [invalid])
+
+    with pytest.raises(ValueError, match="sent_at"):
+        check_corpus(path)
+
+
+def test_check_corpus_validates_date_sidecar_and_reports_response_share(tmp_path):
+    from jev_optimize.threads import MessagePlan
+
+    plan = ThreadPlan(
+        "check-date-share",
+        "none",
+        False,
+        None,
+        [MessagePlan("user", "user_promises", paragraphs=2, responding=1)],
+    )
+    thread = stub_threads([plan])[0]
+    path = tmp_path / "threads.jsonl"
+    write_jsonl(path, [thread_record(thread)])
+    _write_date_candidates(
+        path,
+        [thread],
+        {plan.thread_id: {0: {1: ["2026-10-30"]}}},
+    )
+
+    report = check_corpus(path)
+
+    assert report["date_candidates"]["user_promises"] == {
+        "responding_paragraphs": 1,
+        "with_candidates": 1,
+        "share": 1.0,
+    }
+    assert report["date_candidates"]["wp_changes_due"]["share"] == 0.0
 
 
 def test_whole_message_date_follow_up_uses_joined_message_text(tmp_path):
@@ -1013,10 +1333,16 @@ def test_whole_message_date_follow_up_uses_joined_message_text(tmp_path):
     thread = stub_threads([plan])[0]
     path = tmp_path / "threads.jsonl"
     write_jsonl(path, [thread_record(thread)])
+    _write_date_candidates(
+        path,
+        [thread],
+        {plan.thread_id: {0: {1: ["2026-10-30"], 2: ["2026-10-30"]}}},
+    )
     client = WholeMessageDateClient()
-    evaluate_walk(path, client, thresholds=THRESHOLDS)
+    report = evaluate_walk(path, client, thresholds=THRESHOLDS)
     expected = "\n\n".join(thread.later[0])
     assert client.date_states == [date_state(thread.ask, expected)]
+    assert report["date"]["none"] == 1
 
 
 def test_paid_commands_refuse_stub_rows(tmp_path):
@@ -1214,7 +1540,9 @@ def test_evaluate_walk_sends_the_registry_wording(tmp_path):
         [MessagePlan("waiting_party", "wp_received")],
     )
     path = tmp_path / "threads.jsonl"
-    write_jsonl(path, [thread_record(stub_threads([plan])[0])])
+    threads = stub_threads([plan])
+    write_jsonl(path, [thread_record(threads[0])])
+    _write_date_candidates(path, threads)
     registry = {
         "questions": {
             "walk.responds": {

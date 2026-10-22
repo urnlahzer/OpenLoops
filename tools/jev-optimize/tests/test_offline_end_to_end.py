@@ -323,7 +323,25 @@ def test_evaluate_walk_reports_offline_metrics(tmp_path, monkeypatch):
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-not-real")
     path = tmp_path / "threads.jsonl"
-    write_jsonl(path, map(thread_record, stub_threads(plan_threads(40))))
+    threads = stub_threads(plan_threads(40))
+    write_jsonl(path, map(thread_record, threads))
+    write_jsonl(
+        path.with_name("date_candidates.jsonl"),
+        (
+            {
+                "thread_id": thread.plan.thread_id,
+                "messages": [
+                    {
+                        "units": [
+                            [] for _ in range(len(paragraphs) + int(len(paragraphs) >= 2))
+                        ]
+                    }
+                    for paragraphs in thread.later
+                ],
+            }
+            for thread in threads
+        ),
+    )
     endpoint = FakeDecisionsEndpoint()
     report = evaluate_walk(path, _client(endpoint))
     assert {"accuracy", "escalated_share", "confusion"} <= set(report)

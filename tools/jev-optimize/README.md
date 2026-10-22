@@ -86,6 +86,21 @@ paragraphs also have a whole-message unit whose `later.text` joins those
 paragraphs with a blank line. The fixed plan determines which paragraph
 responds and which outcome it expresses. `threads.jsonl` stores each thread and
 `walk.jsonl` and `expiry.jsonl` store the question rows derived from them.
+Each later message record has a `sent_at` timestamp at 12:00 UTC. The adjacent
+`date_candidates.jsonl` file has one entry per thread and lists the normalized
+date candidates for each paragraph and whole-message unit. The desktop
+development test produces this sidecar. `OPENLOOPS_WALK_THREADS` and
+`OPENLOOPS_WALK_DATES_OUT` specify the test's input and output paths. The test
+command is:
+
+```powershell
+cargo test -p openloops-desktop --features native-ui --locked export_walk_date_candidates -- --ignored
+```
+
+`evaluate-walk` requires `date_candidates.jsonl` beside `threads.jsonl` and
+stops when the sidecar is missing. `check-corpus threads.jsonl` verifies message
+timestamps and validates sidecar counts and candidate values when the sidecar
+exists.
 
 The committed corpus in `data/synthetic/` is LLM-authored: 600 threads written
 by `google/gemini-3.1-flash-lite` through OpenRouter with `provider.zdr`

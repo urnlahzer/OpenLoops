@@ -251,14 +251,21 @@ def date_state(ask: str, text: str) -> dict[str, Any]:
     return {"ask": ask, "later": {"text": text}}
 
 
-def expected_status(plan: ThreadPlan) -> str:
+def expected_status(
+    plan: ThreadPlan, date_candidates: list[dict[str, Any]] | None = None
+) -> str:
     """Compute a synthetic thread's expected final status from its fixed path."""
     from .threads import TERMINAL
 
     steps: list[tuple[str, list[dict[str, Any]]]] = []
-    for message in plan.later:
+    for message_index, message in enumerate(plan.later):
         units = []
         labels = branch_labels(message.author_role, message.outcome)
+        message_candidates: list[list[dict[str, str]]] = []
+        if date_candidates is not None and message_index < len(date_candidates):
+            raw_candidates = date_candidates[message_index].get("units", [])
+            if isinstance(raw_candidates, list):
+                message_candidates = raw_candidates
         for ordinal in range(message.paragraphs):
             responds = ordinal == message.responding and message.outcome != "unrelated"
             values = {question_id: False for question_id in BRANCH_IDS[message.author_role]}
@@ -271,7 +278,15 @@ def expected_status(plan: ThreadPlan) -> str:
                     for question_id, value in values.items()
                 },
             }
-            if message.outcome in {"wp_changes_due", "user_promises"} and responds:
+            has_date_candidate = (
+                date_candidates is None
+                or ordinal < len(message_candidates) and bool(message_candidates[ordinal])
+            )
+            if (
+                message.outcome in {"wp_changes_due", "user_promises"}
+                and responds
+                and has_date_candidate
+            ):
                 probabilities["walk.new_date"] = "synthetic date"
             units.append(probabilities)
         if message.paragraphs >= 2:
@@ -429,6 +444,7 @@ def evaluate_walk(
     *,
     thresholds: dict[str, dict[str, float]] | None = None,
     registry: dict[str, Any] | None = None,
+    date_candidates: str | Path | None = None,
 ) -> dict[str, Any]:
     """Evaluate held-out thread statuses through the DecisionsClient interface.
 
@@ -446,6 +462,32 @@ def evaluate_walk(
     if not records:
         raise ValueError("thread corpus is empty")
     held_out = [record for record in records if is_held_out_thread(str(record["thread_id"]))]
+    candidates_path = (
+        Path(date_candidates)
+        if date_candidates is not None
+        else Path(threads_path).parent / "date_candidates.jsonl"
+    )
+    try:
+        candidate_lines = candidates_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        raise ValueError(f"date_candidates.jsonl sidecar is missing: {candidates_path}") from None
+    candidate_by_id: dict[str, dict[str, Any]] = {}
+    for line_number, line in enumerate(candidate_lines, 1):
+        if not line.strip():
+            continue
+        try:
+            candidate_record = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"invalid date_candidates.jsonl entry on line {line_number}"
+            ) from error
+        if not isinstance(candidate_record, dict):
+            raise ValueError("date_candidates.jsonl entries must be objects")
+        thread_id = str(candidate_record.get("thread_id", ""))
+        if not thread_id or thread_id in candidate_by_id:
+            raise ValueError("date_candidates.jsonl must have one entry per thread")
+        candidate_by_id[thread_id] = candidate_record
+
     active_thresholds = thresholds or _registry_thresholds(registry)
     registry_instructions = {
         question_id: str(item["instructions"])
@@ -457,8 +499,32 @@ def evaluate_walk(
     handoff_total = 0
     handoff_mark_correct = 0
     handoff_person_correct = 0
+    date_counts = {
+        "asked": 0,
+        "skipped_no_candidates": 0,
+        "picked": 0,
+        "none": 0,
+        "gray": 0,
+    }
+    registry_date = (registry or {}).get("questions", {}).get("walk.new_date", {})
+    registry_date_options = (
+        registry_date.get("options", {}) if isinstance(registry_date, dict) else {}
+    )
+    if isinstance(registry_date_options, dict) and "none" in registry_date_options:
+        date_none_text = str(registry_date_options["none"])
+    else:
+        date_none_text = (SPECS["walk.new_date"].options or {}).get("none", "")
     for record in held_out:
         plan = _plan_from_record(record)
+        thread_id = str(record["thread_id"])
+        candidate_record = candidate_by_id.get(thread_id)
+        if candidate_record is None:
+            raise ValueError(f"held-out thread {thread_id} has no date-candidate entry")
+        date_messages = candidate_record.get("messages")
+        if not isinstance(date_messages, list):
+            raise ValueError(f"date candidates for {thread_id} must have a messages list")
+        if len(date_messages) != len(plan.later) or len(date_messages) != len(record["later"]):
+            raise ValueError(f"date-candidate message count differs for {thread_id}")
         ask = str(record["ask"])
         due = str(record["due"])
         steps: list[tuple[str, list[dict[str, Any]]]] = []
@@ -473,7 +539,9 @@ def evaluate_walk(
             if "@" in address
         }
         waiting_party_address = str(record.get("waiting_party_address", ""))
-        for message, raw_later in zip(plan.later, record["later"], strict=True):
+        for message_index, (message, raw_later, date_message) in enumerate(
+            zip(plan.later, record["later"], date_messages, strict=True)
+        ):
             role = message.author_role
             later = _later_record(raw_later)
             paragraphs = later.get("paragraphs", [])
@@ -482,8 +550,15 @@ def evaluate_walk(
             unit_texts = [str(text) for text in paragraphs]
             if len(unit_texts) >= 2:
                 unit_texts.append("\n\n".join(unit_texts))
+            date_units = date_message.get("units") if isinstance(date_message, dict) else None
+            if not isinstance(date_units, list) or len(date_units) != len(unit_texts):
+                raise ValueError(
+                    f"date-candidate unit count differs for {thread_id} message {message_index}"
+                )
+            if any(not isinstance(unit_candidates, list) for unit_candidates in date_units):
+                raise ValueError(f"date-candidate units must be lists for {thread_id}")
             unit_answers = []
-            for text in unit_texts:
+            for unit_index, text in enumerate(unit_texts):
                 state = walk_state(
                     str(record.get("user_name", "the user")),
                     str(record["waiting_party"]),
@@ -525,17 +600,39 @@ def evaluate_walk(
                     == "accept"
                 )
                 if needs_date:
-                    date_predictor = predictors.setdefault(
-                        "walk.new_date",
-                        program(
-                            "walk.new_date", client, registry_instructions.get("walk.new_date")
-                        ),
-                    )
-                    date_prediction = date_predictor(**date_state(ask, text)).decision
-                    answers["walk.new_date"] = {
-                        "choice": str(date_prediction.value),
-                        "confidence": float(date_prediction.confidence),
-                    }
+                    choices = date_units[unit_index]
+                    if not choices:
+                        date_counts["skipped_no_candidates"] += 1
+                    else:
+                        criteria = {
+                            str(candidate["handle"]): str(candidate["value"])
+                            for candidate in choices
+                        }
+                        criteria["none"] = date_none_text
+                        question = {
+                            "walk.new_date": {
+                                "type": "choice",
+                                "instructions": registry_instructions.get(
+                                    "walk.new_date",
+                                    SPECS["walk.new_date"].signature.instructions,
+                                ),
+                                "criteria": criteria,
+                            }
+                        }
+                        response = client.decide(date_state(ask, text), question)[
+                            "walk.new_date"
+                        ]
+                        date_answer = {
+                            "choice": str(response.get("choice", "none")),
+                            "confidence": float(response.get("confidence", 0.0)),
+                        }
+                        answers["walk.new_date"] = date_answer
+                        date_counts["asked"] += 1
+                        date_status = _new_date_status(date_answer, active_thresholds)
+                        if date_status == "selected":
+                            date_counts["picked"] += 1
+                        elif date_status in {"none", "gray"}:
+                            date_counts[date_status] += 1
                 handoff_accepts = (
                     gate_accepts
                     and role == "user"
@@ -611,7 +708,7 @@ def evaluate_walk(
                         ask = f"{ask}\n\nLater change: {text}"
                         break
         actual = walk_status(steps, active_thresholds)
-        outcomes.append((expected_status(plan), actual))
+        outcomes.append((expected_status(plan, date_messages), actual))
 
     correct = sum(expected == actual for expected, actual in outcomes)
     escalated = sum(actual == "escalated" for _expected, actual in outcomes)
@@ -630,6 +727,8 @@ def evaluate_walk(
         "accuracy": correct / total if total else 0.0,
         "escalated": escalated,
         "escalated_share": escalated / total if total else 0.0,
+        "expected_escalated": sum(expected == "escalated" for expected, _actual in outcomes),
+        "date": date_counts,
         "confusion": confusion,
         "handoff": {
             "total": handoff_total,

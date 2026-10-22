@@ -968,8 +968,21 @@ def check_corpus(
 ) -> dict[str, Any]:
     """Validate corpus diversity, balance, provenance, and closure exclusivity."""
 
+    corpus_path = Path(path)
+    with corpus_path.open(encoding="utf-8") as stream:
+        first_record = next((line for line in stream if line.strip()), "")
+    if first_record:
+        try:
+            first_value = json.loads(first_record)
+        except json.JSONDecodeError:
+            first_value = None
+        if isinstance(first_value, dict) and {"thread_id", "plan", "later"} <= set(first_value):
+            from .threads import check_thread_corpus
+
+            return check_thread_corpus(corpus_path)
+
     thresholds = thresholds or CorpusThresholds()
-    rows = load_jsonl(path)
+    rows = load_jsonl(corpus_path)
     if not rows:
         raise ValueError("corpus is empty")
     set_names = {row.set for row in rows}
