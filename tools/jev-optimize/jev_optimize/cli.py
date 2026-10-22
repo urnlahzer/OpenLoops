@@ -86,11 +86,17 @@ def _parser() -> argparse.ArgumentParser:
         "--threads", type=Path, default=DEFAULT_ROOT / "threads.jsonl"
     )
     evaluate_walk_command.add_argument("--replay")
+    evaluate_walk_command.add_argument(
+        "--registry", type=Path, help="use this registry's walk wording and thresholds"
+    )
     optimize = commands.add_parser("optimize")
     optimize.add_argument("--set", required=True, choices=SETS)
     optimize.add_argument("--data")
     optimize.add_argument("--budget", choices=("light", "medium"), default="light")
     optimize.add_argument("--only", help="comma-separated question ids to optimize")
+    optimize.add_argument(
+        "--output", type=Path, help="result file (default runs/<set>-result.json)"
+    )
     optimize.add_argument(
         "--replay", nargs="?", const=str(ROOT / "runs" / "latest.json")
     )
@@ -195,7 +201,10 @@ def main() -> None:
         print(json.dumps(result, indent=2, sort_keys=True))
     elif args.command == "evaluate-walk":
         refuse_stub_rows(args.threads, args.replay)
-        result = evaluate_walk(args.threads, _client(args.replay))
+        registry = (
+            json.loads(args.registry.read_text(encoding="utf-8")) if args.registry else None
+        )
+        result = evaluate_walk(args.threads, _client(args.replay), registry=registry)
         print(json.dumps(result, indent=2, sort_keys=True))
     elif args.command == "optimize":
         data_set = "triage" if args.set == "extract" else args.set
@@ -209,8 +218,8 @@ def main() -> None:
             budget=args.budget,
             only=only or None,
         )
-        output = ROOT / "runs" / f"{args.set}-result.json"
-        output.parent.mkdir(exist_ok=True)
+        output = args.output or ROOT / "runs" / f"{args.set}-result.json"
+        output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(
             json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )

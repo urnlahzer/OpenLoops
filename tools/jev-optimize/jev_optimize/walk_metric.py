@@ -391,14 +391,15 @@ def _handoff_mark(
     )
 
 
-def _registry_thresholds() -> dict[str, dict[str, float]]:
+def _registry_thresholds(registry: dict[str, Any] | None = None) -> dict[str, dict[str, float]]:
     from .registry import DEFAULT_REGISTRY
 
     thresholds = {key: dict(value) for key, value in _FALLBACK_THRESHOLDS.items()}
-    try:
-        registry = json.loads(DEFAULT_REGISTRY.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return thresholds
+    if registry is None:
+        try:
+            registry = json.loads(DEFAULT_REGISTRY.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return thresholds
     for question_id in thresholds:
         item = registry.get("questions", {}).get(question_id)
         if isinstance(item, dict) and "accept" in item and "escalate" in item:
@@ -409,13 +410,31 @@ def _registry_thresholds() -> dict[str, dict[str, float]]:
     return thresholds
 
 
+def is_held_out_thread(thread_id: str) -> bool:
+    """A thread is held out only when it is test data for every question.
+
+    Large question populations split 78/7/15 and small ones 60/20/20, so a
+    thread in buckets 80-84 is test data for a small question but validation
+    data for `walk.responds`. Only buckets 85-99 are test under both.
+    """
+    return (
+        split_name(thread_id, small=True) == "test"
+        and split_name(thread_id, small=False) == "test"
+    )
+
+
 def evaluate_walk(
     threads_path: str | Path,
     client: Any,
     *,
     thresholds: dict[str, dict[str, float]] | None = None,
+    registry: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Evaluate held-out thread statuses through the DecisionsClient interface."""
+    """Evaluate held-out thread statuses through the DecisionsClient interface.
+
+    With ``registry``, the predictors use its instructions and thresholds (the
+    wording that ships); without it, the bootstrap docstrings.
+    """
     from .adapter import program
     from .questions import SPECS
 
@@ -426,12 +445,13 @@ def evaluate_walk(
     ]
     if not records:
         raise ValueError("thread corpus is empty")
-    held_out = [
-        record
-        for record in records
-        if split_name(str(record["thread_id"]), small=True) == "test"
-    ]
-    active_thresholds = thresholds or _registry_thresholds()
+    held_out = [record for record in records if is_held_out_thread(str(record["thread_id"]))]
+    active_thresholds = thresholds or _registry_thresholds(registry)
+    registry_instructions = {
+        question_id: str(item["instructions"])
+        for question_id, item in (registry or {}).get("questions", {}).items()
+        if isinstance(item, dict) and item.get("instructions")
+    }
     predictors: dict[str, Any] = {}
     outcomes: list[tuple[str, str]] = []
     handoff_total = 0
@@ -476,7 +496,8 @@ def evaluate_walk(
                 question_ids = ("walk.responds", *BRANCH_IDS[role])
                 for question_id in question_ids:
                     predictor = predictors.setdefault(
-                        question_id, program(question_id, client)
+                        question_id,
+                        program(question_id, client, registry_instructions.get(question_id)),
                     )
                     prediction = predictor(**state)
                     answers[question_id] = float(prediction.decision.probability)
@@ -505,7 +526,10 @@ def evaluate_walk(
                 )
                 if needs_date:
                     date_predictor = predictors.setdefault(
-                        "walk.new_date", program("walk.new_date", client)
+                        "walk.new_date",
+                        program(
+                            "walk.new_date", client, registry_instructions.get("walk.new_date")
+                        ),
                     )
                     date_prediction = date_predictor(**date_state(ask, text)).decision
                     answers["walk.new_date"] = {
@@ -529,9 +553,10 @@ def evaluate_walk(
                     question = {
                         "walk.handoff_to": {
                             "type": "choice",
-                            "instructions": SPECS[
-                                "walk.handoff_to"
-                            ].signature.instructions,
+                            "instructions": registry_instructions.get(
+                                "walk.handoff_to",
+                                SPECS["walk.handoff_to"].signature.instructions,
+                            ),
                             "criteria": options,
                         }
                     }
@@ -599,6 +624,7 @@ def evaluate_walk(
     }
     total = len(outcomes)
     return {
+        "instructions": "registry" if registry_instructions else "bootstrap",
         "threads": total,
         "correct": correct,
         "accuracy": correct / total if total else 0.0,

@@ -126,6 +126,11 @@ bootstrap wording because their options are generated per request. The
 thread-level hand-off report separately counts mark and person accuracy.
 `evaluate-walk --threads data/synthetic/threads.jsonl --replay runs/walk.json`
 evaluates held-out statuses and hand-off accuracy without a network call.
+`--registry PATH` makes it send that registry's wording and use its
+thresholds; without it, the bootstrap wording is sent. Held-out threads are
+those in the test split under both split sizes, so no thread that tuned
+`walk.responds` is scored. `optimize --output PATH` writes the result to that
+file, so runs for separate question groups do not overwrite each other.
 
 Run `optimize` separately for `closure`, `triage`, and `rules`; pass all result
 files to `write-registry` to merge them in one reviewed edit. Replay files are

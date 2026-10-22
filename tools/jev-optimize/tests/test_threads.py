@@ -24,6 +24,7 @@ from jev_optimize.walk_metric import (
     date_state,
     evaluate_walk,
     expected_status,
+    is_held_out_thread,
     walk_state,
     walk_status,
 )
@@ -914,7 +915,7 @@ def _test_thread_id(prefix):
     index = 0
     while True:
         thread_id = f"{prefix}-{index}"
-        if split_name(thread_id, small=True) == "test":
+        if is_held_out_thread(thread_id):
             return thread_id
         index += 1
 
@@ -1158,3 +1159,72 @@ def test_pay_by_date_plans_mention_an_event_that_does_not_end_the_ask():
     labels = [plan.ends_with_event for plan in plans if plan.has_event]
     assert labels.count(False) >= 80
     assert labels.count(True) >= 80
+
+
+def test_optimize_writes_its_result_to_the_output_option(tmp_path, monkeypatch):
+    import sys
+
+    from jev_optimize import cli
+
+    data = tmp_path / "walk.jsonl"
+    data.write_text("", encoding="utf-8")
+    monkeypatch.setattr(cli, "refuse_stub_rows", lambda *_args: None)
+    monkeypatch.setattr(cli, "_client", lambda _replay: object())
+    monkeypatch.setattr(cli, "optimize_set", lambda *_args, **_kwargs: {"questions": {}})
+    output = tmp_path / "nested" / "walk-group.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["jev-optimize", "optimize", "--set", "walk", "--data", str(data), "--output", str(output)],
+    )
+    cli.main()
+    assert json.loads(output.read_text(encoding="utf-8")) == {"questions": {}}
+
+
+def test_held_out_threads_are_test_data_under_both_split_sizes():
+    ids = [f"thread-{index:05d}" for index in range(600)]
+    held = [thread_id for thread_id in ids if is_held_out_thread(thread_id)]
+    assert held
+    assert all(split_name(thread_id, small=False) == "test" for thread_id in held)
+    leaked = [
+        thread_id
+        for thread_id in ids
+        if split_name(thread_id, small=True) == "test"
+        and split_name(thread_id, small=False) != "test"
+    ]
+    assert leaked and not set(leaked) & set(held)
+
+
+def test_evaluate_walk_sends_the_registry_wording(tmp_path):
+    from jev_optimize.threads import MessagePlan
+
+    seen = {}
+
+    class RecordingClient:
+        def decide(self, state, questions):
+            question_id, question = next(iter(questions.items()))
+            seen.setdefault(question_id, question["instructions"])
+            return {question_id: {"type": "noul", "noul": 0.01}}
+
+    plan = ThreadPlan(
+        _test_thread_id("registry-wording"),
+        "none",
+        False,
+        None,
+        [MessagePlan("waiting_party", "wp_received")],
+    )
+    path = tmp_path / "threads.jsonl"
+    write_jsonl(path, [thread_record(stub_threads([plan])[0])])
+    registry = {
+        "questions": {
+            "walk.responds": {
+                "instructions": "Registry wording for the gate.",
+                "accept": 0.7,
+                "escalate": 0.3,
+            }
+        }
+    }
+    result = evaluate_walk(path, RecordingClient(), registry=registry)
+    assert result["instructions"] == "registry"
+    assert seen["walk.responds"] == "Registry wording for the gate."
+    assert seen["walk.wp_received"] != "Registry wording for the gate."

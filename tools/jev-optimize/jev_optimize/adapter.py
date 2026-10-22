@@ -51,9 +51,16 @@ class JevLM:
         return {"decision": response[self.question_id]}
 
 
-def program(question_id: str, client: Any) -> dspy.Predict:
-    """Build one native decision predictor and bind it to the shared transport."""
+def program(question_id: str, client: Any, instructions: str | None = None) -> dspy.Predict:
+    """Build one native decision predictor and bind it to the shared transport.
 
-    predictor = dspy.Predict(SPECS[question_id].signature)
+    ``instructions`` replaces the bootstrap docstring, so a caller can measure
+    the wording a registry ships.
+    """
+
+    signature = SPECS[question_id].signature
+    if instructions:
+        signature = signature.with_instructions(instructions)
+    predictor = dspy.Predict(signature)
     predictor.set_lm(JevLM(client, question_id))
     return predictor
