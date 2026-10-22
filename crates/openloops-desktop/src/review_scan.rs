@@ -8968,7 +8968,7 @@ mod cipher_scan_integration_tests {
         assert!(question_ids.iter().any(|id| id == "rules.recap"));
         assert!(question_ids.iter().any(|id| id == "triage.asks_recipient"));
         assert!(question_ids.iter().any(|id| id == "extract.claim_type"));
-        assert!(question_ids.iter().any(|id| id.ends_with(".outcome")));
+        assert!(question_ids.iter().any(|id| id == "walk.responds"));
 
         let direct = RecordingScanDecision::default();
         let direct_result = scan_with_clients(

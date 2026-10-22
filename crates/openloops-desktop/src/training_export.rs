@@ -1204,6 +1204,54 @@ mod tests {
     }
 
     #[test]
+    fn export_ciphers_known_people_in_walk_rows() {
+        let mut review = layout_fixture();
+        review.messages[0].input.message.sender = Some(
+            openloops_inference::blocks::CanonicalBlock::new(
+                "Rellian Voss <rellian.voss@example.invalid>",
+            )
+            .unwrap(),
+        );
+        let index = open_loop_with_pending_update(&mut review);
+        let later_handle = review.analysis.as_ref().unwrap().items[index]
+            .suggested_update
+            .as_ref()
+            .unwrap()
+            .source_message
+            .clone();
+        let later = review
+            .messages
+            .iter_mut()
+            .find(|message| message.input.handle == later_handle)
+            .unwrap();
+        later.input.message.body_blocks = vec![
+            openloops_inference::blocks::CanonicalBlock::new(
+                "I sent Rellian Voss the synthetic report at rellian.voss@example.invalid.",
+            )
+            .unwrap(),
+        ];
+        review.resolve_suggested_update(index, true);
+
+        let (_summary, _triage_path, closure_path) = export_to_temp(&review);
+        let folder = closure_path.parent().unwrap().to_path_buf();
+        let walk_path = folder.join("walk.jsonl");
+        let rows = read_rows(&walk_path);
+        assert!(rows.iter().any(|row| {
+            row["later"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("the synthetic report"))
+        }));
+        let text = std::fs::read_to_string(&walk_path).expect("read exported walk rows");
+        assert!(!text.contains("Rellian"), "real given name in walk.jsonl");
+        assert!(!text.contains("Voss"), "real family name in walk.jsonl");
+        assert!(
+            !text.contains("rellian.voss@example.invalid"),
+            "real address in walk.jsonl"
+        );
+        std::fs::remove_dir_all(folder).ok();
+    }
+
+    #[test]
     fn an_oversize_paragraph_is_skipped_without_failing_the_export() {
         let mut review = layout_fixture();
         let oversized = "x".repeat(MAX_PARAGRAPH_CHARS + 1);
