@@ -124,6 +124,7 @@ class CorpusThresholds:
     min_rows: int = 600
     min_paragraphs: int = 300
     min_obligations: int = 40
+    min_thread_class_rows: int = 20
     max_from_user_gap: float = 0.1
     max_days_mean_gap: float = 2.0
     positive_rate_min: float = 0.4
@@ -213,6 +214,16 @@ def scrub_row(row: dict[str, Any]) -> list[str]:
     if _URL_RE.search(text):
         violations.append("URL")
     allowed_names = _allowed_name_phrases()
+    # Each value is matched on its own, so a name ending one field and a name
+    # starting the next never join into one phrase.
+    for value in _text_values(row):
+        if _has_unknown_name(value, allowed_names):
+            violations.append("capitalized name outside the synthetic pool")
+            break
+    return violations
+
+
+def _has_unknown_name(text: str, allowed_names: set[str]) -> bool:
     for match in _CAPITALIZED_BIGRAM_RE.finditer(text):
         phrase = match.group(1)
         if phrase in allowed_names:
@@ -222,9 +233,8 @@ def scrub_row(row: dict[str, Any]) -> list[str]:
             continue
         # A name-shaped run that is not a pool name and contains no ordinary
         # capitalized word.
-        violations.append("capitalized name outside the synthetic pool")
-        break
-    return violations
+        return True
+    return False
 
 
 def _question_assignment(set_name: str, index: int, rows: int) -> tuple[str, int]:
@@ -395,11 +405,17 @@ def generate_stub(
 
     if rows < 10:
         raise ValueError("stub generation requires at least 10 rows")
-    names = tuple(name for name in SETS if name != "extract") if selected_set == "all" else (
-        selected_set,
+    names = (
+        tuple(name for name in SETS if name not in {"extract", "walk", "expiry"})
+        if selected_set == "all"
+        else (selected_set,)
     )
     if "extract" in names:
         raise ValueError("extract rows are derived from the triage corpus")
+    if selected_set in {"walk", "expiry"}:
+        raise ValueError(
+            "walk and expiry rows are derived from threads; use generate-threads"
+        )
     root = Path(output)
     paths: list[Path] = []
     for offset, set_name in enumerate(names):
@@ -723,12 +739,18 @@ def generate_llm(
     if smoke and rows < 128:
         raise ValueError("a smoke run needs at least 128 rows to balance every label")
     parallel = max(1, parallel)
+    if selected_set in {"walk", "expiry"}:
+        raise ValueError(
+            "walk and expiry rows are derived from threads; use generate-threads"
+        )
     api_key = os.environ.get("OPENROUTER_API_KEY")
     model = os.environ.get("OPENROUTER_SYNTH_MODEL")
     if not api_key or not model:
         raise RuntimeError("OPENROUTER_API_KEY and OPENROUTER_SYNTH_MODEL must be set")
-    names = tuple(name for name in SETS if name != "extract") if selected_set == "all" else (
-        selected_set,
+    names = (
+        tuple(name for name in SETS if name not in {"extract", "walk", "expiry"})
+        if selected_set == "all"
+        else (selected_set,)
     )
     if "extract" in names:
         raise ValueError("extract rows are derived from the triage corpus")
@@ -841,19 +863,134 @@ def _paragraph_text(row: DatasetRow) -> str:
     return str(getattr(row, _MAIN_TEXT_FIELD[question_id]))
 
 
+def _check_thread_corpus(
+    rows: list[DatasetRow], set_name: str, thresholds: CorpusThresholds
+) -> dict[str, Any]:
+    from .threads import _with_id
+
+    errors: list[str] = []
+    if any(not isinstance(getattr(row, "group", None), str) or not row.group for row in rows):
+        errors.append("every thread row must have a group")
+    if any(row.id != _with_id(row.model_dump())["id"] for row in rows):
+        errors.append("one or more row ids are not stable thread hashes")
+    scrubbed = sum(bool(scrub_row(row.model_dump())) for row in rows)
+    if scrubbed:
+        errors.append(f"privacy scrub rejected {scrubbed} rows")
+
+    unit_counts = {
+        unit: sum(
+            getattr(row, "unit", None) == unit
+            for row in rows
+        )
+        for unit in ("paragraph", "message")
+    }
+    if set_name == "walk" and any(
+        getattr(row, "unit", None) not in {"paragraph", "message"}
+        for row in rows
+    ):
+        errors.append("every walk row must have a paragraph or message unit")
+    if set_name == "walk" and any(
+        not isinstance(getattr(row, "later", None), dict)
+        or not isinstance(row.later.get("text"), str)
+        or not row.later["text"].strip()
+        for row in rows
+    ):
+        errors.append("every walk row must have non-empty later.text")
+
+    unit_texts = {
+        unit: {
+            _normalize(str(row.later["text"]))
+            for row in rows
+            if set_name == "walk"
+            and getattr(row, "unit", None) == unit
+            and isinstance(getattr(row, "later", None), dict)
+            and isinstance(row.later.get("text"), str)
+        }
+        for unit in ("paragraph", "message")
+    }
+    asks = {
+        _normalize(str(row.ask))
+        for row in rows
+        if isinstance(getattr(row, "ask", None), str)
+    }
+    if set_name == "walk" and len(unit_texts["paragraph"]) < thresholds.min_paragraphs:
+        errors.append(
+            "distinct later paragraphs "
+            f"{len(unit_texts['paragraph'])} < {thresholds.min_paragraphs}"
+        )
+    if len(asks) < thresholds.min_obligations:
+        errors.append(f"distinct asks {len(asks)} < {thresholds.min_obligations}")
+
+    choice_ids = {"walk.new_date", "walk.handoff_to", "expiry.event"}
+    question_stats: dict[str, Any] = {}
+    for question_id in SETS[set_name]:
+        if question_id in choice_ids:
+            continue
+        question_rows = [row for row in rows if question_id in row.label]
+        values = [row.label[question_id] for row in question_rows]
+        positives = sum(value is True for value in values)
+        negatives = sum(value is False for value in values)
+        question_stats[question_id] = {
+            "rows": len(question_rows),
+            "positives": positives,
+            "negatives": negatives,
+        }
+        if not all(isinstance(value, bool) for value in values):
+            errors.append(f"{question_id}: labels must be boolean")
+        minimum = thresholds.min_thread_class_rows
+        if positives < minimum or negatives < minimum:
+            errors.append(
+                f"{question_id}: needs {minimum} positives and {minimum} negatives"
+            )
+
+    report = {
+        "set": set_name,
+        "rows": len(rows),
+        "distinct_paragraph_texts": len(unit_texts["paragraph"]),
+        "distinct_message_texts": len(unit_texts["message"]),
+        "distinct_unit_texts": len(set().union(*unit_texts.values())),
+        "distinct_obligation_texts": len(asks),
+        "questions": question_stats,
+        "errors": errors,
+    }
+    if set_name == "walk":
+        report["unit_counts"] = unit_counts
+        report["distinct_unit_text_counts"] = {
+            unit: len(texts) for unit, texts in unit_texts.items()
+        }
+    if errors:
+        raise ValueError("; ".join(errors))
+    return report
+
+
 def check_corpus(
     path: str | Path, thresholds: CorpusThresholds | None = None
 ) -> dict[str, Any]:
     """Validate corpus diversity, balance, provenance, and closure exclusivity."""
 
+    corpus_path = Path(path)
+    with corpus_path.open(encoding="utf-8") as stream:
+        first_record = next((line for line in stream if line.strip()), "")
+    if first_record:
+        try:
+            first_value = json.loads(first_record)
+        except json.JSONDecodeError:
+            first_value = None
+        if isinstance(first_value, dict) and {"thread_id", "plan", "later"} <= set(first_value):
+            from .threads import check_thread_corpus
+
+            return check_thread_corpus(corpus_path)
+
     thresholds = thresholds or CorpusThresholds()
-    rows = load_jsonl(path)
+    rows = load_jsonl(corpus_path)
     if not rows:
         raise ValueError("corpus is empty")
     set_names = {row.set for row in rows}
     if len(set_names) != 1:
         raise ValueError("corpus must contain exactly one set")
     set_name = set_names.pop()
+    if set_name in {"walk", "expiry"}:
+        return _check_thread_corpus(rows, set_name, thresholds)
     errors: list[str] = []
     if len(rows) < thresholds.min_rows:
         errors.append(f"rows {len(rows)} < {thresholds.min_rows}")

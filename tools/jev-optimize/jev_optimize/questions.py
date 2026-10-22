@@ -224,6 +224,189 @@ class RulesDeadlineKind(dspy.Signature):
     )
 
 
+class WalkBase(dspy.Signature):
+    user: dict[str, str] = dspy.InputField()
+    waiting_party: str = dspy.InputField()
+    ask: str = dspy.InputField()
+    due: str = dspy.InputField()
+    later: dict[str, Any] = dspy.InputField()
+
+
+def _walk_signature(name: str, instructions: str) -> type[dspy.Signature]:
+    return type(
+        name,
+        (WalkBase,),
+        {
+            "__doc__": instructions,
+            "__annotations__": {"decision": Noul},
+            "decision": dspy.OutputField(
+                desc="Probability that the statement is true."
+            ),
+        },
+    )
+
+
+_WALK_STATEMENTS = {
+    "walk.responds": "`later.text` responds to the request in `ask`.",
+    "walk.wp_received": (
+        "In `later.text`, `waiting_party` says they received what `ask` requests."
+    ),
+    "walk.wp_no_longer_needed": (
+        "In `later.text`, `waiting_party` says they no longer need what `ask` requests."
+    ),
+    "walk.wp_asks_again": (
+        "In `later.text`, `waiting_party` asks again for what `ask` requests "
+        "or asks for an update on it."
+    ),
+    "walk.wp_changes_terms": (
+        "In `later.text`, `waiting_party` changes what `ask` requests."
+    ),
+    "walk.wp_still_owed": (
+        "After `later.text`, `user.name` still owes `waiting_party` an action for `ask`."
+    ),
+    "walk.wp_changes_due": (
+        "In `later.text`, `waiting_party` changes when `ask` must be done."
+    ),
+    "walk.user_delivers": (
+        "In `later.text`, `user.name` gives `waiting_party` what `ask` requests."
+    ),
+    "walk.user_promises": (
+        "In `later.text`, `user.name` says they will do what `ask` requests "
+        "at a later time."
+    ),
+    "walk.user_declines": (
+        "In `later.text`, `user.name` declines to do what `ask` requests."
+    ),
+    "walk.user_hands_off": (
+        "In `later.text`, `user.name` says another person will do what `ask` requests."
+    ),
+    "walk.third_party_done": (
+        "In `later.text`, the writer says they did what `ask` requests or will do it."
+    ),
+}
+
+_WALK_INTENTS = {
+    "walk.responds": "`later.text` is about the request.",
+    "walk.wp_received": "In `later.text`, the waiting party confirms receipt.",
+    "walk.wp_no_longer_needed": "In `later.text`, the waiting party withdraws the request.",
+    "walk.wp_asks_again": "In `later.text`, the waiting party chases the request.",
+    "walk.wp_changes_terms": (
+        "In `later.text`, the waiting party changes what the request requires."
+    ),
+    "walk.wp_still_owed": "After `later.text`, the user still owes an action for the request.",
+    "walk.wp_changes_due": "In `later.text`, the waiting party changes the due time.",
+    "walk.user_delivers": "In `later.text`, the user delivers what was requested.",
+    "walk.user_promises": "In `later.text`, the user promises to do it later.",
+    "walk.user_declines": "In `later.text`, the user declines the request.",
+    "walk.user_hands_off": "In `later.text`, the user hands the request to another person.",
+    "walk.third_party_done": "In `later.text`, another participant did or will do the request.",
+}
+
+_WALK_FIELDS = (
+    "user.name",
+    "waiting_party",
+    "ask",
+    "due",
+    "later.author_role",
+    "later.text",
+)
+
+
+_WALK_NEW_DATE_OPTIONS = {"none": "The text sets no new date for the request."}
+WalkNewDateDecision = Choice[tuple(_WALK_NEW_DATE_OPTIONS.items())]
+
+
+class WalkNewDate(dspy.Signature):
+    """Which date does `later.text` set as the new time for `ask`?"""
+
+    ask: str = dspy.InputField()
+    later: dict[str, Any] = dspy.InputField()
+    decision: WalkNewDateDecision = dspy.OutputField(desc="The issued date handle, or none.")
+
+
+_WALK_HANDOFF_OPTIONS = {"none": "The text names no listed person."}
+WalkHandoffToDecision = Choice[tuple(_WALK_HANDOFF_OPTIONS.items())]
+
+
+class WalkHandoffTo(WalkBase):
+    """Which person does `later.text` name as the one who will now do what `ask` requests?"""
+
+    decision: WalkHandoffToDecision = dspy.OutputField(
+        desc="The issued participant handle, or none."
+    )
+
+
+_EXPIRY_EVENT_OPTIONS = {"none": "The request serves no listed event."}
+ExpiryEventDecision = Choice[tuple(_EXPIRY_EVENT_OPTIONS.items())]
+
+
+class ExpiryEvent(dspy.Signature):
+    """Which event does `ask` help `waiting_party` prepare for or take part in?"""
+
+    ask: str = dspy.InputField()
+    waiting_party: str = dspy.InputField()
+    due: str = dspy.InputField()
+    decision: ExpiryEventDecision = dspy.OutputField(desc="The issued event handle, or none.")
+
+
+class ExpiryEndsWithEvent(dspy.Signature):
+    """`ask` has no purpose after `event` ends."""
+
+    ask: str = dspy.InputField()
+    waiting_party: str = dspy.InputField()
+    event: str = dspy.InputField()
+    decision: Noul = dspy.OutputField(desc="Probability that the statement is true.")
+
+
+def _walk_specs() -> dict[str, QuestionSpec]:
+    return {
+        **{
+            qid: QuestionSpec(
+                "walk",
+                _walk_signature(qid.replace(".", "_").title(), text),
+                _WALK_INTENTS[qid],
+                ("later.text",),
+                _WALK_FIELDS,
+            )
+            for qid, text in _WALK_STATEMENTS.items()
+        },
+        "walk.new_date": QuestionSpec(
+            "walk",
+            WalkNewDate,
+            "The new date set in later.text for the request.",
+            ("later.text",),
+            ("ask", "later.text"),
+            "choice",
+            _WALK_NEW_DATE_OPTIONS,
+        ),
+        "walk.handoff_to": QuestionSpec(
+            "walk",
+            WalkHandoffTo,
+            "The person named in later.text who will now do the request.",
+            ("later.text",),
+            _WALK_FIELDS,
+            "choice",
+            _WALK_HANDOFF_OPTIONS,
+        ),
+        "expiry.event": QuestionSpec(
+            "expiry",
+            ExpiryEvent,
+            "The event the request serves.",
+            ("ask",),
+            ("ask", "waiting_party", "due"),
+            "choice",
+            {"none": "The request serves no listed event."},
+        ),
+        "expiry.ends_with_event": QuestionSpec(
+            "expiry",
+            ExpiryEndsWithEvent,
+            "The request loses its purpose when the event ends.",
+            ("ask", "event"),
+            ("ask", "waiting_party", "event"),
+        ),
+    }
+
+
 _CLOSURE_FIELDS = (
     "obligation.title",
     "obligation.evidence_text",
@@ -356,10 +539,11 @@ SPECS: dict[str, QuestionSpec] = {
         "choice",
         _RULES_DEADLINE_KIND_OPTIONS,
     ),
+    **_walk_specs(),
 }
 
 
 SETS = {
     name: tuple(key for key, spec in SPECS.items() if spec.set_name == name)
-    for name in ("closure", "triage", "rules", "extract")
+    for name in ("closure", "triage", "rules", "extract", "walk", "expiry")
 }

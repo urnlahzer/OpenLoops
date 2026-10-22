@@ -31,7 +31,7 @@ def test_synthetic_generation_is_deterministic_and_sane(tmp_path, relaxed_thresh
     # "triage" rows (see test_extract_claim_type_is_derived_from_triage_labels
     # below), so generate_stub never writes extract.jsonl.
     for set_name, question_ids in SETS.items():
-        if set_name == "extract":
+        if set_name in {"extract", "walk", "expiry"}:
             continue
         assert (one / f"{set_name}.jsonl").read_bytes() == (
             two / f"{set_name}.jsonl"
@@ -103,7 +103,7 @@ def test_llm_request_uses_zdr_and_strict_json_without_live_network():
         assert _chat_rows(
             client,
             "synthetic/model",
-            "synthetic-test-placeholder",
+            "test-key-not-real",
             "triage",
             [],
             "triage.asks_recipient",

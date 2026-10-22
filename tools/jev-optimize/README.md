@@ -78,6 +78,75 @@ already carries `closure.outcome`.
   triage question's own balance and `extract.claim_type`'s label
   distribution.
 
+## Walk and expiry sets
+
+Walk examples are complete synthetic threads: one request followed by one to
+three later messages. Each paragraph is a unit, and messages with two or more
+paragraphs also have a whole-message unit whose `later.text` joins those
+paragraphs with a blank line. The fixed plan determines which paragraph
+responds and which outcome it expresses. `threads.jsonl` stores each thread and
+`walk.jsonl` and `expiry.jsonl` store the question rows derived from them.
+Each later message record has a `sent_at` timestamp at 12:00 UTC. The adjacent
+`date_candidates.jsonl` file has one entry per thread and lists the normalized
+date candidates for each paragraph and whole-message unit. The desktop
+development test produces this sidecar. `OPENLOOPS_WALK_THREADS` and
+`OPENLOOPS_WALK_DATES_OUT` specify the test's input and output paths. The test
+command is:
+
+```powershell
+cargo test -p openloops-desktop --features native-ui --locked export_walk_date_candidates -- --ignored
+```
+
+`evaluate-walk` requires `date_candidates.jsonl` beside `threads.jsonl` and
+stops when the sidecar is missing. `check-corpus threads.jsonl` verifies message
+timestamps and validates sidecar counts and candidate values when the sidecar
+exists.
+
+The committed corpus in `data/synthetic/` is LLM-authored: 600 threads written
+by `google/gemini-3.1-flash-lite` through OpenRouter with `provider.zdr`
+(1,908 walk rows, 241 expiry rows). The offline stub generator is for tests
+and local checks; send it to another folder so it never replaces the
+committed corpus:
+
+```powershell
+uv run --locked jev-optimize generate-threads --stub --threads 800 --output runs/stub-threads
+uv run --locked jev-optimize check-corpus data/synthetic/walk.jsonl
+uv run --locked jev-optimize check-corpus data/synthetic/expiry.jsonl
+uv run --locked jev-optimize generate-threads --llm --smoke
+uv run --locked jev-optimize generate-threads --llm --threads 600
+```
+
+`check-corpus` verifies thread groups, stable ids, the privacy scrub, counts
+per unit, distinct unit text and ask counts, and at least 20 positive and 20
+negative examples for each labeled question. Splits use `group` (the thread
+id), so every row from a thread stays in one split. The `--llm --smoke` command
+is the small paid trial (OpenRouter, `provider.zdr`): 24 threads by default,
+written to `runs/smoke-threads/` unless `--output` names another folder.
+Inspect its output before a full `--llm` run. The automated test uses `httpx.MockTransport` and never opens a
+network connection.
+
+The stub corpus carries `mk-*` marker tokens that reveal its labels to the
+offline fake endpoint. `optimize`, `evaluate` and `evaluate-walk` therefore
+refuse a file that holds `synthetic-stub` rows unless `--replay` is given:
+generate the LLM corpus before any paid run.
+
+Optimize selected questions with:
+
+```powershell
+uv run --locked jev-optimize optimize --set walk --only walk.responds,walk.user_delivers --budget light
+```
+
+`walk.new_date`, `walk.handoff_to`, and `expiry.event` remain at their
+bootstrap wording because their options are generated per request. The
+thread-level hand-off report separately counts mark and person accuracy.
+`evaluate-walk --threads data/synthetic/threads.jsonl --replay runs/walk.json`
+evaluates held-out statuses and hand-off accuracy without a network call.
+`--registry PATH` makes it send that registry's wording and use its
+thresholds; without it, the bootstrap wording is sent. Held-out threads are
+those in the test split under both split sizes, so no thread that tuned
+`walk.responds` is scored. `optimize --output PATH` writes the result to that
+file, so runs for separate question groups do not overwrite each other.
+
 Run `optimize` separately for `closure`, `triage`, and `rules`; pass all result
 files to `write-registry` to merge them in one reviewed edit. Replay files are
 stable-hash keyed and allow evaluation without a network call.

@@ -29,6 +29,15 @@ def test_every_question_declares_intent_and_field_contract():
     assert all(set(spec.primary_fields) <= set(spec.allowed_fields) for spec in SPECS.values())
 
 
+def test_walk_proposer_contract_uses_later_text():
+    spec = SPECS["walk.responds"]
+    assert spec.primary_fields == ("later.text",)
+    assert "later.text" in spec.allowed_fields
+    assert "later.paragraph_text" not in spec.allowed_fields
+    assert "later.text" in spec.intent
+    assert spec.signature.instructions == "`later.text` responds to the request in `ask`."
+
+
 def test_every_question_has_one_native_decision_output():
     for spec in SPECS.values():
         assert list(spec.signature.output_fields) == ["decision"]

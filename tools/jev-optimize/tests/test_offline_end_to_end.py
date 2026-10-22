@@ -19,6 +19,7 @@ from jev_optimize.metrics import ACCEPT_FLOOR, ESCALATE_FLOOR
 from jev_optimize.optimize import evaluate_question, optimize_set
 from jev_optimize.questions import SETS, SPECS
 from jev_optimize.registry import DEFAULT_REGISTRY, merge_registry
+from jev_optimize.walk_metric import evaluate_walk
 
 TOOL_ROOT = Path(__file__).parents[1]
 MODEL = "typesafe/jev-1.13"
@@ -33,6 +34,27 @@ def _stable_jitter(question_id, text):
 
 def _noul_probability(question_id, text):
     lower = text.casefold()
+    if question_id == "walk.responds":
+        matched = "unrelated note" not in lower and "mk-unrelated" not in lower
+        probability = 0.9 if matched else 0.1
+        return min(0.99, max(0.01, probability + _stable_jitter(question_id, text)))
+    walk_markers = {
+        "walk.wp_received": "mk-received.",
+        "walk.wp_no_longer_needed": "mk-withdrawn.",
+        "walk.wp_asks_again": "mk-chase.",
+        "walk.wp_changes_terms": "mk-amend-",
+        "walk.wp_still_owed": "mk-still-owed.",
+        "walk.wp_changes_due": "mk-newdate.",
+        "walk.user_delivers": "mk-delivered.",
+        "walk.user_promises": "mk-promise.",
+        "walk.user_declines": "mk-decline.",
+        "walk.user_hands_off": "mk-handoff.",
+        "walk.third_party_done": "mk-thirddone.",
+    }
+    if question_id in walk_markers:
+        matched = walk_markers[question_id] in lower
+        probability = 0.9 if matched else 0.1
+        return min(0.99, max(0.01, probability + _stable_jitter(question_id, text)))
     signals = {
         "triage.asks_recipient": ("please", "could you", "would you", "can you"),
         "triage.commits_sender": ("i will", "i'll", "we will", "we'll"),
@@ -81,6 +103,7 @@ class FakeDecisionsEndpoint:
         self.mode = mode
         self.calls = 0
         self.question_ids = set()
+        self.seen_ids = set()
         self.saw_envelope_state = False
         self._lock = threading.Lock()
 
@@ -105,6 +128,7 @@ class FakeDecisionsEndpoint:
             self.calls += 1
             call_number = self.calls
             self.question_ids.add(question_id)
+            self.seen_ids.add(question_id)
             self.saw_envelope_state |= "inputs" in body["state"]
         if self.mode == "http_400":
             return httpx.Response(400, json={"error": "synthetic rejection"})
@@ -253,6 +277,142 @@ def test_real_optimize_path_is_offline_and_production_shaped(tmp_path, monkeypat
     assert {key: set(value) for key, value in after["questions"].items()} == {
         key: set(value) for key, value in before["questions"].items()
     }
+
+
+def _reflection_lm():
+    return DummyLM(
+        {
+            "later.text": {
+                "reasoning": "The statement stays literal and names the primary field.",
+                "proposed_statement": "later.text states the relevant walk condition.",
+            }
+        }
+    )
+
+
+def test_walk_subset_optimizes_offline(tmp_path, monkeypatch):
+    from jev_optimize.threads import derive_rows, plan_threads, stub_threads
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-not-real")
+    rows = [
+        row
+        for row in derive_rows(stub_threads(plan_threads(400)))
+        if row["set"] == "walk"
+    ]
+    data = tmp_path / "walk.jsonl"
+    write_jsonl(data, rows)
+    endpoint = FakeDecisionsEndpoint()
+    result = optimize_set(
+        "walk",
+        _client(endpoint),
+        data,
+        budget="light",
+        reflection_lm=_reflection_lm(),
+        only=("walk.responds", "walk.user_delivers"),
+    )
+    assert set(result["questions"]) == {"walk.responds", "walk.user_delivers"}
+    for question_id in result["questions"]:
+        question = result["questions"][question_id]
+        assert ESCALATE_FLOOR <= question["escalate"] < question["accept"]
+    assert endpoint.seen_ids >= {"walk.responds", "walk.user_delivers"}
+
+
+def test_evaluate_walk_reports_offline_metrics(tmp_path, monkeypatch):
+    from jev_optimize.threads import plan_threads, stub_threads, thread_record
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-not-real")
+    path = tmp_path / "threads.jsonl"
+    threads = stub_threads(plan_threads(40))
+    write_jsonl(path, map(thread_record, threads))
+    write_jsonl(
+        path.with_name("date_candidates.jsonl"),
+        (
+            {
+                "thread_id": thread.plan.thread_id,
+                "messages": [
+                    {
+                        "units": [
+                            [] for _ in range(len(paragraphs) + int(len(paragraphs) >= 2))
+                        ]
+                    }
+                    for paragraphs in thread.later
+                ],
+            }
+            for thread in threads
+        ),
+    )
+    endpoint = FakeDecisionsEndpoint()
+    report = evaluate_walk(path, _client(endpoint))
+    assert {"accuracy", "escalated_share", "confusion"} <= set(report)
+
+
+def test_evaluate_walk_uses_candidate_text_for_new_date_option(tmp_path):
+    from jev_optimize.threads import MessagePlan, ThreadPlan, stub_threads, thread_record
+    from jev_optimize.walk_metric import is_held_out_thread
+
+    index = 0
+    while not is_held_out_thread(f"date-text-{index}"):
+        index += 1
+    plan = ThreadPlan(
+        f"date-text-{index}",
+        "none",
+        False,
+        None,
+        [MessagePlan("user", "user_promises")],
+    )
+    thread = stub_threads([plan])[0]
+    path = tmp_path / "threads.jsonl"
+    write_jsonl(path, [thread_record(thread)])
+    write_jsonl(
+        path.with_name("date_candidates.jsonl"),
+        [
+            {
+                "thread_id": plan.thread_id,
+                "messages": [
+                    {
+                        "units": [
+                            [
+                                {
+                                    "handle": "t0",
+                                    "value": "2026-10-30",
+                                    "text": "by Friday",
+                                }
+                            ]
+                        ]
+                    }
+                ],
+            }
+        ],
+    )
+
+    class CapturingClient:
+        def __init__(self):
+            self.date_question = None
+
+        def decide(self, _state, questions):
+            question_id, question = next(iter(questions.items()))
+            if question_id == "walk.new_date":
+                self.date_question = question
+                return {
+                    question_id: {
+                        "type": "choice",
+                        "choice": "t0",
+                        "probabilities": {"t0": 0.95},
+                        "confidence": 0.95,
+                    }
+                }
+            probability = (
+                0.99
+                if question_id in {"walk.responds", "walk.user_promises"}
+                else 0.01
+            )
+            return {question_id: {"type": "noul", "noul": probability}}
+
+    client = CapturingClient()
+    evaluate_walk(path, client)
+
+    assert client.date_question["criteria"]["t0"] == "by Friday"
 
 
 def test_evaluate_question_rejects_malformed_reply(monkeypatch):

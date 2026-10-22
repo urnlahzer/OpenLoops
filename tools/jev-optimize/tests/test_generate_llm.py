@@ -173,9 +173,11 @@ def _question_from_prompt(content: str) -> str | None:
     return content.split(marker, 1)[1].split(". Definition:", 1)[0]
 
 
-@pytest.mark.parametrize("set_name", [name for name in SETS if name != "extract"])
+@pytest.mark.parametrize(
+    "set_name", [name for name in SETS if name not in {"extract", "walk", "expiry"}]
+)
 def test_generate_llm_reaches_the_row_count_offline(tmp_path: Path, monkeypatch, set_name):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "synthetic-test-placeholder")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-not-real")
     monkeypatch.setenv("OPENROUTER_SYNTH_MODEL", "synthetic/model")
     fake = FakeOpenRouter()
     requested = 600 if set_name in {"triage", "rules"} else 128
@@ -211,7 +213,7 @@ def test_generate_llm_reaches_the_row_count_offline(tmp_path: Path, monkeypatch,
 
 
 def test_generate_llm_refuses_the_derived_extract_set(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "synthetic-test-placeholder")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-not-real")
     monkeypatch.setenv("OPENROUTER_SYNTH_MODEL", "synthetic/model")
     fake = FakeOpenRouter()
     with (
@@ -261,7 +263,7 @@ def test_recap_validator_enforces_sender_pools(value, sender, accepted):
 
 
 def test_generate_llm_refuses_small_runs_unless_smoke(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "synthetic-test-placeholder")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-not-real")
     monkeypatch.setenv("OPENROUTER_SYNTH_MODEL", "synthetic/model")
     with pytest.raises(ValueError):
         generate_llm(tmp_path, selected_set="closure", rows=48)
