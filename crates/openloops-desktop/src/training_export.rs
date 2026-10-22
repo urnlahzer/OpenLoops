@@ -24,6 +24,8 @@ use std::path::{Path, PathBuf};
 
 /// A paragraph longer than this is skipped entirely -- never becomes a row.
 const MAX_PARAGRAPH_CHARS: usize = 4_000;
+/// The walk asks at most the first eight individual paragraphs per message.
+const MAX_WALK_PARAGRAPHS: usize = 8;
 /// Each output file stops growing past this many rows.
 const MAX_ROWS_PER_FILE: usize = 20_000;
 
@@ -578,11 +580,19 @@ fn walk_rows(review: &ReviewState) -> Vec<Value> {
             continue;
         };
         for candidate in later_candidates(review, item, evidence_message) {
-            for (ordinal, block) in candidate.input.message.body_blocks.iter().enumerate() {
+            let blocks: Vec<(usize, String)> = candidate
+                .input
+                .message
+                .body_blocks
+                .iter()
+                .take(MAX_WALK_PARAGRAPHS)
+                .enumerate()
+                .map(|(ordinal, block)| (ordinal, block.as_string()))
+                .collect();
+            for (ordinal, text) in &blocks {
                 if rows.len() >= MAX_ROWS_PER_FILE {
                     return rows;
                 }
-                let text = block.as_string();
                 if text.chars().count() > MAX_PARAGRAPH_CHARS {
                     continue;
                 }
@@ -591,8 +601,31 @@ fn walk_rows(review: &ReviewState) -> Vec<Value> {
                     item,
                     evidence_message,
                     candidate,
-                    ordinal,
+                    *ordinal,
+                    text,
+                    "paragraph",
+                ));
+            }
+            if candidate.input.message.body_blocks.len() >= 2 {
+                if rows.len() >= MAX_ROWS_PER_FILE {
+                    return rows;
+                }
+                let text = candidate
+                    .input
+                    .message
+                    .body_blocks
+                    .iter()
+                    .map(openloops_inference::blocks::CanonicalBlock::as_string)
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                rows.push(walk_row(
+                    review,
+                    item,
+                    evidence_message,
+                    candidate,
+                    0,
                     &text,
+                    "message",
                 ));
             }
         }
@@ -606,7 +639,8 @@ fn walk_row(
     evidence_message: &ReviewMessage,
     candidate: &ReviewMessage,
     ordinal: usize,
-    paragraph_text: &str,
+    text: &str,
+    unit: &'static str,
 ) -> Value {
     let user_name = evidence_message
         .own_given_name
@@ -631,14 +665,11 @@ fn walk_row(
         "walk|{}|{}",
         item.evidence.message, item.evidence.block
     ));
-    let id = stable_id(&format!("walk|{group}|{paragraph_text}"));
-    let (label, label_source) = walk_label(review, item, candidate, ordinal);
+    let id = stable_id(&format!("walk|{group}|{unit}|{text}"));
+    let (label, label_source) = walk_label(review, item, candidate, ordinal, unit);
     let mut later = Map::new();
     later.insert("author_role".into(), Value::String("user".into()));
-    later.insert(
-        "paragraph_text".into(),
-        Value::String(paragraph_text.into()),
-    );
+    later.insert("text".into(), Value::String(text.into()));
     let mut row = Map::new();
     row.insert("ask".into(), Value::String(item.evidence.context.clone()));
     row.insert("due".into(), Value::String(due.into()));
@@ -649,6 +680,7 @@ fn walk_row(
     row.insert("later".into(), Value::Object(later));
     row.insert("set".into(), Value::String("walk".into()));
     row.insert("source".into(), Value::String("owner-export".into()));
+    row.insert("unit".into(), Value::String(unit.into()));
     row.insert(
         "user".into(),
         Value::Object(Map::from_iter([(
@@ -665,6 +697,7 @@ fn walk_label(
     item: &LoopItem,
     candidate: &ReviewMessage,
     ordinal: usize,
+    unit: &'static str,
 ) -> (Map<String, Value>, &'static str) {
     let matches_pair = |source_message: &str, source_block: usize| {
         source_message == candidate.input.handle && source_block == ordinal
@@ -673,6 +706,7 @@ fn walk_label(
         update.obligation_message == item.evidence.message
             && update.obligation_block == item.evidence.block
             && matches_pair(&update.source_message, update.source_block)
+            && update.source_unit == unit
             && matches!(
                 update.kind,
                 SuggestedUpdateKind::Closure
@@ -689,6 +723,7 @@ fn walk_label(
     }
     if let Some(update) = &item.suggested_update
         && matches_pair(&update.source_message, update.source_block)
+        && update.source_unit == unit
         && matches!(
             update.kind,
             SuggestedUpdateKind::Closure
@@ -942,6 +977,8 @@ mod tests {
         item.owner = Owner::You;
         item.suggested_update = Some(SuggestedUpdate {
             kind: SuggestedUpdateKind::Closure,
+            handoff_text: None,
+            source_unit: "paragraph",
             evidence_text: "Synthetic follow-up confirming completion.".into(),
             source_message: later_handle,
             source_block: 0,
@@ -1003,6 +1040,22 @@ mod tests {
     fn an_accepted_closure_update_yields_a_walk_shaped_gold_row() {
         let mut review = layout_fixture();
         let index = open_loop_with_pending_update(&mut review);
+        let later_handle = review.analysis.as_ref().unwrap().items[index]
+            .suggested_update
+            .as_ref()
+            .unwrap()
+            .source_message
+            .clone();
+        let candidate = review
+            .messages
+            .iter_mut()
+            .find(|message| message.input.handle == later_handle)
+            .unwrap();
+        candidate.input.message.body_blocks = vec![
+            openloops_inference::blocks::CanonicalBlock::new("I sent the synthetic report.")
+                .unwrap(),
+            openloops_inference::blocks::CanonicalBlock::new("The receipt is attached.").unwrap(),
+        ];
         review.resolve_suggested_update(index, true);
         let (summary, triage_path, closure_path) = export_to_temp(&review);
         let walk_path = closure_path.parent().unwrap().join("walk.jsonl");
@@ -1016,9 +1069,11 @@ mod tests {
         assert_eq!(gold_rows.len(), 1);
         let row = gold_rows[0];
         assert_eq!(row["set"], "walk");
+        assert_eq!(row["unit"], "paragraph");
         assert_eq!(row["label_source"], "gold");
         assert_eq!(row["source"], "owner-export");
         assert_eq!(row["later"]["author_role"], "user");
+        assert_eq!(row["later"]["text"], "I sent the synthetic report.");
         assert_eq!(
             row["label"],
             serde_json::json!({
@@ -1056,6 +1111,7 @@ mod tests {
                 "later",
                 "set",
                 "source",
+                "unit",
                 "user",
                 "waiting_party"
             ]
@@ -1063,6 +1119,16 @@ mod tests {
             .collect()
         );
         assert_eq!(row["later"].as_object().unwrap().len(), 2);
+        let group_rows: Vec<&Value> = rows
+            .iter()
+            .filter(|candidate| candidate["group"] == row["group"])
+            .collect();
+        assert_eq!(group_rows.len(), 3);
+        assert!(group_rows.iter().any(|candidate| {
+            candidate["unit"] == "message"
+                && candidate["later"]["text"]
+                    == "I sent the synthetic report.\n\nThe receipt is attached."
+        }));
         std::fs::remove_dir_all(triage_path.parent().unwrap()).ok();
     }
 

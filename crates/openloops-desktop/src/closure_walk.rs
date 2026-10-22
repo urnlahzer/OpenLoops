@@ -23,6 +23,7 @@ pub(super) const USER_DECLINES: &str = "walk.user_declines";
 pub(super) const USER_HANDS_OFF: &str = "walk.user_hands_off";
 pub(super) const THIRD_PARTY_DONE: &str = "walk.third_party_done";
 pub(super) const NEW_DATE: &str = "walk.new_date";
+pub(super) const HANDOFF_TO: &str = "walk.handoff_to";
 pub(super) const EXPIRY_EVENT: &str = "expiry.event";
 pub(super) const EXPIRY_ENDS: &str = "expiry.ends_with_event";
 pub(super) const NONE_OPTION: &str = "none";
@@ -90,17 +91,32 @@ pub(super) struct WalkContext<'a> {
     pub due: &'a str,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum UnitKind {
+    Paragraph,
+    Message,
+}
+
+impl UnitKind {
+    pub(super) const fn wire(self) -> &'static str {
+        match self {
+            Self::Paragraph => "paragraph",
+            Self::Message => "message",
+        }
+    }
+}
+
 pub(super) fn walk_state(
     context: &WalkContext<'_>,
     role: AuthorRole,
-    paragraph: &str,
+    text: &str,
 ) -> serde_json::Value {
     serde_json::json!({
         "user": {"name": context.user_name},
         "waiting_party": context.waiting_party,
         "ask": context.ask,
         "due": context.due,
-        "later": {"author_role": role.wire(), "paragraph_text": paragraph},
+        "later": {"author_role": role.wire(), "text": text},
     })
 }
 
@@ -111,16 +127,18 @@ pub(super) fn walk_questions(role: AuthorRole) -> Result<Questions, ProviderErro
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct ParagraphAnswers {
+pub(super) struct UnitAnswers {
     pub ordinal: usize,
+    pub unit: UnitKind,
     pub probabilities: BTreeMap<&'static str, f64>,
 }
 
-pub(super) fn paragraph_answers(
+pub(super) fn unit_answers(
     ordinal: usize,
+    unit: UnitKind,
     role: AuthorRole,
     answers: &Answers,
-) -> Result<ParagraphAnswers, ProviderError> {
+) -> Result<UnitAnswers, ProviderError> {
     let mut probabilities = BTreeMap::new();
     for id in std::iter::once(&GATE).chain(role.branch_ids()) {
         let Some(Answer::Noul { probability }) = answers.get(id) else {
@@ -128,8 +146,9 @@ pub(super) fn paragraph_answers(
         };
         probabilities.insert(*id, *probability);
     }
-    Ok(ParagraphAnswers {
+    Ok(UnitAnswers {
         ordinal,
+        unit,
         probabilities,
     })
 }
@@ -151,6 +170,7 @@ pub(super) enum Effect {
     Suggest {
         kind: SuggestedUpdateKind,
         ordinal: usize,
+        unit: UnitKind,
         probability: f64,
     },
     AskedAgain {
@@ -158,10 +178,12 @@ pub(super) enum Effect {
     },
     Amended {
         ordinal: usize,
+        unit: UnitKind,
     },
     NewDate {
         source: DateSource,
         ordinal: usize,
+        unit: UnitKind,
         probability: f64,
     },
 }
@@ -196,18 +218,15 @@ pub(super) enum StepVerdict {
     Apply(Vec<Effect>),
 }
 
-/// One later message's verdict from its paragraphs' answers.
-pub(super) fn step_verdict(role: AuthorRole, paragraphs: &[ParagraphAnswers]) -> StepVerdict {
-    let gate = |paragraph: &ParagraphAnswers| band(GATE, paragraph.probabilities[GATE]);
-    let responding: Vec<&ParagraphAnswers> = paragraphs
+/// One later message's verdict from its paragraph and whole-message units.
+pub(super) fn step_verdict(role: AuthorRole, units: &[UnitAnswers]) -> StepVerdict {
+    let gate = |unit: &UnitAnswers| band(GATE, unit.probabilities[GATE]);
+    let responding: Vec<&UnitAnswers> = units
         .iter()
-        .filter(|paragraph| gate(paragraph) == Band::Accept)
+        .filter(|unit| gate(unit) == Band::Accept)
         .collect();
     if responding.is_empty() {
-        return if paragraphs
-            .iter()
-            .any(|paragraph| gate(paragraph) == Band::Gray)
-        {
+        return if units.iter().any(|unit| gate(unit) == Band::Gray) {
             StepVerdict::Escalate
         } else {
             StepVerdict::NoResponse
@@ -215,8 +234,8 @@ pub(super) fn step_verdict(role: AuthorRole, paragraphs: &[ParagraphAnswers]) ->
     }
     let mut terminal = Vec::new();
     let mut other: Vec<Effect> = Vec::new();
-    for paragraph in responding {
-        let Some(effects) = paragraph_effects(role, paragraph) else {
+    for unit in responding {
+        let Some(effects) = unit_effects(role, unit) else {
             return StepVerdict::Escalate;
         };
         for effect in effects {
@@ -242,9 +261,9 @@ pub(super) fn step_verdict(role: AuthorRole, paragraphs: &[ParagraphAnswers]) ->
 }
 
 /// `None` when an answer that matters sits in the gray band.
-fn paragraph_effects(role: AuthorRole, paragraph: &ParagraphAnswers) -> Option<Vec<Effect>> {
-    let ordinal = paragraph.ordinal;
-    let probability = |id: &str| paragraph.probabilities[id];
+fn unit_effects(role: AuthorRole, unit: &UnitAnswers) -> Option<Vec<Effect>> {
+    let ordinal = unit.ordinal;
+    let probability = |id: &str| unit.probabilities[id];
     let yes = |id: &str| band(id, probability(id)) == Band::Accept;
     let checked: &[&str] = match role {
         AuthorRole::WaitingParty => &[
@@ -280,7 +299,10 @@ fn paragraph_effects(role: AuthorRole, paragraph: &ParagraphAnswers) -> Option<V
             }
             if yes(WP_CHANGES_TERMS) {
                 match band(WP_STILL_OWED, probability(WP_STILL_OWED)) {
-                    Band::Accept => effects.push(Effect::Amended { ordinal }),
+                    Band::Accept => effects.push(Effect::Amended {
+                        ordinal,
+                        unit: unit.unit,
+                    }),
                     Band::Reject => effects.push(Effect::Close {
                         kind: ResolutionKind::Withdrawn,
                         ordinal,
@@ -295,6 +317,7 @@ fn paragraph_effects(role: AuthorRole, paragraph: &ParagraphAnswers) -> Option<V
                 effects.push(Effect::NewDate {
                     source: DateSource::WaitingParty,
                     ordinal,
+                    unit: unit.unit,
                     probability: probability(WP_CHANGES_DUE),
                 });
             }
@@ -309,6 +332,7 @@ fn paragraph_effects(role: AuthorRole, paragraph: &ParagraphAnswers) -> Option<V
                     effects.push(Effect::Suggest {
                         kind,
                         ordinal,
+                        unit: unit.unit,
                         probability: probability(id),
                     });
                 }
@@ -317,6 +341,7 @@ fn paragraph_effects(role: AuthorRole, paragraph: &ParagraphAnswers) -> Option<V
                 effects.push(Effect::NewDate {
                     source: DateSource::User,
                     ordinal,
+                    unit: unit.unit,
                     probability: probability(USER_PROMISES),
                 });
             }
@@ -326,6 +351,7 @@ fn paragraph_effects(role: AuthorRole, paragraph: &ParagraphAnswers) -> Option<V
                 effects.push(Effect::Suggest {
                     kind: SuggestedUpdateKind::Closure,
                     ordinal,
+                    unit: unit.unit,
                     probability: probability(THIRD_PARTY_DONE),
                 });
             }
@@ -334,9 +360,57 @@ fn paragraph_effects(role: AuthorRole, paragraph: &ParagraphAnswers) -> Option<V
     Some(effects)
 }
 
-/// Follow-up for a date change: `{ask, later: {paragraph_text}}`.
-pub(super) fn date_state(ask: &str, paragraph: &str) -> serde_json::Value {
-    serde_json::json!({"ask": ask, "later": {"paragraph_text": paragraph}})
+/// Follow-up for a date change: `{ask, later: {text}}`.
+pub(super) fn date_state(ask: &str, text: &str) -> serde_json::Value {
+    serde_json::json!({"ask": ask, "later": {"text": text}})
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct HandoffCandidate {
+    pub handle: String,
+    pub name: String,
+    pub address: String,
+}
+
+pub(super) fn handoff_questions(
+    candidates: &[HandoffCandidate],
+) -> Result<Questions, ProviderError> {
+    let registered = Registry::get()
+        .question(HANDOFF_TO)
+        .ok_or(ProviderError::InvalidQuestion)?;
+    let none = registered
+        .options
+        .iter()
+        .find(|(key, _)| key == NONE_OPTION)
+        .map_or("The text names no listed person.", |(_, text)| {
+            text.as_str()
+        });
+    let mut options: Vec<(&str, &str)> = candidates
+        .iter()
+        .map(|candidate| (candidate.handle.as_str(), candidate.name.as_str()))
+        .collect();
+    options.push((NONE_OPTION, none));
+    Questions::new().choice(HANDOFF_TO, &registered.instructions, &options)
+}
+
+/// The chosen participant, or `None` for `none`, gray, or low confidence.
+pub(super) fn handoff_pick(
+    answers: &Answers,
+    candidates: &[HandoffCandidate],
+) -> Option<HandoffCandidate> {
+    let Some(Answer::Choice {
+        choice, confidence, ..
+    }) = answers.get(HANDOFF_TO)
+    else {
+        return None;
+    };
+    if choice == NONE_OPTION || band(HANDOFF_TO, *confidence) != Band::Accept {
+        return None;
+    }
+    candidates
+        .iter()
+        .find(|candidate| candidate.handle == *choice)
+        .cloned()
 }
 
 /// `candidates` are `(handle, normalized value)` pairs.
@@ -483,7 +557,7 @@ mod tests {
         role: AuthorRole,
         yes: &[&'static str],
         grays: &[&'static str],
-    ) -> ParagraphAnswers {
+    ) -> UnitAnswers {
         let mut probabilities = BTreeMap::new();
         for id in std::iter::once(&GATE).chain(role.branch_ids()) {
             let probability = if yes.contains(id) {
@@ -495,8 +569,9 @@ mod tests {
             };
             probabilities.insert(*id, probability);
         }
-        ParagraphAnswers {
+        UnitAnswers {
             ordinal,
+            unit: UnitKind::Paragraph,
             probabilities,
         }
     }
@@ -558,7 +633,10 @@ mod tests {
         );
         assert_eq!(
             step_verdict(AuthorRole::WaitingParty, &[paragraph]),
-            StepVerdict::Apply(vec![Effect::Amended { ordinal: 0 }])
+            StepVerdict::Apply(vec![Effect::Amended {
+                ordinal: 0,
+                unit: UnitKind::Paragraph,
+            }])
         );
     }
 
@@ -639,6 +717,32 @@ mod tests {
     }
 
     #[test]
+    fn paragraph_effect_wins_deduplication_and_conflicting_units_escalate() {
+        let para_unit = paragraph(1, AuthorRole::WaitingParty, &[GATE, WP_ASKS_AGAIN], &[]);
+        let whole = paragraph(0, AuthorRole::WaitingParty, &[GATE, WP_ASKS_AGAIN], &[]);
+        let mut whole = whole;
+        whole.unit = UnitKind::Message;
+        assert_eq!(
+            step_verdict(
+                AuthorRole::WaitingParty,
+                &[para_unit.clone(), whole.clone()]
+            ),
+            StepVerdict::Apply(vec![Effect::AskedAgain { ordinal: 1 }])
+        );
+
+        let para_unit = paragraph(1, AuthorRole::WaitingParty, &[GATE, WP_RECEIVED], &[]);
+        let mut whole = paragraph(0, AuthorRole::WaitingParty, &[GATE], &[]);
+        whole.unit = UnitKind::Message;
+        whole
+            .probabilities
+            .insert(WP_NO_LONGER_NEEDED, accept(WP_NO_LONGER_NEEDED));
+        assert_eq!(
+            step_verdict(AuthorRole::WaitingParty, &[para_unit, whole]),
+            StepVerdict::Escalate
+        );
+    }
+
+    #[test]
     fn user_branches_become_suggestions() {
         for (id, kind) in [
             (USER_DELIVERS, SuggestedUpdateKind::Closure),
@@ -701,7 +805,7 @@ mod tests {
         );
         assert_eq!(
             state.to_string(),
-            r#"{"user":{"name":"Alex"},"waiting_party":"Priya Venkataraman","ask":"Send the summary.","due":"Friday","later":{"author_role":"user","paragraph_text":"Attached."}}"#
+            r#"{"user":{"name":"Alex"},"waiting_party":"Priya Venkataraman","ask":"Send the summary.","due":"Friday","later":{"author_role":"user","text":"Attached."}}"#
         );
     }
 
@@ -832,7 +936,7 @@ mod tests {
     fn follow_up_and_expiry_states_match_harness_shapes() {
         assert_eq!(
             date_state("Send the summary.", "Wednesday works better.").to_string(),
-            r#"{"ask":"Send the summary.","later":{"paragraph_text":"Wednesday works better."}}"#
+            r#"{"ask":"Send the summary.","later":{"text":"Wednesday works better."}}"#
         );
         assert_eq!(
             expiry_state("Send the summary.", "Priya Venkataraman", "Friday").to_string(),

@@ -932,10 +932,19 @@ impl ReviewState {
             kind: update.kind,
             source_message: update.source_message.clone(),
             source_block: update.source_block,
+            source_unit: update.source_unit,
             accepted: accept,
         });
         if !accept {
             return SuggestionOutcome::Cleared;
+        }
+        if update.kind == SuggestedUpdateKind::Delegated {
+            item.handoff_text = Some(
+                update
+                    .handoff_text
+                    .clone()
+                    .unwrap_or_else(|| "Handed to someone not on the message".to_owned()),
+            );
         }
         match (update.kind, update.temporal_value) {
             (SuggestedUpdateKind::Closure, _) => SuggestionOutcome::MarkHandled,
@@ -1813,6 +1822,7 @@ pub fn layout_fixture() -> ReviewState {
             cross_thread: true,
             event_passed: None,
             suggested_update: None,
+            handoff_text: None,
             from_call_summary: false,
             meeting_time: None,
             meeting_time_approx: false,
@@ -1852,6 +1862,7 @@ pub fn layout_fixture() -> ReviewState {
             cross_thread: false,
             event_passed: None,
             suggested_update: None,
+            handoff_text: None,
             from_call_summary: false,
             meeting_time: None,
             meeting_time_approx: false,
@@ -1889,6 +1900,7 @@ pub fn layout_fixture() -> ReviewState {
             cross_thread: false,
             event_passed: None,
             suggested_update: None,
+            handoff_text: None,
             from_call_summary: false,
             meeting_time: None,
             meeting_time_approx: false,
@@ -2341,6 +2353,8 @@ mod tests {
         let mut state = layout_fixture();
         state.analysis.as_mut().unwrap().items[0].suggested_update = Some(SuggestedUpdate {
             kind: SuggestedUpdateKind::Closure,
+            handoff_text: None,
+            source_unit: "paragraph",
             evidence_text: "Synthetic follow-up confirming completion.".into(),
             source_message: "m1".into(),
             source_block: 0,
@@ -2365,6 +2379,8 @@ mod tests {
 
         state.analysis.as_mut().unwrap().items[1].suggested_update = Some(SuggestedUpdate {
             kind: SuggestedUpdateKind::DeadlineChange,
+            handoff_text: None,
+            source_unit: "paragraph",
             evidence_text: "Synthetic deadline change.".into(),
             source_message: "m2".into(),
             source_block: 0,
@@ -2382,6 +2398,8 @@ mod tests {
         let mut state = layout_fixture();
         state.analysis.as_mut().unwrap().items[0].suggested_update = Some(SuggestedUpdate {
             kind: SuggestedUpdateKind::Modification,
+            handoff_text: None,
+            source_unit: "paragraph",
             evidence_text: "Synthetic modification.".into(),
             source_message: "m1".into(),
             source_block: 0,
@@ -2451,6 +2469,8 @@ mod tests {
     fn suggested(kind: SuggestedUpdateKind, confidence_micros: u32) -> SuggestedUpdate {
         SuggestedUpdate {
             kind,
+            handoff_text: None,
+            source_unit: "paragraph",
             evidence_text: "Synthetic follow-up.".into(),
             source_message: "m3".into(),
             source_block: 0,
@@ -2912,6 +2932,7 @@ mod tests {
             cross_thread: false,
             event_passed: None,
             suggested_update: None,
+            handoff_text: None,
             from_call_summary: false,
             meeting_time: None,
             meeting_time_approx: false,

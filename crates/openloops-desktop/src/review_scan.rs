@@ -2594,6 +2594,7 @@ fn map_accepted_claim(
         cross_thread: false,
         event_passed: None,
         suggested_update: None,
+        handoff_text: None,
         from_call_summary: false,
         meeting_time: None,
         meeting_time_approx: false,
@@ -5802,6 +5803,8 @@ fn suggested_update_for(
     })?;
     Some(SuggestedUpdate {
         kind,
+        handoff_text: None,
+        source_unit: "paragraph",
         evidence_text: evidence.text.clone(),
         source_message: evidence.source_handle.clone(),
         source_block: usize::from(evidence.block_ordinal),
@@ -5903,10 +5906,11 @@ struct ExpiryEndsJob {
     questions: Questions,
 }
 
-struct WalkParagraphJob {
+struct WalkUnitJob {
     walk_index: usize,
     role: closure_walk::AuthorRole,
     ordinal: usize,
+    unit: closure_walk::UnitKind,
     state: serde_json::Value,
     questions: Questions,
 }
@@ -5916,9 +5920,21 @@ struct DateFollowupJob<'a> {
     source: closure_walk::DateSource,
     later: &'a ReviewMessage,
     ordinal: usize,
+    unit: closure_walk::UnitKind,
     text: String,
     probability: f64,
     candidates: Vec<(String, String)>,
+    questions: Questions,
+    state: serde_json::Value,
+}
+
+struct HandoffFollowupJob<'a> {
+    walk_index: usize,
+    later: &'a ReviewMessage,
+    ordinal: usize,
+    unit: closure_walk::UnitKind,
+    candidates: Vec<closure_walk::HandoffCandidate>,
+    probability: f64,
     questions: Questions,
     state: serde_json::Value,
 }
@@ -5970,6 +5986,145 @@ fn closure_walk_role(item: &LoopItem, later: &ReviewMessage) -> closure_walk::Au
     } else {
         closure_walk::AuthorRole::ThirdParty
     }
+}
+
+const PUBLIC_MAIL_DOMAINS: &[&str] = &[
+    "gmail.com",
+    "googlemail.com",
+    "outlook.com",
+    "hotmail.com",
+    "live.com",
+    "msn.com",
+    "yahoo.com",
+    "ymail.com",
+    "icloud.com",
+    "me.com",
+    "mac.com",
+    "aol.com",
+    "proton.me",
+    "protonmail.com",
+    "pm.me",
+    "passmail.net",
+    "gmx.com",
+    "gmx.net",
+    "mail.com",
+    "zoho.com",
+    "yandex.com",
+    "fastmail.com",
+    "hey.com",
+    "tutanota.com",
+];
+
+fn closure_handoff_candidates(
+    item: &LoopItem,
+    later: &ReviewMessage,
+) -> Vec<closure_walk::HandoffCandidate> {
+    let waiting_address = waiting_party_address(&item.waiting_party);
+    let mut participants = Vec::new();
+    if let Some(sender) = &later.input.message.sender {
+        participants.push(sender);
+    }
+    participants.extend(&later.input.message.to);
+    participants.extend(&later.input.message.cc);
+
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+    for participant in participants {
+        let label = participant.as_string();
+        let Some(address) = waiting_party_address(&label) else {
+            continue;
+        };
+        if participant_is_user(participant, &later.own_addresses)
+            || (later.input.from_user
+                && label
+                    == later
+                        .input
+                        .message
+                        .sender
+                        .as_ref()
+                        .map(CanonicalBlock::as_string)
+                        .unwrap_or_default())
+            || waiting_address
+                .as_ref()
+                .is_some_and(|waiting| waiting == &address)
+            || !seen.insert(address.clone())
+        {
+            continue;
+        }
+        let name = participant_display_name(&label)
+            .map(str::to_owned)
+            .or_else(|| address.split_once('@').map(|(local, _)| local.to_owned()))
+            .unwrap_or_else(|| address.clone());
+        candidates.push(closure_walk::HandoffCandidate {
+            handle: format!("p{}", candidates.len()),
+            name,
+            address,
+        });
+    }
+    candidates
+}
+
+fn handoff_internal(address: &str, own_addresses: &[String]) -> bool {
+    let domain = address
+        .rsplit_once('@')
+        .map(|(_, domain)| domain.to_ascii_lowercase());
+    domain.is_some_and(|domain| {
+        !PUBLIC_MAIL_DOMAINS.contains(&domain.as_str())
+            && own_addresses.iter().any(|own| {
+                waiting_party_address(own)
+                    .and_then(|own| own.rsplit_once('@').map(|(_, domain)| domain.to_owned()))
+                    .is_some_and(|own_domain| own_domain.eq_ignore_ascii_case(&domain))
+            })
+    })
+}
+
+fn handoff_display(candidate: Option<&closure_walk::HandoffCandidate>, own: &[String]) -> String {
+    candidate.map_or_else(
+        || "Handed to someone not on the message".to_owned(),
+        |candidate| {
+            let mark = if handoff_internal(&candidate.address, own) {
+                "internal"
+            } else {
+                "external"
+            };
+            format!("Handed to {} ({mark})", candidate.name)
+        },
+    )
+}
+
+fn walk_unit_text(later: &ReviewMessage, unit: closure_walk::UnitKind, ordinal: usize) -> String {
+    match unit {
+        closure_walk::UnitKind::Paragraph => later.input.message.body_blocks[ordinal].as_string(),
+        closure_walk::UnitKind::Message => later
+            .input
+            .message
+            .body_blocks
+            .iter()
+            .map(CanonicalBlock::as_string)
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    }
+}
+
+fn walk_unit_date_candidates(
+    later: &ReviewMessage,
+    unit: closure_walk::UnitKind,
+    ordinal: usize,
+) -> Vec<(String, String)> {
+    let ordinals: Vec<usize> = match unit {
+        closure_walk::UnitKind::Paragraph => vec![ordinal],
+        closure_walk::UnitKind::Message => (0..later.input.message.body_blocks.len()).collect(),
+    };
+    let mut seen = BTreeSet::new();
+    let mut candidates = Vec::new();
+    for paragraph_ordinal in ordinals {
+        for candidate in extraction_temporal_candidates(&later.input, paragraph_ordinal) {
+            if seen.insert(candidate.value.clone()) {
+                candidates.push((format!("t{}", candidates.len()), candidate.value));
+            }
+        }
+    }
+    candidates
 }
 
 fn closure_walk_later_messages<'a>(
@@ -6370,7 +6525,7 @@ fn scan_decision_closures(
     }
 
     while !result.cancelled && !progress.cancel.load(Ordering::Relaxed) {
-        let mut jobs = Vec::new();
+        let mut jobs: Vec<WalkUnitJob> = Vec::new();
         let mut in_round = BTreeSet::new();
         for walk_index in 0..walks.len() {
             if walks[walk_index].stopped {
@@ -6402,20 +6557,36 @@ fn scan_decision_closures(
                 stop_walk_as_skipped(&mut walks, walk_index, &mut skipped);
                 continue;
             };
-            for (ordinal, block) in later
+            let paragraphs: Vec<(usize, String)> = later
                 .input
                 .message
                 .body_blocks
                 .iter()
-                .take(MAX_CLOSURE_PARAGRAPHS)
                 .enumerate()
-            {
-                let text = block.as_string();
-                jobs.push(WalkParagraphJob {
+                .map(|(ordinal, block)| (ordinal, block.as_string()))
+                .collect();
+            for (ordinal, text) in paragraphs.iter().take(MAX_CLOSURE_PARAGRAPHS) {
+                jobs.push(WalkUnitJob {
                     walk_index,
                     role,
-                    ordinal,
-                    state: closure_walk::walk_state(&context, role, &text),
+                    ordinal: *ordinal,
+                    unit: closure_walk::UnitKind::Paragraph,
+                    state: closure_walk::walk_state(&context, role, text),
+                    questions: questions.clone(),
+                });
+            }
+            if paragraphs.len() >= 2 {
+                let whole_text = paragraphs
+                    .iter()
+                    .map(|(_, text)| text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                jobs.push(WalkUnitJob {
+                    walk_index,
+                    role,
+                    ordinal: 0,
+                    unit: closure_walk::UnitKind::Message,
+                    state: closure_walk::walk_state(&context, role, &whole_text),
                     questions: questions.clone(),
                 });
             }
@@ -6443,11 +6614,11 @@ fn scan_decision_closures(
                         DECISION_DEADLINE,
                     )
                     .and_then(|answers| {
-                        closure_walk::paragraph_answers(job.ordinal, job.role, &answers)
+                        closure_walk::unit_answers(job.ordinal, job.unit, job.role, &answers)
                     }),
             )
         });
-        let mut paragraphs: Vec<Vec<closure_walk::ParagraphAnswers>> =
+        let mut units: Vec<Vec<closure_walk::UnitAnswers>> =
             (0..walks.len()).map(|_| Vec::new()).collect();
         let mut failed = BTreeSet::new();
         let mut completed = BTreeSet::new();
@@ -6456,7 +6627,7 @@ fn scan_decision_closures(
             let job = &jobs[slot];
             match outcome {
                 JobOutcome::Completed(Ok(Some(answers))) => {
-                    paragraphs[job.walk_index].push(answers);
+                    units[job.walk_index].push(answers);
                 }
                 JobOutcome::Completed(Err(ProviderError::Cancelled)) => result.cancelled = true,
                 JobOutcome::NotStarted if progress.cancel.load(Ordering::Relaxed) => {
@@ -6482,11 +6653,15 @@ fn scan_decision_closures(
         for walk_index in failed {
             stop_walk_as_skipped(&mut walks, walk_index, &mut skipped);
         }
+        for walk_units in &mut units {
+            walk_units.sort_by_key(|unit| (unit.unit, unit.ordinal));
+        }
         if result.cancelled || progress.cancel.load(Ordering::Relaxed) {
             break;
         }
 
         let mut pending_dates = Vec::new();
+        let mut pending_handoffs = Vec::new();
         for walk_index in in_round {
             if walks[walk_index].stopped {
                 continue;
@@ -6495,7 +6670,7 @@ fn scan_decision_closures(
             let offered_loop = &offered[walks[walk_index].offered_index];
             let item_index = offered_loop.item;
             let role = closure_walk_role(&result.analysis.items[item_index], later);
-            match closure_walk::step_verdict(role, &paragraphs[walk_index]) {
+            match closure_walk::step_verdict(role, &units[walk_index]) {
                 closure_walk::StepVerdict::NoResponse => {
                     walks[walk_index].next_message += 1;
                 }
@@ -6537,22 +6712,99 @@ fn scan_decision_closures(
                             closure_walk::Effect::Suggest {
                                 kind,
                                 ordinal,
+                                unit,
                                 probability,
                             } => {
                                 let text = later.input.message.body_blocks[ordinal].as_string();
-                                set_walk_suggestion(
-                                    result,
-                                    item_index,
-                                    SuggestedUpdate {
-                                        kind,
-                                        evidence_text: text,
-                                        source_message: later.input.handle.clone(),
-                                        source_block: ordinal,
-                                        temporal_value: None,
-                                        confidence_micros: confidence_micros(probability),
-                                    },
-                                    &mut suggested,
-                                );
+                                if kind == SuggestedUpdateKind::Delegated {
+                                    let candidates = closure_handoff_candidates(
+                                        &result.analysis.items[item_index],
+                                        later,
+                                    );
+                                    if candidates.is_empty() {
+                                        set_walk_suggestion(
+                                            result,
+                                            item_index,
+                                            SuggestedUpdate {
+                                                kind,
+                                                handoff_text: Some(handoff_display(
+                                                    None,
+                                                    &later.own_addresses,
+                                                )),
+                                                source_unit: unit.wire(),
+                                                evidence_text: text,
+                                                source_message: later.input.handle.clone(),
+                                                source_block: ordinal,
+                                                temporal_value: None,
+                                                confidence_micros: confidence_micros(probability),
+                                            },
+                                            &mut suggested,
+                                        );
+                                    } else {
+                                        let context = closure_walk::WalkContext {
+                                            user_name: &walks[walk_index].context.user_name,
+                                            waiting_party: &walks[walk_index].context.waiting_party,
+                                            ask: &walks[walk_index].context.ask,
+                                            due: &walks[walk_index].context.due,
+                                        };
+                                        let state = closure_walk::walk_state(
+                                            &context,
+                                            role,
+                                            &walk_unit_text(later, unit, ordinal),
+                                        );
+                                        if let Ok(questions) =
+                                            closure_walk::handoff_questions(&candidates)
+                                        {
+                                            pending_handoffs.push(HandoffFollowupJob {
+                                                walk_index,
+                                                later,
+                                                ordinal,
+                                                unit,
+                                                candidates,
+                                                probability,
+                                                questions,
+                                                state,
+                                            });
+                                        } else {
+                                            set_walk_suggestion(
+                                                result,
+                                                item_index,
+                                                SuggestedUpdate {
+                                                    kind,
+                                                    handoff_text: Some(handoff_display(
+                                                        None,
+                                                        &later.own_addresses,
+                                                    )),
+                                                    source_unit: unit.wire(),
+                                                    evidence_text: text,
+                                                    source_message: later.input.handle.clone(),
+                                                    source_block: ordinal,
+                                                    temporal_value: None,
+                                                    confidence_micros: confidence_micros(
+                                                        probability,
+                                                    ),
+                                                },
+                                                &mut suggested,
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    set_walk_suggestion(
+                                        result,
+                                        item_index,
+                                        SuggestedUpdate {
+                                            kind,
+                                            handoff_text: None,
+                                            source_unit: unit.wire(),
+                                            evidence_text: text,
+                                            source_message: later.input.handle.clone(),
+                                            source_block: ordinal,
+                                            temporal_value: None,
+                                            confidence_micros: confidence_micros(probability),
+                                        },
+                                        &mut suggested,
+                                    );
+                                }
                             }
                             closure_walk::Effect::AskedAgain { ordinal } => {
                                 let text = later.input.message.body_blocks[ordinal].as_string();
@@ -6582,8 +6834,10 @@ fn scan_decision_closures(
                                         result.suggested_updates.saturating_sub(1);
                                 }
                             }
-                            closure_walk::Effect::Amended { ordinal } => {
-                                let text = later.input.message.body_blocks[ordinal].as_string();
+                            closure_walk::Effect::Amended { ordinal, unit } => {
+                                // A whole-message amendment carries the whole text, so a
+                                // change spread over paragraphs is kept in `ask`.
+                                let text = walk_unit_text(later, unit, ordinal);
                                 result.analysis.items[item_index].mentions.push(Mention {
                                     message: later.input.handle.clone(),
                                     block: ordinal,
@@ -6598,6 +6852,7 @@ fn scan_decision_closures(
                             closure_walk::Effect::NewDate {
                                 source,
                                 ordinal,
+                                unit,
                                 probability,
                             } => {
                                 let text = later.input.message.body_blocks[ordinal].as_string();
@@ -6606,6 +6861,7 @@ fn scan_decision_closures(
                                     source,
                                     later,
                                     ordinal,
+                                    unit,
                                     text,
                                     probability,
                                 ));
@@ -6617,12 +6873,12 @@ fn scan_decision_closures(
         }
 
         let mut date_jobs = Vec::new();
-        for (walk_index, source, later, ordinal, text, probability) in pending_dates {
+        for (walk_index, source, later, ordinal, unit, text, probability) in pending_dates {
             if walks[walk_index].stopped {
                 continue;
             }
-            let temporal = extraction_temporal_candidates(&later.input, ordinal);
-            if temporal.is_empty() {
+            let candidates = walk_unit_date_candidates(later, unit, ordinal);
+            if candidates.is_empty() {
                 if source == closure_walk::DateSource::WaitingParty {
                     record_walk_escalation(
                         &mut walks,
@@ -6634,26 +6890,94 @@ fn scan_decision_closures(
                 }
                 continue;
             }
-            let candidates: Vec<(String, String)> = temporal
-                .into_iter()
-                .map(|candidate| (candidate.handle, candidate.value))
-                .collect();
             let Ok(questions) = closure_walk::date_questions(&candidates) else {
                 stop_walk_as_skipped(&mut walks, walk_index, &mut skipped);
                 continue;
             };
+            let request_text = walk_unit_text(later, unit, ordinal);
             date_jobs.push(DateFollowupJob {
                 walk_index,
                 source,
                 later,
                 ordinal,
+                unit,
                 text: text.clone(),
                 probability,
-                state: closure_walk::date_state(&walks[walk_index].context.ask, &text),
+                state: closure_walk::date_state(&walks[walk_index].context.ask, &request_text),
                 candidates,
                 questions,
             });
         }
+        if !pending_handoffs.is_empty() {
+            start_closure_round(
+                progress,
+                &decision_pass,
+                pending_handoffs.len(),
+                &mut running_total,
+            );
+            let per_job = vec![1; pending_handoffs.len()];
+            let outcomes = run_jobs(&per_job, &decision_pass, progress, &|slot| {
+                let job = &pending_handoffs[slot];
+                isolated_decision(decision_client.decide(
+                    &job.state,
+                    &job.questions,
+                    Some(&progress.cancel),
+                    DECISION_DEADLINE,
+                ))
+            });
+            let mut chosen: Vec<Option<closure_walk::HandoffCandidate>> =
+                std::iter::repeat_with(|| None)
+                    .take(pending_handoffs.len())
+                    .collect();
+            let mut completed = BTreeSet::new();
+            for (slot, outcome) in outcomes {
+                completed.insert(slot);
+                let job = &pending_handoffs[slot];
+                match outcome {
+                    JobOutcome::Completed(Ok(Some(answers))) => {
+                        chosen[slot] = closure_walk::handoff_pick(&answers, &job.candidates);
+                    }
+                    JobOutcome::Completed(Err(ProviderError::Cancelled)) => {
+                        result.cancelled = true;
+                    }
+                    JobOutcome::NotStarted if progress.cancel.load(Ordering::Relaxed) => {
+                        result.cancelled = true;
+                    }
+                    JobOutcome::Completed(Ok(None) | Err(_))
+                    | JobOutcome::Panicked
+                    | JobOutcome::NotStarted => {}
+                }
+            }
+            for (slot, job) in pending_handoffs.iter().enumerate() {
+                if !completed.contains(&slot) && progress.cancel.load(Ordering::Relaxed) {
+                    result.cancelled = true;
+                }
+                if result.cancelled {
+                    continue;
+                }
+                let item_index = offered[walks[job.walk_index].offered_index].item;
+                let evidence_text = job.later.input.message.body_blocks[job.ordinal].as_string();
+                set_walk_suggestion(
+                    result,
+                    item_index,
+                    SuggestedUpdate {
+                        kind: SuggestedUpdateKind::Delegated,
+                        handoff_text: Some(handoff_display(
+                            chosen[slot].as_ref(),
+                            &job.later.own_addresses,
+                        )),
+                        source_unit: job.unit.wire(),
+                        evidence_text,
+                        source_message: job.later.input.handle.clone(),
+                        source_block: job.ordinal,
+                        temporal_value: None,
+                        confidence_micros: confidence_micros(job.probability),
+                    },
+                    &mut suggested,
+                );
+            }
+        }
+
         if date_jobs.is_empty() {
             continue;
         }
@@ -6712,6 +7036,8 @@ fn scan_decision_closures(
                                 item_index,
                                 SuggestedUpdate {
                                     kind: SuggestedUpdateKind::DeadlineChange,
+                                    handoff_text: None,
+                                    source_unit: job.unit.wire(),
                                     evidence_text: job.text.clone(),
                                     source_message: job.later.input.handle.clone(),
                                     source_block: job.ordinal,
@@ -10386,6 +10712,7 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread: false,
             event_passed: None,
             suggested_update: None,
+            handoff_text: None,
             from_call_summary: false,
             meeting_time: None,
             meeting_time_approx: false,
@@ -11291,6 +11618,7 @@ at the downtown courthouse. Let me know if that works.",
             cross_thread: false,
             event_passed: None,
             suggested_update: None,
+            handoff_text: None,
             from_call_summary: false,
             meeting_time: None,
             meeting_time_approx: false,
@@ -12822,12 +13150,15 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
         format!("{:.0}", probability * 1_000_000.0).parse().unwrap()
     }
 
+    type RecordedChoiceOptions = Vec<(String, Vec<(String, String)>)>;
+
     struct FixedDecisionClient<'a> {
         answer: Box<FixedDecisionAnswer<'a>>,
         choice: Box<FixedDecisionChoice<'a>>,
         calls: AtomicUsize,
         states: Mutex<Vec<serde_json::Value>>,
         question_ids: Mutex<Vec<Vec<String>>>,
+        choice_options: Mutex<RecordedChoiceOptions>,
         fail_at: Option<(usize, ProviderError)>,
         parallel: usize,
     }
@@ -12848,6 +13179,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 calls: AtomicUsize::new(0),
                 states: Mutex::new(Vec::new()),
                 question_ids: Mutex::new(Vec::new()),
+                choice_options: Mutex::new(Vec::new()),
                 fail_at: None,
                 parallel: 1,
             }
@@ -12884,6 +13216,15 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 .clone()
         }
 
+        fn choice_options(&self, id: &str) -> Vec<(String, String)> {
+            self.choice_options
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .find(|(question, _)| question == id)
+                .map_or_else(Vec::new, |(_, options)| options.clone())
+        }
+
         fn triage(
             answer: impl Fn(usize, &serde_json::Value) -> Result<[f64; 6], ProviderError>
             + Send
@@ -12903,6 +13244,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                 calls: AtomicUsize::new(0),
                 states: Mutex::new(Vec::new()),
                 question_ids: Mutex::new(Vec::new()),
+                choice_options: Mutex::new(Vec::new()),
                 fail_at: None,
                 parallel: 1,
             }
@@ -12960,6 +13302,21 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
                         );
                     }
                     Some("choice") => {
+                        let criteria = question["criteria"]
+                            .as_object()
+                            .ok_or(ProviderError::InvalidQuestion)?;
+                        self.choice_options
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .push((
+                                id.clone(),
+                                criteria
+                                    .iter()
+                                    .filter_map(|(handle, description)| {
+                                        Some((handle.clone(), description.as_str()?.to_owned()))
+                                    })
+                                    .collect(),
+                            ));
                         let options: Vec<String> = question["criteria"]
                             .as_object()
                             .ok_or(ProviderError::InvalidQuestion)?
@@ -14633,6 +14990,56 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
     }
 
     #[test]
+    fn a_whole_message_amendment_carries_the_whole_text_into_later_states() {
+        let (mut all, item) = closure_test_messages();
+        let mut amendment = request_from("sam@example.invalid", "wp-1", "c1", "acct", "Fee");
+        amendment.received = "2026-09-02T12:00:00Z".into();
+        amendment.body = "One change to the fee.\n\nIt is now $350.".into();
+        all.push(prepare(&amendment, "Inbox", all.len()).unwrap());
+        let mut followup = reply_to("sam@example.invalid", "user-1", "c1", "acct", "Fee");
+        followup.received = "2026-09-03T12:00:00Z".into();
+        followup.body = "I will review this.".into();
+        all.push(prepare(&followup, "Sent", all.len()).unwrap());
+        // Only the whole-message unit carries the amendment.
+        let client = FixedDecisionClient::walk(|_, state, id| {
+            let whole = state["later"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("\n\n"));
+            match id {
+                "walk.responds" | "walk.wp_changes_terms" | "walk.wp_still_owed" if whole => {
+                    Some(registry_accept(id))
+                }
+                _ => None,
+            }
+        });
+
+        let result = run_decision_closures(
+            &all,
+            vec![item],
+            &client,
+            &empty_chat(),
+            &ScanProgress::default(),
+            1_800_000_000,
+        );
+
+        assert_eq!(
+            result.analysis.items[0].mentions[0].origin,
+            MentionOrigin::Amended
+        );
+        let later_ask = (0..client.calls())
+            .map(|index| client.state(index))
+            .find(|state| state["later"]["author_role"] == "user")
+            .expect("the follow-up is walked")["ask"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            later_ask.ends_with("\n\nLater change: One change to the fee.\n\nIt is now $350."),
+            "{later_ask}"
+        );
+    }
+
+    #[test]
     fn walk_carries_an_amendment_into_later_states() {
         let (mut all, item) = closure_test_messages();
         let mut amendment = request_from("sam@example.invalid", "wp-1", "c1", "acct", "Fee");
@@ -14875,26 +15282,21 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
             1_800_000_000,
         );
 
-        assert_eq!(client.calls(), 8);
+        assert_eq!(client.calls(), 9);
         for index in 0..8 {
             assert!(
-                client.state(index)["later"]["paragraph_text"]
+                client.state(index)["later"]["text"]
                     .as_str()
                     .unwrap()
                     .contains(&format!("Paragraph {index}."))
             );
         }
-        assert!(
-            !client
-                .states
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .iter()
-                .any(|state| state["later"]["paragraph_text"]
-                    .as_str()
-                    .unwrap()
-                    .contains("Paragraph 8."))
-        );
+        let whole = client.state(8)["later"]["text"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(whole.contains("Paragraph 8."));
+        assert!(whole.contains("Paragraph 9."));
         assert!(result.analysis.items[0].resolution.is_none());
     }
 
@@ -14927,10 +15329,7 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
 
         assert_eq!(client.calls(), 1);
         assert_eq!(client.state(0)["later"]["author_role"], "user");
-        assert_eq!(
-            client.state(0)["later"]["paragraph_text"],
-            "Sure, let's do it."
-        );
+        assert_eq!(client.state(0)["later"]["text"], "Sure, let's do it.");
     }
 
     #[test]
@@ -15084,9 +15483,318 @@ Action Items\nSend Thomas the resources on neurosymbolic AI and the Leavenitz li
 
         assert_eq!(
             client.state(0).to_string(),
-            r#"{"user":{"name":"Alex"},"waiting_party":"Other","ask":"Can we meet?","due":"not stated","later":{"author_role":"waiting_party","paragraph_text":"We received the fee, thank you."}}"#
+            r#"{"user":{"name":"Alex"},"waiting_party":"Other","ask":"Can we meet?","due":"not stated","later":{"author_role":"waiting_party","text":"We received the fee, thank you."}}"#
         );
         assert!(client.question_ids(0).contains(&"walk.responds".into()));
+    }
+
+    #[test]
+    fn walk_sends_one_request_per_paragraph_and_one_for_a_multi_paragraph_message() {
+        let (mut three_paragraphs, item) = closure_test_messages();
+        let mut later = request_from("sam@example.invalid", "wp-1", "c1", "acct", "Fee");
+        later.received = "2026-09-03T12:00:00Z".into();
+        later.body = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.".into();
+        three_paragraphs.push(prepare(&later, "Inbox", three_paragraphs.len()).unwrap());
+        let client = FixedDecisionClient::walk(|_, _, _| None);
+        run_decision_closures(
+            &three_paragraphs,
+            vec![item.clone()],
+            &client,
+            &empty_chat(),
+            &ScanProgress::default(),
+            1_800_000_000,
+        );
+        assert_eq!(client.calls(), 4);
+
+        let (mut one_paragraph, item) = closure_test_messages();
+        let mut later = request_from("sam@example.invalid", "wp-1", "c1", "acct", "Fee");
+        later.received = "2026-09-03T12:00:00Z".into();
+        later.body = "One paragraph.".into();
+        one_paragraph.push(prepare(&later, "Inbox", one_paragraph.len()).unwrap());
+        let client = FixedDecisionClient::walk(|_, _, _| None);
+        run_decision_closures(
+            &one_paragraph,
+            vec![item],
+            &client,
+            &empty_chat(),
+            &ScanProgress::default(),
+            1_800_000_000,
+        );
+        assert_eq!(client.calls(), 1);
+    }
+
+    #[test]
+    fn a_whole_message_unit_can_close_when_no_paragraph_does_and_cites_the_first() {
+        let (mut all, item) = closure_test_messages();
+        let mut later = request_from("sam@example.invalid", "wp-1", "c1", "acct", "Fee");
+        later.received = "2026-09-03T12:00:00Z".into();
+        later.body = "The first part is context.\n\nTogether, we confirm receipt.".into();
+        all.push(prepare(&later, "Inbox", all.len()).unwrap());
+        let whole = "The first part is context.\n\nTogether, we confirm receipt.";
+        let client = FixedDecisionClient::walk(move |_, state, id| {
+            (state["later"]["text"] == whole && matches!(id, "walk.responds" | "walk.wp_received"))
+                .then(|| registry_accept(id))
+        });
+        let result = run_decision_closures(
+            &all,
+            vec![item],
+            &client,
+            &empty_chat(),
+            &ScanProgress::default(),
+            1_800_000_000,
+        );
+        let resolution = result.analysis.items[0].resolution.as_ref().unwrap();
+        assert_eq!(resolution.message, all[1].input.handle);
+        assert_eq!(resolution.block, 0);
+        assert_eq!(resolution.quote, "The first part is context.");
+    }
+
+    #[test]
+    fn disagreeing_paragraph_and_whole_message_terminals_escalate() {
+        let (mut all, item) = closure_test_messages();
+        let mut later = request_from("sam@example.invalid", "wp-1", "c1", "acct", "Fee");
+        later.received = "2026-09-03T12:00:00Z".into();
+        later.body = "We received it.\n\nActually, we no longer need it.".into();
+        all.push(prepare(&later, "Inbox", all.len()).unwrap());
+        let whole = "We received it.\n\nActually, we no longer need it.";
+        let client = FixedDecisionClient::walk(move |_, state, id| match id {
+            "walk.responds" => Some(registry_accept(id)),
+            "walk.wp_received" if state["later"]["text"] != whole => Some(registry_accept(id)),
+            "walk.wp_no_longer_needed" if state["later"]["text"] == whole => {
+                Some(registry_accept(id))
+            }
+            _ => None,
+        });
+        let chat = empty_chat();
+        let result = run_decision_closures(
+            &all,
+            vec![item],
+            &client,
+            &chat,
+            &ScanProgress::default(),
+            1_800_000_000,
+        );
+        assert!(result.analysis.items[0].resolution.is_none());
+        assert_eq!(chat.calls(), 1);
+    }
+
+    #[test]
+    fn whole_message_date_followup_uses_deduplicated_candidates_from_all_paragraphs() {
+        let (mut all, item) = closure_test_messages();
+        let mut later = reply_to("sam@example.invalid", "user-1", "c1", "acct", "Fee");
+        later.received = "2026-09-02T12:00:00Z".into();
+        later.body = "I will send it.\n\nSeptember 9, 2026 works.\n\nSeptember 9, 2026 or September 10, 2026 works.".into();
+        all.push(prepare(&later, "Sent", all.len()).unwrap());
+        let whole = all[1]
+            .input
+            .message
+            .body_blocks
+            .iter()
+            .map(CanonicalBlock::as_string)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let expected_candidate_count = all[1]
+            .input
+            .message
+            .body_blocks
+            .iter()
+            .enumerate()
+            .flat_map(|(ordinal, _)| extraction_temporal_candidates(&all[1].input, ordinal))
+            .map(|candidate| candidate.value)
+            .collect::<BTreeSet<_>>()
+            .len();
+        assert!(expected_candidate_count >= 2);
+        let whole_for_answer = whole.clone();
+        let captured = std::sync::Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let capture = captured.clone();
+        let client = FixedDecisionClient::walk(move |_, state, id| {
+            (state["later"]["text"] == whole_for_answer
+                && matches!(id, "walk.responds" | "walk.user_promises"))
+            .then(|| registry_accept(id))
+        })
+        .with_choice(move |_, _, id, options| {
+            if id == "walk.new_date" {
+                capture.lock().unwrap().push(options.to_vec());
+                let first = options.iter().find(|option| option.as_str() != "none")?;
+                Some((first.clone(), registry_accept(id)))
+            } else {
+                let none = options.iter().find(|option| option.as_str() == "none")?;
+                Some((none.clone(), registry_accept(id)))
+            }
+        });
+        let result = run_decision_closures(
+            &all,
+            vec![item],
+            &client,
+            &empty_chat(),
+            &ScanProgress::default(),
+            1_800_000_000,
+        );
+        assert_eq!(client.state(client.calls() - 1)["later"]["text"], whole);
+        assert_eq!(
+            captured.lock().unwrap()[0].len(),
+            expected_candidate_count + 1
+        );
+        assert!(result.analysis.items[0].suggested_update.is_some());
+    }
+
+    #[test]
+    fn handoff_options_exclude_user_and_waiting_party_and_mark_internal_names() {
+        let (mut all, item) = closure_test_messages();
+        let mut handoff = reply_to("sam@example.invalid", "user-1", "c1", "acct", "Fee");
+        handoff.received = "2026-09-02T12:00:00Z".into();
+        handoff.body = "Pat will take care of the fee.".into();
+        handoff.to = vec![
+            "Other <sam@example.invalid>".into(),
+            "user@example.invalid".into(),
+            "Pat Colleague <pat@EXAMPLE.INVALID>".into(),
+        ];
+        handoff.cc = vec![
+            "Pat Colleague <pat@example.invalid>".into(),
+            "jules@example.invalid".into(),
+        ];
+        all.push(prepare(&handoff, "Sent", all.len()).unwrap());
+        let listed = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let capture = listed.clone();
+        let client = FixedDecisionClient::walk(|_, _, id| {
+            matches!(id, "walk.responds" | "walk.user_hands_off").then(|| registry_accept(id))
+        })
+        .with_choice(move |_, _, id, options| {
+            if id == "walk.handoff_to" {
+                capture.lock().unwrap().push(options.to_vec());
+                let first = options.iter().find(|option| option.as_str() != "none")?;
+                Some((first.clone(), registry_accept(id)))
+            } else {
+                let none = options.iter().find(|option| option.as_str() == "none")?;
+                Some((none.clone(), registry_accept(id)))
+            }
+        });
+        let result = run_decision_closures(
+            &all,
+            vec![item],
+            &client,
+            &empty_chat(),
+            &ScanProgress::default(),
+            1_800_000_000,
+        );
+        let choices = client.choice_options("walk.handoff_to");
+        let descriptions: Vec<&str> = choices.iter().map(|(_, text)| text.as_str()).collect();
+        assert_eq!(
+            descriptions,
+            ["Pat Colleague", "jules", "The text names no listed person."]
+        );
+        assert_eq!(listed.lock().unwrap()[0].len(), 3);
+        let suggestion = result.analysis.items[0].suggested_update.as_ref().unwrap();
+        assert!(format!("{suggestion:?}").contains("Handed to Pat Colleague (internal)"));
+    }
+
+    #[test]
+    fn handoff_none_gray_no_participants_and_request_errors_keep_delegated_suggestions() {
+        for mode in ["none", "gray", "no_participants", "error"] {
+            let (mut all, item) = closure_test_messages();
+            let mut handoff = reply_to("sam@example.invalid", "user-1", "c1", "acct", "Fee");
+            handoff.received = "2026-09-02T12:00:00Z".into();
+            handoff.body = "Pat will take care of the fee.".into();
+            if mode != "no_participants" {
+                handoff.to = vec![
+                    "Other <sam@example.invalid>".into(),
+                    "Pat Colleague <pat@outside.invalid>".into(),
+                ];
+            }
+            all.push(prepare(&handoff, "Sent", all.len()).unwrap());
+            let answer = FixedDecisionClient::walk(|_, _, id| {
+                matches!(id, "walk.responds" | "walk.user_hands_off").then(|| registry_accept(id))
+            })
+            .with_choice(move |_, _, id, options| {
+                if id == "walk.handoff_to" {
+                    match mode {
+                        "none" => Some(("none".into(), registry_accept(id))),
+                        "gray" => Some(("p0".into(), registry_gray(id))),
+                        _ => Some(("p0".into(), registry_accept(id))),
+                    }
+                } else {
+                    let none = options.iter().find(|option| option.as_str() == "none")?;
+                    Some((none.clone(), registry_accept(id)))
+                }
+            });
+            let client = if mode == "error" {
+                answer.fail_at(1, ProviderError::Network)
+            } else {
+                answer
+            };
+            let result = run_decision_closures(
+                &all,
+                vec![item],
+                &client,
+                &empty_chat(),
+                &ScanProgress::default(),
+                1_800_000_000,
+            );
+            let suggestion = result.analysis.items[0].suggested_update.as_ref().unwrap();
+            let debug = format!("{suggestion:?}");
+            if mode == "no_participants" {
+                assert_eq!(client.calls(), 1);
+                assert!(!debug.contains("walk.handoff_to"));
+            }
+            if mode == "none" || mode == "gray" || mode == "no_participants" || mode == "error" {
+                assert!(debug.contains("Handed to someone not on the message"));
+            }
+            if mode == "error" {
+                assert_eq!(client.calls(), 2);
+            }
+        }
+    }
+
+    #[test]
+    fn handoff_to_a_person_at_the_users_public_mail_domain_is_external() {
+        let (mut all, item) = closure_test_messages();
+        all[0].own_addresses = vec!["user@example.invalid".into(), "me@gmail.com".into()];
+        let mut handoff = reply_to("sam@example.invalid", "user-1", "c1", "acct", "Fee");
+        handoff.received = "2026-09-02T12:00:00Z".into();
+        handoff.to = vec!["Pat <pat@gmail.com>".into()];
+        all.push(prepare(&handoff, "Sent", all.len()).unwrap());
+        all[1].own_addresses = all[0].own_addresses.clone();
+        let client = FixedDecisionClient::walk(|_, _, id| {
+            matches!(id, "walk.responds" | "walk.user_hands_off").then(|| registry_accept(id))
+        })
+        .with_choice(choose_first_dynamic_option);
+        let result = run_decision_closures(
+            &all,
+            vec![item],
+            &client,
+            &empty_chat(),
+            &ScanProgress::default(),
+            1_800_000_000,
+        );
+        assert!(
+            format!("{:?}", result.analysis.items[0].suggested_update)
+                .contains("Handed to Pat (external)")
+        );
+    }
+
+    #[test]
+    fn handoff_to_an_external_person_is_marked_external() {
+        let (mut all, item) = closure_test_messages();
+        let mut handoff = reply_to("sam@example.invalid", "user-1", "c1", "acct", "Fee");
+        handoff.received = "2026-09-02T12:00:00Z".into();
+        handoff.to = vec!["Pat <pat@outside.invalid>".into()];
+        all.push(prepare(&handoff, "Sent", all.len()).unwrap());
+        let client = FixedDecisionClient::walk(|_, _, id| {
+            matches!(id, "walk.responds" | "walk.user_hands_off").then(|| registry_accept(id))
+        })
+        .with_choice(choose_first_dynamic_option);
+        let result = run_decision_closures(
+            &all,
+            vec![item],
+            &client,
+            &empty_chat(),
+            &ScanProgress::default(),
+            1_800_000_000,
+        );
+        assert!(
+            format!("{:?}", result.analysis.items[0].suggested_update)
+                .contains("Handed to Pat (external)")
+        );
     }
 
     #[test]

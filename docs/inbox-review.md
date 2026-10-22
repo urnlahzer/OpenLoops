@@ -210,20 +210,28 @@ keeps the previous rule behavior and creates no decision client.
 After the per-conversation pass, the closure walk checks open requests the user
 owes. It visits later messages in timestamp order: every later message in the
 same thread, then reachable cross-thread messages the user sent to the waiting
-party. For each message, the first eight body paragraphs get a `walk.responds`
-gate and the questions for that author's role. A message that does not respond
-advances the walk; a waiting-party chaser adds an **Asked again** evidence card.
-An accepted amendment adds a **Changed** chip and is appended to the ask used
-by later steps. A confirmed new due date replaces the old date, keeps the old
-date as a **Due date changed** mention, and changes overdue grouping.
+party. Each of the first eight body paragraphs gets its own `walk.responds`
+gate and the questions for that author's role. Messages with two or more
+paragraphs also get a whole-message check, with the paragraphs joined in order
+by a blank line. All these checks run in the same round. A message with no
+responding unit advances the walk; a waiting-party chaser adds an **Asked
+again** evidence card. An accepted amendment adds a **Changed** chip and is
+appended to the ask used by later steps. A confirmed new due date replaces the
+old date, keeps the old date as a **Due date changed** mention, and changes
+overdue grouping.
 
 A waiting-party confirmation closes the card as completed; a withdrawal or a
 change that means the action is no longer owed closes it as withdrawn. The
 user's own delivery, promise, decline, or hand-off and a third party's reported
-completion remain suggestions for the owner to review. Accepting a hand-off
-moves the card to Watching. A promise with no date is an acknowledgement and
-does not change the card. A waiting-party due-date change with no usable date
-candidate escalates for another check.
+completion remain suggestions for the owner to review. A hand-off suggestion
+names the matching message participant and marks them **internal** when their
+domain matches one of the user's own non-public mail domains; otherwise the
+mark is **external**. When no participant is named confidently, the suggestion
+reads **Handed to someone not on the message**. Accepting a hand-off moves the
+card to Watching and its status pill keeps the same hand-off text. A promise
+with no date is an acknowledgement and does not change the card. A
+waiting-party due-date change with no usable date candidate escalates for
+another check.
 
 Before walking, the decision model can match the ask to a later event. It asks
 twice with event options in opposite orders; only an agreeing event choice and
@@ -321,8 +329,10 @@ carry `subject_a`, `subject_b`, `first_paragraph_a`, `first_paragraph_b`, and
 `source`.
 
 `walk.jsonl` carries `user`, `waiting_party`, `ask`, `due`, and one later user
-paragraph with its author role. `group` keeps all rows for one evidence loop in
-the same training split. Accepted and rejected suggestions supply gold labels;
+unit with its author role and text. Messages with multiple paragraphs produce
+paragraph rows and a whole-message row; `unit` identifies each row as
+`paragraph` or `message`. `group` keeps all rows for one evidence loop in the
+same training split. Accepted and rejected suggestions supply gold labels;
 pending suggestions supply silver labels.
 
 # Retry failed conversations and sources

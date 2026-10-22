@@ -133,10 +133,13 @@ the unchanged chat-model request instead.
 The closure walk sends decision requests to `POST /api/alpha/decisions` with
 request members `model`, `state`, `questions`, and `provider: {"zdr": true}`
 when the endpoint accepts it (which the check reports). It visits each open
-request's later messages in timestamp order, checking at most the first 8 body
-paragraphs in each message. The message role is selected locally as
-`waiting_party`, `user`, or `third_party`. Each paragraph request has this
-state shape:
+request's later messages in timestamp order, checking the first 8 body
+paragraphs individually. A message with two or more paragraphs also gets one
+whole-message check; its text joins all of the message's paragraphs in order
+with `\n\n`, including any past the first 8. These unit requests run in one
+round. The message role is selected locally as
+`waiting_party`, `user`, or `third_party`. Each unit request has this state
+shape:
 
 ```json
 {
@@ -146,15 +149,20 @@ state shape:
   "due": "the current due-date text or not stated",
   "later": {
     "author_role": "waiting_party | user | third_party",
-    "paragraph_text": "one later body paragraph"
+    "text": "one later paragraph or the whole later message"
   }
 }
 ```
 
 There is no message history, address, or generated text in this state. When a
-paragraph changes a date, the follow-up state is `{"ask": ..., "later":
-{"paragraph_text": ...}}`; its choice options are only date candidates found
-by the app's parser, plus `none`. For expiry, `expiry.event` receives
+unit changes a date, the follow-up state is `{"ask": ..., "later":
+{"text": ...}}`; its choice options are only date candidates found by the
+app's parser, plus `none`. A whole-message date follow-up offers the union of
+the paragraphs' candidates, without duplicates. When `walk.user_hands_off`
+accepts, `walk.handoff_to` receives that same unit state. Its options are
+handles for the later message's participants, described by their display names
+or address local parts when no display name exists, plus `none`; no participant
+addresses are sent as option values. For expiry, `expiry.event` receives
 `{"ask": ..., "waiting_party": ..., "due": ...}` and event descriptions
 found from the event index or ask text, plus `none`. That choice is requested
 twice with the event options reversed. If both answers agree, the

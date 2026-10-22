@@ -526,7 +526,7 @@ const SUGGESTED_EVIDENCE_MAX_CHARS: usize = 240;
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 struct SuggestedView {
     state: &'static str,
-    label: &'static str,
+    label: String,
     evidence: String,
     deadline: String,
     sender: String,
@@ -573,7 +573,10 @@ fn suggested_view(review: &ReviewState, update: Option<&SuggestedUpdate>) -> Sug
     };
     SuggestedView {
         state,
-        label: suggested_kind_label(update.kind),
+        label: update
+            .handoff_text
+            .clone()
+            .unwrap_or_else(|| suggested_kind_label(update.kind).into()),
         evidence: truncated_evidence(&update.evidence_text),
         deadline: review
             .suggested_deadline_view(update)
@@ -823,7 +826,12 @@ fn status_pill(item: &LoopItem, card: &CardContext) -> PillView {
         Decision::Dismissed => ("Dismissed – not mine".into(), "neutral"),
         Decision::Moot => ("No longer relevant".into(), "neutral"),
         Decision::Mine => ("Tracking".into(), "success"),
-        Decision::Watching => ("Watching team follow-up".into(), "watch"),
+        Decision::Watching => (
+            item.handoff_text
+                .clone()
+                .unwrap_or_else(|| "Watching team follow-up".into()),
+            "watch",
+        ),
         // A resolution keeps the spec's own pill text, with the model's
         // cross-thread suffix appended when it applies -- see
         // `status_shows_cross_thread`.
@@ -4744,6 +4752,9 @@ mod tests {
     fn suggestion(kind: SuggestedUpdateKind, temporal: Option<&str>) -> SuggestedUpdate {
         SuggestedUpdate {
             kind,
+            handoff_text: (kind == SuggestedUpdateKind::Delegated)
+                .then(|| "Handed to Pat (internal)".into()),
+            source_unit: "paragraph",
             evidence_text: "Synthetic later message text.".into(),
             source_message: "m2".into(),
             source_block: 0,
@@ -4792,11 +4803,26 @@ mod tests {
     fn accepting_a_delegation_moves_the_card_to_watching() {
         let (mut app, key) =
             model_with_suggestion(suggestion(SuggestedUpdateKind::Delegated, None));
+        let label = suggested_view(
+            &app.review,
+            app.review.analysis.as_ref().unwrap().items[2]
+                .suggested_update
+                .as_ref(),
+        )
+        .label;
+        assert_eq!(label, "Handed to Pat (internal)");
         resolve_selected_suggestion(&mut app, Some(key), true);
         assert!(matches!(
             app.review.decisions.get(&key).decision,
             Decision::Watching
         ));
+        let item = &app.review.analysis.as_ref().unwrap().items[2];
+        assert_eq!(
+            item.handoff_text.as_deref(),
+            Some("Handed to Pat (internal)")
+        );
+        let pills = pills_for(item, &card_at(&app, 2));
+        assert_eq!(pills[0].text, "Handed to Pat (internal)");
     }
 
     #[test]
