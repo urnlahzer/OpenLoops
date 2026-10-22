@@ -8989,6 +8989,223 @@ mod tests {
     use crate::claim_view::DELEGATION_UNCERTAINTY;
     use std::time::Instant;
 
+    fn walk_date_candidate_units(
+        paragraphs: &[String],
+        sent_at: &str,
+        thread_id: &str,
+        message_index: usize,
+    ) -> Result<Vec<Vec<(String, String)>>, String> {
+        let mut item = reply_to(
+            "recipient@example.invalid",
+            &format!("{thread_id}-{message_index}"),
+            thread_id,
+            "synthetic-account",
+            "Synthetic subject",
+        );
+        item.body = paragraphs.join("\n\n");
+        item.received = sent_at.to_owned();
+
+        let message = prepare(&item, "Sent", message_index)
+            .map_err(|error| format!("prepare failed: {error:?}"))?;
+        if message.input.message.body_blocks.len() != paragraphs.len() {
+            return Err(format!(
+                "prepared {} body blocks for {} paragraphs",
+                message.input.message.body_blocks.len(),
+                paragraphs.len()
+            ));
+        }
+
+        let mut units = paragraphs
+            .iter()
+            .enumerate()
+            .map(|(ordinal, _)| {
+                walk_unit_date_candidates(&message, closure_walk::UnitKind::Paragraph, ordinal)
+            })
+            .collect::<Vec<_>>();
+        if paragraphs.len() >= 2 {
+            units.push(walk_unit_date_candidates(
+                &message,
+                closure_walk::UnitKind::Message,
+                0,
+            ));
+        }
+        Ok(units)
+    }
+
+    struct WalkDateExportThread {
+        output_line: String,
+        errors: Vec<String>,
+        unit_count: usize,
+        non_empty_unit_count: usize,
+    }
+
+    fn walk_date_export_thread(line: &str, line_index: usize) -> WalkDateExportThread {
+        let thread: serde_json::Value = serde_json::from_str(line).unwrap_or_else(|error| {
+            panic!("invalid thread JSON on line {}: {error}", line_index + 1)
+        });
+        let thread_id = thread
+            .get("thread_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("missing string thread_id on line {}", line_index + 1));
+        let later_messages = thread
+            .get("later")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| panic!("missing later array on line {}", line_index + 1));
+        let mut messages = Vec::with_capacity(later_messages.len());
+        let mut errors = Vec::new();
+        let mut unit_count = 0usize;
+        let mut non_empty_unit_count = 0usize;
+
+        for (message_index, later) in later_messages.iter().enumerate() {
+            let paragraphs = later
+                .get("paragraphs")
+                .and_then(serde_json::Value::as_array)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "missing paragraphs array for thread {thread_id} message {message_index}"
+                    )
+                })
+                .iter()
+                .enumerate()
+                .map(|(paragraph_index, paragraph)| {
+                    paragraph
+                        .as_str()
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "non-string paragraph {paragraph_index} for thread {thread_id} message {message_index}"
+                            )
+                        })
+                        .to_owned()
+                })
+                .collect::<Vec<_>>();
+            let sent_at = later
+                .get("sent_at")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| {
+                    panic!("missing string sent_at for thread {thread_id} message {message_index}")
+                });
+
+            match walk_date_candidate_units(&paragraphs, sent_at, thread_id, message_index) {
+                Ok(units) => {
+                    unit_count += units.len();
+                    non_empty_unit_count += units.iter().filter(|unit| !unit.is_empty()).count();
+                    let serialized_units = units
+                        .into_iter()
+                        .map(|unit| {
+                            unit.into_iter()
+                                .map(|(handle, value)| {
+                                    serde_json::json!({ "handle": handle, "value": value })
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .collect::<Vec<_>>();
+                    messages.push(serde_json::json!({ "units": serialized_units }));
+                }
+                Err(error) => errors.push(format!(
+                    "thread {thread_id} message {message_index}: {error}"
+                )),
+            }
+        }
+
+        WalkDateExportThread {
+            output_line: serde_json::to_string(&serde_json::json!({
+                "messages": messages,
+                "thread_id": thread_id,
+            }))
+            .expect("walk date candidates should serialize"),
+            errors,
+            unit_count,
+            non_empty_unit_count,
+        }
+    }
+
+    fn write_walk_date_candidates(input_path: &Path, output_path: &Path) {
+        use std::fs;
+        use std::io::{BufRead as _, BufReader};
+
+        let input = fs::File::open(input_path).unwrap_or_else(|error| {
+            panic!(
+                "cannot open OPENLOOPS_WALK_THREADS input {}: {error}",
+                input_path.display()
+            )
+        });
+        let mut output_lines = Vec::new();
+        let mut errors = Vec::new();
+        let mut thread_count = 0usize;
+        let mut unit_count = 0usize;
+        let mut non_empty_unit_count = 0usize;
+
+        for (line_index, line) in BufReader::new(input).lines().enumerate() {
+            let line = line.unwrap_or_else(|error| {
+                panic!("cannot read JSONL line {}: {error}", line_index + 1)
+            });
+            let result = walk_date_export_thread(&line, line_index);
+            errors.extend(result.errors);
+            output_lines.push(result.output_line);
+            thread_count += 1;
+            unit_count += result.unit_count;
+            non_empty_unit_count += result.non_empty_unit_count;
+        }
+
+        assert!(
+            errors.is_empty(),
+            "walk date candidate conversion errors ({}):\n{}",
+            errors.len(),
+            errors.join("\n")
+        );
+
+        let mut output = String::new();
+        for line in &output_lines {
+            output.push_str(line);
+            output.push('\n');
+        }
+        fs::write(output_path, output).unwrap_or_else(|error| {
+            panic!(
+                "cannot write OPENLOOPS_WALK_DATES_OUT output {}: {error}",
+                output_path.display()
+            )
+        });
+        println!(
+            "Exported {thread_count} threads, {unit_count} units, and {non_empty_unit_count} non-empty unit lists"
+        );
+    }
+
+    #[test]
+    #[ignore = "dev tool: writes walk date candidates for the jev-optimize corpus"]
+    fn export_walk_date_candidates() {
+        use std::env;
+        use std::path::PathBuf;
+
+        let input_path = env::var_os("OPENLOOPS_WALK_THREADS").map_or_else(
+            || panic!("OPENLOOPS_WALK_THREADS must be set to an input JSONL path"),
+            PathBuf::from,
+        );
+        let output_path = env::var_os("OPENLOOPS_WALK_DATES_OUT").map_or_else(
+            || panic!("OPENLOOPS_WALK_DATES_OUT must be set to an output JSONL path"),
+            PathBuf::from,
+        );
+        write_walk_date_candidates(&input_path, &output_path);
+    }
+
+    #[test]
+    fn export_walk_date_candidates_for_message() {
+        let paragraphs = vec![
+            "Please hold September 9, 2026.".to_owned(),
+            "The rest of the details follow.".to_owned(),
+        ];
+        let units =
+            walk_date_candidate_units(&paragraphs, "2026-09-02T12:00:00Z", "thread-test", 0)
+                .unwrap();
+        assert_eq!(
+            units,
+            vec![
+                vec![("t0".to_owned(), "2026-09-09".to_owned())],
+                vec![],
+                vec![("t0".to_owned(), "2026-09-09".to_owned())],
+            ]
+        );
+    }
+
     fn vocative_message() -> ConversationMessage {
         ConversationMessage {
             handle: "m0".into(),
